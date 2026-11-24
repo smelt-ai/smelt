@@ -1012,7 +1012,7 @@ export function Main() {
                   alignItems: "center",
                   padding: 2,
                   gap: 2,
-                  borderRadius: look().radius.md ?? 6,
+                  borderRadius: look().radius.md,
                   backgroundColor: look().palette.soft,
                 }}
               >
@@ -1043,7 +1043,7 @@ export function Main() {
                           alignItems: "center",
                           justifyContent: "center",
                           flexShrink: 0,
-                          borderRadius: look().radius.sm ?? 4,
+                          borderRadius: look().radius.sm,
                           backgroundColor: isSelected() ? look().palette.surface : "transparent",
                           cursor: "default",
                         }}
@@ -1273,7 +1273,7 @@ export function Main() {
                                       gap: 2,
                                       paddingLeft: 8,
                                       paddingRight: 8,
-                                      borderRadius: look().radius.row ?? 6,
+                                      borderRadius: look().radius.row,
                                       backgroundColor: isSelected()
                                         ? look().palette.row_selected
                                         : "transparent",

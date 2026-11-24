@@ -126,4 +126,9 @@ pub mod testing {
     pub fn host_registry() -> Registry {
         crate::module::registry()
     }
+
+    /// 宿主交给插件的主题切片（`state().theme`），测试里伪造宿主状态时用同一份。
+    pub fn theme_state(rem: f32) -> serde_json::Value {
+        crate::host::theme(rem)
+    }
 }

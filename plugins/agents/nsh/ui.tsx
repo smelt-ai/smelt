@@ -358,9 +358,9 @@ export function DropdownButton(props: {
   const look = currentTheme;
   const open = signal(false);
   const bg = () => {
-    if (open()) return look().palette.soft_hover ?? look().palette.row_selected;
+    if (open()) return look().palette.soft_hover;
     if (props.quiet) return "transparent";
-    return look().palette.button_secondary?.[0] ?? look().palette.soft;
+    return look().palette.button_secondary[0];
   };
   return (
     <SmeltMenu
@@ -390,9 +390,7 @@ export function DropdownButton(props: {
           hoverStyle={{
             backgroundColor: props.quiet
               ? look().palette.row_hover
-              : (look().palette.button_secondary?.[1] ??
-                look().palette.soft_hover ??
-                look().palette.row_hover),
+              : look().palette.button_secondary[1],
           }}
         >
           {props.leading}

@@ -209,7 +209,7 @@ export function SettingsSection(props: {
         style={{
           width: "100%",
           paddingVertical: 4,
-          borderRadius: look().radius.lg ?? 10,
+          borderRadius: look().radius.lg,
           borderWidth: 1,
           borderColor: look().palette.hair,
           backgroundColor: look().palette.surface,
@@ -503,14 +503,13 @@ export function DropdownMenuButton(props: {
 
   const bg = () => {
     const p = look().palette;
-    const neutral = p.button_secondary ?? [p.soft, p.soft_hover ?? p.soft, p.row_selected];
-    if (open()) return p.soft_hover ?? p.row_selected;
-    return props.quiet ? "transparent" : neutral[0];
+    if (open()) return p.soft_hover;
+    return props.quiet ? "transparent" : p.button_secondary[0];
   };
   const fg = () => {
     const p = look().palette;
     if (props.quiet) return open() ? p.text : p.muted;
-    return p.button_secondary_fg ?? p.text;
+    return p.button_secondary_fg;
   };
 
   const renderTrigger = () =>
@@ -680,8 +679,8 @@ export function UsesPopover(props: {
               paddingRight: 8,
               borderRadius: look().radius.md,
               backgroundColor: open()
-                ? look().palette.soft_hover ?? look().palette.row_selected
-                : (look().palette.button_secondary?.[0] ?? look().palette.soft),
+                ? look().palette.soft_hover
+                : look().palette.button_secondary[0],
               display: "flex",
               flexDirection: "row",
               alignItems: "center",
@@ -695,7 +694,7 @@ export function UsesPopover(props: {
                 fontSize: look().type.small_medium.size,
                 lineHeight: look().type.small_medium.line_height,
                 fontWeight: look().type.small_medium.weight,
-                color: look().palette.button_secondary_fg ?? look().palette.text,
+                color: look().palette.button_secondary_fg,
                 numberOfLines: 1,
               }}
             >

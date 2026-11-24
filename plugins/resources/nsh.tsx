@@ -304,7 +304,7 @@ function SectionCard(props: { title: string; description?: string; children?: an
       </View>
       <View
         style={{
-          borderRadius: look().radius.lg ?? 8,
+          borderRadius: look().radius.lg,
           borderWidth: 1,
           borderColor: look().palette.hair,
           backgroundColor: look().palette.surface,
@@ -439,7 +439,7 @@ function SortHeader(props: { label: string; column: string; width: number }) {
         paddingRight: SORT_HEADER_PAD,
         paddingTop: 2,
         paddingBottom: 2,
-        borderRadius: look().radius.sm ?? 4,
+        borderRadius: look().radius.sm,
         backgroundColor: "transparent",
         display: "flex",
         flexDirection: "row",
@@ -758,7 +758,7 @@ function MachineSection(props: { section: () => any }) {
                       paddingTop: 4,
                       paddingBottom: 4,
                       gap: 12,
-                      borderRadius: look().radius.row ?? 6,
+                      borderRadius: look().radius.row,
                       backgroundColor: "transparent",
                       cursor: "default",
                     }}
@@ -916,7 +916,7 @@ function MachineSection(props: { section: () => any }) {
                     paddingTop: 4,
                     paddingBottom: 4,
                     gap: 12,
-                    borderRadius: look().radius.row ?? 6,
+                    borderRadius: look().radius.row,
                     cursor: "default",
                   }}
                 >

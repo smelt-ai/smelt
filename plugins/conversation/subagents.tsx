@@ -36,7 +36,7 @@ export function SubagentsControl(props: {
       >
         <View style={{ gap: 8 }}>
           <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-            <Text style={{ fontSize: look().type.small_medium?.size ?? 12, color: look().palette.muted }}>
+            <Text style={{ fontSize: look().type.small_medium.size, color: look().palette.muted }}>
               {ct("subagent.title")}
             </Text>
             <SmeltButton
@@ -124,7 +124,7 @@ export function BackgroundTasksControl(props: {
         }
       >
         <View style={{ gap: 8 }}>
-          <Text style={{ fontSize: look().type.small_medium?.size ?? 12, color: look().palette.muted }}>
+          <Text style={{ fontSize: look().type.small_medium.size, color: look().palette.muted }}>
             {ct("task.title")}
           </Text>
           <Scroll style={{ maxHeight: 240 }}>
@@ -301,7 +301,7 @@ export function SubagentDrawer(props: {
             style={{
               flex: 1,
               minWidth: 0,
-              fontSize: look().type.small_medium?.size ?? 12,
+              fontSize: look().type.small_medium.size,
               color: look().palette.text,
               numberOfLines: 1,
             }}

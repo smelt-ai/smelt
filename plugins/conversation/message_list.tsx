@@ -328,7 +328,7 @@ function ToolCallRow(props: {
               style={{
                 paddingHorizontal: 10,
                 paddingVertical: 8,
-                borderRadius: look().radius.md ?? 8,
+                borderRadius: look().radius.md,
                 borderWidth: 1,
                 borderColor: look().palette.hair,
                 backgroundColor: look().palette.surface,
@@ -372,7 +372,7 @@ function ToolCallRow(props: {
             style={{
               paddingHorizontal: 10,
               paddingVertical: 6,
-              borderRadius: look().radius.md ?? 8,
+              borderRadius: look().radius.md,
               borderWidth: 1,
               borderColor: peer()?.error ? look().palette.bad : look().palette.hair,
               backgroundColor: look().palette.surface,
@@ -526,7 +526,7 @@ function ToolCallRow(props: {
               minHeight: 26,
               paddingHorizontal: 8,
               paddingVertical: 4,
-              borderRadius: look().radius.row ?? 6,
+              borderRadius: look().radius.row,
               flexDirection: "row",
               alignItems: "center",
               gap: 8,
@@ -601,7 +601,7 @@ function ToolCallRow(props: {
                       style={{
                         paddingHorizontal: 10,
                         paddingVertical: 6,
-                        borderRadius: look().radius.md ?? 8,
+                        borderRadius: look().radius.md,
                         borderWidth: 1,
                         borderColor: look().palette.hair,
                         backgroundColor: look().palette.surface,
@@ -799,7 +799,7 @@ export function MessageList(props: {
                   style={{
                     height: 28,
                     paddingHorizontal: 8,
-                    borderRadius: look().radius.row ?? 6,
+                    borderRadius: look().radius.row,
                     flexDirection: "row",
                     alignItems: "center",
                     gap: 6,
@@ -830,7 +830,7 @@ export function MessageList(props: {
                     style={{
                       height: 28,
                       paddingHorizontal: 8,
-                      borderRadius: look().radius.row ?? 6,
+                      borderRadius: look().radius.row,
                       flexDirection: "row",
                       alignItems: "center",
                       gap: 6,
@@ -1003,7 +1003,7 @@ export function MessageList(props: {
                                 style={{
                                   height: 26,
                                   paddingHorizontal: 8,
-                                  borderRadius: look().radius.row ?? 6,
+                                  borderRadius: look().radius.row,
                                   flexDirection: "row",
                                   alignItems: "center",
                                   gap: 6,
@@ -1196,7 +1196,7 @@ export function MessageList(props: {
                           style={{
                             paddingHorizontal: 10,
                             paddingVertical: 6,
-                            borderRadius: look().radius.md ?? 8,
+                            borderRadius: look().radius.md,
                             borderWidth: 1,
                             borderColor: look().palette.hair,
                             backgroundColor: look().palette.surface,

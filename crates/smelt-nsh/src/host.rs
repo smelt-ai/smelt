@@ -3037,7 +3037,7 @@ fn rgba_css(color: gpui::Rgba) -> String {
 }
 
 /// 插件自己画时要的几档色、字、圆角；字按这扇窗口的 rem 换成点。
-fn theme(rem: f32) -> Value {
+pub(crate) fn theme(rem: f32) -> Value {
     let p = ui_theme::palette();
     let text = |style: TextStyle| {
         json!({

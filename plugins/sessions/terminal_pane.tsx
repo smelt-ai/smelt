@@ -217,7 +217,7 @@ export function TerminalPane(props: {
               paddingRight: 8,
               paddingTop: 4,
               paddingBottom: 4,
-              borderRadius: look().radius.md ?? 6,
+              borderRadius: look().radius.md,
               backgroundColor: look().palette.surface,
               borderWidth: 1,
               borderColor: look().palette.hair,

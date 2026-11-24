@@ -37,6 +37,7 @@ import {
   registerEventListener,
   resolveTranslation,
   setEventSyncHandler,
+  setHostThemeArrived,
   setLocaleReader,
   setTextsByPlugin,
 } from "./provider.tsx";
@@ -436,52 +437,8 @@ const DEFAULT_STATE: SmeltState = {
   js_views: {},
   safe_areas: {},
   bar_insets: {},
-  theme: {
-    rem: 16,
-    palette: {
-      bg: "#161616",
-      side: "#121212",
-      surface: "#191919",
-      soft: "#242424",
-      soft_hover: "#2e2e2e",
-      text: "#fafafa",
-      muted: "#aeaeae",
-      muted_selected: "#d4d4d8",
-      faint: "#808080",
-      faint_selected: "#a1a1aa",
-      ink: "#5c5c5c",
-      on_ink: "#ffffff",
-      link: "#a2bcff",
-      run: "#7698fd",
-      need: "#ffca76",
-      ok: "#6bd586",
-      bad: "#f17471",
-      on_bad: "#ffffff",
-      hair: "rgba(255, 255, 255, 0.102)",
-      hair_strong: "rgba(255, 255, 255, 0.200)",
-      row_hover: "rgba(255, 255, 255, 0.059)",
-      row_selected: "rgba(255, 255, 255, 0.102)",
-      focus: "rgba(118, 152, 253, 1.000)",
-      button_primary: ["rgba(92, 92, 92, 1)", "rgba(74, 74, 74, 1)", "rgba(55, 55, 55, 1)"],
-      button_primary_fg: "#ffffff",
-      button_secondary: ["rgba(255, 255, 255, 0.06)", "rgba(255, 255, 255, 0.11)", "rgba(255, 255, 255, 0.16)"],
-      button_secondary_fg: "#fafafa",
-      button_submit: ["rgba(219, 219, 219, 1)", "rgba(201, 201, 201, 1)", "rgba(176, 176, 176, 1)"],
-      button_submit_fg: "#161616",
-      scrim: "rgba(0, 0, 0, 0.600)",
-      chart: ["#7fa3f0", "#6cc294", "#e0ad5c", "#b293e6", "#e07a97"],
-    },
-    fonts: { mono: "Maple Mono NF" },
-    type: {
-      ui: { size: 13, line_height: 20, weight: 440 },
-      ui_medium: { size: 13, line_height: 20, weight: 530 },
-      small: { size: 11, line_height: 12, weight: 440 },
-      small_medium: { size: 11, line_height: 12, weight: 530 },
-      text_xsmall: { size: 12, line_height: 18, weight: 400 },
-      text_xsmall_medium: { size: 12, line_height: 18, weight: 500 },
-    },
-    radius: { sm: 4, md: 6, lg: 8, row: 6 },
-  },
+  // 主题只有宿主那一份（`host.rs` 的 `theme`），首份状态里一定带；到之前插件不上报 ready、视图不挂。
+  theme: null,
   texts: {},
 };
 
@@ -507,6 +464,12 @@ const commandsSlice = signal<any[]>(DEFAULT_STATE.commands);
 const jsViewsSlice = signal<Record<string, { plugin: string; view: string }>>(DEFAULT_STATE.js_views);
 const safeAreasSlice = signal<Record<string, any>>(DEFAULT_STATE.safe_areas);
 const themeSlice = signal<any>(DEFAULT_STATE.theme);
+let themeArrived: () => void = () => {};
+setHostThemeArrived(
+  new Promise<void>((resolve) => {
+    themeArrived = resolve;
+  }),
+);
 const textsSlice = signal<Record<string, Record<string, string>>>({});
 const shellSlice = signal<any>(undefined);
 
@@ -735,8 +698,9 @@ function applyState(next: any, explicitRev?: number) {
     changedKeys.push("safe_areas");
   }
   if ("theme" in next && canAcceptSlice("theme", rev)) {
-    const val = next.theme ?? DEFAULT_STATE.theme;
+    const val = next.theme;
     themeSlice.set(val);
+    if (val) themeArrived();
     merged.theme = val;
     changedKeys.push("theme");
   }
@@ -789,8 +753,10 @@ export function initHost(initialSlices?: readonly StateSlice[]): Promise<SmeltSt
   if (!initStarted) {
     initStarted = true;
     initScheduled = true;
-    // 首帧始终至少带上 locale 以便 `t()` / `locale()` 就绪；其余切片等同一微任务周期的并发 `initHost` 合并后一次拉取。
+    // 首份状态始终带上 locale 和 theme：`t()` 要语言，视图要主题才画得出来（ready 等主题到）；
+    // 其余切片等同一微任务周期的并发 `initHost` 合并后一次拉取。
     subscribedSlices.add("locale");
+    subscribedSlices.add("theme");
     initPromise = Promise.resolve().then(() => {
       initScheduled = false;
       pendingAddSlices.clear();
@@ -1688,11 +1654,10 @@ export function SmeltButton(props: SmeltButtonProps) {
 
   const colors = computed(() => {
     const p = look().palette;
-    const primary = iconOnly() ? (p.button_submit ?? p.button_primary) : p.button_primary;
-    const primaryFg = iconOnly() ? (p.button_submit_fg ?? p.button_primary_fg) : p.button_primary_fg;
-    const neutral = p.button_secondary ?? [p.soft, p.soft_hover ?? p.soft, p.row_selected];
-    const neutralFg = p.button_secondary_fg ?? p.text;
-    const softHover = p.soft_hover ?? p.row_selected;
+    const primary = iconOnly() ? p.button_submit : p.button_primary;
+    const primaryFg = iconOnly() ? p.button_submit_fg : p.button_primary_fg;
+    const neutral = p.button_secondary;
+    const neutralFg = p.button_secondary_fg;
 
     if (props.dismiss) {
       return {
@@ -1712,7 +1677,7 @@ export function SmeltButton(props: SmeltButtonProps) {
         fg: p.text,
         hoverBg: p.soft,
         hoverFg: p.text,
-        pressBg: p.soft_hover ?? p.row_selected,
+        pressBg: p.soft_hover,
         pressFg: p.text,
         surfaceClass: "border border-border shadow-sm",
         disabledOpacity: 0.45,
@@ -1720,12 +1685,12 @@ export function SmeltButton(props: SmeltButtonProps) {
     }
     if (props.primary) {
       return {
-        bg: primary?.[0] ?? p.ink,
-        fg: primaryFg ?? p.on_ink,
-        hoverBg: primary?.[1] ?? p.ink,
-        hoverFg: primaryFg ?? p.on_ink,
-        pressBg: primary?.[2] ?? p.ink,
-        pressFg: primaryFg ?? p.on_ink,
+        bg: primary[0],
+        fg: primaryFg,
+        hoverBg: primary[1],
+        hoverFg: primaryFg,
+        pressBg: primary[2],
+        pressFg: primaryFg,
         surfaceClass: "shadow-xs",
         disabledOpacity: 0.35,
       };
@@ -1767,7 +1732,7 @@ export function SmeltButton(props: SmeltButtonProps) {
       };
     }
     return {
-      bg: props.selected ? softHover : neutral[0],
+      bg: props.selected ? p.soft_hover : neutral[0],
       fg: neutralFg,
       hoverBg: neutral[1],
       hoverFg: neutralFg,
@@ -1869,7 +1834,7 @@ export function SmeltButton(props: SmeltButtonProps) {
         paddingLeft: metrics().px,
         paddingRight: metrics().px,
         borderRadius: metrics().radius,
-        backgroundColor: props.loading ? (look().palette.soft_hover ?? colors().bg) : colors().bg,
+        backgroundColor: props.loading ? look().palette.soft_hover : colors().bg,
         color: props.loading ? look().palette.text : colors().fg,
         cursor: "default",
         ...(props.style ?? {}),
@@ -2096,7 +2061,7 @@ export function SmeltMarkdown(props: {
         borderRadius: 6,
       },
       codeBlock: {
-        backgroundColor: p.side ?? p.surface,
+        backgroundColor: p.side,
         borderRadius: 10,
         borderColor: p.hair,
       },

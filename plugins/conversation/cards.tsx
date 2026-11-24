@@ -76,8 +76,8 @@ export function PermissionTray(props: {
           />
           <Text
             style={{
-              fontSize: look().type.ui_medium?.size ?? 13,
-              fontWeight: look().type.ui_medium?.weight ?? 530,
+              fontSize: look().type.ui_medium.size,
+              fontWeight: look().type.ui_medium.weight,
               color: look().palette.text,
             }}
           >
@@ -244,8 +244,8 @@ export function ElicitationCard(props: {
           <Text
             style={{
               flex: 1,
-              fontSize: look().type.small_medium?.size ?? 12,
-              fontWeight: look().type.small_medium?.weight ?? "500",
+              fontSize: look().type.small_medium.size,
+              fontWeight: look().type.small_medium.weight,
               color: look().palette.text,
             }}
           >
@@ -302,7 +302,7 @@ export function ElicitationCard(props: {
                                 style={{
                                   paddingHorizontal: 10,
                                   paddingVertical: 6,
-                                  borderRadius: look().radius.row ?? 6,
+                                  borderRadius: look().radius.row,
                                   borderWidth: 1,
                                   borderColor: selected() ? look().palette.ink : look().palette.hair,
                                   backgroundColor: selected() ? look().palette.row_selected : "transparent",

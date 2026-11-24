@@ -130,6 +130,7 @@ fn conversation_subscribe_wire_contract(cx: &mut TestAppContext) {
         call.resolve(json!({
             "revision": 1,
             "locale": "zh-CN",
+            "theme": smelt_nsh::testing::theme_state(16.),
             "machines_meta": [],
             "sessions_data": [],
         }));

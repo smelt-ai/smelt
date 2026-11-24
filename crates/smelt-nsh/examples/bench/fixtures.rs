@@ -288,6 +288,7 @@ pub fn setup_real_conv(
         call.resolve(json!({
             "revision": 1,
             "locale": "zh-CN",
+            "theme": smelt_nsh::testing::theme_state(16.),
             "window_active": true,
             "machines_meta": [],
             "sessions_data": [],

@@ -1969,7 +1969,7 @@ export function Main() {
               alignItems: "center",
               gap: 2,
               padding: 2,
-              borderRadius: look().radius.md ?? 6,
+              borderRadius: look().radius.md,
               backgroundColor: look().palette.soft,
             }}
           >
@@ -3023,7 +3023,7 @@ export function Main() {
                                 margin: 8,
                                 padding: 10,
                                 gap: 8,
-                                borderRadius: look().radius.md ?? 6,
+                                borderRadius: look().radius.md,
                                 borderWidth: 1,
                                 borderColor: look().palette.hair,
                                 backgroundColor: look().palette.surface,
@@ -3225,7 +3225,7 @@ export function Main() {
                                                     marginRight: 4,
                                                     paddingLeft: 10 + row().depth * 12,
                                                     paddingRight: 8,
-                                                    borderRadius: look().radius.row ?? 6,
+                                                    borderRadius: look().radius.row,
                                                     cursor: "pointer",
                                                     overflow: "hidden",
                                                   }}
@@ -3379,7 +3379,7 @@ export function Main() {
                                               marginRight: 4,
                                               paddingLeft: 10 + row().depth * 12,
                                               paddingRight: 8,
-                                              borderRadius: look().radius.row ?? 6,
+                                              borderRadius: look().radius.row,
                                               cursor: "pointer",
                                             }}
                                           >
@@ -3544,7 +3544,7 @@ export function Main() {
                                       <View
                                         style={{
                                           padding: 6,
-                                          borderRadius: look().radius.sm ?? 4,
+                                          borderRadius: look().radius.sm,
                                           backgroundColor: look().palette.surface,
                                         }}
                                       >
@@ -3577,7 +3577,7 @@ export function Main() {
                                   marginRight: 4,
                                   paddingLeft: 4,
                                   paddingRight: 4,
-                                  borderRadius: look().radius.row ?? 6,
+                                  borderRadius: look().radius.row,
                                   backgroundColor: row().active
                                     ? look().palette.soft
                                     : "transparent",

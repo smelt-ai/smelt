@@ -75,8 +75,8 @@ export function ModelConfigPopover(props: {
           <View style={{ flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 }}>
             <Text
               style={{
-                fontSize: look().type.text_xsmall_medium?.size ?? 12,
-                fontWeight: look().type.text_xsmall_medium?.weight ?? 500,
+                fontSize: look().type.text_xsmall_medium.size,
+                fontWeight: look().type.text_xsmall_medium.weight,
                 color: pendingNotice()
                   ? look().palette.need
                   : open()
@@ -166,8 +166,8 @@ export function ModelConfigPopover(props: {
                         >
                           <Text
                             style={{
-                              fontSize: look().type.small_medium?.size ?? 11,
-                              fontWeight: look().type.small_medium?.weight ?? 530,
+                              fontSize: look().type.small_medium.size,
+                              fontWeight: look().type.small_medium.weight,
                               color: active() ? look().palette.on_ink : look().palette.muted,
                             }}
                           >
@@ -213,7 +213,7 @@ export function ModelConfigPopover(props: {
                           style={{
                             height: 30,
                             paddingHorizontal: 10,
-                            borderRadius: look().radius.row ?? 6,
+                            borderRadius: look().radius.row,
                             flexDirection: "row",
                             alignItems: "center",
                             gap: 8,
@@ -274,8 +274,8 @@ export function ModelConfigPopover(props: {
             <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
               <Text
                 style={{
-                  fontSize: look().type.text_xsmall_medium?.size ?? 12,
-                  fontWeight: look().type.text_xsmall_medium?.weight ?? 500,
+                  fontSize: look().type.text_xsmall_medium.size,
+                  fontWeight: look().type.text_xsmall_medium.weight,
                   color: look().palette.muted,
                 }}
               >
@@ -284,7 +284,7 @@ export function ModelConfigPopover(props: {
               <If when={pendingNotice()}>
                 <Text
                   style={{
-                    fontSize: look().type.small_medium?.size ?? 11,
+                    fontSize: look().type.small_medium.size,
                     color: look().palette.need,
                   }}
                 >
@@ -323,8 +323,8 @@ export function ModelConfigPopover(props: {
                     <View style={{ gap: 6 }}>
                       <Text
                         style={{
-                          fontSize: look().type.text_xsmall_medium?.size ?? 12,
-                          fontWeight: look().type.text_xsmall_medium?.weight ?? 500,
+                          fontSize: look().type.text_xsmall_medium.size,
+                          fontWeight: look().type.text_xsmall_medium.weight,
                           color: look().palette.muted,
                         }}
                       >
@@ -495,14 +495,14 @@ export function CapabilitiesPopover(props: {
               <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 8, paddingTop: 2, paddingBottom: 2 }}>
                 <Text
                   style={{
-                    fontSize: look().type.small_medium?.size ?? 11,
-                    fontWeight: look().type.small_medium?.weight ?? 530,
+                    fontSize: look().type.small_medium.size,
+                    fontWeight: look().type.small_medium.weight,
                     color: look().palette.faint,
                   }}
                 >
                   {ct("capabilities.skills")}
                 </Text>
-                <Text style={{ fontSize: look().type.small?.size ?? 11, color: look().palette.faint }}>
+                <Text style={{ fontSize: look().type.small.size, color: look().palette.faint }}>
                   {props.skills().length}
                 </Text>
               </View>
@@ -548,14 +548,14 @@ export function CapabilitiesPopover(props: {
               <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 8, paddingBottom: 2 }}>
                 <Text
                   style={{
-                    fontSize: look().type.small_medium?.size ?? 11,
-                    fontWeight: look().type.small_medium?.weight ?? 530,
+                    fontSize: look().type.small_medium.size,
+                    fontWeight: look().type.small_medium.weight,
                     color: look().palette.faint,
                   }}
                 >
                   {ct("capabilities.mcp")}
                 </Text>
-                <Text style={{ fontSize: look().type.small?.size ?? 11, color: look().palette.faint }}>
+                <Text style={{ fontSize: look().type.small.size, color: look().palette.faint }}>
                   {props.mcpServers().length}
                 </Text>
               </View>
@@ -707,8 +707,8 @@ export function UsagePopover(props: {
           <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
             <Text
               style={{
-                fontSize: look().type.ui_medium?.size ?? 13,
-                fontWeight: look().type.ui_medium?.weight ?? 530,
+                fontSize: look().type.ui_medium.size,
+                fontWeight: look().type.ui_medium.weight,
                 color: look().palette.text,
               }}
             >

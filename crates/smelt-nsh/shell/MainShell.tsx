@@ -681,9 +681,10 @@ export function Shell() {
     () => (shellState() as ShellSnapshot | undefined)?.plugin_roots ?? [],
   );
 
+  // 主题到之前不画：页面都按主题取色，窗口底由宿主铺。
   return (
     <View style={{ position: "relative", width: "100%", height: "100%", flex: 1, minWidth: 0, minHeight: 0 }}>
-      <Each of={pageKeys()} key={(key: string) => key}>
+      <Each of={currentTheme() ? pageKeys() : []} key={(key: string) => key}>
         {(key: () => string) => <PageWorkspace pageKey={key()} />}
       </Each>
 

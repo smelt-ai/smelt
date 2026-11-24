@@ -324,7 +324,7 @@ function DropLine(props: { edge: "top" | "bottom" | null }) {
           right: 4,
           height: 2,
           borderRadius: 1,
-          backgroundColor: look().palette.focus ?? look().palette.link,
+          backgroundColor: look().palette.focus,
           pointerEvents: "none",
         }}
       />

@@ -357,7 +357,7 @@ function SectionCard(props: { title: string; children?: any }) {
       <View
         style={{
           width: "100%",
-          borderRadius: look().radius.lg ?? 8,
+          borderRadius: look().radius.lg,
           backgroundColor: look().palette.surface,
           borderWidth: 1,
           borderColor: look().palette.hair,

@@ -499,7 +499,7 @@ export function Composer(props: {
                         style={{
                           height: 30,
                           paddingHorizontal: 10,
-                          borderRadius: look().radius.row ?? 6,
+                          borderRadius: look().radius.row,
                           flexDirection: "row",
                           alignItems: "center",
                           gap: 8,
@@ -619,8 +619,8 @@ export function Composer(props: {
                 />
                 <Text
                   style={{
-                    fontSize: look().type.text_xsmall_medium?.size ?? 12,
-                    fontWeight: look().type.text_xsmall_medium?.weight ?? 500,
+                    fontSize: look().type.text_xsmall_medium.size,
+                    fontWeight: look().type.text_xsmall_medium.weight,
                     color: look().palette.muted,
                   }}
                 >
@@ -657,8 +657,8 @@ export function Composer(props: {
               <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
                 <Text
                   style={{
-                    fontSize: look().type.text_xsmall_medium?.size ?? 12,
-                    fontWeight: look().type.text_xsmall_medium?.weight ?? 500,
+                    fontSize: look().type.text_xsmall_medium.size,
+                    fontWeight: look().type.text_xsmall_medium.weight,
                     color: look().palette.muted,
                   }}
                 >

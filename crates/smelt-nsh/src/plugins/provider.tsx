@@ -44,6 +44,9 @@ let cachedTextsByPlugin: Record<string, Record<string, Record<string, string>>> 
 
 let localeReader: () => string = () => "en";
 let eventSyncHandler: () => void = () => {};
+// 宿主的主题到了：视图读 `theme()` 画样子，没有它画不出来，所以上报 ready（宿主据此挂视图）要等它。
+// 由 sdk.tsx 在首份状态里拿到主题时兑现；provider 不 import sdk（sdk 依赖 provider，免得成环）。
+let hostThemeArrived: Promise<void> = Promise.resolve();
 
 const eventListeners = new Set<EventListenerEntry>();
 
@@ -64,6 +67,10 @@ export function setLocaleReader(fn: () => string): void {
 
 export function setEventSyncHandler(fn: () => void): void {
   eventSyncHandler = fn;
+}
+
+export function setHostThemeArrived(arrived: Promise<void>): void {
+  hostThemeArrived = arrived;
 }
 
 export function resolveTranslation(
@@ -258,13 +265,9 @@ async function flushBootTaskQueue(queue: Promise<unknown>[]): Promise<void> {
 }
 
 function announceAfterBootTasks(queue: Promise<unknown>[] | undefined, announce: () => void): void {
-  if (!queue || queue.length === 0) {
-    announce();
-    return;
-  }
   let timer: ReturnType<typeof setTimeout> | undefined;
   void Promise.race([
-    flushBootTaskQueue(queue),
+    Promise.all([hostThemeArrived, flushBootTaskQueue(queue ?? [])]),
     new Promise<void>((resolve) => {
       timer = setTimeout(resolve, BOOT_TIMEOUT_MS);
     }),

@@ -186,7 +186,7 @@ export function EditDiffDialog(props: {
                         style={{
                           paddingHorizontal: 10,
                           paddingVertical: 5,
-                          borderRadius: look().radius.sm ?? 6,
+                          borderRadius: look().radius.sm,
                           flexDirection: "row",
                           alignItems: "center",
                           gap: 6,
@@ -239,7 +239,7 @@ export function EditDiffDialog(props: {
                       {(chunk, idx) => (
                         <View
                           style={{
-                            borderRadius: look().radius.md ?? 8,
+                            borderRadius: look().radius.md,
                             borderWidth: 1,
                             borderColor: look().palette.hair,
                             overflow: "hidden",

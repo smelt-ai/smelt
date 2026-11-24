@@ -110,7 +110,7 @@ function MachinePickingButton(props: {
                 borderRadius: props.small ? look().radius.md : look().radius.lg,
                 backgroundColor: props.quiet
                   ? "transparent"
-                  : (look().palette.button_secondary?.[0] ?? look().palette.soft),
+                  : look().palette.button_secondary[0],
                 display: "flex",
                 flexDirection: "row",
                 alignItems: "center",
