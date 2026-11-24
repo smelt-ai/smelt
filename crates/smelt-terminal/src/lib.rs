@@ -300,19 +300,17 @@ impl TerminalCanvas {
             };
             let open = spec.clone();
             // 行列先按 24×80 开，首帧布局后终端按实际大小重发。
-            let terminal = cx
-                .background_executor()
-                .spawn(async move {
-                    Terminal::spawn(
-                        connector.as_ref(),
-                        24,
-                        80,
-                        open.cwd.as_deref(),
-                        &open.session_id,
-                        open.launch.as_deref(),
-                    )
-                })
-                .await;
+            let terminal = api::blocking::run(move || {
+                Terminal::spawn(
+                    connector.as_ref(),
+                    24,
+                    80,
+                    open.cwd.as_deref(),
+                    &open.session_id,
+                    open.launch.as_deref(),
+                )
+            })
+            .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 match terminal {
                     Ok(terminal) => {

@@ -30,8 +30,8 @@ pub use smelt_paths as paths;
 pub use smelt_runtime_client as client;
 // 量进程的 CPU 和内存（桌面进程自己在这里量，会话的由运行时报）。
 pub use smelt_sys::process_usage;
-// 应用日志（`app.log`）和在后台线程里跑一个要 tokio 的 future。
-pub use smelt_sys::{app_log, block_on};
+// 应用日志（`app.log`）以及专用阻塞/IO 池。
+pub use smelt_sys::{app_log, blocking};
 // 这个构建的版本号。
 pub use smelt_version;
 // 桌面的在线更新（macOS 换 .app 包，Windows 拉起安装程序），和 macOS 上 App 放的位置。
@@ -421,6 +421,10 @@ pub trait Host: 'static {
         machine: &RuntimeKey,
         cx: &App,
     ) -> Option<model::workspace_directory::WorkspaceDirectory>;
+    /// 那台机器的 `(工作区目录修订, 会话状态修订)`；宿主提供时用于增量缓存，未提供返回 `None`。
+    fn sessions_revision(&self, _machine: &RuntimeKey, _cx: &App) -> Option<(u64, u64)> {
+        None
+    }
     /// 系统通知的授权。应用回到前台时重查；变了发
     /// [`HostEvent::NotificationPermissionChanged`]。
     fn notification_permission(&self, cx: &App) -> NotificationPermission;
@@ -505,8 +509,11 @@ where
 {
     let client = host(cx).client(machine, cx);
     cx.background_executor().spawn(async move {
-        let client = client.ok_or_else(machine_removed)?;
-        client.call::<C>(&params, timeout).map_err(call_error_text)
+        smelt_sys::blocking::run(move || {
+            let client = client.ok_or_else(machine_removed)?;
+            client.call::<C>(&params, timeout).map_err(call_error_text)
+        })
+        .await
     })
 }
 

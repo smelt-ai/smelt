@@ -29,11 +29,13 @@ com.example.demo/
 
 - `id`：只能包含 ASCII 字母、数字、`.`、`-`、`_`，且不能以 `.` 开头。同来源内（用户目录下两份、或自带目录下两份）不可重名；用户目录若与自带插件同 `id` 则构成**原地覆写**（用户版编译/主题/启动失败时自动回退到自带版本，`smelt plugin status` 可查看 `overrides_builtin` 与 `fallback_to_builtin`；用 `smelt plugin fork <自带id>` 可一键拷贝自带源码到用户目录）。
 - `entry`：插件目录内的相对路径。若以 `.json` 结尾（如 `"themes/my-theme.json"`），则为**纯主题插件**，只加载主题 JSON，不启动 JS VM。
+- `pages` / `layouts`（可选，可替代 `entry`）：声明该插件为**零 VM 纯布局插件**（如内置 `smelt.layouts`），直接通过清单内 `pages` 与 `layouts[].state` 引用静态布局 JSON 文件与 `locales/*.yml` 文案（`"pages": [{ "name": "workbench", "title": "workbench.title", "home": true, "index": "smelt.sessions/session" }]`，`"layouts": [{ "page": "smelt.layouts/workbench", "name": "standard", "title": "standard.title", "state": "standard.json" }]`），无需 JS 入口与 QuickJS VM。
+- `module`（可选）：声明该插件为**共享 JS 模块插件**（至少两段 `/` 分隔且不占用内置保留名，如 `"smelt/conversation"`），不独立起 VM 与注册视图，而是供其他插件通过 `import { ... } from "<module>"` 直接内联打包。配套可选填 `types`（插件目录内的 `.d.ts` 相对路径，如 `"index.d.ts"`），`smelt plugin types` 会生成对应声明到 `.nsh/types/<module>.d.ts`。保存或删改用户覆写模块时，宿主会自动重新打包加载并增量重编依赖它的插件（出错自动回退自带模块并重载恢复）。
 - 若使用相对模块（如 `./model.ts`、`./store.js`），必须留在当前插件目录内，禁止 `../` 越出目录、禁止导入静态资源图片文件（`import logo from "./logo.png"` 会被打包器拒绝）。
 
 ## 2. 隔离模型、可导入模块与能力边界
 
-每个插件运行在独立的加固 QuickJS VM（`harden: true`）中，拥有独立的堆与 CPU 预算和隔离的宿主通道：
+未覆写的内置脚本插件共驻 1 个共享内置 VM（通过作用域 SDK 隔离 `pluginId`、`dataDir`、`texts`、`store`、`onCommand` 与视图边界），每个用户插件（含同名覆写内置与新增插件）则运行在各自独立的加固 QuickJS VM（`harden: true`）中，拥有独立的堆与 CPU 预算和不可伪造的宿主通道：
 
 - **可导入的模块**：
   - `"nsh"`：核心响应式原语（`signal`, `computed`, `effect`, `batch`, `untracked`, `cleanup`, `resource`, `context`, `split`, `ErrorBoundary`）与基础节点（`View`, `Text`, `Scroll`, `List`, `Overlay`, `Image`, `Input`, `Canvas`, `Shader`, ...）。
@@ -42,6 +44,7 @@ com.example.demo/
   - `"nsh/i18n"`：国际化工具（常规插件优先直接用 `smelt/sdk` 的 `t`/`text`）。
   - `"smelt/sdk"`：Smelt 宿主桥、响应式状态、SQLite 存储、控制 RPC 与 Smelt 主题化组件。
   - `"smelt/host"`：底层纯同步 Rust 原语（`<Icon>`, `<Vector>`, `nativeModule("smelt/host")`，常规功能已被 `smelt/sdk` 包装）。
+  - **共享 JS 模块插件**（如内置 `smelt.conversation` 提供的 `"smelt/conversation"`，导出 `<SmeltConversation>`）：可通过 `smelt plugin fork smelt.conversation` 在本地覆写完整对话界面（输入框、消息列表、卡片等）。
   - 同插件目录内的 `./*.ts` / `./*.tsx` / `./*.js` / `./*.json` 相对模块。
 - **禁止导入 / 不可用**：
   - 禁止导入 `"smelt/slots"`（主壳专用，Guest 插件不得嵌套其它插件）。
@@ -62,7 +65,7 @@ NSH **不是 React**：组件函数只在挂载时执行**一次**，之后只�
    - `<If when={ready()} else={<Text>Loading</Text>}>{(val) => <Text>{val()}</Text>}</If>`
    - `<Each of={items()} key={(item) => item.id}>{(item, idx) => <Text>{item().name}</Text>}</Each>`
    - 大列表用 `"nsh"` 的 `<List>`（虚拟滚动）。
-4. **副作用与清理**：`effect(() => { const off = onEvent(...); cleanup(off); })`，或直接使用 `useHostEvent(...)`。不要设定时轮询；等待宿主或运行时变化一律监听事件（`onEvent` / `onState` / `waitOnline`）。
+4. **副作用与清理**：`effect(() => { const off = onEvent(..., ["view_opened"]); cleanup(off); })`，或配合 `onSlices(["views"], ...)` 按需监听状态切片。不要设定时轮询；等待宿主或运行时变化一律监听事件（`onEvent` 须显式传第二个参数 `types` 数组 / `onSlices` / `waitOnline`）。
 5. **顶层不可阻塞主渲染**：文件/数据库/RPC 都异步放到 `bootTask` 或事件回调里，界面直接读内存 signal。
 6. **主题样式不要硬编码颜色**：尽量使用语义 Tailwind class（见第 6 节）或读取 `theme()` 切片信号（`theme().palette`、`theme().radius`、`theme().type`）。
 
@@ -89,8 +92,8 @@ NSH **不是 React**：组件函数只在挂载时执行**一次**，之后只�
   - 注册命令，完整 id 为 `<插件 id>/<name>`。
   - `key` 可给默认快捷键（如 `"cmd-shift-y"`）；`palette` 控制是否进命令面板；`cli: true` + `args: ["field"]`（空数组 `[]` 表示无参）允许通过 `smelt app run <插件 id>/<name>` 从命令行调用。
   - 用 `onCommand(async ({ name, args }) => { ... })` 分发并返回值或抛错。
-- `registerPages(specs)` & `registerLayouts(specs)`：扩展主窗口页面和 Dock 布局。
-- `registerTopics(topics)`：订阅守护运行时广播话题（如 `"attention.changed"`），再由 `onEvent` 接收 `{ type: "runtime_topic", machine, topic, message }`。
+- `registerPages(specs)` & `registerLayouts(specs)`：声明扩展主窗口页面和 Dock 布局。
+- `registerTopics(topics)`：订阅守护运行时广播话题（如 `"attention.changed"`），再由 `onEvent(..., ["runtime_topic"])` 接收 `{ type: "runtime_topic", machine, topic, message }`。
 - `registerMenuItems(items)`：`{ slot: "app" | "help", title, command }`（仅 macOS）。
 - `registerContextMenuItems(menu, items)`：向其他插件定义的右键菜单注册条目。
 - `setStatusMenu(menu | null)`：设置本插件专属 macOS 菜单栏状态图标与菜单（每插件独立）。
@@ -99,9 +102,9 @@ NSH **不是 React**：组件函数只在挂载时执行**一次**，之后只�
 ## 5. 状态、RPC 与存储（`smelt/sdk`）
 
 - **细粒度响应式状态读取**（只订阅用到的切片）：
-  `locale()`、`systemLocale()`、`locales()`、`theme()` / `currentTheme()`、`machines()`、`machineEntry(machine)`、`connections()`、`activeContext()`、`views()`、`pages()`、`commands()`、`viewShown(id)`、`viewLaidOut(id)`、`safeArea(viewId)`、`windowActive()`、`notificationPermission()`。
+  `locale()`、`systemLocale()`、`locales()`、`theme()` / `currentTheme()`、`machineMeta()`、`machineMetaEntry(machine)`、`machines()`、`machineEntry(machine)`、`connections()`、`activeContext()`、`views()`、`pages()`、`commands()`、`viewShown(id)`、`viewLaidOut(id)`、`safeArea(viewId)`、`windowActive()`、`notificationPermission()`、`onSlices(slices, fn)`、`initHost(initialSlices)`、`hostReady()`。
 - **国际化**：在插件目录 `locales/` 放 `ui.yml`（结构同 Smelt 主库，`en` / `zh-CN`），用 `t("key", { count })` 取当前语言译文，用 `text("key")` 生成传给 `registerViews` / `registerCommands` 的多语言对象。
-- **离散事件**：`onEvent((event) => { ... })`（或组件内 `useHostEvent`）接收 `view_opened`（附带 `open-view` 的 `args`）、`runtime_topic`、`plugin`、`window_activated`、`machines_changed`、`sessions_changed`、`themes_changed`、`locale_changed` 等；本插件也可用 `emitEvent(`${pluginId()}/event-name`, payload)` 广播事件。
+- **离散事件**：`onEvent((event) => { ... }, types)` 需显式传入第二个参数 `types` 数组（仅在订阅的事件到达时唤醒 VM），接收 `view_opened`（附带 `open-view` 的 `args`）、`runtime_topic`、`plugin:<name>`、`window_activated`、`machines_changed`、`sessions_changed`、`themes_changed`、`locale_changed` 等；本插件也可用 `emitEvent(`${pluginId()}/event-name`, payload)` 广播事件。
 - **调用命令与守护 RPC**：
   - `run("smelt.app/open-view", { view, args })` 等触发宿主或其它插件命令。
   - `call(machine, method, params, timeoutMs?)` / `callDetail(...)`：调用本机（`machine = null`）或远程（`machine = "<id>"`）`smeltd` 的 Control API（方法名联合类型见 `.nsh/types/smelt/sdk.d.ts` 中的 `ControlMethodName`）。可用 `await waitOnline(machine)` 事件驱动等待机器上线。
@@ -116,7 +119,7 @@ NSH **不是 React**：组件函数只在挂载时执行**一次**，之后只�
   - `SmeltButton`：`label`、`icon`、`trailingIcon`、`tooltip`、`command`、`quiet` / `primary` / `danger` / `dismiss` / `floating`、`small`、`circle`、`fill`、`loading`、`selected`、`onPress`。
   - `SmeltIcon`：渲染内置 SVG，`<SmeltIcon path="icons/search.svg" size={14} spin={false} />`。
   - `SmeltVector`：渲染任意内联 SVG 字符串 `<SmeltVector markup="<svg ...>...</svg>" width={16} height={16} />`。
-  - `SmeltMarkdown`、`SmeltEditor`、`SmeltDiffView`、`SmeltConversation`、`SmeltWindowBar`、`ViewInstance`。
+  - `SmeltMarkdown`、`SmeltEditor`、`SmeltDiffView`、`SmeltWindowBar`、`ViewInstance`（以及共享模块 `"smelt/conversation"` 导出的 `<SmeltConversation>`）。
   - `SmeltNativeTerminal`、`SmeltNativeBuddy`、`SmeltNativeDesktop`。
   - 共享浮层样式常量：`POPUP_CLASS`、`TOOLTIP_CLASS`、`MENU_ITEM_CLASS`、`INPUT_CLASS`、`DIALOG_SURFACE_CLASS`。
 - **可用图标路径**：只能使用内置 SVG 资产路径（`icons/<name>.svg` 和 `smelt-icons/agent-<id>.svg`），精确枚举位于 `.nsh/types/smelt/sdk.d.ts` 的 `SmeltIconPath`。
@@ -187,21 +190,31 @@ import { computed, signal, Text, View } from "nsh";
 import {
   bootTask,
   initHost,
-  machines,
+  machineMeta,
   onCommand,
+  onEvent,
   registerCommands,
   registerViews,
   run,
   SmeltButton,
   SmeltIcon,
   store,
-  useHostEvent,
 } from "smelt/sdk";
 
 const lastMessage = signal("Ready");
 
+onEvent(
+  (ev) => {
+    if (ev.type === "view_opened") {
+      const note = (ev.args as { note?: string } | null)?.note;
+      if (note) lastMessage.set(String(note));
+    }
+  },
+  ["view_opened"],
+);
+
 bootTask(async () => {
-  await initHost();
+  await initHost(["machines_meta"]);
   await store.migrate([
     "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL);",
   ]);
@@ -231,13 +244,7 @@ bootTask(async () => {
 });
 
 export function Main() {
-  const count = computed(() => machines().length);
-  useHostEvent((ev) => {
-    if (ev.type === "view_opened") {
-      const note = (ev.args as { note?: string } | null)?.note;
-      if (note) lastMessage.set(String(note));
-    }
-  });
+  const count = computed(() => machineMeta().length);
 
   return (
     <View class="flex-1 gap-3 bg-background p-4">

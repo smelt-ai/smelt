@@ -3,12 +3,13 @@
 import { cleanup, computed, Scroll, Text, View } from "nsh";
 import { Input, Submenu } from "nsh/base";
 import {
+  locale,
   pathJoin,
   pathStyle,
   SmeltButton,
   SmeltIcon,
-  state as hostState,
   t,
+  views,
   workspaceDirectory,
 } from "smelt/sdk";
 
@@ -273,7 +274,7 @@ function ContextCard(props: { ref: () => AgentRef | null; agent: () => any | nul
   const look = currentTheme;
 
   const workspaceText = computed(() => {
-    hostState();
+    locale();
     agentHostsSignal();
     const ref = props.ref();
     const agent = props.agent();
@@ -602,7 +603,7 @@ function CapabilitiesCard(props: { agent: () => any | null }) {
     (props.agent()?.plugins?.length ?? 0) + (props.agent()?.mcp_servers?.length ?? 0);
 
   const allRows = computed(() => {
-    hostState();
+    locale();
     const a = props.agent();
     if (!a) return [];
     const snap = piSnapshot();
@@ -618,7 +619,7 @@ function CapabilitiesCard(props: { agent: () => any | null }) {
   });
 
   const hasCapabilitiesView = computed(() => {
-    hostState();
+    views();
     return capabilitiesViewRegistered();
   });
 
@@ -843,7 +844,7 @@ function CapabilitiesCard(props: { agent: () => any | null }) {
 function DeleteAgentRow(props: { ref: () => AgentRef | null }) {
   const look = currentTheme;
   const autos = computed(() => {
-    hostState();
+    locale();
     const r = props.ref();
     if (!r) return [];
     return automationNamesFor(r.machine, r.id);
@@ -1250,7 +1251,7 @@ function MemoryTabPanel(props: { ref: () => AgentRef | null; agent: () => any | 
   const narrowed = () => query().trim().length > 0 || filter() !== "all";
 
   const filterOptions = computed<SegmentedOption[]>(() => {
-    hostState();
+    locale();
     return [
       { key: "all", label: t("memory.filter.all"), tooltip: t("memory.filter.all_tooltip") },
       {
@@ -1404,7 +1405,7 @@ export function AgentEditorView() {
 
   const ref = computed(() => editingAgent());
   const agent = computed(() => {
-    hostState();
+    locale();
     agentHostsSignal();
     const r = ref();
     if (!r) return null;
@@ -1412,7 +1413,8 @@ export function AgentEditorView() {
   });
 
   const tabOptions = computed<SegmentedOption[]>(() => {
-    hostState();
+    locale();
+    views();
     const pending = memoryPendingCount(memoriesState());
     const list: SegmentedOption[] = [{ key: "config", label: t("tab.config") }];
     if (automationsViewRegistered()) {
@@ -1445,7 +1447,7 @@ export function AgentEditorView() {
   });
 
   const usageText = computed(() => {
-    hostState();
+    locale();
     const r = ref();
     if (!r) return "";
     const convs = agentConversationCount(workspaceDirectory(r.machine), r.id);

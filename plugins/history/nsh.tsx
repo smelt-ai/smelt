@@ -13,8 +13,9 @@ import {
   initHost,
   isInterruptMarker,
   launchableProfiles,
+  machineMetaEntry,
   onEvent,
-  onState,
+  onSlices,
   registerTopics,
   registerViews,
   request,
@@ -23,7 +24,6 @@ import {
   SmeltIcon,
   SmeltMarkdown,
   stableMemo,
-  state,
   t,
   currentTheme,
   DIALOG_SURFACE_CLASS,
@@ -226,7 +226,7 @@ const openedDetail = signal<{ path: string; detail: SessionDetail } | null>(null
 const renameDialog = signal<RenameDialogState | null>(null);
 const deleteDialog = signal<DeleteDialogState | null>(null);
 
-const inflight = new Set<string>();
+const inflight = new Map<string, string | null>();
 const invalidated = new Set<string>();
 let detailGen = 0;
 let wasShown = false;
@@ -275,6 +275,9 @@ function markStale(machine: string | null | undefined) {
     } else {
       next[key] = list;
     }
+  }
+  for (const [key, m] of inflight.entries()) {
+    if ((m ?? null) === target) invalidated.add(key);
   }
   if (changed) listsMap.set(next);
   const project = currentProject();
@@ -329,7 +332,8 @@ function ensureList(
     return;
   }
   if (inflight.has(key)) return;
-  inflight.add(key);
+  if (machineMetaEntry(project.machine)?.online !== true) return;
+  inflight.set(key, project.machine);
   void call(project.machine, "history.list", {
     agent,
     profile_id: profileId,
@@ -365,7 +369,7 @@ function ensureList(
         ...listsMap(),
         [key]: {
           machine: project.machine,
-          fetchedAt: stale ? null : Date.now(),
+          fetchedAt: null,
           sessions: old?.sessions ?? [],
           bindings: old?.bindings ?? {},
         },
@@ -581,7 +585,7 @@ function confirmDelete() {
 
 // ---- 宿主事件与启动 ----
 
-onState(() => {
+onSlices(["commands", "views", "active_context", "machines_meta"], () => {
   syncAgentSettingsRegistry();
   const shown = viewShown(VIEW_ID);
   const appeared = shown && !wasShown;
@@ -593,38 +597,47 @@ onState(() => {
   }
 });
 
-onEvent((event: any) => {
-  if (!event || typeof event !== "object") return;
-  if (event.type === "plugin" && event.name === AGENT_SETTINGS_CHANGED_EVENT) {
-    applyAgentSettingsEvent(event.payload);
-    return;
-  }
-  if (event.type === "view_opened" && event.view === VIEW_ID) {
-    wasShown = true;
-    syncProject();
-    refresh(true);
-    return;
-  }
-  if (event.type === "machines_changed") {
-    syncProject();
-    refresh();
-    return;
-  }
-  if (event.type === "reconnected") {
-    markStale(event.machine);
-    return;
-  }
-  if (
-    event.type === "runtime_topic" &&
-    event.topic === TOPIC_HISTORY_CHANGED &&
-    event.message?.kind !== "unavailable"
-  ) {
-    markStale(event.machine);
-  }
-});
+onEvent(
+  (event: any) => {
+    if (!event || typeof event !== "object") return;
+    if (event.type === "plugin" && event.name === AGENT_SETTINGS_CHANGED_EVENT) {
+      applyAgentSettingsEvent(event.payload);
+      return;
+    }
+    if (event.type === "view_opened" && event.view === VIEW_ID) {
+      wasShown = true;
+      syncProject();
+      refresh(true);
+      return;
+    }
+    if (event.type === "machines_changed") {
+      syncProject();
+      refresh();
+      return;
+    }
+    if (event.type === "reconnected") {
+      markStale(event.machine);
+      return;
+    }
+    if (
+      event.type === "runtime_topic" &&
+      event.topic === TOPIC_HISTORY_CHANGED &&
+      event.message?.kind !== "unavailable"
+    ) {
+      markStale(event.machine);
+    }
+  },
+  [
+    `plugin:${AGENT_SETTINGS_CHANGED_EVENT}`,
+    "view_opened",
+    "machines_changed",
+    "reconnected",
+    "runtime_topic",
+  ],
+);
 
 bootTask(async () => {
-  await initHost();
+  await initHost(["commands", "views", "active_context", "machines_meta"]);
   await registerTopics([TOPIC_HISTORY_CHANGED]);
   await registerViews([
     {

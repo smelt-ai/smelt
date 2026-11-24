@@ -16,6 +16,8 @@ import {
   bootTask,
   call,
   initHost,
+  locale,
+  machineMeta,
   machines,
   onEvent,
   processUsage,
@@ -24,7 +26,6 @@ import {
   SmeltButton,
   SmeltIcon,
   SmeltVector,
-  state as hostState,
   t,
   text,
   theme,
@@ -164,7 +165,7 @@ function sleepWhileVisible(ms: number, gen: number): Promise<boolean> {
 }
 
 async function sampleRound() {
-  const targets = machines().filter(
+  const targets = machineMeta().filter(
     (machine: any) => (machine.machine ?? null) === null || machine.unavailable == null,
   );
   const desktopPromise = processUsage().catch(() => null);
@@ -241,10 +242,10 @@ onEvent((event) => {
   ) {
     rebuildSnapshot();
   }
-});
+}, ["shown_views_changed", "sessions_changed", "machines_changed", "locale_changed"]);
 
 bootTask(async () => {
-  await initHost();
+  await initHost(["views", "machines_meta", "sessions_data"]);
   await registerViews([
     {
       name: VIEW_NAME,
@@ -474,7 +475,7 @@ function SummarySection() {
   const snap = computed(() => snapshot());
   const local = computed(() => snap().local);
   const shareText = computed(() => {
-    hostState();
+    locale();
     const cur = local();
     const total = snap().totalMemory;
     if (!cur || total == null || total <= 0) return null;
@@ -781,7 +782,7 @@ function MachineSection(props: { section: () => any }) {
           {(item: () => any) => {
             const isOpen = () => expanded().has(item().id);
             const detail = () => {
-              hostState();
+              locale();
               const g = item().group;
               const summary = processSummary(g.usage.process_count, g.processes, t);
               return g.jump != null ? summary : t("others.detail", { summary });

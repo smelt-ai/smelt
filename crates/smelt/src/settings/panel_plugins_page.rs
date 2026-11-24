@@ -70,10 +70,7 @@ impl PanelPluginsPage {
             if !matches!(this.update(cx, |this, cx| this.begin_change(cx)), Ok(true)) {
                 return;
             }
-            let result = cx
-                .background_executor()
-                .spawn(async move { crate::plugins::import(&source) })
-                .await;
+            let result = smelt_sys::blocking::run(move || crate::plugins::import(&source)).await;
             let _ = this.update(cx, |this, cx| {
                 this.finish_change(
                     result.map(|name| t!("plugins.imported", name = name).into_owned()),
@@ -109,10 +106,7 @@ impl PanelPluginsPage {
         }
         cx.spawn_in(window, async move |this, cx| {
             let root = plugin.root.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move { crate::plugins::uninstall(&root) })
-                .await;
+            let result = smelt_sys::blocking::run(move || crate::plugins::uninstall(&root)).await;
             let _ = this.update(cx, |this, cx| {
                 let message = if plugin.overrides_builtin {
                     t!("plugins.restored", name = plugin.name).into_owned()
@@ -130,12 +124,19 @@ impl PanelPluginsPage {
         let Some(dir) = self.user_dir.clone() else {
             return;
         };
-        if let Err(error) = std::fs::create_dir_all(&dir) {
-            self.error = Some(t!("plugins.create_dir_failed", error = error).into_owned());
-            cx.notify();
-            return;
-        }
-        cx.open_with_system(&dir);
+        cx.spawn(async move |this, cx| {
+            let dir_for_create = dir.clone();
+            let created =
+                smelt_sys::blocking::run(move || std::fs::create_dir_all(&dir_for_create)).await;
+            let _ = this.update(cx, |this, cx| match created {
+                Ok(()) => cx.open_with_system(&dir),
+                Err(error) => {
+                    this.error = Some(t!("plugins.create_dir_failed", error = error).into_owned());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// 返回能不能开始：同一时刻只做一件。

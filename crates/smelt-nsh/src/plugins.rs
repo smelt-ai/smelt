@@ -33,48 +33,6 @@ const APP: &str = include_str!("plugins/App.tsx");
 const PROVIDER: &str = include_str!("plugins/provider.tsx");
 const SLOTS: &str = include_str!("plugins/slots.tsx");
 const SDK: &str = include_str!("plugins/sdk.tsx");
-const SDK_CONVERSATION_FILES: &[(&str, &str)] = &[
-    (
-        "conversation/model.js",
-        include_str!("plugins/conversation/model.js"),
-    ),
-    (
-        "conversation/i18n.ts",
-        include_str!("plugins/conversation/i18n.ts"),
-    ),
-    (
-        "conversation/cards.tsx",
-        include_str!("plugins/conversation/cards.tsx"),
-    ),
-    (
-        "conversation/edit_diff_dialog.tsx",
-        include_str!("plugins/conversation/edit_diff_dialog.tsx"),
-    ),
-    (
-        "conversation/model_popover.tsx",
-        include_str!("plugins/conversation/model_popover.tsx"),
-    ),
-    (
-        "conversation/subagents.tsx",
-        include_str!("plugins/conversation/subagents.tsx"),
-    ),
-    (
-        "conversation/prompt_rail.tsx",
-        include_str!("plugins/conversation/prompt_rail.tsx"),
-    ),
-    (
-        "conversation/message_list.tsx",
-        include_str!("plugins/conversation/message_list.tsx"),
-    ),
-    (
-        "conversation/composer.tsx",
-        include_str!("plugins/conversation/composer.tsx"),
-    ),
-    (
-        "conversation/index.tsx",
-        include_str!("plugins/conversation/index.tsx"),
-    ),
-];
 const SHELL_NSH_CONFIG: &str = include_str!("plugins/shell.nsh.json");
 const PLUGIN_NSH_CONFIG: &str = include_str!("plugins/plugin.nsh.json");
 
@@ -88,6 +46,8 @@ const SLOT_FAILED: &str = "smelt.slot.failed";
 const PLUGIN_READY: &str = "smelt.plugin.ready";
 /// 外壳在宿主桥里的身份标识。
 pub(crate) const SHELL_OWNER: &str = "__shell__";
+/// 所有未被用户覆写、未依赖用户模块的内置脚本插件共驻的共享 VM 身份标识。
+pub(crate) const BUILTINS_VM_ID: &str = "__builtins__";
 
 /// 一个插件的入口文件，导出它的视图。
 pub(crate) const ENTRY: &str = "main.tsx";
@@ -99,30 +59,41 @@ pub enum CompiledCode {
     Bytecode(Arc<[u8]>),
 }
 
-/// 一个插件打好的可执行模块。
+/// 一个 VM 承载的已编译可执行模块（单插件时 `members` 为 `[id]`，共享内置 VM 时为全部内置成员 id）。
 #[derive(Clone, Debug)]
 pub struct Compiled {
     id: String,
+    members: Vec<String>,
     code: CompiledCode,
 }
 
 impl Compiled {
-    pub(crate) fn from_bytecode(id: String, bytes: Vec<u8>) -> Self {
+    pub(crate) fn from_source(id: String, source: String) -> Self {
+        Self::from_source_multi(id.clone(), vec![id], source)
+    }
+
+    pub(crate) fn from_bytecode_multi(id: String, members: Vec<String>, bytes: Vec<u8>) -> Self {
         Self {
             id,
+            members,
             code: CompiledCode::Bytecode(Arc::from(bytes)),
         }
     }
 
-    pub(crate) fn from_source(id: String, source: String) -> Self {
+    pub(crate) fn from_source_multi(id: String, members: Vec<String>, source: String) -> Self {
         Self {
             id,
+            members,
             code: CompiledCode::Source(source.into()),
         }
     }
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    pub fn members(&self) -> &[String] {
+        &self.members
     }
 
     #[cfg(test)]
@@ -142,39 +113,124 @@ impl Compiled {
 /// 一次改动之后，引擎那头要做的。
 #[derive(Clone, Debug)]
 pub enum Change {
-    /// 起一个新引擎：外壳，加上此刻装着的全部插件。
+    /// 起一个新引擎：外壳，加上此刻装着的全部 VM。
     Start {
         shell: CompiledCode,
         plugins: Vec<Compiled>,
     },
-    /// 装上或者原地热重载一个插件。
+    /// 装上或者原地热重载一个 VM。
     Install(Compiled),
-    /// 卸掉一个插件。
+    /// 卸掉一个 VM。
     Remove(String),
+}
+
+const FNV1A_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+fn fnv1a_feed(hash: &mut u64, bytes: &[u8]) {
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    for &b in bytes {
+        *hash ^= u64::from(b);
+        *hash = hash.wrapping_mul(PRIME);
+    }
+    *hash ^= 0xff;
+    *hash = hash.wrapping_mul(PRIME);
+}
+
+/// 插件目录在打包、指纹计算与发行拷贝时统一跳过的条目（避免源码之外的测试/产物/隐藏目录干扰）。
+pub(crate) fn is_ignored_plugin_entry(name: &str, is_dir: bool) -> bool {
+    name.starts_with('.')
+        || name == "node_modules"
+        || name == "tsconfig.json"
+        || (is_dir && name == "tests")
+        || (!is_dir
+            && (name.contains(".test.")
+                || name == "bundle.nshc"
+                || name == "bundle.meta.json"
+                || name == "builtins.nshc"
+                || name == "builtins.meta.json"))
+}
+
+/// 共享 JS 模块插件声明的包描述。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModulePackage {
+    pub id: String,
+    pub specifier: String,
+    pub root: PathBuf,
+    pub entry: String,
+    pub types: Option<String>,
+    pub fingerprint: String,
+    pub source: crate::manifest::PluginSource,
+}
+
+pub(crate) enum CompileMode<'a> {
+    Plugin,
+    Module { self_specifier: &'a str },
+}
+
+pub(crate) struct CompiledSource {
+    pub code: String,
+    pub used_modules: BTreeMap<String, String>,
+    pub used_module_ids: Vec<String>,
+}
+
+pub(crate) struct BuiltinCompileInput<'a> {
+    pub id: &'a str,
+    pub root: &'a Path,
+    pub entry_rel: &'a str,
+}
+
+pub(crate) struct CompiledBuiltinsSource {
+    pub code: String,
+    pub used_modules: BTreeMap<String, String>,
+    pub per_plugin_module_ids: BTreeMap<String, Vec<String>>,
+}
+
+/// 校验共享模块声明的 import 标识符（如 `smelt/conversation`、`custom/my.conv`），禁止占用内置保留模块。
+pub(crate) fn valid_module_specifier(spec: &str) -> bool {
+    if spec == "nsh"
+        || spec.starts_with("nsh/")
+        || matches!(spec, "smelt/sdk" | "smelt/host" | "smelt/slots")
+    {
+        return false;
+    }
+    let mut count = 0usize;
+    for seg in spec.split('/') {
+        if !valid_id(seg) {
+            return false;
+        }
+        count += 1;
+    }
+    count >= 2
+}
+
+/// 为共享模块插件内容计算确定性指纹（用于消费方 `.nshc` 失效检测与增量重编）。
+pub(crate) fn module_fingerprint(
+    root: &Path,
+    specifier: &str,
+    entry: &str,
+) -> Result<String, String> {
+    let files = read_dir(root).map_err(|error| format!("{}: {error}", root.display()))?;
+    let mut hash = FNV1A_OFFSET;
+    fnv1a_feed(&mut hash, specifier.as_bytes());
+    fnv1a_feed(&mut hash, entry.as_bytes());
+    for (rel, bytes) in files {
+        fnv1a_feed(
+            &mut hash,
+            rel.to_string_lossy().replace('\\', "/").as_bytes(),
+        );
+        fnv1a_feed(&mut hash, &bytes);
+    }
+    Ok(format!("{hash:016x}"))
 }
 
 /// 对嵌入所有 Guest 插件的 SDK、配置与 QuickJS 字节码版本生成稳定指纹，
 /// 避免升级 Smelt SDK 或 NSH 引擎版本后误读旧的 `.nshc` 预编译产物。
 pub(crate) fn sdk_fingerprint() -> String {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash = OFFSET;
-    let feed = |h: &mut u64, bytes: &[u8]| {
-        for &b in bytes {
-            *h ^= u64::from(b);
-            *h = h.wrapping_mul(PRIME);
-        }
-        *h ^= 0xff;
-        *h = h.wrapping_mul(PRIME);
-    };
-    feed(&mut hash, nsh_js::BYTECODE_VERSION.as_bytes());
-    feed(&mut hash, PLUGIN_NSH_CONFIG.as_bytes());
-    feed(&mut hash, PROVIDER.as_bytes());
-    feed(&mut hash, SDK.as_bytes());
-    for (path, text) in SDK_CONVERSATION_FILES {
-        feed(&mut hash, path.as_bytes());
-        feed(&mut hash, text.as_bytes());
-    }
+    let mut hash = FNV1A_OFFSET;
+    fnv1a_feed(&mut hash, nsh_js::BYTECODE_VERSION.as_bytes());
+    fnv1a_feed(&mut hash, PLUGIN_NSH_CONFIG.as_bytes());
+    fnv1a_feed(&mut hash, PROVIDER.as_bytes());
+    fnv1a_feed(&mut hash, SDK.as_bytes());
     format!("{hash:016x}")
 }
 
@@ -182,6 +238,7 @@ pub(crate) fn sdk_fingerprint() -> String {
 pub struct Plugins {
     stage: PathBuf,
     ui_sets: Vec<SetDescription>,
+    modules: Vec<ModulePackage>,
     shell: CompiledCode,
     installed: BTreeMap<String, Compiled>,
 }
@@ -206,7 +263,6 @@ impl Plugins {
             &dir,
             files
                 .into_iter()
-                .chain(SDK_CONVERSATION_FILES.iter().copied())
                 .map(|(path, text)| (Path::new(path), text.as_bytes())),
         )
         .map_err(io)?;
@@ -217,6 +273,7 @@ impl Plugins {
             shell: CompiledCode::Source(bundle.code.into()),
             stage,
             ui_sets,
+            modules: Vec::new(),
             installed: BTreeMap::new(),
         })
     }
@@ -230,9 +287,14 @@ impl Plugins {
         Ok(Self {
             stage: stage.to_path_buf(),
             ui_sets,
+            modules: Vec::new(),
             shell: CompiledCode::Bytecode(Arc::from(shell_bytecode)),
             installed: BTreeMap::new(),
         })
+    }
+
+    pub fn set_modules(&mut self, modules: Vec<ModulePackage>) {
+        self.modules = modules;
     }
 
     pub(crate) fn stage(&self) -> &Path {
@@ -281,7 +343,7 @@ impl Plugins {
         Change::Install(compiled)
     }
 
-    /// 装着的插件 id。
+    /// 装着的 VM id（共享内置 VM 记为 `BUILTINS_VM_ID`，独立插件记为插件 id）。
     pub fn installed(&self) -> impl Iterator<Item = &str> {
         self.installed.keys().map(String::as_str)
     }
@@ -291,89 +353,448 @@ impl Plugins {
         Change::Remove(id.to_owned())
     }
 
-    /// 无共享可变状态地把单个插件打包为 JS 文本，可由上层多线程并行调用。
+    /// 检查单插件是否声明/引用了 `specs` 中的任一共享模块。
+    pub(crate) fn plugin_uses_any_module(
+        root: &Path,
+        modules: &[ModulePackage],
+        specs: &BTreeSet<String>,
+    ) -> bool {
+        if specs.is_empty() {
+            return false;
+        }
+        let Ok(files) = read_dir(root) else {
+            return false;
+        };
+        let Ok(selected) = select_candidate_modules(&files, modules, None) else {
+            return false;
+        };
+        selected
+            .iter()
+            .any(|item| specs.contains(&item.package.specifier))
+    }
+
+    /// 无共享可变状态地把单个插件（或共享模块插件）打包为 JS 文本，可由上层多线程并行调用。
     pub(crate) fn compile_source_to_js(
         stage: &Path,
         ui_sets: &[SetDescription],
+        modules: &[ModulePackage],
         id: &str,
         source: &Path,
         entry_rel: &str,
+        mode: CompileMode<'_>,
         minify: bool,
-    ) -> Result<String, String> {
+    ) -> Result<CompiledSource, String> {
         if !valid_id(id) {
             return Err(format!("插件 id 不能作目录名：{id}"));
         }
-        let rel = Path::new(entry_rel);
-        if rel.is_absolute()
-            || rel.components().any(|part| {
-                matches!(
-                    part,
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                )
-            })
-        {
-            return Err(format!("{id} 的入口路径不合法：{entry_rel}"));
-        }
-        let normalized_entry: PathBuf = rel
-            .components()
-            .filter(|part| !matches!(part, Component::CurDir))
-            .collect();
+        let normalized_entry = normalize_rel_path(id, entry_rel)?;
         let files = read_dir(source).map_err(|error| format!("{}: {error}", source.display()))?;
         if !files.contains_key(&normalized_entry) {
             return Err(format!("{id} 没有 {entry_rel}"));
         }
         let import_rel = normalized_entry.to_string_lossy().replace('\\', "/");
         let raw_dir = stage.join("plugins").join(id);
-        let entry = format!(
-            "import {{ provideViews }} from \"./provider.tsx\";\n\
-             import * as views from \"./plugin/{import_rel}\";\n\
-             provideViews({id:?}, views);\n"
-        );
-        let staged: Vec<(PathBuf, &[u8])> = files
+        let entry = match mode {
+            CompileMode::Plugin => format!(
+                "import {{ provideViews }} from \"./provider.tsx\";\n\
+                 import * as views from \"./plugin/{import_rel}\";\n\
+                 provideViews({id:?}, views);\n"
+            ),
+            CompileMode::Module { .. } => {
+                format!(
+                    "import * as _module_exports from \"./plugin/{import_rel}\";\n\
+                     (globalThis as Record<string, unknown>).__nsh_module_exports = _module_exports;\n"
+                )
+            }
+        };
+
+        let self_specifier = match mode {
+            CompileMode::Plugin => None,
+            CompileMode::Module { self_specifier } => Some(self_specifier),
+        };
+        let selected = select_candidate_modules(&files, modules, self_specifier)?;
+        let nsh_config_bytes = build_plugin_nsh_config(&selected, true, id)?;
+
+        let mut staged: Vec<(PathBuf, &[u8])> = files
             .iter()
             .map(|(path, bytes)| (Path::new("plugin").join(path), bytes.as_slice()))
             .chain([
-                (PathBuf::from("nsh.json"), PLUGIN_NSH_CONFIG.as_bytes()),
+                (PathBuf::from("nsh.json"), nsh_config_bytes.as_slice()),
                 (PathBuf::from("provider.tsx"), PROVIDER.as_bytes()),
                 (PathBuf::from("sdk.tsx"), SDK.as_bytes()),
                 (PathBuf::from("entry.ts"), entry.as_bytes()),
             ])
-            .chain(
-                SDK_CONVERSATION_FILES
-                    .iter()
-                    .map(|(path, text)| (PathBuf::from(path), text.as_bytes())),
-            )
             .collect();
-        write_dir(
-            &raw_dir,
-            staged.iter().map(|(path, bytes)| (path.as_path(), *bytes)),
-        )
-        .map_err(|error| format!("{}: {error}", raw_dir.display()))?;
-        // macOS `/var` -> `/private/var` 符号链接解析，确保 `inside` 前缀对比一致。
-        let dir = raw_dir
-            .canonicalize()
-            .map_err(|error| format!("{}: {error}", raw_dir.display()))?;
-        let bundle = bundle(&dir.join("entry.ts"), ui_sets, minify)?;
-        if let Some(outside) = bundle.watch_files.iter().find(|file| !inside(file, &dir)) {
-            return Err(format!(
-                "{id} 引了自己目录以外的文件：{}",
-                outside.display()
+        for item in &selected {
+            let prefix = Path::new("modules").join(&item.package.id);
+            staged.extend(
+                item.files
+                    .iter()
+                    .map(|(path, bytes)| (prefix.join(path), bytes.as_slice())),
+            );
+        }
+
+        let (dir, bundle) = stage_and_bundle(&raw_dir, id, &staged, ui_sets, minify)?;
+        let hit_ids = collect_hit_modules(&dir, &bundle.watch_files);
+        let mut used_modules = BTreeMap::new();
+        let mut used_module_ids = Vec::new();
+        for item in &selected {
+            if hit_ids.contains(&item.package.id) {
+                used_modules.insert(
+                    item.package.specifier.clone(),
+                    item.package.fingerprint.clone(),
+                );
+                used_module_ids.push(item.package.id.clone());
+            }
+        }
+        used_module_ids.sort();
+        used_module_ids.dedup();
+
+        Ok(CompiledSource {
+            code: bundle.code,
+            used_modules,
+            used_module_ids,
+        })
+    }
+
+    /// 把一组内置脚本插件打进同一份共享 ES 模块包（共用 `sdk.tsx` / `provider.tsx` 与共享模块），
+    /// 并为每个子插件经就近 `node_modules/smelt/sdk.ts` 注入按 `id` 隔离的作用域 SDK。
+    pub(crate) fn compile_builtins_to_js(
+        stage: &Path,
+        ui_sets: &[SetDescription],
+        modules: &[ModulePackage],
+        entries: &[BuiltinCompileInput<'_>],
+        minify: bool,
+    ) -> Result<CompiledBuiltinsSource, String> {
+        if entries.is_empty() {
+            return Err("compile_builtins_to_js：内置插件列表不能为空".to_owned());
+        }
+
+        struct PreparedEntry<'a> {
+            id: &'a str,
+            import_rel: String,
+            files: BTreeMap<PathBuf, Vec<u8>>,
+            shim: String,
+            candidate_mod_ids: Vec<String>,
+        }
+
+        let mut prepared = Vec::with_capacity(entries.len());
+        let mut all_selected: BTreeMap<String, SelectedModule<'_>> = BTreeMap::new();
+        let mut seen_ids = BTreeSet::new();
+
+        for item in entries {
+            if !valid_id(item.id) {
+                return Err(format!("插件 id 不能作目录名：{}", item.id));
+            }
+            if !seen_ids.insert(item.id) {
+                return Err(format!("builtins 合包存在重复插件 id：{}", item.id));
+            }
+            let normalized_entry = normalize_rel_path(item.id, item.entry_rel)?;
+            let files =
+                read_dir(item.root).map_err(|error| format!("{}: {error}", item.root.display()))?;
+            if !files.contains_key(&normalized_entry) {
+                return Err(format!("{} 没有 {}", item.id, item.entry_rel));
+            }
+            let import_rel = normalized_entry.to_string_lossy().replace('\\', "/");
+            let selected = select_candidate_modules(&files, modules, None)?;
+            let mut candidate_mod_ids = Vec::with_capacity(selected.len());
+            for m in selected {
+                candidate_mod_ids.push(m.package.id.clone());
+                all_selected.entry(m.package.id.clone()).or_insert(m);
+            }
+            prepared.push(PreparedEntry {
+                id: item.id,
+                import_rel,
+                files,
+                shim: scoped_sdk_shim(item.id),
+                candidate_mod_ids,
+            });
+        }
+
+        let selected_list: Vec<SelectedModule<'_>> = all_selected.into_values().collect();
+        let nsh_config_bytes = build_plugin_nsh_config(&selected_list, false, BUILTINS_VM_ID)?;
+
+        let mut entry_src = String::from("import { provideMultiViews } from \"./provider.tsx\";\n");
+        for (ix, item) in prepared.iter().enumerate() {
+            let id = item.id;
+            let rel = &item.import_rel;
+            entry_src.push_str(&format!(
+                "import * as p_{ix} from \"./plugins/{id}/plugin/{rel}\";\n"
             ));
         }
-        if let Some(asset) = bundle.assets.first() {
-            return Err(format!("{id} 引了资源文件，还不支持：{}", asset.display()));
+        entry_src.push_str("provideMultiViews({\n");
+        for (ix, item) in prepared.iter().enumerate() {
+            entry_src.push_str(&format!("  {:?}: p_{ix},\n", item.id));
         }
-        let served = native_specifiers(ui_sets);
-        validate_imports(id, &bundle.code, &served)?;
-        Ok(bundle.code)
+        entry_src.push_str("});\n");
+
+        let shared_sdk_shim = b"export * from \"../../sdk.tsx\";\n";
+        let mut staged: Vec<(PathBuf, &[u8])> = vec![
+            (PathBuf::from("nsh.json"), nsh_config_bytes.as_slice()),
+            (PathBuf::from("provider.tsx"), PROVIDER.as_bytes()),
+            (PathBuf::from("sdk.tsx"), SDK.as_bytes()),
+            (
+                PathBuf::from("node_modules/smelt/sdk.ts"),
+                shared_sdk_shim.as_slice(),
+            ),
+            (PathBuf::from("entry.ts"), entry_src.as_bytes()),
+        ];
+        for item in &selected_list {
+            let prefix = Path::new("modules").join(&item.package.id);
+            staged.extend(
+                item.files
+                    .iter()
+                    .map(|(path, bytes)| (prefix.join(path), bytes.as_slice())),
+            );
+        }
+        for item in &prepared {
+            let base = Path::new("plugins").join(item.id);
+            let plugin_prefix = base.join("plugin");
+            staged.extend(
+                item.files
+                    .iter()
+                    .map(|(path, bytes)| (plugin_prefix.join(path), bytes.as_slice())),
+            );
+            staged.push((base.join("node_modules/smelt/sdk.ts"), item.shim.as_bytes()));
+        }
+
+        let raw_dir = stage.join("builtins");
+        let (dir, bundle) = stage_and_bundle(&raw_dir, BUILTINS_VM_ID, &staged, ui_sets, minify)?;
+        let hit_ids = collect_hit_modules(&dir, &bundle.watch_files);
+
+        let mut used_modules = BTreeMap::new();
+        for item in &selected_list {
+            if hit_ids.contains(&item.package.id) {
+                used_modules.insert(
+                    item.package.specifier.clone(),
+                    item.package.fingerprint.clone(),
+                );
+            }
+        }
+        let mut per_plugin_module_ids = BTreeMap::new();
+        for item in &prepared {
+            let mut ids: Vec<String> = item
+                .candidate_mod_ids
+                .iter()
+                .filter(|id| hit_ids.contains(*id))
+                .cloned()
+                .collect();
+            ids.sort();
+            ids.dedup();
+            per_plugin_module_ids.insert(item.id.to_owned(), ids);
+        }
+
+        Ok(CompiledBuiltinsSource {
+            code: bundle.code,
+            used_modules,
+            per_plugin_module_ids,
+        })
     }
 
     /// 拷一份到自己的目录里再打包：插件目录里不落生成的文件，import 也出不了这个目录。
     fn compile(&self, id: &str, source: &Path, entry_rel: &str) -> Result<Compiled, String> {
-        let code =
-            Self::compile_source_to_js(&self.stage, &self.ui_sets, id, source, entry_rel, false)?;
-        Ok(Compiled::from_source(id.to_owned(), code))
+        let compiled = Self::compile_source_to_js(
+            &self.stage,
+            &self.ui_sets,
+            &self.modules,
+            id,
+            source,
+            entry_rel,
+            CompileMode::Plugin,
+            false,
+        )?;
+        Ok(Compiled::from_source(id.to_owned(), compiled.code))
     }
+}
+
+fn build_plugin_nsh_config(
+    selected: &[SelectedModule<'_>],
+    include_sdk_alias: bool,
+    owner: &str,
+) -> Result<Vec<u8>, String> {
+    if selected.is_empty() && include_sdk_alias {
+        return Ok(PLUGIN_NSH_CONFIG.as_bytes().to_vec());
+    }
+    let mut config: Value = serde_json::from_str(PLUGIN_NSH_CONFIG)
+        .map_err(|error| format!("解析内置 plugin.nsh.json 失败：{error}"))?;
+    let alias = config
+        .get_mut("resolve")
+        .and_then(|v| v.get_mut("alias"))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "内置 plugin.nsh.json 缺少 resolve.alias".to_owned())?;
+    if !include_sdk_alias {
+        alias.remove("smelt/sdk");
+    }
+    for item in selected {
+        alias.insert(
+            item.package.specifier.clone(),
+            Value::String(format!("./modules/{}/{}", item.package.id, item.entry_rel)),
+        );
+    }
+    serde_json::to_vec(&config).map_err(|error| format!("序列化 {owner} nsh.json 失败：{error}"))
+}
+
+fn stage_and_bundle(
+    raw_dir: &Path,
+    owner: &str,
+    staged: &[(PathBuf, &[u8])],
+    ui_sets: &[SetDescription],
+    minify: bool,
+) -> Result<(PathBuf, nsh_bundler::Bundle), String> {
+    write_dir(
+        raw_dir,
+        staged.iter().map(|(path, bytes)| (path.as_path(), *bytes)),
+    )
+    .map_err(|error| format!("{}: {error}", raw_dir.display()))?;
+    // macOS `/var` -> `/private/var` 符号链接解析，确保 `inside` 前缀对比一致。
+    let dir = raw_dir
+        .canonicalize()
+        .map_err(|error| format!("{}: {error}", raw_dir.display()))?;
+    let bundle = bundle(&dir.join("entry.ts"), ui_sets, minify)?;
+    if let Some(outside) = bundle.watch_files.iter().find(|file| !inside(file, &dir)) {
+        return Err(format!(
+            "{owner} 引了自己目录以外的文件：{}",
+            outside.display()
+        ));
+    }
+    if let Some(asset) = bundle.assets.first() {
+        return Err(format!(
+            "{owner} 引了资源文件，还不支持：{}",
+            asset.display()
+        ));
+    }
+    let served = native_specifiers(ui_sets);
+    validate_imports(owner, &bundle.code, &served)?;
+    Ok((dir, bundle))
+}
+
+fn collect_hit_modules(dir: &Path, watch_files: &[PathBuf]) -> BTreeSet<String> {
+    let modules_dir = dir.join("modules");
+    let mut hit_ids = BTreeSet::new();
+    for watched in watch_files {
+        if let Ok(rel) = watched.strip_prefix(&modules_dir)
+            && let Some(Component::Normal(first)) = rel.components().next()
+            && let Some(mod_id) = first.to_str()
+        {
+            hit_ids.insert(mod_id.to_owned());
+        }
+    }
+    hit_ids
+}
+
+fn scoped_sdk_shim(id: &str) -> String {
+    format!(
+        "export * from \"../../../../sdk.tsx\";\n\
+         import {{ createScopedSdk }} from \"../../../../provider.tsx\";\n\
+         const _s = createScopedSdk({id:?});\n\
+         export const pluginId = _s.pluginId;\n\
+         export const dataDir = _s.dataDir;\n\
+         export const bootTask = _s.bootTask;\n\
+         export const t = _s.t;\n\
+         export const text = _s.text;\n\
+         export const texts = _s.texts;\n\
+         export const onEvent = _s.onEvent;\n\
+         export const onCommand = _s.onCommand;\n\
+         export const store = _s.store;\n\
+         export const registerViews = _s.registerViews;\n\
+         export const registerCommands = _s.registerCommands;\n\
+         export const registerTopics = _s.registerTopics;\n\
+         export const registerLayouts = _s.registerLayouts;\n\
+         export const registerPages = _s.registerPages;\n\
+         export const registerContextMenuItems = _s.registerContextMenuItems;\n\
+         export const registerMenuItems = _s.registerMenuItems;\n\
+         export const registerFileOpener = _s.registerFileOpener;\n\
+         export const setStatusMenu = _s.setStatusMenu;\n\
+         export const emitEvent = _s.emitEvent;\n"
+    )
+}
+
+struct SelectedModule<'a> {
+    package: &'a ModulePackage,
+    files: BTreeMap<PathBuf, Vec<u8>>,
+    entry_rel: String,
+}
+
+fn normalize_rel_path(owner: &str, entry_rel: &str) -> Result<PathBuf, String> {
+    let rel = Path::new(entry_rel);
+    if rel.is_absolute()
+        || rel.components().any(|part| {
+            matches!(
+                part,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(format!("{owner} 的入口路径不合法：{entry_rel}"));
+    }
+    Ok(rel
+        .components()
+        .filter(|part| !matches!(part, Component::CurDir))
+        .collect())
+}
+
+fn is_source_file(path: &Path) -> bool {
+    const EXTS: &[&str] = &["ts", "tsx", "js", "jsx", "mjs", "cjs"];
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| EXTS.iter().any(|allowed| ext.eq_ignore_ascii_case(allowed)))
+}
+
+fn contains_specifier(files: &BTreeMap<PathBuf, Vec<u8>>, specifier: &str) -> bool {
+    let needle = specifier.as_bytes();
+    !needle.is_empty()
+        && files
+            .iter()
+            .filter(|(path, _)| is_source_file(path))
+            .any(|(_, bytes)| bytes.windows(needle.len()).any(|w| w == needle))
+}
+
+fn select_candidate_modules<'a>(
+    root_files: &BTreeMap<PathBuf, Vec<u8>>,
+    modules: &'a [ModulePackage],
+    self_specifier: Option<&str>,
+) -> Result<Vec<SelectedModule<'a>>, String> {
+    if modules.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut selected_indices = BTreeSet::new();
+    let mut queue = Vec::new();
+    for (ix, m) in modules.iter().enumerate() {
+        if Some(m.specifier.as_str()) != self_specifier
+            && contains_specifier(root_files, &m.specifier)
+        {
+            selected_indices.insert(ix);
+            queue.push(ix);
+        }
+    }
+    let mut selected = Vec::with_capacity(queue.len());
+    let mut head = 0usize;
+    while let Some(&ix) = queue.get(head) {
+        head += 1;
+        let pkg = &modules[ix];
+        let m_files =
+            read_dir(&pkg.root).map_err(|error| format!("{}: {error}", pkg.root.display()))?;
+        let m_entry = normalize_rel_path(&pkg.id, &pkg.entry)?;
+        if !m_files.contains_key(&m_entry) {
+            return Err(format!("模块插件 {} 缺少入口 {}", pkg.id, pkg.entry));
+        }
+        let entry_rel = m_entry.to_string_lossy().replace('\\', "/");
+        for (other_ix, other) in modules.iter().enumerate() {
+            if !selected_indices.contains(&other_ix)
+                && Some(other.specifier.as_str()) != self_specifier
+                && contains_specifier(&m_files, &other.specifier)
+            {
+                selected_indices.insert(other_ix);
+                queue.push(other_ix);
+            }
+        }
+        selected.push(SelectedModule {
+            package: pkg,
+            files: m_files,
+            entry_rel,
+        });
+    }
+    Ok(selected)
 }
 
 /// 引擎内插件运行时与跨 VM 插槽路由器。
@@ -397,7 +818,8 @@ type LifecycleObserver = Arc<dyn Fn(PluginLifecycle) + Send + Sync>;
 struct PluginEntry {
     generation: u64,
     channel: HostChannel,
-    ready: bool,
+    members: Vec<String>,
+    ready_members: BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -413,6 +835,7 @@ struct HostInner {
     shell_channel: Option<HostChannel>,
     next_generation: u64,
     plugins: BTreeMap<String, PluginEntry>,
+    vm_by_plugin: BTreeMap<String, String>,
     instances: BTreeMap<String, SlotInstance>,
     failed: BTreeSet<String>,
     handlers: BTreeMap<String, CallHandler>,
@@ -503,21 +926,49 @@ impl PluginHost {
         }
     }
 
-    /// 把一条宿主事件只推给指定的插件 VM。
-    pub fn send_to(&self, plugin: &str, event: &str, data: Value) {
-        let channel = self
-            .lock()
-            .plugins
-            .get(plugin)
-            .map(|entry| entry.channel.clone());
+    /// 把一条宿主事件只推给指定的插件（或共享 VM `target`）。
+    pub fn send_to(&self, target: &str, event: &str, data: Value) {
+        let channel = {
+            let inner = self.lock();
+            inner
+                .plugins
+                .get(target)
+                .or_else(|| {
+                    inner
+                        .vm_by_plugin
+                        .get(target)
+                        .and_then(|vm| inner.plugins.get(vm))
+                })
+                .map(|entry| entry.channel.clone())
+        };
         if let Some(channel) = channel
             && let Err(error) = channel.send(event, data)
         {
-            eprintln!("[nsh-plugins] 推送 {event} 给 {plugin} 失败：{error}");
+            eprintln!("[nsh-plugins] 推送 {event} 给 {target} 失败：{error}");
         }
     }
 
-    /// 把一次变更交给引擎：外壳和插件各自运行在 `harden: true` 的独立 QuickJS VM 中。
+    pub(crate) fn vm_of(&self, plugin: &str) -> String {
+        self.lock()
+            .vm_by_plugin
+            .get(plugin)
+            .cloned()
+            .unwrap_or_else(|| plugin.to_owned())
+    }
+
+    pub(crate) fn members_of(&self, vm_id: &str) -> Vec<String> {
+        self.lock()
+            .plugins
+            .get(vm_id)
+            .map(|entry| entry.members.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn vm_ids(&self) -> Vec<String> {
+        self.lock().plugins.keys().cloned().collect()
+    }
+
+    /// 把一次变更交给引擎：外壳和插件各自运行在 `harden: true` 的加固 QuickJS VM 中。
     pub fn apply(&self, view: &AppView, change: Change) {
         match change {
             Change::Start { shell, plugins } => {
@@ -527,6 +978,7 @@ impl PluginHost {
                     inner.next_generation += 1;
                     inner.shell_channel = Some(shell_channel.clone());
                     inner.plugins.clear();
+                    inner.vm_by_plugin.clear();
                     inner.instances.clear();
                     inner.failed.clear();
                     let handlers: Vec<(String, CallHandler)> = inner
@@ -561,69 +1013,119 @@ impl PluginHost {
             }
             Change::Install(plugin) => self.load_one(view, plugin),
             Change::Remove(id) => {
-                let shell_channel = {
+                let (shell_channel, cleared_failed) = {
                     let mut inner = self.lock();
-                    inner.plugins.remove(&id);
-                    let was_failed = inner.failed.remove(&id);
-                    was_failed.then(|| inner.shell_channel.clone()).flatten()
+                    let removed_members = inner
+                        .plugins
+                        .remove(&id)
+                        .map(|entry| entry.members)
+                        .unwrap_or_else(|| vec![id.clone()]);
+                    let mut cleared = Vec::new();
+                    for member in removed_members {
+                        if inner.vm_by_plugin.get(&member).is_some_and(|v| v == &id) {
+                            inner.vm_by_plugin.remove(&member);
+                        }
+                        if inner.failed.remove(&member) {
+                            cleared.push(member);
+                        }
+                    }
+                    (inner.shell_channel.clone(), cleared)
                 };
                 if let Some(shell_channel) = shell_channel {
-                    send_failed_status(&shell_channel, &id, false);
+                    for member in cleared_failed {
+                        send_failed_status(&shell_channel, &member, false);
+                    }
                 }
                 view.unload_plugin(id);
             }
         }
     }
 
-    /// 处理引擎报出的 [`AppError`]：若是某个插件的致命错误（顶层抛错、OOM、死循环熔断等），
-    /// 仅收尾该插件的路由表并标出故障状态，绝不重启引擎或影响其它插件。
+    /// 处理引擎报出的 [`AppError`]：若是某个插件（或共享 VM）的致命错误（顶层抛错、OOM、死循环熔断等），
+    /// 仅收尾该 VM 名下成员的路由表并标出故障状态，绝不重启引擎或影响其它 VM。
     pub fn on_app_error(&self, error: &AppError) {
-        let Some(plugin_id) = error.plugin.as_deref() else {
+        let Some(vm_id) = error.plugin.as_deref() else {
             return;
         };
         if !error.is_fatal() {
             return;
         }
-        let (shell_channel, observer) = {
+        let (members, shell_channel, observer) = {
             let mut inner = self.lock();
             // 若新版本已经加载完成并报就绪，则忽略上一代延迟到达的 Load 错误。
             if error.kind == AppErrorKind::Load
                 && inner
                     .plugins
-                    .get(plugin_id)
-                    .is_some_and(|entry| entry.ready)
+                    .get(vm_id)
+                    .is_some_and(|entry| !entry.ready_members.is_empty())
             {
                 return;
             }
-            inner.plugins.remove(plugin_id);
-            inner.failed.insert(plugin_id.to_owned());
-            (inner.shell_channel.clone(), inner.lifecycle.clone())
+            let members = inner
+                .plugins
+                .remove(vm_id)
+                .map(|entry| entry.members)
+                .unwrap_or_else(|| vec![vm_id.to_owned()]);
+            for member in &members {
+                if inner.vm_by_plugin.get(member).is_some_and(|v| v == vm_id) {
+                    inner.vm_by_plugin.remove(member);
+                }
+                inner.failed.insert(member.clone());
+            }
+            (
+                members,
+                inner.shell_channel.clone(),
+                inner.lifecycle.clone(),
+            )
         };
-        if let Some(shell_channel) = shell_channel {
-            send_failed_status(&shell_channel, plugin_id, true);
-        }
-        if let Some(observer) = observer {
-            observer(PluginLifecycle::Fatal {
-                plugin: plugin_id.to_owned(),
-                message: error.to_string(),
-            });
+        let message = error.to_string();
+        for member in members {
+            if let Some(shell_channel) = shell_channel.as_ref() {
+                send_failed_status(shell_channel, &member, true);
+            }
+            if let Some(observer) = observer.as_ref() {
+                observer(PluginLifecycle::Fatal {
+                    plugin: member,
+                    message: message.clone(),
+                });
+            }
         }
     }
 
     fn load_one(&self, view: &AppView, plugin: Compiled) {
-        let id = plugin.id;
+        let vm_id = plugin.id;
+        let members = plugin.members;
+        let is_builtins = vm_id == BUILTINS_VM_ID;
         let channel = HostChannel::new();
-        let (generation, handlers, limits, cpu_window, clear_failed_shell) = {
+        let (generation, handlers, limits, cpu_window, clear_failed_shell, cleared_failed) = {
             let mut inner = self.lock();
             inner.next_generation += 1;
             let generation = inner.next_generation;
-            let was_failed = inner.failed.remove(&id);
+            if let Some(prev) = inner.plugins.remove(&vm_id) {
+                for old_member in prev.members {
+                    if inner
+                        .vm_by_plugin
+                        .get(&old_member)
+                        .is_some_and(|v| v == &vm_id)
+                    {
+                        inner.vm_by_plugin.remove(&old_member);
+                    }
+                }
+            }
+            let mut cleared_failed = Vec::new();
+            for member in &members {
+                if inner.failed.remove(member) {
+                    cleared_failed.push(member.clone());
+                }
+                inner.vm_by_plugin.insert(member.clone(), vm_id.clone());
+            }
             inner.plugins.insert(
-                id.clone(),
+                vm_id.clone(),
                 PluginEntry {
                     generation,
                     channel: channel.clone(),
-                    ready: false,
+                    members: members.clone(),
+                    ready_members: BTreeSet::new(),
                 },
             );
             let handlers: Vec<(String, CallHandler)> = inner
@@ -631,35 +1133,64 @@ impl PluginHost {
                 .iter()
                 .map(|(name, f)| (name.clone(), f.clone()))
                 .collect();
-            let clear_failed_shell = was_failed.then(|| inner.shell_channel.clone()).flatten();
+            let clear_failed_shell = (!cleared_failed.is_empty())
+                .then(|| inner.shell_channel.clone())
+                .flatten();
             (
                 generation,
                 handlers,
                 inner.plugin_limits,
                 inner.cpu_window_budget,
                 clear_failed_shell,
+                cleared_failed,
             )
         };
 
         if let Some(shell_channel) = clear_failed_shell {
-            send_failed_status(&shell_channel, &id, false);
+            for member in cleared_failed {
+                send_failed_status(&shell_channel, &member, false);
+            }
         }
 
         let mut params = serde_json::Map::new();
-        params.insert("__smelt_plugin_id".into(), Value::String(id.clone()));
-        if let Ok(data_dir) = smelt_plugin_api::plugin_data_dir(&id) {
+        if is_builtins {
+            let mut dirs = serde_json::Map::new();
+            for member in &members {
+                if let Ok(data_dir) = smelt_plugin_api::plugin_data_dir(member) {
+                    dirs.insert(
+                        member.clone(),
+                        Value::String(data_dir.to_string_lossy().into_owned()),
+                    );
+                }
+            }
             params.insert(
-                "__smelt_data_dir".into(),
-                Value::String(data_dir.to_string_lossy().into_owned()),
+                "__smelt_builtin_members".into(),
+                Value::Array(members.iter().cloned().map(Value::String).collect()),
             );
+            params.insert("__smelt_data_dirs".into(), Value::Object(dirs));
+        } else {
+            let logical_id = members.first().map(String::as_str).unwrap_or(&vm_id);
+            params.insert(
+                "__smelt_plugin_id".into(),
+                Value::String(logical_id.to_owned()),
+            );
+            if let Ok(data_dir) = smelt_plugin_api::plugin_data_dir(logical_id) {
+                params.insert(
+                    "__smelt_data_dir".into(),
+                    Value::String(data_dir.to_string_lossy().into_owned()),
+                );
+            }
         }
         channel.set_params(params);
 
-        // 插件初始化完 provideViews 后上报就绪：宿主立即按外壳 instances 表原位重放。
+        let allowed_members = Arc::new(members.into_iter().collect::<BTreeSet<String>>());
+
+        // 插件初始化完 provideViews / provideMultiViews 后上报就绪：宿主立即按外壳 instances 表原位重放。
         {
             let host = self.clone();
-            let plugin_id = id.clone();
+            let vm = vm_id.clone();
             let ready_channel = channel.clone();
+            let allowed = allowed_members.clone();
             channel.handle(PLUGIN_READY, move |call| {
                 let views: Vec<String> = call
                     .data()
@@ -672,22 +1203,39 @@ impl PluginHost {
                             .collect()
                     })
                     .unwrap_or_default();
+                let member_id = if is_builtins {
+                    let Some(p) = call
+                        .data()
+                        .get("plugin")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                    else {
+                        return call.reject("smelt.plugin.ready：共享内置 VM 缺少 plugin 字段");
+                    };
+                    if !allowed.contains(&p) {
+                        return call.reject(format!("smelt.plugin.ready：非法成员 {p}"));
+                    }
+                    p
+                } else {
+                    vm.clone()
+                };
                 let (replay, observer) = {
                     let mut inner = host.lock();
-                    let Some(entry) = inner.plugins.get_mut(&plugin_id) else {
+                    let Some(entry) = inner.plugins.get_mut(&vm) else {
                         return;
                     };
                     if entry.generation != generation {
                         return;
                     }
-                    entry.ready = true;
+                    entry.ready_members.insert(member_id.clone());
                     let replay: Vec<Value> = inner
                         .instances
                         .iter()
-                        .filter(|(_, inst)| inst.plugin == plugin_id)
+                        .filter(|(_, inst)| inst.plugin == member_id)
                         .map(|(instance, inst)| {
                             json!({
                                 "op": "mount",
+                                "plugin": inst.plugin,
                                 "instance": instance,
                                 "target": inst.target,
                                 "view": inst.view,
@@ -700,11 +1248,11 @@ impl PluginHost {
                 if !replay.is_empty()
                     && let Err(error) = ready_channel.send(SLOT_SYNC, Value::Array(replay))
                 {
-                    eprintln!("[nsh-plugins] 重放 {plugin_id} 插槽失败：{error}");
+                    eprintln!("[nsh-plugins] 重放 {member_id} 插槽失败：{error}");
                 }
                 if let Some(observer) = observer {
                     observer(PluginLifecycle::Ready {
-                        plugin: plugin_id.clone(),
+                        plugin: member_id,
                         views,
                     });
                 }
@@ -712,13 +1260,29 @@ impl PluginHost {
             });
         }
 
-        // 绑定所有宿主函数：plugin_id 由 Rust 闭包固定，插件无法篡改。
+        // 绑定所有宿主函数：独立 VM 的 plugin_id 由 Rust 闭包固定、绝不可伪造；
+        // 共享内置 VM 按请求体 `__plugin` 且必须命中 `allowed_members` 白名单分发。
         // Guest 插件不具备 SLOT_OPS 权限：只有宿主外壳能挂载插件视图。
         let mut declared_host = vec![PLUGIN_READY.to_owned()];
         for (name, handler) in handlers {
             declared_host.push(name.clone());
-            let plugin_id = id.clone();
-            channel.handle(name, move |call| handler(&plugin_id, call));
+            if is_builtins {
+                let allowed = allowed_members.clone();
+                let vm = vm_id.clone();
+                channel.handle(name, move |call| {
+                    let caller = call
+                        .data()
+                        .get("__plugin")
+                        .and_then(Value::as_str)
+                        .filter(|id| allowed.contains(*id))
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| vm.clone());
+                    handler(&caller, call);
+                });
+            } else {
+                let plugin_id = vm_id.clone();
+                channel.handle(name, move |call| handler(&plugin_id, call));
+            }
         }
 
         let mut policy = Policy::default();
@@ -726,10 +1290,19 @@ impl PluginHost {
         declared.host = declared_host;
         policy.declared = Some(declared);
         let bundle = make_bundle(&plugin.code, policy);
-        let mut config = PluginConfig::new(id, bundle)
+        let mut config = PluginConfig::new(vm_id, bundle)
             .with_host(channel)
             .with_cpu_window_budget(cpu_window);
-        if let Some(limits) = limits {
+        let effective_limits = limits.or_else(|| {
+            is_builtins.then_some(Limits {
+                memory_bytes: 256 << 20,
+                load_budget: Duration::from_millis(2_000),
+                call_budget: Duration::from_millis(250),
+                max_nodes: 80_000,
+                ..Limits::default()
+            })
+        });
+        if let Some(limits) = effective_limits {
             config = config.with_limits(limits);
         }
         view.load_plugin(config);
@@ -810,8 +1383,9 @@ impl HostInner {
                             .or_default()
                             .push(json!({ "op": "unmount", "instance": instance }));
                     }
-                    by_target.entry(plugin).or_default().push(json!({
+                    by_target.entry(plugin.clone()).or_default().push(json!({
                         "op": "mount",
+                        "plugin": plugin,
                         "instance": instance,
                         "target": target,
                         "view": view,
@@ -851,18 +1425,23 @@ impl HostInner {
         &self,
         by_target: BTreeMap<String, Vec<Value>>,
     ) -> Vec<(HostChannel, Vec<Value>)> {
-        let mut out = Vec::new();
-        for (target_plugin, batch) in by_target {
+        let mut by_vm: BTreeMap<String, (HostChannel, Vec<Value>)> = BTreeMap::new();
+        for (target_plugin, mut batch) in by_target {
             if batch.is_empty() {
                 continue;
             }
-            if let Some(entry) = self.plugins.get(&target_plugin)
-                && entry.ready
+            if let Some(vm_id) = self.vm_by_plugin.get(&target_plugin)
+                && let Some(entry) = self.plugins.get(vm_id)
+                && entry.ready_members.contains(&target_plugin)
             {
-                out.push((entry.channel.clone(), batch));
+                by_vm
+                    .entry(vm_id.clone())
+                    .or_insert_with(|| (entry.channel.clone(), Vec::new()))
+                    .1
+                    .append(&mut batch);
             }
         }
-        out
+        by_vm.into_values().collect()
     }
 }
 
@@ -1138,7 +1717,7 @@ fn inside(file: &Path, dir: &Path) -> bool {
     file.starts_with(dir) && !file.components().any(|part| part == Component::ParentDir)
 }
 
-/// 目录里的文件，不跟符号链接，不要点开头的和 `node_modules`。
+/// 目录里的文件，不跟符号链接，忽略测试与隐藏/预编译条目（与 `manifest::copy_dir_filtered` 一致）。
 fn read_dir(root: &Path) -> io::Result<BTreeMap<PathBuf, Vec<u8>>> {
     let mut files = BTreeMap::new();
     let mut dirs = vec![PathBuf::new()];
@@ -1146,11 +1725,12 @@ fn read_dir(root: &Path) -> io::Result<BTreeMap<PathBuf, Vec<u8>>> {
         for entry in fs::read_dir(root.join(&dir))? {
             let entry = entry?;
             let name = entry.file_name();
-            if name.to_string_lossy().starts_with('.') || name == "node_modules" {
+            let name_str = name.to_string_lossy();
+            let kind = entry.file_type()?;
+            if is_ignored_plugin_entry(&name_str, kind.is_dir()) {
                 continue;
             }
             let path = dir.join(&name);
-            let kind = entry.file_type()?;
             if kind.is_dir() {
                 dirs.push(path);
             } else if kind.is_file() {

@@ -1,7 +1,7 @@
 //! 多插件共享的 ACP 活体订阅中心（纯非 UI、零 GPUI、事件驱动零空闲唤醒）。
 //!
 //! - 每个活跃订阅归属唯一 `owner`（插件 id），按 `sub_id` 索引，事件只定向推送给该 `owner`；
-//! - 活跃回合吐字期间用事件驱动 30ms 节流合并增量帧（空闲时阻塞在 `event_rx.recv()`，0 周期唤醒），
+//! - 活跃回合吐字期间用事件驱动 12ms 节流合并增量帧（空闲时阻塞在 `event_rx.recv()`，0 周期唤醒），
 //!   相位/审批/提问/配置/模型/记忆/结束态等关键变化零延迟直推；
 //! - 支持同帧分屏重构复用（`reuse_key`）：`unsubscribe` 时将活体连接暂存 [`PARK_GRACE`]，
 //!   同 `owner` 在窗口内带相同 `reuse_key` 重新 `subscribe` 时零断连接管并立即重放最新快照；
@@ -23,8 +23,8 @@ use crate::client::{
 };
 use crate::images::ImageStore;
 
-/// 流式文本增量的合并节流间隔（~33Hz，压测实证主线程单帧 0.60 ms）。
-const STREAM_COALESCE: Duration = Duration::from_millis(30);
+/// 流式文本增量的防抖合并窗口（12ms，对齐 `smeltd` 16ms 节流边界避免拍频，同时保护突发帧）。
+const STREAM_COALESCE: Duration = Duration::from_millis(12);
 /// 分屏重构同帧短暂 unmount→mount 的连接暂存宽限期。
 const PARK_GRACE: Duration = Duration::from_millis(300);
 

@@ -3,6 +3,7 @@
 pub mod agent_image;
 pub mod app_log;
 pub mod block_on;
+pub mod blocking;
 pub mod daemon_image;
 pub mod fd_limit;
 pub mod file_lock;

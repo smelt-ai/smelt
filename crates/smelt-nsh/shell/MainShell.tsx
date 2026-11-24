@@ -6,6 +6,7 @@ import { cleanup, computed, effect, host, signal, Text, View } from "nsh";
 import { DockArea } from "nsh/base";
 import { Slot } from "smelt/slots";
 import {
+  initHost,
   jsViews,
   safeArea,
   shellState,
@@ -18,6 +19,8 @@ import {
   theme as currentTheme,
   views,
 } from "smelt/sdk";
+
+void initHost(["locale", "theme", "shell", "js_views", "views", "pages", "safe_areas"]);
 
 /** 外壳专用视图挂载：JS 插件走内部 `<Slot>`，宿主内置/Rust 视图走 `<SmeltNativeView>`。 */
 function HostView(props: {
@@ -323,6 +326,157 @@ function PanelBody(props: { pageKey: string; panelId: string }) {
   );
 }
 
+function TabBarLeading(props: { pageKey: string; groupId: string }) {
+  const area = stableMemo(() => {
+    const pages = (shellState() as ShellSnapshot | undefined)?.pages ?? [];
+    const entry = pages.find((p) => p.key === props.pageKey)?.group_areas?.[props.groupId];
+    return {
+      left: Number(entry?.top_bar_insets?.left ?? 0),
+      titleBar: Boolean(entry?.title_bar),
+    };
+  });
+  return (
+    <If when={area().left > 0}>
+      <View style={{ width: area().left, height: TOP_BAR_HEIGHT, flexShrink: 0 }}>
+        <If when={area().titleBar}>
+          <SmeltNativeWindowDrag style={{ width: "100%", height: "100%" }} />
+        </If>
+      </View>
+    </If>
+  );
+}
+
+function TabItem(props: { pageKey: string; panelId: string; active: boolean }) {
+  const theme = currentTheme;
+  const tabMeta = stableMemo(() => {
+    const pages = (shellState() as ShellSnapshot | undefined)?.pages ?? [];
+    const meta = pages.find((p) => p.key === props.pageKey)?.meta?.[props.panelId];
+    const title = typeof meta?.title === "string" && meta.title.length > 0 ? meta.title : props.panelId;
+    const badge = typeof meta?.badge === "string" && meta.badge.length > 0 ? meta.badge : null;
+    return { title, badge };
+  });
+  const tStyle = computed(() => (props.active ? theme().type.ui_medium : theme().type.ui));
+
+  return (
+    <View
+      style={{
+        height: TOP_BAR_HEIGHT - 8,
+        paddingLeft: 8,
+        paddingRight: 8,
+        marginLeft: 2,
+        marginRight: 2,
+        borderRadius: theme().radius.row,
+        backgroundColor: props.active ? theme().palette.row_selected : "transparent",
+        display: "flex",
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 4,
+      }}
+    >
+      <Text
+        style={{
+          fontSize: tStyle().size,
+          lineHeight: tStyle().line_height,
+          fontWeight: tStyle().weight,
+          color: props.active ? theme().palette.text : theme().palette.muted,
+          numberOfLines: 1,
+        }}
+      >
+        {tabMeta().title}
+      </Text>
+      <If when={tabMeta().badge !== null}>
+        <View
+          style={{
+            paddingLeft: 5,
+            paddingRight: 5,
+            height: 16,
+            borderRadius: 8,
+            backgroundColor: theme().palette.soft,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <Text
+            style={{
+              fontSize: theme().type.text_xsmall.size,
+              color: theme().palette.text,
+            }}
+          >
+            {tabMeta().badge ?? ""}
+          </Text>
+        </View>
+      </If>
+    </View>
+  );
+}
+
+function TabBarTrailing(props: {
+  pageKey: string;
+  groupId: string;
+  activePanel: string | null;
+  zoomed: boolean;
+  onToggleZoom: () => void;
+}) {
+  const trailing = stableMemo(() => {
+    const snap = shellState() as ShellSnapshot | undefined;
+    const currentPage = (snap?.pages ?? []).find((p) => p.key === props.pageKey);
+    const area = currentPage?.group_areas?.[props.groupId];
+    const right = Number(area?.top_bar_insets?.right ?? 0);
+    const titleBar = Boolean(area?.title_bar);
+    const activeMeta = props.activePanel ? currentPage?.meta?.[props.activePanel] : null;
+    const canZoom =
+      props.zoomed ||
+      Boolean(activeMeta && !activeMeta.draws_top_bar && activeMeta.kind === "view");
+    const lbl = snap?.labels;
+    return {
+      right,
+      titleBar,
+      canZoom,
+      zoomLabel: lbl?.zoom ?? "Zoom",
+      restoreLabel: lbl?.restore ?? "Restore",
+    };
+  });
+
+  return (
+    <View
+      style={{
+        display: "flex",
+        flexDirection: "row",
+        alignItems: "center",
+        width: "100%",
+        height: TOP_BAR_HEIGHT,
+      }}
+    >
+      <View style={{ flex: 1, height: "100%", minWidth: 8 }}>
+        <If when={trailing().titleBar}>
+          <SmeltNativeWindowDrag style={{ width: "100%", height: "100%" }} />
+        </If>
+      </View>
+      <If when={trailing().canZoom}>
+        <View style={{ flexShrink: 0, paddingRight: 4 }}>
+          <SmeltButton
+            quiet={true}
+            small={true}
+            selected={props.zoomed}
+            toggled={props.zoomed}
+            icon={props.zoomed ? "icons/minimize.svg" : "icons/maximize.svg"}
+            tooltip={props.zoomed ? trailing().restoreLabel : trailing().zoomLabel}
+            onPress={props.onToggleZoom}
+          />
+        </View>
+      </If>
+      <If when={trailing().right > 0}>
+        <View style={{ width: trailing().right, height: TOP_BAR_HEIGHT, flexShrink: 0 }}>
+          <If when={trailing().titleBar}>
+            <SmeltNativeWindowDrag style={{ width: "100%", height: "100%" }} />
+          </If>
+        </View>
+      </If>
+    </View>
+  );
+}
+
 function PageWorkspace(props: { pageKey: string }) {
   let dockRef: any = null;
   effect(() => {
@@ -433,124 +587,23 @@ function PageWorkspace(props: { pageKey: string }) {
                 style={{ width: "100%", height: "100%", pointerEvents: "none" }}
               />
             )}
-            renderTabBarLeading={(group: any) => {
-              const area = page()?.group_areas?.[String(group.id)];
-              const left = area?.top_bar_insets?.left ?? 0;
-              if (left <= 0) return null;
-              return (
-                <View style={{ width: left, height: TOP_BAR_HEIGHT, flexShrink: 0 }}>
-                  {area?.title_bar ? (
-                    <SmeltNativeWindowDrag style={{ width: "100%", height: "100%" }} />
-                  ) : null}
-                </View>
-              );
-            }}
-            renderTab={(tab: any) => {
-              const meta = page()?.meta?.[tab.panel];
-              const title = meta?.title ?? tab.panel;
-              const badge = meta?.badge;
-              const active = Boolean(tab.active);
-              const tStyle = active ? theme().type.ui_medium : theme().type.ui;
-              return (
-                <View
-                  style={{
-                    height: TOP_BAR_HEIGHT - 8,
-                    paddingLeft: 8,
-                    paddingRight: 8,
-                    marginLeft: 2,
-                    marginRight: 2,
-                    borderRadius: theme().radius.row,
-                    backgroundColor: active ? theme().palette.row_selected : "transparent",
-                    display: "flex",
-                    flexDirection: "row",
-                    alignItems: "center",
-                    gap: 4,
-                  }}
-                >
-                  <Text
-                    style={{
-                      fontSize: tStyle.size,
-                      lineHeight: tStyle.line_height,
-                      fontWeight: tStyle.weight,
-                      color: active ? theme().palette.text : theme().palette.muted,
-                      numberOfLines: 1,
-                    }}
-                  >
-                    {title}
-                  </Text>
-                  {badge ? (
-                    <View
-                      style={{
-                        paddingLeft: 5,
-                        paddingRight: 5,
-                        height: 16,
-                        borderRadius: 8,
-                        backgroundColor: theme().palette.soft,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                      }}
-                    >
-                      <Text
-                        style={{
-                          fontSize: theme().type.text_xsmall.size,
-                          color: theme().palette.text,
-                        }}
-                      >
-                        {badge}
-                      </Text>
-                    </View>
-                  ) : null}
-                </View>
-              );
-            }}
-            renderTabBarTrailing={(group: any) => {
-              const area = page()?.group_areas?.[String(group.id)];
-              const right = area?.top_bar_insets?.right ?? 0;
-              const activeMeta = group.active ? page()?.meta?.[group.active] : null;
-              const zoomed = Boolean(group.zoomed);
-              const canZoom = zoomed || (activeMeta && !activeMeta.draws_top_bar && activeMeta.kind === "view");
-              const lbl = labels();
-              return (
-                <View
-                  style={{
-                    display: "flex",
-                    flexDirection: "row",
-                    alignItems: "center",
-                    width: "100%",
-                    height: TOP_BAR_HEIGHT,
-                  }}
-                >
-                  <View style={{ flex: 1, height: "100%", minWidth: 8 }}>
-                    {area?.title_bar ? (
-                      <SmeltNativeWindowDrag style={{ width: "100%", height: "100%" }} />
-                    ) : null}
-                  </View>
-                  {canZoom ? (
-                    <View style={{ flexShrink: 0, paddingRight: 4 }}>
-                      <SmeltButton
-                        quiet={true}
-                        small={true}
-                        selected={zoomed}
-                        toggled={zoomed}
-                        icon={zoomed ? "icons/minimize.svg" : "icons/maximize.svg"}
-                        tooltip={zoomed ? lbl?.restore ?? "Restore" : lbl?.zoom ?? "Zoom"}
-                        onPress={() => {
-                          if (dockRef) dockRef.toggleZoom(group.id);
-                        }}
-                      />
-                    </View>
-                  ) : null}
-                  {right > 0 ? (
-                    <View style={{ width: right, height: TOP_BAR_HEIGHT, flexShrink: 0 }}>
-                      {area?.title_bar ? (
-                        <SmeltNativeWindowDrag style={{ width: "100%", height: "100%" }} />
-                      ) : null}
-                    </View>
-                  ) : null}
-                </View>
-              );
-            }}
+            renderTabBarLeading={(group: any) => (
+              <TabBarLeading pageKey={props.pageKey} groupId={String(group.id)} />
+            )}
+            renderTab={(tab: any) => (
+              <TabItem pageKey={props.pageKey} panelId={tab.panel} active={Boolean(tab.active)} />
+            )}
+            renderTabBarTrailing={(group: any) => (
+              <TabBarTrailing
+                pageKey={props.pageKey}
+                groupId={String(group.id)}
+                activePanel={group.active ?? null}
+                zoomed={Boolean(group.zoomed)}
+                onToggleZoom={() => {
+                  if (dockRef) dockRef.toggleZoom(group.id);
+                }}
+              />
+            )}
             renderPanel={(panel: any) => (
               <PanelBody pageKey={props.pageKey} panelId={panel.id} />
             )}

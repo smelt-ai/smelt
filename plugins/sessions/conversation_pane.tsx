@@ -3,16 +3,15 @@
 // 模型刷新、以及承载 `smelt.sessions/send-text` 直投。
 import { cleanup, computed, effect, signal, Text, View } from "nsh";
 import {
-  machineEntry,
+  machineMetaEntry,
   run,
   sessionStates,
-  SmeltConversation,
   stableMemo,
-  state as hostState,
   currentTheme,
   t,
   workspaceDirectory,
 } from "smelt/sdk";
+import { SmeltConversation } from "smelt/conversation";
 import { machineKey, terminalPaneKey } from "./model.js";
 
 const OPEN_VIEW_CMD = "smelt.app/open-view";
@@ -221,7 +220,7 @@ export function ConversationPane(props: {
         ? st.conversation_name.trim()
         : t("kind.conversation");
     if (m == null) return baseName;
-    const entry = machineEntry(m);
+    const entry = machineMetaEntry(m);
     const mName = entry?.name ? String(entry.name) : m;
     return `${baseName} · ${mName}`;
   });

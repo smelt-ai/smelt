@@ -25,9 +25,11 @@ mod view;
 
 pub use components::{BackdropHooks, BackdropPlacement};
 pub use manifest::{
-    LoadedPluginInfo, MANIFEST_FILE, PluginCheckReport, PluginManifest, PluginSource, SourceDir,
-    StageReport, stage_builtin_plugins,
+    DeclarativeLayoutSpec, DeclarativePageSpec, LoadedPluginInfo, MANIFEST_FILE, PluginCheckReport,
+    PluginManifest, PluginSource, SourceDir, StageReport, discover_module_packages,
+    stage_builtin_plugins,
 };
+pub use plugins::ModulePackage;
 pub use shell::{MainShell, MainShellEvent, OutletTarget, ShellConfig, ShellLabels};
 pub use shell_layout::{ComputedShellView, WindowCorners};
 pub use types::{
@@ -46,9 +48,28 @@ pub fn is_valid_plugin_id(id: &str) -> bool {
     plugins::valid_id(id)
 }
 
-/// 离线检查一个 NSH 插件目录（清单、locales、主题文件、TSX 打包、import 与 QuickJS 字节码编译）。
+/// 离线检查一个 NSH 插件目录（清单、locales、主题文件、TSX 打包、import 与 QuickJS 字节码编译），
+/// 默认同时扫描同级目录里声明了 `module` 的共享模块插件（主要给内置校验与测试用）。
 pub fn check_plugin(dir: &Path) -> Result<PluginCheckReport, String> {
-    manifest::check_plugin(dir, ui_sets())
+    let sources: Vec<SourceDir> = dir
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|parent| SourceDir {
+            path: parent.to_path_buf(),
+            source: PluginSource::Builtin,
+            watch: false,
+        })
+        .into_iter()
+        .collect();
+    manifest::check_plugin_with_sources(dir, &sources, ui_sets())
+}
+
+/// 按调用方传入的多目录优先级（如自带 + 用户覆写）离线检查插件或共享模块。
+pub fn check_plugin_with_sources(
+    dir: &Path,
+    sources: &[SourceDir],
+) -> Result<PluginCheckReport, String> {
+    manifest::check_plugin_with_sources(dir, sources, ui_sets())
 }
 
 /// 打包时认的那几套，和交给引擎的一致。

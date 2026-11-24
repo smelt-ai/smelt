@@ -141,6 +141,8 @@ pub struct MainShell {
     runtime_errors: BTreeMap<String, String>,
     /// 已登记的主题文件来源，重载时整批替换。
     theme_owners: Vec<String>,
+    /// 已登记的纯声明式页面与布局来源，重载时整批替换。
+    layout_owners: Vec<String>,
     /// 首批启动扫描中尚未报就绪或失败的脚本插件 id；`None` 表示首批扫描尚未送达。
     initial_pending: Option<BTreeSet<String>>,
     /// 因覆写版启动崩溃正在自动回退到自带版的插件 id。
@@ -152,9 +154,9 @@ pub struct MainShell {
     /// 只有 `self.app` 本帧确实被通知重画时才清空上一帧的材质分块；避免 `MainShell` 单独重画而
     /// `self.app` 走 GPUI Fast 缓存时把 `Regions` 清空闪一帧实色。
     app_dirty: Rc<Cell<bool>>,
-    /// 同一轮 GPUI 更新内多次状态变更与离散信号事件合并成一次快照推送 + 去重转发，避免休眠唤醒或
-    /// 启动注册风暴把整份状态连广播几十次给全部插件 VM。
-    publish_pending: bool,
+    /// 同一轮 GPUI 更新内多次状态变更与离散信号事件合并成一次按脏切片位掩码的增量推送 + 去重转发，
+    /// 避免休眠唤醒或流式输出把无关切片连重算并推给所有插件 VM。
+    dirty_slices: host::SliceMask,
     flush_scheduled: bool,
     pending_events: Vec<HostEvent>,
     /// 绑定在当前主窗口上的激活/尺寸/外观观察器；关窗时清空，重开窗口时挂到新窗口。
@@ -276,7 +278,12 @@ impl MainShell {
                 });
                 if any_view_reg {
                     let _ = this.update(cx, |this, cx| {
-                        this.schedule_publish(cx);
+                        this.schedule_publish_slices(
+                            host::SliceMask::JS_VIEWS
+                                | host::SliceMask::VIEWS
+                                | host::SliceMask::SHELL,
+                            cx,
+                        );
                         cx.emit(MainShellEvent::PluginsChanged);
                     });
                 }
@@ -304,12 +311,21 @@ impl MainShell {
 
         let themed = cx.observe_global::<smelt_ui::theme_catalog::ActiveTheme>(|this, cx| {
             apply_theme(&this.app, cx);
-            this.schedule_publish(cx);
+            this.schedule_publish_slices(host::SliceMask::THEME, cx);
         });
         let events = cx.subscribe(&api::events(cx), |this, _, event: &HostEvent, cx| {
-            if host::affects_state(event) {
-                this.recompute_shell_view(cx);
-                this.publish_pending = true;
+            if matches!(
+                event,
+                HostEvent::MachinesChanged | HostEvent::Reconnected(_)
+            ) {
+                this.bridge.sync_clients(cx);
+            }
+            let dirty = host::dirty_slices_for_event(event);
+            if !dirty.is_empty() {
+                if dirty.intersects(host::SliceMask::SHELL | host::SliceMask::SAFE_AREAS) {
+                    this.recompute_shell_view(cx);
+                }
+                this.dirty_slices |= dirty;
             }
             this.enqueue_event(event.clone(), cx);
         });
@@ -320,6 +336,8 @@ impl MainShell {
             mark_app_dirty.set(true);
             cx.notify();
         });
+
+        bridge.sync_clients(cx);
 
         let rem = f32::from(window.rem_size());
         let shell = Self {
@@ -339,12 +357,13 @@ impl MainShell {
             loaded_plugins: Vec::new(),
             runtime_errors: BTreeMap::new(),
             theme_owners: Vec::new(),
+            layout_owners: Vec::new(),
             initial_pending: None,
             pending_fallback: BTreeSet::new(),
             initial_ready: false,
             backdrop_hooks,
             app_dirty,
-            publish_pending: false,
+            dirty_slices: host::SliceMask::EMPTY,
             flush_scheduled: false,
             pending_events: Vec::new(),
             window_subs: Vec::new(),
@@ -352,7 +371,7 @@ impl MainShell {
             _tasks: [installing, serving, handling_shell],
             _subscriptions: [themed, events, app_obs],
         };
-        shell.publish(cx);
+        shell.publish_dirty(host::SliceMask::ALL, cx);
         shell
     }
 
@@ -402,13 +421,17 @@ impl MainShell {
         self.active_page.clear();
         self.settings_page = None;
         self.recompute_shell_view(cx);
-        self.publish(cx);
+        self.publish_dirty(host::SliceMask::SHELL | host::SliceMask::SAFE_AREAS, cx);
     }
 
     fn apply_shell_update(&mut self, update: ShellUpdate, cx: &mut Context<Self>) {
-        // 先替换文件级主题包，与旧插件系统保持一致。
+        // 先替换文件级主题包与纯声明式页面/布局，与旧插件系统保持一致。
         for owner in std::mem::take(&mut self.theme_owners) {
             smelt_ui::theme_catalog::unregister_themes(&owner, cx);
+        }
+        for owner in std::mem::take(&mut self.layout_owners) {
+            api::unregister_layouts(&owner, cx);
+            api::unregister_pages(&owner, cx);
         }
         let mut theme_errors = BTreeMap::new();
         for (id, sources) in update.themes {
@@ -419,6 +442,41 @@ impl MainShell {
                 Err(error) => {
                     eprintln!("[smelt-nsh] 插件 {id} 主题加载失败：{error}");
                     theme_errors.insert(id, error.to_string());
+                }
+            }
+        }
+        let mut layout_errors = BTreeMap::new();
+        for (id, assets) in update.declarative_layouts {
+            let pages: Vec<api::PageSource<'_>> = assets
+                .pages
+                .iter()
+                .map(|p| api::PageSource {
+                    name: &p.name,
+                    title: p.title.clone(),
+                    home: p.home,
+                    index: p.index.as_deref(),
+                })
+                .collect();
+            let layouts: Vec<api::LayoutSource<'_>> = assets
+                .layouts
+                .iter()
+                .map(|l| api::LayoutSource {
+                    page: &l.page,
+                    name: &l.name,
+                    title: l.title.clone(),
+                    state: &l.state,
+                    materials: l.materials,
+                })
+                .collect();
+            let res = api::register_pages(&id, &pages, cx)
+                .and_then(|()| api::register_layouts(&id, &layouts, cx));
+            match res {
+                Ok(()) => self.layout_owners.push(id),
+                Err(error) => {
+                    api::unregister_layouts(&id, cx);
+                    api::unregister_pages(&id, cx);
+                    eprintln!("[smelt-nsh] 插件 {id} 声明式布局加载失败：{error}");
+                    layout_errors.insert(id, error);
                 }
             }
         }
@@ -446,20 +504,40 @@ impl MainShell {
                     }
                 }
                 crate::plugins::Change::Install(compiled) => {
-                    let id = compiled.id().to_owned();
-                    installed_ids.insert(id.clone());
-                    self.pending_fallback.remove(&id);
-                    self.runtime_errors.remove(&id);
-                    // 重新装载前先撤掉旧一版的登记，避免重载去掉某个视图/命令后残留；
+                    let vm_id = compiled.id().to_owned();
+                    let old_members = self.plugins.members_of(&vm_id);
+                    let new_members = compiled.members().to_vec();
+                    let mut affected = BTreeSet::new();
+                    for member in old_members {
+                        affected.insert(member);
+                    }
+                    for member in &new_members {
+                        installed_ids.insert(member.clone());
+                        affected.insert(member.clone());
+                    }
+                    // 重新装载前先撤掉旧一版的登记，避免重载去掉某个视图/命令/成员后残留；
                     // 随后立即写入新版文案，再启动新 VM，防止旧清理把刚读出的文案抹掉。
-                    self.bridge.unregister_plugin(&id, cx);
-                    if let Some(texts) = pending_texts.remove(&id) {
-                        self.bridge.set_texts(&id, texts);
+                    for member in &affected {
+                        self.pending_fallback.remove(member);
+                        self.runtime_errors.remove(member);
+                        self.plugin_roots.remove(member);
+                        self.bridge.unregister_plugin(member, cx);
+                    }
+                    self.bridge.forget_vm(&vm_id);
+                    for member in &new_members {
+                        if let Some(texts) = pending_texts.remove(member) {
+                            self.bridge.set_texts(member, texts);
+                        }
                     }
                 }
-                crate::plugins::Change::Remove(id) => {
-                    self.pending_fallback.remove(id);
-                    self.bridge.forget_plugin(id);
+                crate::plugins::Change::Remove(vm_id) => {
+                    for member in self.plugins.members_of(vm_id) {
+                        self.pending_fallback.remove(&member);
+                        self.runtime_errors.remove(&member);
+                        self.plugin_roots.remove(&member);
+                        self.bridge.unregister_plugin(&member, cx);
+                    }
+                    self.bridge.forget_vm(vm_id);
                 }
             }
             self.app.update(cx, |view, _| {
@@ -478,7 +556,9 @@ impl MainShell {
                     self.settle_initial_plugin(&info.id, cx);
                 }
                 if info.error.is_none()
-                    && let Some(err) = theme_errors.remove(&info.id)
+                    && let Some(err) = theme_errors
+                        .remove(&info.id)
+                        .or_else(|| layout_errors.remove(&info.id))
                 {
                     info.error = Some(err);
                 }
@@ -534,7 +614,10 @@ impl MainShell {
                 }
                 entry.layout.layout = parsed;
                 self.recompute_shell_view(cx);
-                self.schedule_publish(cx);
+                self.schedule_publish_slices(
+                    host::SliceMask::SHELL | host::SliceMask::SAFE_AREAS,
+                    cx,
+                );
                 cx.emit(MainShellEvent::LayoutChanged { page_key });
             }
             ShellInput::ZoomChanged { page_key, group } => {
@@ -546,7 +629,10 @@ impl MainShell {
                 }
                 entry.layout.zoomed = group;
                 self.recompute_shell_view(cx);
-                self.schedule_publish(cx);
+                self.schedule_publish_slices(
+                    host::SliceMask::SHELL | host::SliceMask::SAFE_AREAS,
+                    cx,
+                );
                 cx.emit(MainShellEvent::StateChanged);
             }
             ShellInput::Lifecycle(PluginLifecycle::Ready { plugin, views }) => {
@@ -558,7 +644,7 @@ impl MainShell {
                     self.plugin_roots.remove(&plugin)
                 };
                 if changed {
-                    self.schedule_publish(cx);
+                    self.schedule_publish_slices(host::SliceMask::SHELL, cx);
                 }
                 if cleared_error {
                     cx.emit(MainShellEvent::PluginsChanged);
@@ -568,15 +654,40 @@ impl MainShell {
             ShellInput::Lifecycle(PluginLifecycle::Fatal { plugin, message }) => {
                 self.plugin_roots.remove(&plugin);
                 self.bridge.unregister_plugin(&plugin, cx);
-                let can_fallback = self.loaded_plugins.iter().any(|info| {
+                let direct_fallback = self.loaded_plugins.iter().any(|info| {
                     info.id == plugin && info.overrides_builtin && !info.fallback_to_builtin
                 });
-                if can_fallback {
+                let module_fallback = if direct_fallback {
+                    None
+                } else {
+                    self.loaded_plugins
+                        .iter()
+                        .find(|info| info.id == plugin)
+                        .and_then(|info| {
+                            info.used_modules.iter().find(|mod_id| {
+                                self.loaded_plugins.iter().any(|m| {
+                                    m.id == **mod_id
+                                        && m.overrides_builtin
+                                        && !m.fallback_to_builtin
+                                })
+                            })
+                        })
+                        .cloned()
+                };
+                if direct_fallback {
                     eprintln!(
                         "[smelt-nsh] 用户覆写插件 {plugin} 运行崩溃，已请求自动回退自带版本：{message}"
                     );
                     self.pending_fallback.insert(plugin.clone());
                     self.live.request_builtin_fallback(plugin, message);
+                } else if let Some(mod_id) = module_fallback {
+                    let reason = format!("使用该模块的插件 {plugin} 运行时加载失败：{message}");
+                    eprintln!(
+                        "[smelt-nsh] 用户覆写模块 {mod_id} 导致插件 {plugin} 崩溃，已请求自动回退自带版本：{message}"
+                    );
+                    if self.pending_fallback.insert(mod_id.clone()) {
+                        self.live.request_builtin_fallback(mod_id, reason);
+                    }
                 } else {
                     self.runtime_errors.insert(plugin.clone(), message);
                     self.settle_initial_plugin(&plugin, cx);
@@ -609,7 +720,7 @@ impl MainShell {
             });
         }
         self.recompute_shell_view(cx);
-        self.schedule_publish(cx);
+        self.schedule_publish_slices(host::SliceMask::SHELL | host::SliceMask::SAFE_AREAS, cx);
         Ok(())
     }
 
@@ -625,7 +736,7 @@ impl MainShell {
         self.pages.retain(|p| p.key != page_key);
         if self.pages.len() != before {
             self.recompute_shell_view(cx);
-            self.schedule_publish(cx);
+            self.schedule_publish_slices(host::SliceMask::SHELL | host::SliceMask::SAFE_AREAS, cx);
         }
     }
 
@@ -647,7 +758,7 @@ impl MainShell {
         }
         if page_changed || outlet_changed {
             self.recompute_shell_view(cx);
-            self.schedule_publish(cx);
+            self.schedule_publish_slices(host::SliceMask::SHELL | host::SliceMask::SAFE_AREAS, cx);
         }
     }
 
@@ -666,7 +777,7 @@ impl MainShell {
         }
         entry.outlet = outlet;
         self.recompute_shell_view(cx);
-        self.schedule_publish(cx);
+        self.schedule_publish_slices(host::SliceMask::SHELL | host::SliceMask::SAFE_AREAS, cx);
     }
 
     /// 更新设置页右侧选中的具体设置视图（Rust 或 JS 视图皆可）。
@@ -675,7 +786,7 @@ impl MainShell {
             return;
         }
         self.settings_page = page;
-        self.schedule_publish(cx);
+        self.schedule_publish_slices(host::SliceMask::SHELL, cx);
     }
 
     /// 更新窗口角占空（进出全屏时变化）。
@@ -685,7 +796,7 @@ impl MainShell {
         }
         self.corners = corners;
         self.recompute_shell_view(cx);
-        self.schedule_publish(cx);
+        self.schedule_publish_slices(host::SliceMask::SHELL | host::SliceMask::SAFE_AREAS, cx);
     }
 
     /// 更新壳层外边距与本地化文案。
@@ -695,7 +806,7 @@ impl MainShell {
         }
         self.padding = padding;
         self.labels = labels;
-        self.schedule_publish(cx);
+        self.schedule_publish_slices(host::SliceMask::SHELL, cx);
     }
 
     /// 某页的布局里是否摆着指定视图（含 `smelt/stack` 内的叶子）。
@@ -748,7 +859,7 @@ impl MainShell {
         if changed {
             entry.layout_rev = entry.layout_rev.wrapping_add(1);
             self.recompute_shell_view(cx);
-            self.schedule_publish(cx);
+            self.schedule_publish_slices(host::SliceMask::SHELL | host::SliceMask::SAFE_AREAS, cx);
         }
         true
     }
@@ -767,7 +878,7 @@ impl MainShell {
         self.plugins
             .send_to_shell("shell.unzoom", json!({ "page": active }));
         self.recompute_shell_view(cx);
-        self.schedule_publish(cx);
+        self.schedule_publish_slices(host::SliceMask::SHELL | host::SliceMask::SAFE_AREAS, cx);
         true
     }
 
@@ -789,6 +900,11 @@ impl MainShell {
     #[doc(hidden)]
     pub fn app_view(&self) -> &Entity<AppView> {
         &self.app
+    }
+
+    #[doc(hidden)]
+    pub fn plugin_vm_ids(&self) -> Vec<String> {
+        self.plugins.vm_ids()
     }
 
     /// 供设置「面板插件」页展示的已发现插件清单（含编译或运行错误及已登记视图）。
@@ -821,13 +937,18 @@ impl MainShell {
         for id in ids {
             self.bridge.unregister_plugin(&id, cx);
         }
+        self.bridge.forget_vm(crate::plugins::BUILTINS_VM_ID);
         self.plugin_roots.clear();
-        self.publish_pending = false;
+        self.dirty_slices = host::SliceMask::EMPTY;
         self.pending_events.clear();
     }
 
     fn schedule_publish(&mut self, cx: &mut Context<Self>) {
-        self.publish_pending = true;
+        self.schedule_publish_slices(host::SliceMask::ALL, cx);
+    }
+
+    fn schedule_publish_slices(&mut self, slices: host::SliceMask, cx: &mut Context<Self>) {
+        self.dirty_slices |= slices;
         self.schedule_flush(cx);
     }
 
@@ -849,8 +970,9 @@ impl MainShell {
 
     fn flush_pending(&mut self, cx: &mut Context<Self>) {
         self.flush_scheduled = false;
-        if std::mem::take(&mut self.publish_pending) {
-            self.publish(cx);
+        let dirty = std::mem::replace(&mut self.dirty_slices, host::SliceMask::EMPTY);
+        if !dirty.is_empty() {
+            self.publish_dirty(dirty, cx);
         }
         let events = std::mem::take(&mut self.pending_events);
         for event in &events {
@@ -874,65 +996,69 @@ impl MainShell {
         *self.shared_shell_view.borrow_mut() = self.shell_view.clone();
     }
 
-    fn publish(&self, cx: &App) {
-        let pages_json: Vec<Value> = self
-            .pages
-            .iter()
-            .map(|entry| {
-                let active = entry.key == self.active_page;
-                let outlet_id = entry.outlet.as_ref().map(|o| o.id.as_str());
-                let view = if active {
-                    self.shell_view.clone()
-                } else {
-                    compute_shell_view(
-                        &entry.layout,
-                        self.corners,
-                        outlet_id.map(str::to_owned),
-                        cx,
-                    )
-                };
-                json!({
-                    "key": entry.key,
-                    "active": active,
-                    "layout_rev": entry.layout_rev,
-                    "layout": layout_to_json(&entry.layout.layout),
-                    "panels": panel_options_json(&entry.layout, outlet_id, cx),
-                    "meta": panel_meta_json(&entry.layout, outlet_id, cx),
-                    "group_areas": group_areas_json(&view),
-                    "outlet": entry.outlet.as_ref().map(|o| json!({
-                        "id": o.id,
-                        "args": o.args,
-                        "seq": o.seq,
-                        "managed_rust_instance": o.managed_rust_instance,
-                    })),
-                    "left_dock": view.left_dock,
-                    "right_dock": view.right_dock,
-                    "left_toggle_x": view.left_toggle_x(),
-                    "zoomed": entry.layout.zoomed,
+    fn publish_dirty(&self, dirty: host::SliceMask, cx: &App) {
+        let shell_json = dirty.contains(host::SliceMask::SHELL).then(|| {
+            let pages_json: Vec<Value> = self
+                .pages
+                .iter()
+                .map(|entry| {
+                    let active = entry.key == self.active_page;
+                    let outlet_id = entry.outlet.as_ref().map(|o| o.id.as_str());
+                    let view = if active {
+                        self.shell_view.clone()
+                    } else {
+                        compute_shell_view(
+                            &entry.layout,
+                            self.corners,
+                            outlet_id.map(str::to_owned),
+                            cx,
+                        )
+                    };
+                    json!({
+                        "key": entry.key,
+                        "active": active,
+                        "layout_rev": entry.layout_rev,
+                        "layout": layout_to_json(&entry.layout.layout),
+                        "panels": panel_options_json(&entry.layout, outlet_id, cx),
+                        "meta": panel_meta_json(&entry.layout, outlet_id, cx),
+                        "group_areas": group_areas_json(&view),
+                        "outlet": entry.outlet.as_ref().map(|o| json!({
+                            "id": o.id,
+                            "args": o.args,
+                            "seq": o.seq,
+                            "managed_rust_instance": o.managed_rust_instance,
+                        })),
+                        "left_dock": view.left_dock,
+                        "right_dock": view.right_dock,
+                        "left_toggle_x": view.left_toggle_x(),
+                        "zoomed": entry.layout.zoomed,
+                    })
                 })
+                .collect();
+            json!({
+                "padding": self.padding,
+                "pages": pages_json,
+                "settings_page": self.settings_page.as_ref().map(|(id, title)| json!({
+                    "id": id,
+                    "title": title,
+                })),
+                "plugin_roots": self.plugin_roots.iter().cloned().collect::<Vec<_>>(),
+                "labels": {
+                    "collapse_left": self.labels.collapse_left,
+                    "expand_left": self.labels.expand_left,
+                    "collapse_right": self.labels.collapse_right,
+                    "expand_right": self.labels.expand_right,
+                    "zoom": self.labels.zoom,
+                    "restore": self.labels.restore,
+                    "settings_page_gone": self.labels.settings_page_gone,
+                },
             })
-            .collect();
-        let shell_json = json!({
-            "padding": self.padding,
-            "pages": pages_json,
-            "settings_page": self.settings_page.as_ref().map(|(id, title)| json!({
-                "id": id,
-                "title": title,
-            })),
-            "plugin_roots": self.plugin_roots.iter().cloned().collect::<Vec<_>>(),
-            "labels": {
-                "collapse_left": self.labels.collapse_left,
-                "expand_left": self.labels.expand_left,
-                "collapse_right": self.labels.collapse_right,
-                "expand_right": self.labels.expand_right,
-                "zoom": self.labels.zoom,
-                "restore": self.labels.restore,
-                "settings_page_gone": self.labels.settings_page_gone,
-            },
         });
-        let safe_areas = safe_areas_json(&self.shell_view);
+        let safe_areas = dirty
+            .contains(host::SliceMask::SAFE_AREAS)
+            .then(|| safe_areas_json(&self.shell_view));
         self.bridge
-            .publish_shell(&self.plugins, self.rem, safe_areas, shell_json, cx);
+            .publish_dirty(&self.plugins, dirty, self.rem, safe_areas, shell_json, cx);
     }
 }
 
@@ -941,7 +1067,7 @@ impl Render for MainShell {
         let rem = f32::from(window.rem_size());
         if (self.rem - rem).abs() > f32::EPSILON {
             self.rem = rem;
-            self.schedule_publish(cx);
+            self.schedule_publish_slices(host::SliceMask::THEME, cx);
         }
         let reset = self.backdrop_hooks.borrow().reset.clone();
         let app_dirty = self.app_dirty.clone();

@@ -79,7 +79,7 @@ struct Figure {
 impl Figure {
     fn new(cast: Cast, cx: &mut Context<Self>) -> Self {
         let buddy = Buddy::of(&cast.seed);
-        prepare(buddy, cx);
+        buddy.prewarm_in_background(cx);
         let _release = cx.on_release(|figure: &mut Self, cx| figure.portrait.release(cx));
         Self {
             cast,
@@ -96,16 +96,11 @@ impl Figure {
         if cast.seed != self.cast.seed {
             self.buddy = Buddy::of(&cast.seed);
             self.playing = None;
-            prepare(self.buddy, cx);
+            self.buddy.prewarm_in_background(cx);
         }
         self.cast = cast;
         cx.notify();
     }
-}
-
-/// 第一次画完之后把这个小人要的零件都画好（画过的跳过），转身、换动作时不用现画。不在 render 里。
-fn prepare(buddy: Buddy, cx: &mut App) {
-    cx.defer(move |_| buddy.prepare());
 }
 
 impl RenderOnce for BuddyFigure {

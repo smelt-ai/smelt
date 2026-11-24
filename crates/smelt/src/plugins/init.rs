@@ -162,7 +162,8 @@ pub(super) fn scaffold(dir: &Path, id: &str, name: &str) -> Result<serde_json::V
         false
     };
 
-    let types = smelt_nsh::write_plugin_types(&root)?;
+    let sources = super::module_sources();
+    let types = smelt_nsh::write_plugin_types(&root, &sources)?;
 
     let mut files = vec![
         smelt_nsh::MANIFEST_FILE.to_owned(),
@@ -370,7 +371,7 @@ mod tests {
 
         assert!(scaffold(&dir, "com.example.hello", "Hello").is_err());
         assert_eq!(run(&["../bad".into()]), 1);
-        assert_eq!(run(&["smelt.language".into()]), 1);
+        assert_eq!(run(&["smelt.git".into()]), 1);
         assert_eq!(run(&[]), 2);
         assert_eq!(run(&["com.example.ok".into(), "--unknown".into()]), 2);
         assert_eq!(run(&["com.example.ok".into(), "--name".into()]), 2);

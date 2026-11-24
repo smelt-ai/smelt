@@ -1,6 +1,7 @@
 // 启动栏（NSH A2 独立 VM 版本）：复用纯逻辑 model.js 与 contract.js。
 import { computed, Text, View } from "nsh";
 import {
+  bootTask,
   command,
   initHost,
   pages,
@@ -47,8 +48,9 @@ function runCmd(cmd: string) {
   run(cmd).catch(notifyError);
 }
 
-initHost().then(() => {
-  registerViews([
+bootTask(async () => {
+  await initHost(["pages", "views", "commands", "safe_areas"]);
+  await registerViews([
     {
       name: NAV_NAME,
       export: NAV_NAME,
@@ -63,7 +65,7 @@ initHost().then(() => {
       icon: "icons/settings.svg",
       draws_top_bar: true,
     },
-  ]).catch((error) => console.error("[launcher] registerViews 失败:", error));
+  ]);
 });
 
 export function nav() {

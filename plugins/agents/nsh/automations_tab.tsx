@@ -2,7 +2,7 @@
 // 零跨 VM 插槽；点选条目或「新建自动化」经 `smelt.app/open-view` 跳到 `smelt.automations/main`。
 
 import { computed, Scroll, Text, View } from "nsh";
-import { SmeltButton, state as hostState, t } from "smelt/sdk";
+import { locale, SmeltButton, t } from "smelt/sdk";
 
 import {
   agentDisplayName,
@@ -129,7 +129,7 @@ export function AgentAutomationsTab() {
   const data = computed(() => {
     automationsVersion();
     agentHostsSignal();
-    hostState();
+    locale();
     const tgt = target();
     if (!tgt) {
       return {

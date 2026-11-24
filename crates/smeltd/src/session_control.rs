@@ -26,15 +26,9 @@ use super::{AcpSessions, EventHubHandle, Sessions, WorkspaceDirectoryReader};
 const REMOTE_TERMINAL_COLS: u16 = 100;
 const REMOTE_TERMINAL_ROWS: u16 = 32;
 
-/// 每次打开新建菜单都现查：只在 PATH 里找各家 CLI，不起进程，设置页刚装好的 CLI
-/// 下次打开就在。
-pub(crate) fn new_session_catalog() -> NewSessionCatalogResult {
-    catalog_with(&smelt_core::acp_conn::locate_acp_runtime())
-}
-
-fn catalog_with(diagnostics: &AcpRuntimeDiagnostics) -> NewSessionCatalogResult {
-    let agents = smelt_core::new_session::stored_conversation_options();
-    let sections = smelt_core::new_session::stored_new_session_sections(&agents, Some(diagnostics));
+/// 每次需要强刷新新建菜单时现查 PATH；正常打开走 [`DaemonEventHub::new_session_catalog`] 缓存。
+pub(crate) fn catalog_with(diagnostics: &AcpRuntimeDiagnostics) -> NewSessionCatalogResult {
+    let (agents, sections) = smelt_core::new_session::stored_catalog(Some(diagnostics));
     let restrictable_agent_ids = agents
         .iter()
         .filter(|option| smelt_core::acp_conn::supports_disallowed_tools(&option.launch))
@@ -111,18 +105,26 @@ impl DaemonTerminal {
 /// 自己的目录决定。没给 key 时按 `kind`，默认是对话。
 fn resolve_target(params: &SessionCreateParams) -> Result<CreateTarget, ControlError> {
     if let Some(key) = non_empty(params.launch_key.as_deref()) {
-        let action = smelt_core::new_session::find_stored_action(key).ok_or_else(|| {
-            ControlError::because(
-                ControlErrorCode::NotFound,
-                ControlReason::UnknownLaunchItem {
-                    key: key.to_string(),
-                },
-            )
-        })?;
+        let (action, option) =
+            smelt_core::new_session::resolve_stored_action(key).ok_or_else(|| {
+                ControlError::because(
+                    ControlErrorCode::NotFound,
+                    ControlReason::UnknownLaunchItem {
+                        key: key.to_string(),
+                    },
+                )
+            })?;
         return match action.target {
             NewSessionTarget::Conversation {
                 agent_option_id, ..
-            } => find_option(&agent_option_id).map(CreateTarget::Acp),
+            } => option.map(CreateTarget::Acp).ok_or_else(|| {
+                ControlError::because(
+                    ControlErrorCode::NotFound,
+                    ControlReason::UnknownAgentOption {
+                        id: agent_option_id,
+                    },
+                )
+            }),
             NewSessionTarget::Terminal { command, .. } => Ok(CreateTarget::Terminal {
                 launch: Some(command),
                 label: Some(action.label),

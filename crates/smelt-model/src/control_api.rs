@@ -862,6 +862,11 @@ mod tests {
             catalog.sections.terminal[1].target,
             crate::new_session::NewSessionTarget::BlankTerminal
         );
+        let empty = decode_params::<NewSessionCatalogParams>(serde_json::json!({})).unwrap();
+        assert!(!empty.refresh);
+        let refresh =
+            decode_params::<NewSessionCatalogParams>(serde_json::json!({"refresh": true})).unwrap();
+        assert!(refresh.refresh);
     }
 
     #[test]
@@ -1006,8 +1011,8 @@ pi_calls! {
     ConversationCreateForAgent => ConversationCreateForAgent(AgentDefinitionIdParams)
         -> crate::session_control::CreatedAgentConversation;
     /// 新建会话的选择目录：可开对话的 agent 选项，和按「常用 / 终端 / 对话」分好组的
-    /// 启动动作（含 Pin）。CLI 装没装由运行时每次现查 PATH 过滤。
-    NewSessionCatalog => NewSessionCatalog(EmptyParams) -> NewSessionCatalogResult;
+    /// 启动动作（含 Pin）。CLI 装没装由运行时按需探测或从后台热缓存直接交回。
+    NewSessionCatalog => NewSessionCatalog(NewSessionCatalogParams) -> NewSessionCatalogResult;
     /// 在运行时上新建一个会话（对话或终端）。起好之后写进工作区目录，桌面、手机都按目录看到它。
     SessionCreate => SessionCreate(SessionCreateParams) -> SessionCreateResult;
     /// 删除一个会话。运行时自己判断是终端还是对话；自动化运行的会话拒绝删除。
@@ -1123,7 +1128,14 @@ pub struct AppCommandRunResult {
     pub result: serde_json::Value,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NewSessionCatalogParams {
+    /// 是否忽略守护内存缓存，重新扫一遍本机 `PATH` 里的 Agent CLI。
+    #[serde(default)]
+    pub refresh: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NewSessionCatalogResult {
     /// 产品智能体在前，裸引擎与 profile 在后，与桌面新建菜单同序。不按探测结果过滤：
     /// 历史列表等地方要靠它把 option id 还原成引擎和 profile。

@@ -198,4 +198,66 @@ mod page_tests {
             assert_eq!(columns, [["smelt/settings-nav"], [SETTINGS_VIEW]]);
         });
     }
+
+    /// 多个设置页同时挂角标时，导航红点集合必须同时保留全部有角标的设置页（非设置页不混入），
+    /// 摘掉其中一页的角标只清那一页。
+    #[gpui::test]
+    fn attention_pages_tracks_all_badged_settings_views(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext as _, Context, IntoElement, Render, Window, div};
+        use smelt_plugin_api::{SettingsEntry, SettingsGroup, ViewHandle, ViewSpec};
+        use std::rc::Rc;
+
+        struct DummyView;
+        impl Render for DummyView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+            }
+        }
+        impl smelt_plugin_api::PluginView for DummyView {
+            fn open(&mut self, _: &serde_json::Value, _: &mut Window, _: &mut Context<Self>) {}
+        }
+        let spec = |name: &str, group: Option<SettingsGroup>| ViewSpec {
+            name: name.to_owned().into(),
+            title: name.to_owned().into(),
+            icon: "icons/settings.svg".into(),
+            draws_top_bar: false,
+            settings: group.map(|group| SettingsEntry {
+                group,
+                keywords: Vec::new(),
+            }),
+            instances: false,
+            fills: Vec::new(),
+            build: Rc::new(|_, cx| -> Rc<dyn ViewHandle> { Rc::new(cx.new(|_| DummyView)) }),
+        };
+
+        cx.update(|cx| {
+            smelt_plugin_api::register_views(
+                "a",
+                vec![spec("one", Some(SettingsGroup::Agents))],
+                cx,
+            )
+            .unwrap();
+            smelt_plugin_api::register_views(
+                "b",
+                vec![spec("two", Some(SettingsGroup::System))],
+                cx,
+            )
+            .unwrap();
+            smelt_plugin_api::register_views("c", vec![spec("other", None)], cx).unwrap();
+
+            smelt_plugin_api::set_view_badge("a/one", Some("!".into()), cx);
+            smelt_plugin_api::set_view_badge("b/two", Some("new".into()), cx);
+            smelt_plugin_api::set_view_badge("c/other", Some("9".into()), cx);
+
+            let pages = super::super::attention_pages(cx);
+            assert_eq!(
+                pages,
+                std::collections::BTreeSet::from(["a/one".into(), "b/two".into()])
+            );
+
+            smelt_plugin_api::set_view_badge("a/one", None, cx);
+            let pages = super::super::attention_pages(cx);
+            assert_eq!(pages, std::collections::BTreeSet::from(["b/two".into()]));
+        });
+    }
 }

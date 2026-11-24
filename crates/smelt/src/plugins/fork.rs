@@ -126,14 +126,28 @@ pub(super) fn fork_into(
     target_id: &str,
 ) -> Result<serde_json::Value, String> {
     let manifest = smelt_nsh::PluginManifest::read(builtin_root)?;
-    let normalized_entry = normalize_relative(&manifest.entry)?;
-    if !builtin_root.join(&normalized_entry).is_file() {
-        return Err(t!(
-            "plugins.cli_fork_no_source",
-            id = builtin_id,
-            entry = manifest.entry
-        )
-        .into_owned());
+    if manifest.is_layout_only() {
+        for layout in &manifest.layouts {
+            let normalized_file = normalize_relative(&layout.file)?;
+            if !builtin_root.join(&normalized_file).is_file() {
+                return Err(t!(
+                    "plugins.cli_fork_no_source",
+                    id = builtin_id,
+                    entry = layout.file
+                )
+                .into_owned());
+            }
+        }
+    } else {
+        let normalized_entry = normalize_relative(&manifest.entry)?;
+        if !builtin_root.join(&normalized_entry).is_file() {
+            return Err(t!(
+                "plugins.cli_fork_no_source",
+                id = builtin_id,
+                entry = manifest.entry
+            )
+            .into_owned());
+        }
     }
     if target_dir.join(smelt_nsh::MANIFEST_FILE).exists() {
         return Err(t!("plugins.cli_fork_exists", path = target_dir.display()).into_owned());
@@ -165,6 +179,31 @@ pub(super) fn fork_into(
                 "id".to_owned(),
                 serde_json::Value::String(target_id.to_owned()),
             );
+            if manifest.is_module() {
+                obj.insert(
+                    "module".to_owned(),
+                    serde_json::Value::String(format!("custom/{target_id}")),
+                );
+            }
+            if manifest.is_layout_only()
+                && let Some(layouts) = obj
+                    .get_mut("layouts")
+                    .and_then(serde_json::Value::as_array_mut)
+            {
+                let old_prefix = format!("{builtin_id}/");
+                for layout in layouts {
+                    let next_page = layout
+                        .get("page")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|page| page.strip_prefix(&old_prefix))
+                        .map(|suffix| format!("{target_id}/{suffix}"));
+                    if let Some(next_page) = next_page
+                        && let Some(layout_obj) = layout.as_object_mut()
+                    {
+                        layout_obj.insert("page".to_owned(), serde_json::Value::String(next_page));
+                    }
+                }
+            }
         }
         let updated = format!(
             "{}\n",
@@ -175,14 +214,25 @@ pub(super) fn fork_into(
     }
 
     let theme_only = manifest.is_theme_only();
+    let layout_only = manifest.is_layout_only();
     let mut types_generated = false;
-    if !theme_only {
+    if !theme_only && !layout_only {
         let gitignore = root.join(".gitignore");
         if !gitignore.exists() {
             fs::write(&gitignore, ".nsh/\nnode_modules/\n")
                 .map_err(|error| format!("写入 .gitignore 失败：{error}"))?;
         }
-        smelt_nsh::write_plugin_types(&root)?;
+        let mut type_sources = super::module_sources();
+        if let Some(parent) = builtin_root.parent().filter(|p| !p.as_os_str().is_empty())
+            && !type_sources.iter().any(|s| s.path == parent)
+        {
+            type_sources.push(smelt_nsh::SourceDir {
+                path: parent.to_path_buf(),
+                source: smelt_nsh::PluginSource::Builtin,
+                watch: false,
+            });
+        }
+        smelt_nsh::write_plugin_types(&root, &type_sources)?;
         types_generated = true;
     }
 
@@ -193,6 +243,7 @@ pub(super) fn fork_into(
         "from_builtin": builtin_id,
         "overrides_builtin": target_id == builtin_id,
         "theme_only": theme_only,
+        "layout_only": layout_only,
         "path": root,
         "source_path": source_path,
         "types_generated": types_generated,
@@ -324,5 +375,83 @@ mod tests {
         assert_eq!(run(&["smelt.does-not-exist".into()]), 1);
         assert_eq!(run(&[]), 2);
         assert_eq!(run(&["smelt.files".into(), "--unknown".into()]), 2);
+    }
+
+    #[test]
+    fn fork_module_plugin_generates_types_and_rewrites_specifier_on_as() {
+        let scratch = Scratch::new("module");
+        let builtin_root = scratch.0.join("builtin");
+        let mod_dir = builtin_root.join("conversation");
+        fs::create_dir_all(&mod_dir).unwrap();
+        fs::write(
+            mod_dir.join(smelt_nsh::MANIFEST_FILE),
+            r#"{"id":"demo.mod","name":"Mod","version":"1.0.0","module":"demo/ui","entry":"index.tsx","types":"index.d.ts"}"#,
+        )
+        .unwrap();
+        fs::write(
+            mod_dir.join("index.tsx"),
+            "import { Text } from \"nsh\";\nexport function Widget() { return <Text>mod</Text>; }\n",
+        )
+        .unwrap();
+        fs::write(
+            mod_dir.join("index.d.ts"),
+            "import type { JSX } from \"../nsh/types\";\nexport declare function Widget(): JSX.Element;\n",
+        )
+        .unwrap();
+
+        let override_dir = scratch.0.join("user/demo.mod");
+        let rep1 = fork_into(&mod_dir, &override_dir, "demo.mod", "demo.mod").unwrap();
+        assert_eq!(rep1["overrides_builtin"], true);
+        assert!(override_dir.join(".nsh/types/demo/ui.d.ts").is_file());
+        let checked1 = smelt_nsh::check_plugin(&override_dir).unwrap();
+        assert!(checked1.is_module);
+        assert_eq!(checked1.manifest.module.as_deref(), Some("demo/ui"));
+        assert_eq!(checked1.exports, vec!["Widget"]);
+
+        let renamed_dir = scratch.0.join("user/me.mod");
+        let rep2 = fork_into(&mod_dir, &renamed_dir, "demo.mod", "me.mod").unwrap();
+        assert_eq!(rep2["overrides_builtin"], false);
+        let checked2 = smelt_nsh::check_plugin(&renamed_dir).unwrap();
+        assert_eq!(checked2.manifest.module.as_deref(), Some("custom/me.mod"));
+    }
+
+    #[test]
+    fn fork_layout_plugin_rewrites_page_and_skips_types() {
+        let scratch = Scratch::new("layout");
+        let builtin = scratch.0.join("builtin/layouts");
+        fs::create_dir_all(builtin.join("layouts")).unwrap();
+        fs::write(
+            builtin.join(smelt_nsh::MANIFEST_FILE),
+            r#"{
+              "id": "demo.layouts",
+              "name": "Layouts",
+              "version": "1.0.0",
+              "pages": [{ "name": "main", "title_key": "page.main", "home": true }],
+              "layouts": [{
+                "page": "demo.layouts/main",
+                "name": "std",
+                "title_key": "layout.std",
+                "file": "layouts/std.json",
+                "materials": { "left": "sidebar" }
+              }]
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            builtin.join("layouts/std.json"),
+            r#"{"version":1,"center":{"panel_name":"TabPanel","info":{"tabs":{"active_index":0}},"children":[{"panel_name":"smelt/outlet","children":[],"info":{"panel":null}}]}}"#,
+        )
+        .unwrap();
+
+        let renamed = scratch.0.join("user/me.layouts");
+        let report = fork_into(&builtin, &renamed, "demo.layouts", "me.layouts").unwrap();
+        assert_eq!(report["layout_only"], true);
+        assert_eq!(report["types_generated"], false);
+        assert!(!renamed.join(".nsh").exists());
+        assert!(!renamed.join("tsconfig.json").exists());
+
+        let checked = smelt_nsh::check_plugin(&renamed).unwrap();
+        assert!(checked.layout_only);
+        assert_eq!(checked.manifest.layouts[0].page, "me.layouts/main");
     }
 }

@@ -25,7 +25,7 @@ use rust_i18n::t;
 use smelt_plugin_api as api;
 
 use super::store::{Prefs, UpdaterStore};
-use super::{DOCS_URL, FEEDBACK_URL, OWNER, SOURCE_URL, STATE_EVENT};
+use super::{ABOUT_VIEW, OWNER};
 
 /// 确认框里最多列出几个会话的名字。
 const NAME_LIMIT: usize = 8;
@@ -81,9 +81,18 @@ pub(crate) fn register(cx: &mut App) {
         store,
     });
     cx.set_global(UpdaterGlobal(entity.clone()));
-    // 更新状态变化时广播通用宿主事件，由前端插件自行刷新页面与角标。
-    cx.observe(&entity, |entity, cx| emit_state_changed(&entity, cx))
+    cx.observe(&entity, |entity, cx| refresh_badge(&entity, cx))
         .detach();
+    let badge_owner = entity.downgrade();
+    let events = api::events(cx);
+    cx.subscribe(&events, move |_, event: &api::HostEvent, cx| {
+        if matches!(event, api::HostEvent::LocaleChanged)
+            && let Some(entity) = badge_owner.upgrade()
+        {
+            refresh_badge(&entity, cx);
+        }
+    })
+    .detach();
     api::register_quit_guard(OWNER, Rc::new(quit_guard), cx);
     // Windows 上关掉主窗口就是退出，不经过退出守卫：在进程收尾时把待装的包交给安装程序。
     #[cfg(windows)]
@@ -187,14 +196,12 @@ impl Updater {
         // 启动时那个确认框不看这份状态，靠重绘跟上。
         cx.refresh_windows();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async {
-                    let app = api::app_location::move_to_applications()?;
-                    api::app_location::relaunch_after_exit(&app)?;
-                    anyhow::Ok(app)
-                })
-                .await;
+            let result = api::blocking::run(move || {
+                let app = api::app_location::move_to_applications()?;
+                api::app_location::relaunch_after_exit(&app)?;
+                anyhow::Ok(app)
+            })
+            .await;
             match result {
                 Ok(app) => {
                     api::app_log::info(
@@ -244,15 +251,14 @@ impl Updater {
         cx.notify();
         cx.spawn(async move |this, cx| {
             // 本机已装哪个发布要读包里的文件、拿更新锁读状态库，和查网络一样放后台。
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let installed = updater::installed_release()?;
-                    let latest = api::block_on::block_on_tokio(updater::fetch_latest(channel))
-                        .and_then(|r| r);
-                    anyhow::Ok((installed, latest))
-                })
-                .await;
+            let result = async {
+                let installed = api::blocking::run(updater::installed_release).await?;
+                let latest = api::blocking::spawn_tokio(updater::fetch_latest(channel))
+                    .await
+                    .and_then(|r| r);
+                anyhow::Ok((installed, latest))
+            }
+            .await;
             let _ = this.update(cx, |this, cx| {
                 let (installed, result) = match result {
                     Ok(checked) => checked,
@@ -349,10 +355,8 @@ impl Updater {
     ) {
         cx.spawn(async move |this, cx| {
             let update_for_work = update.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move { updater::discard_staged_update(&update_for_work) })
-                .await;
+            let result =
+                api::blocking::run(move || updater::discard_staged_update(&update_for_work)).await;
             let _ = this.update(cx, |this, cx| match result {
                 Ok(()) => {
                     api::app_log::info(
@@ -412,14 +416,14 @@ impl Updater {
         cx.spawn(async move |this, cx| {
             let (tx, rx) = smol::channel::unbounded::<updater::DownloadProgress>();
             let task_version = version.clone();
-            let task = cx.background_executor().spawn(async move {
-                api::block_on::block_on_tokio(updater::download_and_stage(
-                    &url,
-                    &task_version,
-                    |progress| {
+            let task = cx.spawn(async move |_| {
+                api::blocking::spawn_tokio(async move {
+                    updater::download_and_stage(&url, &task_version, move |progress| {
                         let _ = tx.try_send(progress);
-                    },
-                ))
+                    })
+                    .await
+                })
+                .await
                 .and_then(|r| r)
             });
 
@@ -464,10 +468,7 @@ impl Updater {
         self.status = UpdateStatus::Checking;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async { updater::recover_pending_update() })
-                .await;
+            let result = api::blocking::run(updater::recover_pending_update).await;
             let _ = this.update(cx, |this, cx| match result {
                 Ok(Some(update)) => {
                     api::app_log::info(
@@ -520,10 +521,10 @@ impl Updater {
         cx.spawn(async move |this, cx| {
             let relaunch = trigger == Trigger::User;
             let update_for_installer = update.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move { updater::launch_installer(&update_for_installer, relaunch) })
-                .await;
+            let result = api::blocking::run(move || {
+                updater::launch_installer(&update_for_installer, relaunch)
+            })
+            .await;
             match result {
                 Ok(ticket) => {
                     api::app_log::info(
@@ -532,10 +533,7 @@ impl Updater {
                     );
                     // 安装程序已经起来了，先停掉旧守护再退出：新版桌面起来时拉起的就是新版
                     // 守护，不留新桌面配旧守护的一段。没起来不走这里。
-                    let stopped = cx
-                        .background_executor()
-                        .spawn(async { updater::shutdown_local_daemon() })
-                        .await;
+                    let stopped = api::blocking::run(updater::shutdown_local_daemon).await;
                     if !stopped {
                         api::app_log::error("updater", "退出前没能确认旧守护已退出");
                     }
@@ -810,109 +808,13 @@ fn stop_prompt_body(names: &[String]) -> String {
     body
 }
 
-/// 序列化当前更新状态快照（纯读内存）。
-pub(crate) fn snapshot_json(entity: &Entity<Updater>, cx: &App) -> serde_json::Value {
-    let this = entity.read(cx);
-    let channel = match this.prefs.channel {
-        updater::UpdateChannel::Dev => "dev",
-        updater::UpdateChannel::Prod => "prod",
-    };
-    let status = match &this.status {
-        UpdateStatus::Idle => serde_json::json!({ "kind": "idle" }),
-        UpdateStatus::Checking => serde_json::json!({ "kind": "checking" }),
-        UpdateStatus::UpToDate => serde_json::json!({ "kind": "up_to_date" }),
-        UpdateStatus::Available { version, url } => serde_json::json!({
-            "kind": "available",
-            "version": version,
-            "url": url,
-        }),
-        UpdateStatus::Downloading {
-            version,
-            received,
-            total,
-        } => serde_json::json!({
-            "kind": "downloading",
-            "version": version,
-            "received": received,
-            "total": total,
-        }),
-        UpdateStatus::Installing { version } => serde_json::json!({
-            "kind": "installing",
-            "version": version,
-        }),
-        UpdateStatus::Applying { version } => serde_json::json!({
-            "kind": "applying",
-            "version": version,
-        }),
-        UpdateStatus::ReadyToInstall(update) => serde_json::json!({
-            "kind": "ready",
-            "version": update.version,
-        }),
-        UpdateStatus::InstallFailed(update) => serde_json::json!({
-            "kind": "install_failed",
-            "version": update.version,
-        }),
-        UpdateStatus::Failed(failure) => {
-            let code = match failure {
-                UpdateFailure::Check => "check",
-                UpdateFailure::Download => "download",
-                UpdateFailure::Recovery => "recovery",
-                UpdateFailure::Location => "location",
-                UpdateFailure::NotInstalled => "not_installed",
-            };
-            serde_json::json!({
-                "kind": "failed",
-                "failure": code,
-            })
-        }
-    };
-    #[cfg(target_os = "macos")]
-    let (moving_app, move_app_error) = (
-        this.moving_app,
-        this.move_app_error.as_ref().map(|s| s.to_string()),
-    );
-    #[cfg(windows)]
-    let (moving_app, move_app_error) = (false, None::<String>);
-
-    let manual_download_url = this
-        .status
-        .offers_manual_download()
-        .then(|| updater::manual_download_page(this.prefs.channel))
-        .flatten();
-    let can_check = this.status.can_check();
-    let can_request_check = can_check || this.status.can_retry_recovery();
-    let ready = this.status.ready_update().is_some();
-
-    serde_json::json!({
-        "supported": true,
-        "version": api::smelt_version::VERSION,
-        "channel": channel,
-        "auto_install": this.prefs.auto_install,
-        "status": status,
-        "can_check": can_check,
-        "can_request_check": can_request_check,
-        "ready": ready,
-        "update_available": this.update_available(),
-        "moving_app": moving_app,
-        "move_app_error": move_app_error,
-        "manual_download_url": manual_download_url,
-        "docs_url": DOCS_URL,
-        "feedback_url": FEEDBACK_URL,
-        "source_url": SOURCE_URL,
-        "app_log_path": api::app_log::log_path().map(|p| p.to_string_lossy().into_owned()),
-    })
-}
-
-/// 广播更新状态变化给前端插件。
-fn emit_state_changed(entity: &Entity<Updater>, cx: &mut App) {
-    let payload = snapshot_json(entity, cx);
-    api::emit(
-        api::HostEvent::Plugin {
-            name: STATE_EVENT.into(),
-            payload,
-        },
-        cx,
-    );
+/// 有新版本就在「关于」页挂角标，没有就摘掉。
+fn refresh_badge(entity: &Entity<Updater>, cx: &mut App) {
+    let badge = entity
+        .read(cx)
+        .update_available()
+        .then(|| t!("updater.badge").into());
+    api::set_view_badge(ABOUT_VIEW, badge, cx);
 }
 
 #[cfg(test)]

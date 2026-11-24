@@ -20,7 +20,7 @@ pub(super) struct SettingsNavView {
     /// 没筛过的整棵导航。
     nav: Vec<SettingsNavCategory>,
     selected: Option<SharedString>,
-    attention: Option<SharedString>,
+    attention: std::collections::BTreeSet<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -63,7 +63,7 @@ impl SettingsNavView {
             scroll: ScrollHandle::new(),
             nav: Vec::new(),
             selected: None,
-            attention: None,
+            attention: std::collections::BTreeSet::new(),
             _subscriptions: subscriptions,
         };
         view.sync(cx);
@@ -74,7 +74,7 @@ impl SettingsNavView {
     fn sync(&mut self, cx: &mut Context<Self>) {
         self.nav = settings_nav(&smelt_plugin_api::views(cx));
         self.selected = resolve_page(&self.nav, chosen_page(cx)).map(|leaf| leaf.id.clone());
-        self.attention = attention(cx);
+        self.attention = attention_pages(cx);
         cx.notify();
     }
 
@@ -128,8 +128,8 @@ impl SettingsNavView {
                 self.selected.as_ref() == Some(&child.id),
             )
             .on_click(move |_, _, cx| select_page(id.clone(), cx));
-            // 有要处理的事的那一页标个红点（见 [`attention`]）。
-            if self.attention.as_ref() == Some(&child.id) {
+            // 有要处理的事的每一页标个红点（见 [`attention_pages`]）。
+            if self.attention.contains(&child.id) {
                 row.child(
                     div()
                         .size(px(6.))

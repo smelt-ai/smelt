@@ -16,6 +16,21 @@ fn enabled() -> bool {
     })
 }
 
+fn parse_threshold_ms(raw: Option<&str>) -> Option<Duration> {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+        .map(Duration::from_millis)
+}
+
+/// `SMELT_SLOW_FRAME_MS` 设置的慢帧阈值（毫秒）；未设置或 0 时关闭。
+pub fn slow_frame_threshold() -> Option<Duration> {
+    static THRESHOLD: OnceLock<Option<Duration>> = OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        let raw = std::env::var("SMELT_SLOW_FRAME_MS").ok();
+        parse_threshold_ms(raw.as_deref())
+    })
+}
+
 #[derive(Default)]
 struct ViewStats {
     renders: u32,
@@ -61,7 +76,7 @@ impl RenderTiming {
     pub fn start(view: &'static str) -> Self {
         Self {
             view,
-            started: enabled().then(Instant::now),
+            started: (enabled() || slow_frame_threshold().is_some()).then(Instant::now),
         }
     }
 }
@@ -72,6 +87,17 @@ impl Drop for RenderTiming {
             return;
         };
         let now = Instant::now();
+        let elapsed = now - started;
+        if slow_frame_threshold().is_some_and(|threshold| elapsed >= threshold) {
+            eprintln!(
+                "[smelt slow frame] {} render={:.2}ms",
+                self.view,
+                elapsed.as_secs_f64() * 1000.0
+            );
+        }
+        if !enabled() {
+            return;
+        }
         WINDOW.with(|window| {
             let mut window = window.borrow_mut();
             let current = window.get_or_insert_with(|| Window {
@@ -82,7 +108,7 @@ impl Drop for RenderTiming {
                 .views
                 .entry(self.view)
                 .or_default()
-                .record(now - started);
+                .record(elapsed);
             if now - current.started >= REPORT_INTERVAL {
                 let lines = current
                     .views
@@ -108,6 +134,18 @@ mod tests {
         assert_eq!(
             stats.line("Workspace"),
             "Workspace 2 次/秒 · 平均 3.00ms · 最长 4.00ms"
+        );
+    }
+
+    #[test]
+    fn parses_slow_frame_threshold_ms() {
+        assert_eq!(parse_threshold_ms(None), None);
+        assert_eq!(parse_threshold_ms(Some("")), None);
+        assert_eq!(parse_threshold_ms(Some("0")), None);
+        assert_eq!(parse_threshold_ms(Some("bad")), None);
+        assert_eq!(
+            parse_threshold_ms(Some(" 16 ")),
+            Some(Duration::from_millis(16))
         );
     }
 }

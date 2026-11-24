@@ -115,6 +115,13 @@ impl api::Host for SmeltHost {
             .cloned()
     }
 
+    fn sessions_revision(&self, machine: &RuntimeKey, cx: &App) -> Option<(u64, u64)> {
+        Some((
+            crate::WorkspaceDirectoriesGlobal::revision(machine, cx),
+            DaemonStates::revision(machine, cx),
+        ))
+    }
+
     fn notification_permission(&self, _cx: &App) -> api::NotificationPermission {
         status_item::notification_permission()
     }
@@ -188,7 +195,7 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
     let views = workspace.clone();
     let pages = workspace.clone();
     let shown = workspace.clone();
-    let mut commands = vec![
+    let commands = vec![
         // 开窗口、开视图、开页面只改人眼前看到的，开给命令行：智能体写完插件能把它亮出来。
         api::SHOW_MAIN_WINDOW
             .spec(
@@ -234,12 +241,28 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
                 Ok(())
             },
         ),
-        api::OPEN_IN_TEXT_EDITOR.spec(api::text!("command.open_in_text_editor"), |args, _, _| {
-            crate::system_open::open_in_system_text_editor(&args.path)
-        }),
-        api::OPEN_IN_FILE_MANAGER.spec(api::text!("command.open_in_file_manager"), |args, _, _| {
-            crate::system_open::open_in_file_manager(&args.path)
-        }),
+        api::OPEN_IN_TEXT_EDITOR.spec_async(
+            api::text!("command.open_in_text_editor"),
+            |args, _, cx| {
+                cx.spawn(async move |_| {
+                    smelt_sys::blocking::run(move || {
+                        crate::system_open::open_in_system_text_editor(&args.path)
+                    })
+                    .await
+                })
+            },
+        ),
+        api::OPEN_IN_FILE_MANAGER.spec_async(
+            api::text!("command.open_in_file_manager"),
+            |args, _, cx| {
+                cx.spawn(async move |_| {
+                    smelt_sys::blocking::run(move || {
+                        crate::system_open::open_in_file_manager(&args.path)
+                    })
+                    .await
+                })
+            },
+        ),
         api::PICK_PATHS.spec_async(
             api::text!("command.pick_paths"),
             move |request, window, cx| {
@@ -345,8 +368,6 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
             Ok(())
         }),
     ];
-    commands.extend(crate::maintenance::app_commands());
-    commands.extend(crate::updater::app_commands(workspace));
     commands
 }
 

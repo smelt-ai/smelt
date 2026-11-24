@@ -1,6 +1,0 @@
-{
-  "id": "smelt.updater",
-  "name": "Updates & About",
-  "version": "1.0.0",
-  "entry": "nsh.tsx"
-}

@@ -2,8 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { OWNER, STANDARD, WORKBENCH, WORKBENCH_INDEX } from "../contract.js";
-
 function views(panel) {
   const children = Array.isArray(panel?.children) ? panel.children : [];
   if (children.length === 0) return [panel?.panel_name ?? ""];
@@ -20,14 +18,30 @@ function stackViews(stack) {
 }
 
 describe("smelt.layouts standard layout", () => {
-  const standardPath = join(import.meta.dir, "..", "layouts", "standard.json");
-  const state = JSON.parse(readFileSync(standardPath, "utf8"));
+  const root = join(import.meta.dir, "..");
+  const manifest = JSON.parse(readFileSync(join(root, "smelt-plugin.json"), "utf8"));
+  const state = JSON.parse(readFileSync(join(root, "layouts", "standard.json"), "utf8"));
 
-  test("约定 id 沿用原 Rust 插件来源", () => {
-    expect(OWNER).toBe("smelt.layouts");
-    expect(WORKBENCH).toBe("smelt.layouts/workbench");
-    expect(STANDARD).toBe("smelt.layouts/standard");
-    expect(WORKBENCH_INDEX).toBe("smelt.sessions/session");
+  test("清单以纯声明方式登记首页与默认布局，不需要 JS 入口", () => {
+    expect(manifest.id).toBe("smelt.layouts");
+    expect(manifest.entry).toBeUndefined();
+    expect(manifest.pages).toEqual([
+      {
+        name: "workbench",
+        title_key: "page.workbench",
+        home: true,
+        index: "smelt.sessions/session",
+      },
+    ]);
+    expect(manifest.layouts).toEqual([
+      {
+        page: "smelt.layouts/workbench",
+        name: "standard",
+        title_key: "layout.standard",
+        file: "layouts/standard.json",
+        materials: { left: "sidebar" },
+      },
+    ]);
   });
 
   test("默认布局把侧栏摆在左停靠区一摞、右侧面板组开着、出口在中间", () => {

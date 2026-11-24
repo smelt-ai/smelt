@@ -2,7 +2,7 @@
 
 import { computed, Scroll, Text, View } from "nsh";
 import { ContextMenu } from "nsh/base";
-import { SmeltButton, SmeltIcon, state as hostState, t } from "smelt/sdk";
+import { locale, SmeltButton, SmeltIcon, t } from "smelt/sdk";
 
 import {
   agentCardPrompt,
@@ -99,13 +99,13 @@ function buildCreateMenuEntries(): FlatMenuEntry[] {
 function CreateAgentButton(props: { small?: boolean }) {
   const engines = () => catalog().agent_engines;
   const ms = computed(() => {
-    hostState();
+    locale();
     agentHostsSignal();
     return creationMachines();
   });
   const direct = computed(() => ms().length === 1 && engines().length === 1);
   const menuEntries = computed(() => {
-    hostState();
+    locale();
     agentHostsSignal();
     return buildCreateMenuEntries();
   });
@@ -155,7 +155,7 @@ function CreateAgentButton(props: { small?: boolean }) {
 
 function DefaultAgentPicker() {
   const plan = computed(() => {
-    hostState();
+    locale();
     agentHostsSignal();
     return getNewConversationPlan();
   });
@@ -169,7 +169,7 @@ function DefaultAgentPicker() {
   });
 
   const menuEntries = computed<FlatMenuEntry[]>(() => {
-    hostState();
+    locale();
     const p = plan();
     const startOnPick = p.intent.kind !== "start" && pickingForConversation();
     const currentKey =
@@ -369,7 +369,7 @@ export function AgentCatalogView() {
   const look = currentTheme;
 
   const groups = computed<MachineGroup[]>(() => {
-    hostState();
+    locale();
     agentHostsSignal();
     const attached = attachedMachines();
     const keys: Array<string | null> =

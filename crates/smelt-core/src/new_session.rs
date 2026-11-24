@@ -24,11 +24,27 @@ fn stored_launch_entries_on(store: &smelt_store::Store) -> Vec<LaunchEntry> {
     crate::launch_settings::load_on(store).entries
 }
 
-pub fn load_preferences() -> NewSessionPreferences {
-    match crate::sqlite_state::default_sqlite_store()
-        .and_then(|store| store.new_session_pins().map_err(|error| error.to_string()))
-    {
+fn conversation_options_with(
+    snapshot: Option<&smelt_store::AgentUiSnapshot>,
+) -> Vec<AcpAgentOption> {
+    let mut options = crate::session_control::agent_definition_options_with(snapshot);
+    options.extend(crate::session_control::agent_options_with(snapshot));
+    options
+}
+
+fn load_preferences_on(store: &smelt_store::Store) -> NewSessionPreferences {
+    match store.new_session_pins() {
         Ok(pinned) => NewSessionPreferences { pinned },
+        Err(error) => {
+            eprintln!("[new-session] 读取 Pin 偏好失败，使用默认值: {error}");
+            NewSessionPreferences::default()
+        }
+    }
+}
+
+pub fn load_preferences() -> NewSessionPreferences {
+    match crate::sqlite_state::default_sqlite_store() {
+        Ok(store) => load_preferences_on(&store),
         Err(error) => {
             eprintln!("[new-session] 读取 Pin 偏好失败，使用默认值: {error}");
             NewSessionPreferences::default()
@@ -39,51 +55,94 @@ pub fn load_preferences() -> NewSessionPreferences {
 /// 切换一个动作的「常用」标记，返回切换后的偏好。偏好存在运行时：桌面和手机的新建
 /// 菜单读的是同一份。
 pub fn toggle_pin(params: PinParams) -> NewSessionPreferences {
-    let mut preferences = load_preferences();
+    let Ok(store) = crate::sqlite_state::default_sqlite_store() else {
+        let mut preferences = NewSessionPreferences::default();
+        preferences.toggle(&params.key);
+        return preferences;
+    };
+    let mut preferences = load_preferences_on(&store);
     preferences.toggle(&params.key);
-    save_preferences(&preferences);
+    if let Err(error) = store.put_new_session_pins(&preferences.pinned) {
+        eprintln!("[new-session] 保存 Pin 偏好失败: {error}");
+    }
     preferences
 }
 
-fn save_preferences(preferences: &NewSessionPreferences) {
-    if let Err(error) = crate::sqlite_state::default_sqlite_store().and_then(|store| {
-        store
-            .put_new_session_pins(&preferences.pinned)
-            .map_err(|error| error.to_string())
-    }) {
-        eprintln!("[new-session] 保存 Pin 偏好失败: {error}");
-    }
-}
-
-/// 无 GUI 进程时的对话入口清单：产品智能体在前，裸引擎与 profile 在后——与桌面
-/// 新建菜单同序，别让同一份清单在两端读出不同的推荐顺序。
-pub fn stored_conversation_options() -> Vec<AcpAgentOption> {
-    let mut options = crate::session_control::agent_definition_options();
-    options.extend(crate::session_control::agent_options());
-    options
-}
-
-/// 守护侧的完整目录：读同一份落盘配置与同一份 Pin 偏好。`conversation_options`
-/// 由调用方读一次传进来（[`stored_conversation_options`]），和它一起下发的选项清单
-/// 才是同一份快照。
-pub fn stored_new_session_sections(
-    conversation_options: &[AcpAgentOption],
+/// 在给定 `store` 上一次性读完 UI 快照（智能体定义 + env + profile）、启动项与 Pin 偏好，
+/// 拼出完整的对话选项与新建目录分段（只拿一次 SQLite 连接锁）。
+pub fn stored_catalog_on(
+    store: &smelt_store::Store,
     diagnostics: Option<&AcpRuntimeDiagnostics>,
-) -> NewSessionSections {
-    let actions = new_session_actions(conversation_options, &stored_launch_entries(), diagnostics);
-    build_sections(&actions, &load_preferences())
+) -> (Vec<AcpAgentOption>, NewSessionSections) {
+    let snapshot = match store.get_agent_ui_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            eprintln!("[new-session] 读取智能体快照失败，使用默认值: {error}");
+            None
+        }
+    };
+    let agents = conversation_options_with(snapshot.as_ref());
+    let entries = stored_launch_entries_on(store);
+    let preferences = load_preferences_on(store);
+    let actions = new_session_actions(&agents, &entries, diagnostics);
+    let sections = build_sections(&actions, &preferences);
+    (agents, sections)
 }
 
-/// 按 key 找一条启动动作。客户端只回传 key，命令永远在这台机器上解析——别让远程
-/// 设备决定跑什么进程。探测状态不参与解析：目录里还在的启动项就能起，免得打开菜单后
-/// CLI 被挪走，让刚点下的那一行变成「未知启动项」。
+/// 同 [`stored_catalog_on`]，使用当前进程默认 SQLite 库；测试未启用 SQLite 时退回出厂默认。
+pub fn stored_catalog(
+    diagnostics: Option<&AcpRuntimeDiagnostics>,
+) -> (Vec<AcpAgentOption>, NewSessionSections) {
+    if let Ok(store) = crate::sqlite_state::default_sqlite_store() {
+        return stored_catalog_on(&store, diagnostics);
+    }
+    let agents = conversation_options_with(None);
+    let actions = new_session_actions(&agents, &default_launch_entries(), diagnostics);
+    let sections = build_sections(&actions, &NewSessionPreferences::default());
+    (agents, sections)
+}
+
+/// 按 key 一次读库解析出启动动作与对应的对话 Agent 选项（若目标是对话）。
+///
+/// 客户端只回传 key，命令永远在这台机器上解析——别让远程设备决定跑什么进程。
+/// 探测状态不参与解析：目录里还在的启动项就能起，免得打开菜单后 CLI 被挪走，
+/// 让刚点下的那一行变成「未知启动项」。
+pub fn resolve_stored_action(key: &str) -> Option<(NewSessionAction, Option<AcpAgentOption>)> {
+    let (agents, entries) = match crate::sqlite_state::default_sqlite_store() {
+        Ok(store) => {
+            let snapshot = store.get_agent_ui_snapshot().ok().flatten();
+            (
+                conversation_options_with(snapshot.as_ref()),
+                stored_launch_entries_on(&store),
+            )
+        }
+        Err(_) => (conversation_options_with(None), default_launch_entries()),
+    };
+    resolve_action_from(&agents, &entries, key)
+}
+
+fn resolve_action_from(
+    agents: &[AcpAgentOption],
+    entries: &[LaunchEntry],
+    key: &str,
+) -> Option<(NewSessionAction, Option<AcpAgentOption>)> {
+    let actions = new_session_actions(agents, entries, None);
+    let action = find_action(&actions, key)?.clone();
+    let option = match &action.target {
+        NewSessionTarget::Conversation {
+            agent_option_id, ..
+        } => agents
+            .iter()
+            .find(|option| option.id == *agent_option_id)
+            .cloned(),
+        NewSessionTarget::Terminal { .. } | NewSessionTarget::BlankTerminal => None,
+    };
+    Some((action, option))
+}
+
+/// 按 key 找一条启动动作（仅返回动作元数据）。
 pub fn find_stored_action(key: &str) -> Option<NewSessionAction> {
-    let actions = new_session_actions(
-        &stored_conversation_options(),
-        &stored_launch_entries(),
-        None,
-    );
-    find_action(&actions, key).cloned()
+    resolve_stored_action(key).map(|(action, _)| action)
 }
 
 #[cfg(test)]
@@ -436,5 +495,75 @@ mod runtime_detection_tests {
             launch_entry_detected("zsh -l", Some(&diagnostics)),
             "对不上内置 agent 的自定义命令应始终显示"
         );
+    }
+
+    #[test]
+    fn stored_catalog_on_reads_agents_launches_and_pins_from_one_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = smelt_store::Store::open_or_create(dir.path().join("smelt.db")).unwrap();
+        store
+            .insert_agent_definition(&smelt_store::AgentDefinitionRecord {
+                id: "assistant".into(),
+                name: "开发助理".into(),
+                description: String::new(),
+                engine_kind_id: "pi".into(),
+                prompt: "Be helpful".into(),
+                plugins_json: b"[]".to_vec(),
+                mcp_servers_json: b"[]".to_vec(),
+                context_folders_json: b"[]".to_vec(),
+                context_links_json: b"[]".to_vec(),
+                model_provider: String::new(),
+                model_id: String::new(),
+                memory_enabled: true,
+            })
+            .unwrap();
+        store
+            .put_launch_snapshot(&smelt_store::LaunchSnapshot {
+                version: crate::launch_settings::LAUNCH_CONFIG_VERSION,
+                entries: vec![smelt_store::LaunchEntryRecord {
+                    label: "Shell".into(),
+                    command: "zsh".into(),
+                    provider: None,
+                }],
+            })
+            .unwrap();
+        store
+            .put_new_session_pins(&["conversation:agent:assistant".into()])
+            .unwrap();
+
+        let (agents, sections) = super::stored_catalog_on(&store, None);
+        assert!(agents.iter().any(|a| a.id == "agent:assistant"));
+        assert_eq!(
+            sections
+                .common
+                .iter()
+                .map(|a| a.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["conversation:agent:assistant"]
+        );
+        assert!(
+            sections
+                .conversation
+                .iter()
+                .all(|a| a.key != "conversation:agent:assistant")
+        );
+        assert!(
+            sections
+                .terminal
+                .iter()
+                .any(|a| a.key == super::BLANK_TERMINAL_KEY)
+        );
+
+        // 单次解析同时产出 launch action 与对应的 AcpAgentOption。
+        let entries = [super::LaunchEntry {
+            label: "Shell".into(),
+            command: "zsh".into(),
+            provider: None,
+        }];
+        let (action, option) =
+            super::resolve_action_from(&agents, &entries, "conversation:agent:assistant")
+                .expect("should resolve action and option from same snapshot");
+        assert_eq!(action.key, "conversation:agent:assistant");
+        assert_eq!(option.expect("agent option").id, "agent:assistant");
     }
 }

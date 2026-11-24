@@ -16,8 +16,10 @@ mod dock;
 mod host_dialog;
 mod host_views;
 mod keymap;
+mod language;
 mod local_daemon;
 mod maintenance;
+mod notifications;
 mod overlay;
 mod plugin_host;
 mod plugins;
@@ -29,6 +31,7 @@ pub(crate) use runtimes::RuntimeKey;
 mod settings;
 mod status_item;
 mod system_open;
+mod terminal_settings;
 mod updater;
 mod window_backdrop;
 mod workspace_commands;
@@ -129,11 +132,19 @@ impl Global for PersistentShell {}
 #[derive(Default)]
 struct WorkspaceDirectoriesGlobal {
     received: HashMap<RuntimeKey, smelt_model::workspace_directory::WorkspaceDirectory>,
+    revisions: HashMap<RuntimeKey, u64>,
+    next_revision: u64,
 }
 
 impl Global for WorkspaceDirectoriesGlobal {}
 
 impl WorkspaceDirectoriesGlobal {
+    fn revision(key: &RuntimeKey, cx: &App) -> u64 {
+        cx.try_global::<Self>()
+            .and_then(|global| global.revisions.get(key).copied())
+            .unwrap_or(0)
+    }
+
     fn receive(
         key: &RuntimeKey,
         directory: smelt_model::workspace_directory::WorkspaceDirectory,
@@ -151,9 +162,11 @@ impl WorkspaceDirectoriesGlobal {
             Some(current) => directory.version().supersedes(&current.version()),
         };
         if take {
-            cx.default_global::<Self>()
-                .received
-                .insert(key.clone(), directory);
+            let global = cx.default_global::<Self>();
+            global.next_revision = global.next_revision.wrapping_add(1).max(1);
+            let rev = global.next_revision;
+            global.received.insert(key.clone(), directory);
+            global.revisions.insert(key.clone(), rev);
         }
     }
 }
@@ -850,8 +863,8 @@ fn main() {
         // 外观设置：读盘设为全局单例。
         // 主题模式在建窗口之前落地，首帧就是对的，不会先闪一下深色再变浅。
         // 主题先登记再恢复外观，插件主题在首帧前即可生效。
-        // 界面语言先按系统的首选语言定；语言插件启动时换成用户在设置里选的。
-        smelt_plugin_api::set_locale(smelt_plugin_api::system_locale(), cx);
+        // 界面语言在主窗口打开之前按用户设置（或系统首选）定下，避免首帧闪烁。
+        language::restore_saved_locale(cx);
         plugins::register_initial_themes(cx);
         let appearance = load_appearance();
         cx.set_global(appearance.clone());
@@ -889,14 +902,16 @@ fn main() {
         if let Err(error) = bundled_helpers::sync_bundled_smelt_notify() {
             eprintln!("[workspace] 同步 smelt-notify 失败：{error}");
         }
-        #[cfg(target_os = "macos")]
-        maintenance::sync_cli_link_at_startup(cx);
         // 登记过的远程运行时：同步读客户端库，iroh 推迟到第一次连接时在后台绑。
         runtimes::start_runtime_hub(cx);
         // 插件要读机器列表，在 RuntimeHub 之后、开主窗口之前装。
         plugin_host::install(current_ws.clone(), cx);
-        // 宿主应用生命周期：在线更新、移入「应用程序」、退出守卫与帮助菜单。
+        // 内置设置与系统模块：界面语言、终端设置、清理与命令行、在线更新、通知与菜单栏。
+        language::register(cx);
+        terminal_settings::register(cx);
+        maintenance::register(cx);
         updater::register(cx);
+        notifications::register(cx);
         // 快捷键（命令的出厂键位 + 用户改过的）和应用菜单栏，见 `keymap`。要订阅宿主事件，
         // 在插件宿主之后装；命令随后由工作台和插件登记，登记一次重装一次键表。
         keymap::init(cx);
@@ -966,7 +981,7 @@ fn main() {
                             request_id: request_id.clone(),
                             outcome,
                         };
-                        cx.background_executor().spawn(async move {
+                        smelt_sys::blocking::spawn_detached(move || {
                             let request = serde_json::json!({
                                 "op": smelt_runtime_client::protocol::daemon::DaemonOperation::AppearanceReceipt,
                                 "receipt": receipt,
@@ -976,7 +991,7 @@ fn main() {
                             ) {
                                 eprintln!("[appearance] 发送外观修改回执失败：{error}");
                             }
-                        }).detach();
+                        });
                     }
                     continue;
                 }

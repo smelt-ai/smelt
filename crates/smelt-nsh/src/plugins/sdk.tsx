@@ -22,6 +22,19 @@ import {
   Tooltip,
 } from "nsh/base";
 import { Icon as NativeSvgIcon, Vector as NativeSvgVector } from "smelt/host";
+import {
+  buildTextTable,
+  collectEventTypes,
+  dispatchIncomingCommand,
+  dispatchIncomingEvent,
+  hasEventListeners,
+  registerDefaultCommandHandler,
+  registerEventListener,
+  resolveTranslation,
+  setEventSyncHandler,
+  setLocaleReader,
+  setTextsByPlugin,
+} from "./provider.tsx";
 export { bootTask } from "./provider.tsx";
 
 // ---- 原生组件封装（仅保留 NSH 拼不出的 GPUI 能力件：重视图、小人、标题带、毛玻璃坐标） ----
@@ -280,18 +293,6 @@ export function daemonStateStatus(stateObj: unknown): "needs_you" | "running" | 
   return Smelt.daemonStateStatus(JSON.stringify(stateObj)) ?? null;
 }
 
-export function terminalThemeSnapshot(): any {
-  return JSON.parse(Smelt.terminalThemeSnapshot());
-}
-
-export function setTerminalFontPx(px: number): Promise<void> {
-  return host.call("set_terminal_font_px", { px: Math.round(px) });
-}
-
-export function attentionTexts(item: unknown): { title: string; message: string } {
-  return JSON.parse(Smelt.attentionTexts(JSON.stringify(item)));
-}
-
 export function agentIdFromLaunch(launch: string): string | null {
   return Smelt.agentIdFromLaunch(launch) ?? null;
 }
@@ -310,6 +311,27 @@ export function dataDir(): string {
 
 // ---- 响应式宿主状态 ----
 
+export type StateSlice =
+  | "locale"
+  | "system_locale"
+  | "locales"
+  | "window_active"
+  | "notification_permission"
+  | "machines_meta"
+  | "sessions_data"
+  | "connections"
+  | "active_context"
+  | "pages"
+  | "views"
+  | "commands"
+  | "js_views"
+  | "safe_areas"
+  | "bar_insets"
+  | "theme"
+  | "shell";
+
+export type EventFilter = string;
+
 export interface SmeltState {
   revision: number;
   locale: string;
@@ -323,7 +345,8 @@ export interface SmeltState {
     | { kind: "denied" }
     | { kind: "unavailable"; reason: string }
     | { kind: "unsupported" };
-  machines: any[];
+  machines_meta: any[];
+  sessions_data: any[];
   connections: any;
   active_context: { project: any; session: any };
   pages: any[];
@@ -344,7 +367,8 @@ const DEFAULT_STATE: SmeltState = {
   locales: [],
   window_active: true,
   notification_permission: { kind: "unsupported" },
-  machines: [],
+  machines_meta: [],
+  sessions_data: [],
   connections: { remotes: [], load_error: null },
   active_context: { project: null, session: null },
   pages: [],
@@ -400,10 +424,11 @@ const DEFAULT_STATE: SmeltState = {
   texts: {},
 };
 
-export const state = signal<SmeltState>(DEFAULT_STATE);
+const stateSignal = signal<SmeltState>(DEFAULT_STATE);
 
-// 按顶层切片拆分的细粒度信号：只在对应切片真正变化时触发订阅方，
-// 避免窗口失焦、机器心跳或切换会话把所有插件里的 `t()` / `theme()` / `commands()` 连带重算一遍。
+// 按顶层切片拆分的细粒度信号：仅当对应切片在宿主侧真正变化并推送过来时更新，
+// 零 JSON.stringify 全量重比对；插件与主壳各自只订实际读取的切片。
+const hostReadySlice = signal<boolean>(false);
 const localeSlice = signal<string>(DEFAULT_STATE.locale);
 const systemLocaleSlice = signal<string>(DEFAULT_STATE.system_locale);
 const localesSlice = signal<Array<{ code: string; name: string }>>(DEFAULT_STATE.locales);
@@ -411,7 +436,8 @@ const windowActiveSlice = signal<boolean>(DEFAULT_STATE.window_active);
 const notificationPermissionSlice = signal<SmeltState["notification_permission"]>(
   DEFAULT_STATE.notification_permission,
 );
-const machinesSlice = signal<any[]>(DEFAULT_STATE.machines);
+const machinesMetaSlice = signal<any[]>(DEFAULT_STATE.machines_meta);
+const sessionsDataSlice = signal<any[]>(DEFAULT_STATE.sessions_data);
 const connectionsSlice = signal<any>(DEFAULT_STATE.connections);
 const activeContextSlice = signal<{ project: any; session: any }>(DEFAULT_STATE.active_context);
 const pagesSlice = signal<any[]>(DEFAULT_STATE.pages);
@@ -423,164 +449,346 @@ const themeSlice = signal<any>(DEFAULT_STATE.theme);
 const textsSlice = signal<Record<string, Record<string, string>>>({});
 const shellSlice = signal<any>(undefined);
 
-const sliceJsonCache: Record<string, string> = {};
-
-function syncObjectSlice<T>(key: string, sig: { set: (v: T) => void }, next: T) {
-  const encoded = JSON.stringify(next);
-  if (sliceJsonCache[key] === encoded) return;
-  sliceJsonCache[key] = encoded;
-  sig.set(next);
-}
+const sliceRevision: Record<string, number> = {};
 
 let cachedTexts: Record<string, Record<string, string>> = {};
-let initialized = false;
-const stateListeners = new Set<(next: SmeltState) => void>();
-const eventListeners = new Set<(event: any) => void>();
+let handlersAttached = false;
+let initStarted = false;
+let initScheduled = false;
+let initPromise: Promise<SmeltState> | null = null;
+let fallbackInitTimer: ReturnType<typeof setTimeout> | null = null;
+
+interface SliceListenerEntry {
+  slices: Set<string>;
+  fn: (changed: readonly StateSlice[]) => void;
+}
+const sliceListeners = new Set<SliceListenerEntry>();
+
 const acpEventListeners = new Set<(event: any) => void>();
-let commandHandler: ((call: { name: string; args: any }) => any) | null = null;
-const pendingCommands: Array<{ id: number; name: string; args: any }> = [];
 
-function notifyStateListeners(next: SmeltState) {
-  for (const listener of [...stateListeners]) {
-    try {
-      listener(next);
-    } catch (error) {
-      console.error("[smelt/sdk] state listener error:", error);
-    }
-  }
-}
+const subscribedSlices = new Set<string>();
+const pendingAddSlices = new Set<string>();
+let pendingEventSync = false;
+let subscribeScheduled = false;
+let inFlightSubscribe: Promise<void> | null = null;
 
-function applyState(next: any) {
-  if (!next || typeof next !== "object") return;
-  const hasTexts = Boolean(next.texts && typeof next.texts === "object");
-  if (hasTexts) {
-    cachedTexts = next.texts;
+function flushSubscribe(): Promise<void> {
+  subscribeScheduled = false;
+  if (!initStarted || initScheduled) {
+    return inFlightSubscribe ?? Promise.resolve();
   }
-  const current = state();
-  const rev = typeof next.revision === "number" ? next.revision : 0;
-  if (rev > 0 && rev < current.revision) {
-    if (hasTexts && current.texts !== next.texts) {
-      syncObjectSlice("texts", textsSlice, next.texts);
-      const patched: SmeltState = { ...current, texts: next.texts };
-      state.set(patched);
-      notifyStateListeners(patched);
-    }
-    return;
+  const payload: Record<string, unknown> = {};
+  if (pendingAddSlices.size > 0) {
+    payload.add_slices = [...pendingAddSlices];
+    pendingAddSlices.clear();
   }
-  const merged: SmeltState = {
-    ...DEFAULT_STATE,
-    ...next,
-    texts: hasTexts ? next.texts : cachedTexts,
-  };
-  if (localeSlice() !== merged.locale) localeSlice.set(merged.locale);
-  if (systemLocaleSlice() !== merged.system_locale) systemLocaleSlice.set(merged.system_locale);
-  if (windowActiveSlice() !== (merged.window_active !== false)) {
-    windowActiveSlice.set(merged.window_active !== false);
+  if (pendingEventSync) {
+    payload.events_all = false;
+    payload.event_types = collectEventTypes();
+    pendingEventSync = false;
   }
-  syncObjectSlice("locales", localesSlice, merged.locales ?? []);
-  syncObjectSlice(
-    "notification_permission",
-    notificationPermissionSlice,
-    merged.notification_permission ?? { kind: "unsupported" },
-  );
-  syncObjectSlice("machines", machinesSlice, merged.machines ?? []);
-  syncObjectSlice(
-    "connections",
-    connectionsSlice,
-    merged.connections ?? { remotes: [], load_error: null },
-  );
-  syncObjectSlice(
-    "active_context",
-    activeContextSlice,
-    merged.active_context ?? { project: null, session: null },
-  );
-  syncObjectSlice("pages", pagesSlice, merged.pages ?? []);
-  syncObjectSlice("views", viewsSlice, merged.views ?? []);
-  syncObjectSlice("commands", commandsSlice, merged.commands ?? []);
-  syncObjectSlice("js_views", jsViewsSlice, merged.js_views ?? {});
-  syncObjectSlice("safe_areas", safeAreasSlice, merged.safe_areas ?? {});
-  syncObjectSlice("theme", themeSlice, merged.theme ?? DEFAULT_STATE.theme);
-  if (hasTexts) {
-    syncObjectSlice("texts", textsSlice, next.texts);
+  if (Object.keys(payload).length === 0) {
+    return inFlightSubscribe ?? Promise.resolve();
   }
-  if (merged.shell !== undefined) {
-    syncObjectSlice("shell", shellSlice, merged.shell);
-  }
-  state.set(merged);
-  notifyStateListeners(merged);
-}
-
-export function initHost(): Promise<SmeltState> {
-  if (!initialized) {
-    initialized = true;
-    host.on("smelt.state", (next: any) => applyState(next));
-    host.on("smelt.event", (event: any) => {
-      for (const listener of [...eventListeners]) {
-        try {
-          listener(event);
-        } catch (error) {
-          console.error("[smelt/sdk] event listener error:", error);
-        }
-      }
-    });
-    host.on("smelt.acp.event", (event: any) => {
-      for (const listener of [...acpEventListeners]) {
-        try {
-          listener(event);
-        } catch (error) {
-          console.error("[smelt/sdk] acp event listener error:", error);
-        }
-      }
-    });
-    host.on("smelt.command", (call: any) => {
-      if (!call || typeof call.id !== "number" || typeof call.name !== "string") return;
-      if (!commandHandler) {
-        pendingCommands.push(call);
-        return;
-      }
-      dispatchCommand(call);
-    });
-  }
-  return host
-    .call("state")
-    .then((initial: any) => {
-      applyState(initial);
-      return state();
-    })
-    .catch((error: unknown) => {
-      console.error("[smelt/sdk] state() failed:", error);
-      return state();
-    });
-}
-
-function dispatchCommand(call: { id: number; name: string; args: any }) {
-  const handler = commandHandler;
-  if (!handler) return;
-  Promise.resolve()
-    .then(() => handler({ name: call.name, args: call.args }))
-    .then(
-      (value) => host.call("command.reply", { id: call.id, ok: true, value: value ?? null }),
-      (error: any) =>
-        host.call("command.reply", {
-          id: call.id,
-          ok: false,
-          error: error?.message ?? String(error),
-        }),
+  const base = inFlightSubscribe ?? Promise.resolve();
+  const tracked = base
+    .then(() =>
+      host
+        .call("subscribe", payload)
+        .then((res: any) => {
+          if (res && typeof res === "object" && res.patch && typeof res.patch === "object") {
+            if (Object.keys(res.patch).length > 0) {
+              const rev = typeof res.revision === "number" ? res.revision : undefined;
+              applyState(res.patch, rev);
+            }
+          }
+        })
+        .catch(() => {}),
     )
-    .catch(() => {});
+    .finally(() => {
+      if (inFlightSubscribe === tracked) {
+        inFlightSubscribe = null;
+      }
+    });
+  inFlightSubscribe = tracked;
+  return tracked;
 }
 
-// 立即挂载监听并拉首份状态。
-void initHost();
-
-export function onState(listener: (next: SmeltState) => void): () => void {
-  stateListeners.add(listener);
-  return () => stateListeners.delete(listener);
+function scheduleSubscribe() {
+  if (!initStarted || initScheduled || subscribeScheduled) return;
+  subscribeScheduled = true;
+  queueMicrotask(() => {
+    void flushSubscribe();
+  });
 }
 
-export function onEvent(listener: (event: any) => void): () => void {
-  eventListeners.add(listener);
-  return () => eventListeners.delete(listener);
+function wantSlice(key: StateSlice) {
+  if (subscribedSlices.has(key)) return;
+  subscribedSlices.add(key);
+  pendingAddSlices.add(key);
+  scheduleSubscribe();
+}
+
+function syncEventSubscription() {
+  pendingEventSync = true;
+  scheduleSubscribe();
+}
+
+function notifySliceListeners(changedKeys: readonly string[]) {
+  if (changedKeys.length === 0 || sliceListeners.size === 0) return;
+  for (const entry of [...sliceListeners]) {
+    const matched = changedKeys.filter((k) => entry.slices.has(k)) as StateSlice[];
+    if (matched.length === 0) continue;
+    try {
+      entry.fn(matched);
+    } catch (error) {
+      console.error("[smelt/sdk] slice listener error:", error);
+    }
+  }
+}
+
+function canAcceptSlice(key: string, rev: number): boolean {
+  if (rev > 0 && sliceRevision[key] !== undefined && rev < sliceRevision[key]) {
+    return false;
+  }
+  if (rev > 0) sliceRevision[key] = rev;
+  return true;
+}
+
+function applyState(next: any, explicitRev?: number) {
+  if (!next || typeof next !== "object") return;
+  const current = stateSignal();
+  const rev =
+    typeof explicitRev === "number"
+      ? explicitRev
+      : typeof next.revision === "number"
+        ? next.revision
+        : 0;
+  if (rev > 0 && !hostReadySlice()) {
+    hostReadySlice.set(true);
+  }
+  const changedKeys: string[] = [];
+  const merged: SmeltState = { ...current };
+
+  let hasTextPatch = false;
+  if (next.texts && typeof next.texts === "object" && canAcceptSlice("texts", rev)) {
+    cachedTexts = next.texts;
+    textsSlice.set(next.texts);
+    merged.texts = next.texts;
+    hasTextPatch = true;
+  } else {
+    merged.texts = cachedTexts;
+  }
+  if (
+    next.texts_by_plugin &&
+    typeof next.texts_by_plugin === "object" &&
+    canAcceptSlice("texts_by_plugin", rev)
+  ) {
+    setTextsByPlugin(next.texts_by_plugin);
+    hasTextPatch = true;
+  }
+
+  if ("locale" in next && canAcceptSlice("locale", rev)) {
+    const val = typeof next.locale === "string" ? next.locale : DEFAULT_STATE.locale;
+    if (localeSlice() !== val) localeSlice.set(val);
+    merged.locale = val;
+    changedKeys.push("locale");
+  }
+  if ("system_locale" in next && canAcceptSlice("system_locale", rev)) {
+    const val =
+      typeof next.system_locale === "string" ? next.system_locale : DEFAULT_STATE.system_locale;
+    if (systemLocaleSlice() !== val) systemLocaleSlice.set(val);
+    merged.system_locale = val;
+    changedKeys.push("system_locale");
+  }
+  if ("window_active" in next && canAcceptSlice("window_active", rev)) {
+    const val = next.window_active !== false;
+    if (windowActiveSlice() !== val) windowActiveSlice.set(val);
+    merged.window_active = val;
+    changedKeys.push("window_active");
+  }
+  if ("locales" in next && canAcceptSlice("locales", rev)) {
+    const val = next.locales ?? [];
+    localesSlice.set(val);
+    merged.locales = val;
+    changedKeys.push("locales");
+  }
+  if ("notification_permission" in next && canAcceptSlice("notification_permission", rev)) {
+    const val = next.notification_permission ?? { kind: "unsupported" };
+    notificationPermissionSlice.set(val);
+    merged.notification_permission = val;
+    changedKeys.push("notification_permission");
+  }
+  if ("machines_meta" in next && canAcceptSlice("machines_meta", rev)) {
+    const val = next.machines_meta ?? [];
+    machinesMetaSlice.set(val);
+    merged.machines_meta = val;
+    changedKeys.push("machines_meta");
+  }
+  if ("sessions_data" in next && canAcceptSlice("sessions_data", rev)) {
+    const val = next.sessions_data ?? [];
+    sessionsDataSlice.set(val);
+    merged.sessions_data = val;
+    changedKeys.push("sessions_data");
+  }
+  if ("connections" in next && canAcceptSlice("connections", rev)) {
+    const val = next.connections ?? { remotes: [], load_error: null };
+    connectionsSlice.set(val);
+    merged.connections = val;
+    changedKeys.push("connections");
+  }
+  if ("active_context" in next && canAcceptSlice("active_context", rev)) {
+    const val = next.active_context ?? { project: null, session: null };
+    activeContextSlice.set(val);
+    merged.active_context = val;
+    changedKeys.push("active_context");
+  }
+  if ("pages" in next && canAcceptSlice("pages", rev)) {
+    const val = next.pages ?? [];
+    pagesSlice.set(val);
+    merged.pages = val;
+    changedKeys.push("pages");
+  }
+  if ("views" in next && canAcceptSlice("views", rev)) {
+    const val = next.views ?? [];
+    viewsSlice.set(val);
+    merged.views = val;
+    changedKeys.push("views");
+  }
+  if ("commands" in next && canAcceptSlice("commands", rev)) {
+    const val = next.commands ?? [];
+    commandsSlice.set(val);
+    merged.commands = val;
+    changedKeys.push("commands");
+  }
+  if ("js_views" in next && canAcceptSlice("js_views", rev)) {
+    const val = next.js_views ?? {};
+    jsViewsSlice.set(val);
+    merged.js_views = val;
+    changedKeys.push("js_views");
+  }
+  if ("safe_areas" in next && canAcceptSlice("safe_areas", rev)) {
+    const val = next.safe_areas ?? {};
+    safeAreasSlice.set(val);
+    merged.safe_areas = val;
+    changedKeys.push("safe_areas");
+  }
+  if ("theme" in next && canAcceptSlice("theme", rev)) {
+    const val = next.theme ?? DEFAULT_STATE.theme;
+    themeSlice.set(val);
+    merged.theme = val;
+    changedKeys.push("theme");
+  }
+  if (next.shell !== undefined && canAcceptSlice("shell", rev)) {
+    shellSlice.set(next.shell);
+    merged.shell = next.shell;
+    changedKeys.push("shell");
+  }
+  if (changedKeys.length === 0 && !hasTextPatch) return;
+  merged.revision = Math.max(current.revision, rev);
+  stateSignal.set(merged);
+  notifySliceListeners(changedKeys);
+}
+
+function attachHostHandlers() {
+  if (handlersAttached) return;
+  handlersAttached = true;
+  host.on("smelt.state", (next: any) => applyState(next));
+  host.on("smelt.event", (event: any) => dispatchIncomingEvent(event));
+  host.on("smelt.acp.event", (event: any) => {
+    for (const listener of [...acpEventListeners]) {
+      try {
+        listener(event);
+      } catch (error) {
+        console.error("[smelt/sdk] acp event listener error:", error);
+      }
+    }
+  });
+  host.on("smelt.command", (call: any) => dispatchIncomingCommand(call));
+}
+
+export function initHost(initialSlices?: readonly StateSlice[]): Promise<SmeltState> {
+  attachHostHandlers();
+  if (fallbackInitTimer !== null) {
+    clearTimeout(fallbackInitTimer);
+    fallbackInitTimer = null;
+  }
+  const newlyAdded: string[] = [];
+  if (Array.isArray(initialSlices)) {
+    for (const slice of initialSlices) {
+      if (!subscribedSlices.has(slice)) {
+        subscribedSlices.add(slice);
+        if (initStarted && !initScheduled) {
+          pendingAddSlices.add(slice);
+          newlyAdded.push(slice);
+        }
+      }
+    }
+  }
+  if (!initStarted) {
+    initStarted = true;
+    initScheduled = true;
+    // 首帧始终至少带上 locale 以便 `t()` / `locale()` 就绪；其余切片等同一微任务周期的并发 `initHost` 合并后一次拉取。
+    subscribedSlices.add("locale");
+    initPromise = Promise.resolve().then(() => {
+      initScheduled = false;
+      pendingAddSlices.clear();
+      const requestSlices = [...subscribedSlices];
+      if (hasEventListeners()) pendingEventSync = true;
+      const eventSync = pendingEventSync ? flushSubscribe() : Promise.resolve();
+      return Promise.all([
+        host
+          .call("state", { slices: requestSlices })
+          .then((initial: any) => {
+            applyState(initial);
+            return stateSignal();
+          })
+          .catch((error: unknown) => {
+            console.error("[smelt/sdk] state() failed:", error);
+            return stateSignal();
+          }),
+        eventSync,
+      ]).then(([st]) => st);
+    });
+    return initPromise;
+  }
+  if (initScheduled) {
+    return initPromise ?? Promise.resolve(stateSignal());
+  }
+  if (newlyAdded.length > 0 || pendingEventSync || inFlightSubscribe !== null) {
+    return Promise.resolve(initPromise)
+      .then(() => flushSubscribe())
+      .then(() => stateSignal());
+  }
+  return initPromise ?? Promise.resolve(stateSignal());
+}
+
+// 立即挂载本地事件监听；仅当插件自己未显式调 `initHost(...)` 时在下一微任务/宏任务兜底拉默认状态。
+setEventSyncHandler(() => syncEventSubscription());
+attachHostHandlers();
+fallbackInitTimer = setTimeout(() => {
+  fallbackInitTimer = null;
+  if (!initStarted) {
+    void initHost();
+  }
+}, 0);
+
+export function onSlices(
+  slices: readonly StateSlice[],
+  listener: (changed: readonly StateSlice[]) => void,
+): () => void {
+  const wanted = new Set<string>(slices);
+  for (const key of wanted) wantSlice(key as StateSlice);
+  const entry: SliceListenerEntry = { slices: wanted, fn: listener };
+  sliceListeners.add(entry);
+  return () => sliceListeners.delete(entry);
+}
+
+export function onEvent(
+  listener: (event: any) => void,
+  types: readonly EventFilter[],
+): () => void {
+  return registerEventListener(null, listener, types);
 }
 
 export function onAcpEvent(listener: (event: any) => void): () => void {
@@ -668,111 +876,151 @@ export function renderMermaidSvg(source: string): Promise<
 }
 
 export function onCommand(handler: (call: { name: string; args: any }) => any): void {
-  commandHandler = handler;
-  while (pendingCommands.length > 0) {
-    const next = pendingCommands.shift();
-    if (next) dispatchCommand(next);
-  }
+  registerDefaultCommandHandler(handler);
 }
 
 // ---- 国际化 ----
 
 export function locale(): string {
+  wantSlice("locale");
   return localeSlice() || "en";
 }
 
+setLocaleReader(() => locale());
+
 export function t(key: string, params?: Record<string, unknown>): string {
+  wantSlice("locale");
   const curLocale = localeSlice() || "en";
   const tables = textsSlice();
   const dict = Object.keys(tables).length > 0 ? tables : cachedTexts;
-  let raw =
-    dict?.[curLocale]?.[key] ??
-    dict?.[curLocale.split("-")[0]]?.[key] ??
-    dict?.en?.[key] ??
-    key;
-  if (params && typeof raw === "string") {
-    for (const [k, v] of Object.entries(params)) {
-      raw = raw.replaceAll(`%{${k}}`, String(v ?? ""));
-    }
-  }
-  return raw;
+  return resolveTranslation(dict, curLocale, key, params);
 }
 
 /** 构造给 registerViews / registerCommands 用的多语言表（宿主按当前语言动态取）。 */
 export function text(key: string): Record<string, string> {
   const tables = textsSlice();
   const dict = Object.keys(tables).length > 0 ? tables : cachedTexts;
-  const out: Record<string, string> = {};
-  if (dict && typeof dict === "object") {
-    for (const [loc, table] of Object.entries(dict)) {
-      if (table && typeof table[key] === "string") {
-        out[loc] = table[key];
-      }
-    }
-  }
-  if (Object.keys(out).length === 0) out.en = key;
-  return out;
+  return buildTextTable(dict, key);
 }
 
 // ---- 宿主读取与动作（均绑定细粒度切片信号） ----
 
 /** 细粒度主题快照：只在主题或窗口 `rem` 真正变化时触发订阅方。 */
 export function theme(): any {
+  wantSlice("theme");
   return themeSlice();
 }
 
 export const currentTheme = theme;
 
 export function jsViews(): Record<string, { plugin: string; view: string }> {
+  wantSlice("js_views");
   return jsViewsSlice();
 }
 
+export function hostReady(): boolean {
+  return hostReadySlice();
+}
+
+export function texts(): Record<string, Record<string, string>> {
+  const tables = textsSlice();
+  return Object.keys(tables).length > 0 ? tables : cachedTexts;
+}
+
 export function shellState(): any {
+  wantSlice("shell");
   return shellSlice();
 }
 
+export function machineMeta(): any[] {
+  wantSlice("machines_meta");
+  return machinesMetaSlice();
+}
+
+export function machineMetaEntry(machine: string | null | undefined): any {
+  const target = machine ?? null;
+  return machineMeta().find((m) => (m.machine ?? null) === target) ?? null;
+}
+
+function sessionEntry(machine: string | null | undefined): any {
+  wantSlice("sessions_data");
+  const target = machine ?? null;
+  return sessionsDataSlice().find((m) => (m?.machine ?? null) === target) ?? null;
+}
+
 export function machines(): any[] {
-  return machinesSlice();
+  const metas = machineMeta();
+  wantSlice("sessions_data");
+  const sessions = sessionsDataSlice();
+  if (sessions.length === 0) {
+    return metas.map((m) => ({ ...m, directory: null, states: [], facts: [] }));
+  }
+  const byMachine = new Map<string | null, any>();
+  for (const s of sessions) {
+    byMachine.set(s?.machine ?? null, s);
+  }
+  return metas.map((m) => {
+    const s = byMachine.get(m?.machine ?? null);
+    return {
+      ...m,
+      directory: s?.directory ?? null,
+      states: s?.states ?? [],
+      facts: s?.facts ?? [],
+    };
+  });
 }
 
 export function machineEntry(machine: string | null | undefined): any {
-  const target = machine ?? null;
-  return machines().find((m) => (m.machine ?? null) === target) ?? null;
+  const meta = machineMetaEntry(machine);
+  wantSlice("sessions_data");
+  const s = sessionEntry(machine);
+  if (!meta && !s) return null;
+  return {
+    ...(meta ?? { machine: machine ?? null }),
+    directory: s?.directory ?? null,
+    states: s?.states ?? [],
+    facts: s?.facts ?? [],
+  };
 }
 
 export function pathStyle(machine: string | null | undefined): string {
-  return machineEntry(machine)?.path_style ?? (localOs() === "win32" ? "windows" : "posix");
+  return machineMetaEntry(machine)?.path_style ?? (localOs() === "win32" ? "windows" : "posix");
 }
 
 export function workspaceDirectory(machine: string | null | undefined): any {
-  return machineEntry(machine)?.directory ?? null;
+  return sessionEntry(machine)?.directory ?? null;
 }
 
 export function sessionStates(machine: string | null | undefined): any[] {
-  return machineEntry(machine)?.states ?? [];
+  return sessionEntry(machine)?.states ?? [];
 }
 
 export function conversationFacts(machine: string | null | undefined): any[] {
-  return machineEntry(machine)?.facts ?? [];
+  return sessionEntry(machine)?.facts ?? [];
 }
 
 export function connections(): any {
+  wantSlice("connections");
   return connectionsSlice();
 }
 
 export function activeContext(): { project: any; session: any } {
+  wantSlice("active_context");
   return activeContextSlice();
 }
 
 export function views(): any[] {
+  wantSlice("views");
   return viewsSlice();
 }
 
 export function pages(): any[] {
+  wantSlice("pages");
   return pagesSlice();
 }
 
 export function commands(): any[] {
+  wantSlice("commands");
   return commandsSlice();
 }
 
@@ -800,6 +1048,7 @@ export function safeArea(viewId: string): {
   bottom_right: number;
   bar_insets: { left: number; right: number };
 } {
+  wantSlice("safe_areas");
   return (
     safeAreasSlice()?.[viewId] ?? {
       title_bar: false,
@@ -853,10 +1102,12 @@ export function request(
 }
 
 export function windowActive(): boolean {
+  wantSlice("window_active");
   return windowActiveSlice();
 }
 
 export function notificationPermission(): SmeltState["notification_permission"] {
+  wantSlice("notification_permission");
   return notificationPermissionSlice();
 }
 
@@ -957,15 +1208,13 @@ export function launchPath(opts: {
 }
 
 export function locales(): Array<{ code: string; name: string }> {
+  wantSlice("locales");
   return localesSlice();
 }
 
 export function systemLocale(): string {
+  wantSlice("system_locale");
   return systemLocaleSlice() || "en";
-}
-
-export function setLocale(locale: string | null): Promise<void> {
-  return host.call("set_locale", { locale });
 }
 
 export function registerViews(specs: any[]): Promise<void> {
@@ -1015,9 +1264,9 @@ export const store = {
 export async function waitOnline(machine: string | null, failures = 0): Promise<boolean> {
   const target = machine ?? null;
   const status = (): boolean | null => {
-    const entry = machineEntry(target);
+    const entry = machineMetaEntry(target);
     if (entry?.online === true) return true;
-    if (target != null && entry == null && state().revision > 0) return false;
+    if (target != null && entry == null && hostReady()) return false;
     return null;
   };
   if (failures > 0) {
@@ -1031,11 +1280,14 @@ export async function waitOnline(machine: string | null, failures = 0): Promise<
         clearTimeout(timer);
         resolve();
       };
-      const unsubEvent = onEvent((event) => {
-        if (event?.type === "reconnected" && (event.machine ?? null) === target) {
-          finish();
-        }
-      });
+      const unsubEvent = onEvent(
+        (event) => {
+          if (event?.type === "reconnected" && (event.machine ?? null) === target) {
+            finish();
+          }
+        },
+        ["reconnected"],
+      );
       // 轮询例外：运行时在线但上一次调用失败，没有「可以再试了」的事件可等；250ms 起翻倍，上限 8s，重连事件会提前叫醒。
       const timer = setTimeout(finish, backoffMs);
     });
@@ -1046,17 +1298,13 @@ export async function waitOnline(machine: string | null, failures = 0): Promise<
     const check = () => {
       const next = status();
       if (next !== null) {
-        unsubState();
+        unsubSlices();
         unsubEvent();
         resolve(next);
       }
     };
-    const unsubState = onState(check);
-    const unsubEvent = onEvent((event) => {
-      if (event?.type === "machines_changed" || event?.type === "reconnected") {
-        check();
-      }
-    });
+    const unsubSlices = onSlices(["machines_meta"], check);
+    const unsubEvent = onEvent(check, ["machines_changed", "reconnected"]);
     check();
   });
 }
@@ -1602,6 +1850,11 @@ function MermaidDiagramBlock(props: { source: string }) {
   );
 }
 
+const STREAMING_MARKDOWN_OPTIONS = { streaming: true };
+const DEFAULT_MARKDOWN_STYLE = { width: "100%", minWidth: 0 };
+const renderMermaidCustom = (node: any) =>
+  node?.name === "mermaid" ? <MermaidDiagramBlock source={node.text ?? ""} /> : null;
+
 export function SmeltMarkdown(props: {
   markdown: string;
   cwd?: string | null;
@@ -1651,21 +1904,20 @@ export function SmeltMarkdown(props: {
     }
     return base;
   });
+  const rootStyle = computed(() =>
+    props.style ? { ...DEFAULT_MARKDOWN_STYLE, ...props.style } : DEFAULT_MARKDOWN_STYLE,
+  );
   return (
     <TextView
       markdown={props.markdown}
-      options={props.streaming ? { streaming: true } : undefined}
+      options={props.streaming ? STREAMING_MARKDOWN_OPTIONS : undefined}
+      streamingFade={Boolean(props.streaming)}
       selectable={props.selectable ?? true}
       links="report"
       extensions={MERMAID_EXTENSIONS}
-      renderCustom={(node: any) => {
-        if (node?.name === "mermaid") {
-          return <MermaidDiagramBlock source={node.text ?? ""} />;
-        }
-        return null;
-      }}
+      renderCustom={renderMermaidCustom}
       styles={tvStyles()}
-      style={{ width: "100%", minWidth: 0, ...(props.style ?? {}) }}
+      style={rootStyle()}
       onLinkPress={(event: { url?: string }) => {
         const url = event?.url ?? "";
         if (!url || url.startsWith("#")) return;
@@ -1884,18 +2136,3 @@ export function SmeltDiffView(props: {
     />
   );
 }
-
-/** 清理订阅的便捷 hook，绑定到当前组件生命周期。 */
-export function useHostEvent(listener: (event: any) => void) {
-  effect(() => {
-    const unsub = onEvent(listener);
-    cleanup(unsub);
-  });
-}
-
-export {
-  SmeltConversation,
-  type SmeltConversationProps,
-  type SmeltConversationSpec,
-  type SmeltConversationStart,
-} from "./conversation/index.tsx";

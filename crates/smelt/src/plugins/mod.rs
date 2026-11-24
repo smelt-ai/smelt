@@ -47,6 +47,26 @@ pub(crate) fn builtin_dir() -> Option<&'static Path> {
     builtin::dir()
 }
 
+/// 供 `check` / `types` / `init` / `fork` 发现可用共享 JS 模块插件的源目录（用户覆写优先，自带兜底）。
+pub(super) fn module_sources() -> Vec<smelt_nsh::SourceDir> {
+    let mut out = Vec::new();
+    if let Some(dir) = builtin::dir() {
+        out.push(smelt_nsh::SourceDir {
+            path: dir.to_path_buf(),
+            source: smelt_nsh::PluginSource::Builtin,
+            watch: false,
+        });
+    }
+    if let Some(dir) = user_plugin_dir() {
+        out.push(smelt_nsh::SourceDir {
+            path: dir,
+            source: smelt_nsh::PluginSource::User,
+            watch: false,
+        });
+    }
+    out
+}
+
 /// 更新设置「面板插件」页读取的用户插件列表。
 pub(crate) fn set_installed(plugins: Vec<InstalledPlugin>) {
     REGISTRY.with(|registry| registry.borrow_mut().installed = plugins);

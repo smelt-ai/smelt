@@ -53,10 +53,6 @@ fn main() {
         "cargo:rerun-if-changed={}",
         root.join("src/plugins").display()
     );
-    println!(
-        "cargo:rerun-if-changed={}",
-        root.join("src/plugins/conversation").display()
-    );
 
     if let Err(message) = build_main_shell(&root, &out, release) {
         eprintln!("{message}");
@@ -115,24 +111,6 @@ fn build_main_shell(root: &Path, out: &Path, release: bool) -> Result<(), String
     ];
     for (src, rel) in copies {
         copy_file(&src, &stage.join(rel))?;
-    }
-
-    let conv_dir = plugins_dir.join("conversation");
-    let mut conv_entries: Vec<PathBuf> = fs::read_dir(&conv_dir)
-        .map_err(|e| format!("read {}: {e}", conv_dir.display()))?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file())
-        .collect();
-    conv_entries.sort();
-    for path in conv_entries {
-        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if name.contains(".test.") {
-            continue;
-        }
-        copy_file(&path, &stage.join("conversation").join(name))?;
     }
 
     let ui_sets = vec![

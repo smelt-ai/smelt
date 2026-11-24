@@ -25,18 +25,18 @@ pub(crate) fn serve(requests: smol::channel::Receiver<AppCommandRequested>, cx: 
                 AppCommandRequest::Run { command, args } => {
                     let task = cx.update(|cx| run(&command, args, cx));
                     // 一条命令可能要等一会儿（读文件、开视图）；别的请求不必排在它后面。
-                    cx.spawn(async move |cx| {
+                    cx.spawn(async move |_cx| {
                         let outcome = match task.await {
                             Ok(value) => AppCommandOutcome::Done { value },
                             Err(message) => AppCommandOutcome::Failed { message },
                         };
-                        send_receipt(request_id, outcome, cx);
+                        send_receipt(request_id, outcome);
                     })
                     .detach();
                     continue;
                 }
             };
-            send_receipt(request_id, outcome, cx);
+            send_receipt(request_id, outcome);
         }
     })
     .detach();
@@ -72,22 +72,20 @@ fn run(
     smelt_plugin_api::run(id, args, cx)
 }
 
-fn send_receipt(request_id: String, outcome: AppCommandOutcome, cx: &gpui::AsyncApp) {
+fn send_receipt(request_id: String, outcome: AppCommandOutcome) {
     let receipt = AppCommandReceipt {
         request_id,
         outcome,
     };
-    cx.background_executor()
-        .spawn(async move {
-            let request = serde_json::json!({
-                "op": smelt_runtime_client::protocol::daemon::DaemonOperation::AppCommandReceipt,
-                "receipt": receipt,
-            });
-            if let Err(error) = smelt_client::daemon_state::local_runtime()
-                .request_ok(&request, std::time::Duration::from_secs(4))
-            {
-                eprintln!("[app-command] 发送命令回执失败：{error}");
-            }
-        })
-        .detach();
+    smelt_sys::blocking::spawn_detached(move || {
+        let request = serde_json::json!({
+            "op": smelt_runtime_client::protocol::daemon::DaemonOperation::AppCommandReceipt,
+            "receipt": receipt,
+        });
+        if let Err(error) = smelt_client::daemon_state::local_runtime()
+            .request_ok(&request, std::time::Duration::from_secs(4))
+        {
+            eprintln!("[app-command] 发送命令回执失败：{error}");
+        }
+    });
 }

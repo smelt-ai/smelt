@@ -49,7 +49,9 @@ fn stage(src: &std::path::Path, dst: &std::path::Path) -> i32 {
             "ok": true,
             "total": report.total,
             "script_plugins": report.script_plugins,
+            "module_plugins": report.module_plugins,
             "theme_only": report.theme_only,
+            "layout_only": report.layout_only,
             "elapsed_ms": report.elapsed_ms,
         })),
         Err(error) => {
@@ -70,7 +72,8 @@ fn types(dir: &std::path::Path) -> i32 {
             return 1;
         }
     };
-    match smelt_nsh::write_plugin_types(&root) {
+    let sources = super::module_sources();
+    match smelt_nsh::write_plugin_types(&root, &sources) {
         Ok(report) => print(&serde_json::json!({
             "ok": true,
             "path": root,

@@ -2,8 +2,10 @@
 import { Canvas, computed, Scroll, signal, Text, View } from "nsh";
 import { Popover, Switch, Tooltip } from "nsh/base";
 import {
+  bootTask,
   call,
   initHost,
+  locale,
   onEvent,
   quotaFacts,
   quotaTarget,
@@ -11,7 +13,6 @@ import {
   safeArea,
   SmeltButton,
   SmeltIcon,
-  state as hostState,
   t,
   text,
   theme,
@@ -153,10 +154,11 @@ onEvent((event) => {
     if (shown && !settingsWasShown) refreshSettings();
     settingsWasShown = shown;
   }
-});
+}, ["shown_views_changed"]);
 
-initHost().then(() => {
-  registerViews([
+bootTask(async () => {
+  await initHost(["views"]);
+  await registerViews([
     {
       name: BAR_NAME,
       export: BAR_NAME,
@@ -174,11 +176,11 @@ initHost().then(() => {
         keywords: ["quota", "usage", "limit", "keychain", "额度", "用量", "钥匙串"],
       },
     },
-  ]).catch((error) => console.error("[quota] registerViews 失败:", error));
+  ]);
 
   if (!loopStarted) {
     loopStarted = true;
-    refreshLoop().catch((error) => console.error(`[quota] 刷新循环停了：${msgOf(error)}`));
+    void refreshLoop().catch((error) => console.error(`[quota] 刷新循环停了：${msgOf(error)}`));
   }
 });
 
@@ -230,7 +232,7 @@ export function bar() {
   const insets = computed(() => safeArea(BAR).bar_insets);
   const data = computed(() => {
     version();
-    hostState();
+    locale();
     const now = Date.now();
     return {
       shown: chips(quotaState, modelHost, now),

@@ -1,7 +1,7 @@
 // 自动化下钻头、左侧运行列表与任务表单编辑器。
 import { computed, Scroll, Text, View } from "nsh";
 import { Menu } from "nsh/base";
-import { SmeltButton, SmeltIcon, state, t } from "smelt/sdk";
+import { SmeltButton, SmeltIcon, t } from "smelt/sdk";
 import {
   actionKindLabel,
   automationAccessNote,
@@ -110,7 +110,6 @@ export function DrillHeader() {
   const headerModel = computed(() => {
     storeVersion();
     agentsVersion();
-    state();
     const r = curRoute();
     const current = ed();
     const same = Boolean(current && r && current.id === r.id && current.machine === r.machine);
@@ -413,13 +412,11 @@ function ScheduleRuleBody(props: { uid: string; rule: ScheduleRuleDraft }) {
   const r = () => props.rule;
 
   const validationError = computed(() => {
-    state();
     const res = scheduleFromRule(r(), t);
     return res.ok ? null : res.error;
   });
 
   const clockKinds = computed(() => {
-    state();
     return [
       { value: "daily" as const, label: t("schedule_kind.daily") },
       { value: "weekdays" as const, label: t("schedule_kind.weekdays") },
@@ -428,7 +425,6 @@ function ScheduleRuleBody(props: { uid: string; rule: ScheduleRuleDraft }) {
   });
 
   const intervalUnits = computed(() => {
-    state();
     return [
       { value: "minutes" as const, label: t("interval_unit.minutes") },
       { value: "hours" as const, label: t("interval_unit.hours") },
@@ -436,7 +432,6 @@ function ScheduleRuleBody(props: { uid: string; rule: ScheduleRuleDraft }) {
   });
 
   const dayScopes = computed(() => {
-    state();
     return [
       { value: "everyday" as const, label: t("schedule_kind.daily") },
       { value: "weekdays" as const, label: t("schedule_kind.weekdays") },
@@ -445,7 +440,6 @@ function ScheduleRuleBody(props: { uid: string; rule: ScheduleRuleDraft }) {
   });
 
   const weekdayItems = computed(() => {
-    state();
     const mask = r().weekdayMask;
     return [0, 1, 2, 3, 4, 5, 6].map((idx) => ({
       key: String(idx),
@@ -455,7 +449,6 @@ function ScheduleRuleBody(props: { uid: string; rule: ScheduleRuleDraft }) {
   });
 
   const tz = computed(() => {
-    state();
     return localTimezoneLabel(t);
   });
 
@@ -647,7 +640,6 @@ function WebhookEntryBody(props: { uid: string; secret: string; editor: EditorSt
 
   const info = computed(() => {
     storeVersion();
-    state();
     const proj = machineAutomationsOn(props.editor.machine);
     const base = proj?.webhook_base_url || DEFAULT_WEBHOOK_BASE_URL;
     const stored = findAutomation(proj, props.editor.id);
@@ -915,7 +907,6 @@ export function EditorForm(props: { editor: EditorState }) {
   });
 
   const actionOptions = computed(() => {
-    state();
     return BUILTIN_AUTOMATION_ACTIONS.map((kind) => ({
       value: kind as "agent" | "shell",
       label: actionKindLabel(kind, t),
@@ -923,7 +914,6 @@ export function EditorForm(props: { editor: EditorState }) {
   });
 
   const notifyOptions = computed(() => {
-    state();
     return NOTIFY_CHOICES.map((choice) => ({
       value: choice as "never" | "failures_only" | "always",
       label: notifyLabel(choice, t),
@@ -932,7 +922,6 @@ export function EditorForm(props: { editor: EditorState }) {
 
   const whenHint = computed(() => {
     storeVersion();
-    state();
     const cur = ed();
     if (!cur.isNew) {
       const proj = machineAutomationsOn(cur.machine);
@@ -953,7 +942,6 @@ export function EditorForm(props: { editor: EditorState }) {
   const isWebhook = () => ed().entries.some((e) => e.triggerKind === "webhook");
   const customDir = () => customWorkspace(ed().workspaceDir, ed().id);
   const canOpenAgents = computed(() => {
-    state();
     return isViewRegistered(AGENTS_VIEW);
   });
 

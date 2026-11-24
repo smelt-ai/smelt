@@ -11,6 +11,7 @@ import {
   clipboardWrite,
   connections,
   initHost,
+  locale,
   onCommand,
   onEvent,
   qrMatrix,
@@ -21,7 +22,6 @@ import {
   SmeltButton,
   SmeltIcon,
   smeltVersion,
-  state as hostState,
   t,
   text,
   DIALOG_SURFACE_CLASS,
@@ -172,6 +172,7 @@ function updateBadge() {
   lastBadge = label;
   void run("smelt.app/set-view-badge", { view: VIEW, label }).catch((error) => {
     console.warn("[smelt.machines] set-view-badge 失败：", errText(error));
+    if (lastBadge === label) lastBadge = undefined;
   });
 }
 
@@ -528,10 +529,10 @@ onEvent((event) => {
     }
     pageWasShown = shown;
   }
-});
+}, ["machines_changed", "shown_views_changed"]);
 
 bootTask(async () => {
-  await initHost();
+  await initHost(["connections", "views"]);
   await registerViews([
     {
       name: VIEW_NAME,
@@ -716,7 +717,7 @@ export function remote() {
   const enabled = computed(() => Boolean(cfg()?.enabled));
   const running = computed(() => accessState()?.state === "running");
   const accessInfo = computed(() => {
-    hostState();
+    locale();
     return access_status(accessState(), t);
   });
 
@@ -757,7 +758,7 @@ export function remote() {
             <Each of={remotes()} key={(conn: any) => conn.machine}>
               {(conn: () => any) => {
                 const status = () => {
-                  hostState();
+                  locale();
                   return machine_status(conn(), t);
                 };
                 const isOnline = () => conn().state?.state === "online";
@@ -974,7 +975,7 @@ export function remote() {
               {(dev: () => any) => {
                 const p = () => look().palette;
                 const seen = () => {
-                  hostState();
+                  locale();
                   return `${short_id(dev().endpoint_id)} · ${last_seen_text(dev(), Date.now(), t)}`;
                 };
                 return (

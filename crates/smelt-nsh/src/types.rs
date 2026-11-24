@@ -69,8 +69,8 @@ pub struct TypesWriteReport {
     pub created_tsconfig: bool,
 }
 
-/// 生成插件可用的 `.d.ts` 文件表：`(相对 .nsh/types/ 的路径, 内容)`。
-pub fn plugin_type_definitions() -> Vec<(String, String)> {
+/// 生成插件可用的 `.d.ts` 文件表：`(相对 .nsh/types/ 的路径, 内容)`，并包含 `sources` 里发现的共享模块插件类型声明。
+pub fn plugin_type_definitions(sources: &[crate::manifest::SourceDir]) -> Vec<(String, String)> {
     let mut files: BTreeMap<String, String> = nsh_js::type_definitions(&crate::ui_sets())
         .into_iter()
         .filter(|(path, _)| ALLOWED_NSH_FILES.contains(&path.as_str()))
@@ -91,12 +91,33 @@ pub fn plugin_type_definitions() -> Vec<(String, String)> {
     );
     files.insert("smelt/sdk.d.ts".to_owned(), sdk_declaration());
 
+    for pkg in crate::manifest::discover_module_packages(sources) {
+        let Some(types_rel) = pkg.types.as_deref() else {
+            continue;
+        };
+        let path = pkg.root.join(types_rel);
+        match fs::read_to_string(&path) {
+            Ok(body) => {
+                files.insert(format!("{}.d.ts", pkg.specifier), body);
+            }
+            Err(error) => {
+                eprintln!(
+                    "[smelt-nsh] 读取共享模块声明 {} 失败：{error}",
+                    path.display()
+                );
+            }
+        }
+    }
+
     files.into_iter().collect()
 }
 
 /// 把 `.nsh/types/`、`.nsh/tsconfig.json` 和（若缺失）`tsconfig.json` 写进插件目录 `dir`。
-pub fn write_plugin_types(dir: &Path) -> Result<TypesWriteReport, String> {
-    let definitions = plugin_type_definitions();
+pub fn write_plugin_types(
+    dir: &Path,
+    sources: &[crate::manifest::SourceDir],
+) -> Result<TypesWriteReport, String> {
+    let definitions = plugin_type_definitions(sources);
     let types_dir = dir.join(".nsh/types");
     remove_stale(&types_dir, &types_dir, &definitions);
 
@@ -403,7 +424,7 @@ mod tests {
 
     #[test]
     fn generated_type_definitions_are_consistent_and_complete() {
-        let defs: BTreeMap<String, String> = plugin_type_definitions().into_iter().collect();
+        let defs: BTreeMap<String, String> = plugin_type_definitions(&[]).into_iter().collect();
         for required in [
             "nsh/index.d.ts",
             "nsh/types.d.ts",
@@ -469,15 +490,41 @@ mod tests {
         assert!(host.contains("export declare const Vector:"), "{host}");
         assert!(host.contains("export declare const Smelt:"), "{host}");
 
+        // 带上仓库 plugins/ 作为共享模块源时，必须产出 smelt/conversation.d.ts，
+        // 且所有相对 import 与 /// <reference 均解析到实际生成文件。
+        let repo_plugins = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins");
+        let with_modules: BTreeMap<String, String> =
+            plugin_type_definitions(&[crate::manifest::SourceDir {
+                path: repo_plugins.clone(),
+                source: crate::manifest::PluginSource::Builtin,
+                watch: false,
+            }])
+            .into_iter()
+            .collect();
+        assert!(
+            with_modules.contains_key("smelt/conversation.d.ts"),
+            "缺少共享模块声明 smelt/conversation.d.ts"
+        );
+        let conv_dts =
+            collect_all_exports(&with_modules["smelt/conversation.d.ts"], SourceType::d_ts());
+        let conv_tsx = collect_all_exports(
+            &fs::read_to_string(repo_plugins.join("conversation/index.tsx")).unwrap(),
+            SourceType::tsx(),
+        );
+        assert!(
+            conv_dts.contains("SmeltConversation") && conv_tsx.contains("SmeltConversation"),
+            "smelt/conversation 声明或实现缺少 SmeltConversation：{conv_dts:?} / {conv_tsx:?}"
+        );
+
         // 每个相对 import 与 /// <reference 都必须落在实际生成的文件里，且导出的符号存在。
-        for (path, body) in &defs {
+        for (path, body) in &with_modules {
             for line in body.lines() {
                 if let Some(rest) = line.strip_prefix("/// <reference path=\"")
                     && let Some(target) = rest.strip_suffix("\" />")
                 {
                     let resolved = resolve_relative_dts(path, target);
                     assert!(
-                        defs.contains_key(&resolved),
+                        with_modules.contains_key(&resolved),
                         "{path} 引用了不存在的文件：{target} ({resolved})"
                     );
                 }
@@ -486,7 +533,7 @@ mod tests {
                     && let Some(spec) = line[idx + "} from \"".len()..].strip_suffix("\";")
                 {
                     let resolved = resolve_relative_dts(path, spec);
-                    let target_body = defs.get(&resolved).unwrap_or_else(|| {
+                    let target_body = with_modules.get(&resolved).unwrap_or_else(|| {
                         panic!("{path} 导入了不存在的模块：{spec} ({resolved})")
                     });
                     let exported = collect_all_exports(target_body, SourceType::d_ts());
@@ -516,7 +563,7 @@ mod tests {
         fs::create_dir_all(stale.parent().unwrap()).unwrap();
         fs::write(&stale, "// old").unwrap();
 
-        let first = write_plugin_types(&dir).unwrap();
+        let first = write_plugin_types(&dir, &[]).unwrap();
         assert!(first.files_written > 0);
         assert_eq!(first.files_unchanged, 0);
         assert!(first.created_tsconfig);
@@ -528,7 +575,7 @@ mod tests {
         // 用户自己的 tsconfig.json 不能被第二次 write_plugin_types 覆盖。
         let custom = r#"{"extends":"./.nsh/tsconfig.json","include":["src/**/*"]}"#;
         fs::write(dir.join("tsconfig.json"), custom).unwrap();
-        let second = write_plugin_types(&dir).unwrap();
+        let second = write_plugin_types(&dir, &[]).unwrap();
         assert_eq!(second.files_written, 0);
         assert!(second.files_unchanged > 0);
         assert!(!second.created_tsconfig);

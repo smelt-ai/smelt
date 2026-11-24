@@ -454,17 +454,15 @@ impl TerminalView {
                 let reopen = presence == Some(RuntimePresence::LeftOver);
                 let sid3 = sid.clone();
                 let cwd3 = cwd.clone();
-                let term = cx
-                    .background_executor()
-                    .spawn(async move {
-                        let connector = connector.as_ref();
-                        if reopen {
-                            Terminal::spawn(connector, 24, 80, cwd3.as_deref(), &sid3, None)
-                        } else {
-                            Terminal::reattach(connector, 24, 80, cwd3.as_deref(), &sid3)
-                        }
-                    })
-                    .await;
+                let term = smelt_plugin_api::blocking::run(move || {
+                    let connector = connector.as_ref();
+                    if reopen {
+                        Terminal::spawn(connector, 24, 80, cwd3.as_deref(), &sid3, None)
+                    } else {
+                        Terminal::reattach(connector, 24, 80, cwd3.as_deref(), &sid3)
+                    }
+                })
+                .await;
                 match term {
                     Ok(t) => {
                         // 主线程挂回：adopt_terminal 换 Terminal、

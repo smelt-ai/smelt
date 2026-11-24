@@ -12,13 +12,11 @@
 //! 再用 Khronos PBR Neutral 色调映射压回去（[`tone`]）：浅色乘完会超过白，硬截断会把受光的
 //! 半边截成一片平色，压一下高光还是往白里渐变。别的零件 Blender 渲时已经按同一套映射出图。
 //!
-//! 零件算好的留到退出：要画的组合有上限（每组 72 个角度 × 几种颜色），全算出来也就几 MB。都在
-//! 主线程上用，按线程存。
+//! 零件算好的留到退出：要画的组合有上限（每组 72 个角度 × 几种颜色），全算出来也就几 MB。按进程
+//! 共用缓存，后台线程预解码上色，渲染线程直接取来叠。
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use gpui::RenderImage;
 use image::{Frame, Rgba, RgbaImage};
@@ -94,16 +92,19 @@ impl Paint {
         }
     }
 
-    /// 画好的零件（预乘透明度），没画过的这里现画。
-    pub(super) fn pixels(self) -> Rc<RgbaImage> {
-        thread_local! {
-            static PAINTED: RefCell<HashMap<Paint, Rc<RgbaImage>>> = RefCell::default();
+    /// 画好的零件（预乘透明度），没画过的这里现画；先无锁查缓存，算的过程不占写锁。
+    pub(super) fn pixels(self) -> Arc<RgbaImage> {
+        static PAINTED: OnceLock<RwLock<HashMap<Paint, Arc<RgbaImage>>>> = OnceLock::new();
+        let painted = PAINTED.get_or_init(Default::default);
+        if let Some(hit) = painted.read().unwrap_or_else(|e| e.into_inner()).get(&self) {
+            return Arc::clone(hit);
         }
-        PAINTED
-            .with_borrow_mut(|painted| painted.entry(self).or_insert_with(|| self.draw()).clone())
+        let drawn = self.draw();
+        let mut guard = painted.write().unwrap_or_else(|e| e.into_inner());
+        Arc::clone(guard.entry(self).or_insert(drawn))
     }
 
-    fn draw(self) -> Rc<RgbaImage> {
+    fn draw(self) -> Arc<RgbaImage> {
         let mut pixels = decode(self.sprite);
         if let Some(factors) = self.tint.factors() {
             tint(&mut pixels, factors);
@@ -113,7 +114,7 @@ impl Paint {
             let (x, y) = SPRITES[self.sprite].anchor;
             pixels = spin(&pixels, (x * PX, y * PX), f32::from(self.spin) * TURN);
         }
-        Rc::new(pixels)
+        Arc::new(pixels)
     }
 }
 
@@ -262,23 +263,28 @@ impl Canvas {
 /// 第 `sprite` 张零件画出来的东西的重心（按不透明度加权）离锚点多远（pt），全透明的没有。
 /// 转身夹在两个朝向之间时，五官、戴的按两个朝向里重心的差挪过去。算过的留着。
 pub(super) fn centroid(sprite: usize) -> Option<(f32, f32)> {
-    thread_local! {
-        static CENTROIDS: RefCell<HashMap<usize, Option<(f32, f32)>>> = RefCell::default();
+    static CENTROIDS: OnceLock<RwLock<HashMap<usize, Option<(f32, f32)>>>> = OnceLock::new();
+    let known = CENTROIDS.get_or_init(Default::default);
+    if let Some(hit) = known
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&sprite)
+        .copied()
+    {
+        return hit;
     }
-    CENTROIDS.with_borrow_mut(|known| {
-        *known.entry(sprite).or_insert_with(|| {
-            let pixels = Paint::plain(sprite).pixels();
-            let (mut weight, mut x, mut y) = (0., 0., 0.);
-            for (px, py, pixel) in pixels.enumerate_pixels() {
-                let alpha = f32::from(pixel.0[3]);
-                weight += alpha;
-                x += alpha * (px as f32 + 0.5);
-                y += alpha * (py as f32 + 0.5);
-            }
-            let (ax, ay) = SPRITES[sprite].anchor;
-            (weight > 0.).then(|| (x / weight / PX - ax, y / weight / PX - ay))
-        })
-    })
+    let pixels = Paint::plain(sprite).pixels();
+    let (mut weight, mut x, mut y) = (0., 0., 0.);
+    for (px, py, pixel) in pixels.enumerate_pixels() {
+        let alpha = f32::from(pixel.0[3]);
+        weight += alpha;
+        x += alpha * (px as f32 + 0.5);
+        y += alpha * (py as f32 + 0.5);
+    }
+    let (ax, ay) = SPRITES[sprite].anchor;
+    let computed = (weight > 0.).then(|| (x / weight / PX - ax, y / weight / PX - ay));
+    let mut guard = known.write().unwrap_or_else(|e| e.into_inner());
+    *guard.entry(sprite).or_insert(computed)
 }
 
 /// 从 `from` 到 `to`（像素，可以是小数）沾到的成图像素，出了成图的不算。
@@ -409,6 +415,20 @@ mod tests {
             let (width, height) = Paint::plain(index).pixels().dimensions();
             assert!(width > 0 && height > 0, "零件 {index} 解不出来");
         }
+    }
+
+    #[test]
+    fn cross_thread_cache_reuses_background_painted_sprites() {
+        let handle = std::thread::spawn(|| {
+            (
+                Paint::plain(sprites::BODY).pixels(),
+                centroid(sprites::EYE_OPEN_L),
+            )
+        });
+        let (bg_pixels, bg_centroid) = handle.join().unwrap();
+        let main_pixels = Paint::plain(sprites::BODY).pixels();
+        assert!(Arc::ptr_eq(&bg_pixels, &main_pixels));
+        assert_eq!(bg_centroid, centroid(sprites::EYE_OPEN_L));
     }
 
     #[test]

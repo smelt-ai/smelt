@@ -111,10 +111,10 @@ onEvent((event) => {
   if (event?.type === "window_activated" && booted) {
     void scan();
   }
-});
+}, ["window_activated"]);
 
 bootTask(async () => {
-  await initHost();
+  await initHost(["commands", "locale"]);
   await registerCommands(
     [
       {

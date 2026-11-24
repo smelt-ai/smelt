@@ -1,165 +1,52 @@
-//! 本机维护的受控底层能力（无界面）：
-//!
-//! - `~/.smelt` 未登记顶层残留扫描与删除（[`residue`]）；
-//! - macOS 终端 `smelt` 软链管理（[`cli_command`]：启动同步 `~/.smelt/bin/smelt`，按需检测/提权安装 `/usr/local/bin/smelt`）。
-//!
-//! 所有界面与交互均在 JS 插件 `plugins/maintenance/` 中实现，通过 `smelt.app/*` 无界面能力命令调用。
+//! 本机维护（沿用 `smelt.maintenance`）：设置「系统 → 清理残留」与（macOS）「系统 → 命令行」。
+//! 启动时在 macOS 后台同步 `~/.smelt/bin/smelt` 指向当前 App。
 
+mod cleanup;
 #[cfg(target_os = "macos")]
-pub(crate) mod cli_command;
+mod cli_command;
+#[cfg(target_os = "macos")]
+mod page;
 mod residue;
 
-use std::path::PathBuf;
-use std::rc::Rc;
+use gpui::App;
 
-use serde_json::{Value, json};
-use smelt_plugin_api::{CommandSpec, Handled};
+const OWNER: &str = "smelt.maintenance";
 
-/// 启动时在后台把 `~/.smelt/bin/smelt` 拨到这个 App。
-#[cfg(target_os = "macos")]
-pub(crate) fn sync_cli_link_at_startup(cx: &gpui::App) {
-    cx.background_executor()
-        .spawn(async {
-            if let Err(error) = cli_command::sync_managed_link() {
-                eprintln!("[maintenance] 放 ~/.smelt/bin/smelt 失败：{error}");
-            }
-        })
-        .detach();
+pub(crate) fn register(cx: &mut App) {
+    #[cfg(target_os = "macos")]
+    sync_cli_link_at_startup(cx);
+    if let Err(error) = smelt_plugin_api::register_views(OWNER, views(), cx) {
+        eprintln!("[maintenance] 设置页登记失败：{error}");
+    }
 }
 
-/// 暴露给插件的本机维护底层能力命令（不进命令面板、不绑键）。
-pub(crate) fn app_commands() -> Vec<CommandSpec> {
+fn views() -> Vec<smelt_plugin_api::ViewSpec> {
     vec![
-        capability("storage-residue-scan", false, |_, _, cx| {
-            let task = cx.background_executor().spawn(async {
-                residue::scan()
-                    .map(|items| Value::Array(items.into_iter().map(residue_json).collect()))
-                    .map_err(|error| error.to_string())
-            });
-            Handled::Done(task)
-        }),
-        capability("storage-residue-remove", true, |args, _, cx| {
-            let paths: Vec<PathBuf> = args
-                .get("paths")
-                .and_then(Value::as_array)
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(Value::as_str)
-                        .map(PathBuf::from)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let task = cx.background_executor().spawn(async move {
-                let failures: Vec<Value> = residue::remove(&paths)
-                    .into_iter()
-                    .map(|(path, error)| {
-                        eprintln!("[maintenance] 删 {} 失败：{error}", path.display());
-                        json!({
-                            "path": path.to_string_lossy(),
-                            "error": error,
-                        })
-                    })
-                    .collect();
-                match residue::scan() {
-                    Ok(items) => Ok(json!({
-                        "failures": failures,
-                        "items": items.into_iter().map(residue_json).collect::<Vec<_>>(),
-                    })),
-                    Err(error) => Ok(json!({
-                        "failures": failures,
-                        "scan_error": error.to_string(),
-                        "items": [],
-                    })),
-                }
-            });
-            Handled::Done(task)
-        }),
-        capability("cli-link-status", false, |_, _, cx| {
-            #[cfg(target_os = "macos")]
-            {
-                let task = cx.background_executor().spawn(async {
-                    let status = cli_command::system_command();
-                    Ok(json!({
-                        "supported": true,
-                        "link": cli_command::SYSTEM_LINK,
-                        "status": status.as_str(),
-                    }))
-                });
-                Handled::Done(task)
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                let _ = cx;
-                Handled::result(Ok(json!({
-                    "supported": false,
-                    "link": "",
-                    "status": "unknown",
-                })))
-            }
-        }),
-        capability("cli-link-install", false, |_, _, cx| {
-            #[cfg(target_os = "macos")]
-            {
-                let task = cx.background_executor().spawn(async {
-                    let result = cli_command::install();
-                    let status = cli_command::system_command();
-                    Ok(match result {
-                        Ok(()) => json!({
-                            "ok": true,
-                            "link": cli_command::SYSTEM_LINK,
-                            "status": status.as_str(),
-                        }),
-                        Err(error) => {
-                            eprintln!("[maintenance] 装 smelt 命令失败：{error:?}");
-                            json!({
-                                "ok": false,
-                                "code": error.code(),
-                                "error": error.detail(),
-                                "link": cli_command::SYSTEM_LINK,
-                                "status": status.as_str(),
-                            })
-                        }
-                    })
-                });
-                Handled::Done(task)
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                let _ = cx;
-                Handled::result(Ok(json!({
-                    "ok": false,
-                    "code": "unsupported",
-                    "error": "unsupported platform",
-                    "link": "",
-                    "status": "unknown",
-                })))
-            }
-        }),
+        cleanup::spec(),
+        #[cfg(target_os = "macos")]
+        page::spec(),
     ]
 }
 
-fn residue_json(item: residue::Residue) -> Value {
-    json!({
-        "path": item.path.to_string_lossy(),
-        "label": item.label,
-        "bytes": item.bytes,
-    })
+#[cfg(target_os = "macos")]
+fn sync_cli_link_at_startup(_cx: &App) {
+    smelt_sys::blocking::spawn_detached(|| {
+        if let Err(error) = cli_command::sync_managed_link() {
+            eprintln!("[maintenance] 放 ~/.smelt/bin/smelt 失败：{error}");
+        }
+    });
 }
 
-fn capability(
-    name: &'static str,
-    requires_args: bool,
-    handler: impl Fn(&Value, Option<&mut gpui::Window>, &mut gpui::App) -> Handled + 'static,
-) -> CommandSpec {
-    CommandSpec {
-        name: name.into(),
-        title: name.into(),
-        key: None,
-        context: "Workspace".into(),
-        palette: false,
-        requires_args,
-        args: None,
-        cli: false,
-        handler: Rc::new(handler),
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn every_page_is_registered_in_one_set() {
+        let names: Vec<String> = super::views()
+            .into_iter()
+            .map(|spec| spec.name.to_string())
+            .collect();
+        assert!(names.contains(&"cleanup".to_string()));
+        #[cfg(target_os = "macos")]
+        assert!(names.contains(&"cli".to_string()));
     }
 }

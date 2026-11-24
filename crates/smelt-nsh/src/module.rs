@@ -22,7 +22,7 @@ use smelt_plugin_api::{
         agent_status::AgentStatus,
         chrono::DateTime,
         copilot_quota::format_amount,
-        daemon_state::{AttentionItem, DaemonSessionState},
+        daemon_state::DaemonSessionState,
         file_link::parse_file_link,
         new_session::{LaunchEntry, NewSessionAction, default_launch_entries},
         provider_quota::ProviderQuotaData,
@@ -610,23 +610,6 @@ impl Smelt {
                 AgentStatus::Idle => "idle".to_owned(),
             }),
         )
-    }
-
-    /// 按当前激活主题组装的终端配色快照（发给本机运行时应答 OSC 颜色查询与移动端同步）。
-    pub fn terminal_theme_snapshot() -> Result<String, String> {
-        serde_json::to_string(&smelt_terminal::theme_snapshot())
-            .map_err(|error| format!("terminal_theme_snapshot：序列化失败：{error}"))
-    }
-
-    /// 按当前语言把一条提醒展开成给人看的标题和正文（与 `smelt-event-protocol` 同源）。
-    pub fn attention_texts(item_json: String) -> Result<String, String> {
-        let item: AttentionItem = serde_json::from_str(&item_json)
-            .map_err(|error| format!("attention_texts：item 不对：{error}"))?;
-        Ok(serde_json::json!({
-            "title": item.title_text(),
-            "message": item.message_text(),
-        })
-        .to_string())
     }
 
     /// 从终端启动命令行识别内置 agent id（与 `smelt-model` 同源）。

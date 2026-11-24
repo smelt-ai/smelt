@@ -44,6 +44,8 @@ import { message } from "./util.js";
 
 /** 运行时推「哪些会话有没看过的提醒」的话题。 */
 export const ATTENTION_TOPIC = "attention.changed";
+/** 运行时推「新建会话菜单可用目录变了」的话题。 */
+export const NEW_SESSION_CATALOG_TOPIC = "new_session.catalog_changed";
 
 /**
  * 列表里能挂失败的一行，键同那一行的滑动身份：
@@ -128,6 +130,8 @@ export class SessionList {
     this.project_filter = "";
     /** fail_key → { what, error }：在某一行上发起、失败了的操作，画在那一行上。 */
     this.failures = new Map();
+    /** machine_key → { catalog, fetchedAt }：已缓存的新建会话目录。 */
+    this.catalogs = new Map();
   }
 
   /** 库读回来了：侧栏的置顶、顺序、折叠和行首头像换成库里那份。起来时调一次，在 start 之前。 */
@@ -380,6 +384,8 @@ export class SessionList {
       case "runtime_topic":
         if (event.topic === ATTENTION_TOPIC && this.unread.apply(event.machine, event.message)) {
           this.rebuild();
+        } else if (event.topic === NEW_SESSION_CATALOG_TOPIC) {
+          this.on_catalog_topic(event.machine, event.message);
         }
         return;
       case "open_paths":
@@ -415,6 +421,35 @@ export class SessionList {
     this.rebuild();
   }
 
+  cached_catalog(machine) {
+    return this.catalogs.get(machine_key(machine)) ?? null;
+  }
+
+  cache_catalog(machine, catalog) {
+    if (!catalog || typeof catalog !== "object" || !catalog.sections) return;
+    this.catalogs.set(machine_key(machine), { catalog, fetchedAt: Date.now() });
+  }
+
+  apply_catalog(machine, catalog) {
+    if (!catalog || typeof catalog !== "object" || !catalog.sections) return;
+    this.cache_catalog(machine, catalog);
+    const key = machine_key(machine);
+    for (const launcher of this.launchers) {
+      if (machine_key(launcher.machine) === key && typeof launcher.on_catalog_updated === "function") {
+        launcher.on_catalog_updated(catalog);
+      }
+    }
+  }
+
+  on_catalog_topic(machine, message) {
+    if (!message || (message.kind !== "snapshot" && message.kind !== "event")) return;
+    const catalog = message.payload;
+    if (!catalog || typeof catalog !== "object" || !catalog.sections || typeof catalog.sections !== "object") {
+      return;
+    }
+    this.apply_catalog(machine, catalog);
+  }
+
   on_machines_changed() {
     const current = new Set(this.host.machines().map((machine) => machine_key(machine.machine)));
     for (const key of this.known_machines) {
@@ -424,6 +459,7 @@ export class SessionList {
       this.store.forget_machine(machine);
       this.seen.delete(key);
       this.unread.forget(machine);
+      this.catalogs.delete(key);
     }
     this.known_machines = current;
     // 离线、改名也会走到这里：机器行要跟着变。

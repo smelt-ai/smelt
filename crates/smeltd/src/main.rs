@@ -2580,6 +2580,19 @@ fn main() {
     webhook::spawn(Arc::clone(&automations), Arc::clone(&event_hub));
     push::spawn();
 
+    // 后台预热本机 Agent CLI 探测与新建会话目录，避免首帧打开「+」弹窗撞上几十次 PATH stat。
+    {
+        let warm_hub = Arc::clone(&event_hub);
+        if let Err(error) = thread::Builder::new()
+            .name("smeltd-catalog-warm".into())
+            .spawn(move || {
+                warm_hub.refresh_new_session_catalog(true);
+            })
+        {
+            eprintln!("[smeltd] 启动目录预热线程失败：{error}");
+        }
+    }
+
     run_serve_loop(
         listener,
         sessions,

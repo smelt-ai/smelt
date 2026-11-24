@@ -25,7 +25,7 @@ import {
   localOs,
   onCommand,
   onEvent,
-  onState,
+  onSlices,
   openUrl,
   pathFileName,
   pathJoin,
@@ -42,7 +42,7 @@ import {
   SmeltIcon,
   SmeltMarkdown,
   stableMemo,
-  state,
+  windowActive,
   store,
   t,
   currentTheme,
@@ -1176,7 +1176,7 @@ function handleTreeKeyDown(e: any) {
 // ---- 启动注册与事件监听 ----
 
 bootTask(async () => {
-  await initHost();
+  await initHost(["window_active", "active_context", "machines_meta"]);
   await registerViews([
     {
       name: "main",
@@ -1243,50 +1243,59 @@ onCommand(async ({ name, args }) => {
   throw new Error(`unknown command: ${name}`);
 });
 
-onState((next) => {
-  lastWindowActive = next.window_active !== false;
+onSlices(["window_active", "active_context"], () => {
+  lastWindowActive = windowActive();
   void syncProjectFromContext();
 });
 
-onEvent((event) => {
-  if (!event || typeof event !== "object") return;
-  if (event.type === "project_changed") {
-    const machine = event.machine ?? null;
-    const root = typeof event.root === "string" ? event.root : "";
-    if (!root || !watches.has(projectKey(machine, root))) return;
-    const ops = styleOpsFor(machine);
-    markDirsStaleWhere((m, dir) => m === machine && ops.startsWith(dir, root));
-    onOpenFileProjectChanged(machine, root);
-    markGitMarksStaleWhere((m, r) => m === machine && ops.startsWith(r, root));
-    refreshVisible();
-    return;
-  }
-  if (event.type === "reconnected") {
-    const machine = event.machine ?? null;
-    markEverythingStale(machine);
-    for (const key of [...watches]) {
-      const sep = key.indexOf("\0");
-      const m = sep > 0 ? key.slice(0, sep) : null;
-      if (m === machine) watches.delete(key);
-    }
-    refreshVisible();
-    return;
-  }
-  if (event.type === "window_activated") {
-    markEverythingStale(undefined);
-    refreshVisible();
-    return;
-  }
-  if (event.type === "active_context_changed") {
-    void syncProjectFromContext();
-    return;
-  }
-  if (event.type === "shown_views_changed") {
-    if (viewShown(VIEW_ID)) {
+onEvent(
+  (event) => {
+    if (!event || typeof event !== "object") return;
+    if (event.type === "project_changed") {
+      const machine = event.machine ?? null;
+      const root = typeof event.root === "string" ? event.root : "";
+      if (!root || !watches.has(projectKey(machine, root))) return;
+      const ops = styleOpsFor(machine);
+      markDirsStaleWhere((m, dir) => m === machine && ops.startsWith(dir, root));
+      onOpenFileProjectChanged(machine, root);
+      markGitMarksStaleWhere((m, r) => m === machine && ops.startsWith(r, root));
       refreshVisible();
+      return;
     }
-  }
-});
+    if (event.type === "reconnected") {
+      const machine = event.machine ?? null;
+      markEverythingStale(machine);
+      for (const key of [...watches]) {
+        const sep = key.indexOf("\0");
+        const m = sep > 0 ? key.slice(0, sep) : null;
+        if (m === machine) watches.delete(key);
+      }
+      refreshVisible();
+      return;
+    }
+    if (event.type === "window_activated") {
+      markEverythingStale(undefined);
+      refreshVisible();
+      return;
+    }
+    if (event.type === "active_context_changed") {
+      void syncProjectFromContext();
+      return;
+    }
+    if (event.type === "shown_views_changed") {
+      if (viewShown(VIEW_ID)) {
+        refreshVisible();
+      }
+    }
+  },
+  [
+    "project_changed",
+    "reconnected",
+    "window_activated",
+    "active_context_changed",
+    "shown_views_changed",
+  ],
+);
 
 // ---- 子组件 ----
 

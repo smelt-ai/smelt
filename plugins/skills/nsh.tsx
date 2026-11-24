@@ -5,18 +5,18 @@ import { Button as BaseButton, Dialog, Input } from "nsh/base";
 import { Menu } from "nsh/desktop";
 import {
   activeContext,
+  bootTask,
   call,
   initHost,
-  machineEntry,
+  machineMetaEntry,
   onEvent,
-  onState,
+  onSlices,
   registerViews,
   revealPath,
   run,
   SmeltButton,
   SmeltIcon,
   stableMemo,
-  state,
   t,
   currentTheme,
   DIALOG_SURFACE_CLASS,
@@ -152,7 +152,7 @@ function skillAt(dir: string | null): any | null {
 
 async function reload() {
   const { machine, project } = targetContext();
-  const online = machineEntry(machine)?.online === true;
+  const online = machineMetaEntry(machine)?.online === true;
   if (!online) {
     offline.set(true);
     return;
@@ -475,7 +475,7 @@ function syncEvents() {
   const appeared = shown && !lastShown;
   lastShown = shown;
 
-  const online = machineEntry(target.machine)?.online === true;
+  const online = machineMetaEntry(target.machine)?.online === true;
   const becameOnline = online && !lastOnline;
   lastOnline = online;
 
@@ -492,27 +492,31 @@ function syncEvents() {
   }
 }
 
-onState(() => {
+onSlices(["active_context", "views", "machines_meta"], () => {
   syncEvents();
 });
 
-onEvent((event: any) => {
-  if (!event) return;
-  if (event.type === "view_opened" && event.view === VIEW_ID) {
-    lastShown = true;
-    void reload();
-    return;
-  }
-  if (event.type === "reconnected") {
-    const { machine } = targetContext();
-    if ((event.machine ?? null) === machine && viewShown(VIEW_ID)) {
+onEvent(
+  (event: any) => {
+    if (!event) return;
+    if (event.type === "view_opened" && event.view === VIEW_ID) {
+      lastShown = true;
       void reload();
+      return;
     }
-  }
-});
+    if (event.type === "reconnected") {
+      const { machine } = targetContext();
+      if ((event.machine ?? null) === machine && viewShown(VIEW_ID)) {
+        void reload();
+      }
+    }
+  },
+  ["view_opened", "reconnected"],
+);
 
-initHost().then(() => {
-  registerViews([
+bootTask(async () => {
+  await initHost(["active_context", "views", "machines_meta"]);
+  await registerViews([
     {
       name: VIEW_NAME,
       export: VIEW_NAME,
@@ -520,7 +524,7 @@ initHost().then(() => {
       icon: "icons/book-open.svg",
       draws_top_bar: false,
     },
-  ]).catch((err) => console.error("[skills] registerViews 失败：", err));
+  ]);
   syncEvents();
 });
 

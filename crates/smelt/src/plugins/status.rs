@@ -31,6 +31,10 @@ pub(super) struct Entry {
     pub(super) overrides_builtin: bool,
     #[serde(default)]
     pub(super) fallback_to_builtin: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) module: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) uses_modules: Vec<String>,
     pub(super) path: PathBuf,
     #[serde(default)]
     pub(super) views: Vec<String>,
@@ -63,6 +67,8 @@ pub(crate) fn publish(plugins: &[smelt_nsh::LoadedPluginInfo]) {
                 source: source_label(plugin.source),
                 overrides_builtin: plugin.overrides_builtin,
                 fallback_to_builtin: plugin.fallback_to_builtin,
+                module: plugin.module.clone(),
+                uses_modules: plugin.used_modules.clone(),
                 path: plugin.root.clone(),
                 views: plugin.views.clone(),
                 error: plugin.error.clone(),
@@ -136,6 +142,8 @@ mod tests {
                 source: "user".into(),
                 overrides_builtin: false,
                 fallback_to_builtin: false,
+                module: Some("com/example".into()),
+                uses_modules: vec!["smelt.conversation".into()],
                 path: "/tmp/hello".into(),
                 views: vec!["com.example.hello/main".into()],
                 error: Some("SyntaxError".into()),

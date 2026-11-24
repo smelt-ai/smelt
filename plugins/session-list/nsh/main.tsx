@@ -662,6 +662,8 @@ interface SharedRowProps {
   cancelRename: () => void;
   ask: (request: ConfirmRequest) => void;
   drag: () => DragState | null;
+  dragSessionPending: () => boolean;
+  dragProjectPending: () => boolean;
   beginDrag: (info: Omit<DragState, "active" | "overKey" | "overPayload" | "before" | "lastTargetY">) => void;
   hoverDrag: (dragKind: string | null, key: string, payload: any, localY: number, rowHeight: number, pageY: number) => void;
   consumeSuppressedPress: () => boolean;
@@ -809,20 +811,24 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
               pointerY: pageY,
             });
           }}
-          onMouseMove={(e: any) => {
-            const d = props.drag();
-            if (!d || d.kind !== "session") return;
-            const localY = e?.position?.y ?? 0;
-            const pageY = e?.pagePosition?.y ?? 0;
-            props.hoverDrag(
-              myDragKind(),
-              id(),
-              row(),
-              localY,
-              rowHeight || (hasAvatar() ? AVATAR_ROW : ROW_MD),
-              pageY,
-            );
-          }}
+          onMouseMove={
+            props.dragSessionPending()
+              ? (e: any) => {
+                  const d = props.drag();
+                  if (!d || d.kind !== "session") return;
+                  const localY = e?.position?.y ?? 0;
+                  const pageY = e?.pagePosition?.y ?? 0;
+                  props.hoverDrag(
+                    myDragKind(),
+                    id(),
+                    row(),
+                    localY,
+                    rowHeight || (hasAvatar() ? AVATAR_ROW : ROW_MD),
+                    pageY,
+                  );
+                }
+              : undefined
+          }
           class={`group/row relative flex-row items-center ${
             selected() ? "bg-sidebar-accent" : "hover:bg-accent active:bg-sidebar-accent"
           }`}
@@ -1235,6 +1241,8 @@ function ProjectSection(props: SharedRowProps & { project: () => any; byMachine:
                   cancelRename={props.cancelRename}
                   ask={props.ask}
                   drag={props.drag}
+                  dragSessionPending={props.dragSessionPending}
+                  dragProjectPending={props.dragProjectPending}
                   beginDrag={props.beginDrag}
                   hoverDrag={props.hoverDrag}
                   consumeSuppressedPress={props.consumeSuppressedPress}
@@ -1254,6 +1262,8 @@ function ProjectSection(props: SharedRowProps & { project: () => any; byMachine:
                   cancelRename={props.cancelRename}
                   ask={props.ask}
                   drag={props.drag}
+                  dragSessionPending={props.dragSessionPending}
+                  dragProjectPending={props.dragProjectPending}
                   beginDrag={props.beginDrag}
                   hoverDrag={props.hoverDrag}
                   consumeSuppressedPress={props.consumeSuppressedPress}
@@ -1310,13 +1320,17 @@ function ProjectSection(props: SharedRowProps & { project: () => any; byMachine:
                 pointerY: pageY,
               });
             }}
-            onMouseMove={(e: any) => {
-              const d = props.drag();
-              if (!d || d.kind !== "project") return;
-              const localY = e?.position?.y ?? 0;
-              const pageY = e?.pagePosition?.y ?? 0;
-              props.hoverDrag(myDragKind(), key(), project(), localY, rowHeight || ROW_MD, pageY);
-            }}
+            onMouseMove={
+              props.dragProjectPending()
+                ? (e: any) => {
+                    const d = props.drag();
+                    if (!d || d.kind !== "project") return;
+                    const localY = e?.position?.y ?? 0;
+                    const pageY = e?.pagePosition?.y ?? 0;
+                    props.hoverDrag(myDragKind(), key(), project(), localY, rowHeight || ROW_MD, pageY);
+                  }
+                : undefined
+            }
             class={`group/row relative flex-row items-center ${
               selected() ? "bg-sidebar-accent" : "hover:bg-accent"
             }`}
@@ -1592,6 +1606,8 @@ function WorksetSection(props: SharedRowProps & { workset: () => any; level: num
                 cancelRename={props.cancelRename}
                 ask={props.ask}
                 drag={props.drag}
+                dragSessionPending={props.dragSessionPending}
+                dragProjectPending={props.dragProjectPending}
                 beginDrag={props.beginDrag}
                 hoverDrag={props.hoverDrag}
                 consumeSuppressedPress={props.consumeSuppressedPress}
@@ -2502,6 +2518,10 @@ export function main() {
     return sb.area_projects(area).length - visibleProjectsOf(area).length;
   };
 
+  const dragPending = computed(() => drag() != null);
+  const dragSessionPending = computed(() => drag()?.kind === "session");
+  const dragProjectPending = computed(() => drag()?.kind === "project");
+
   const sharedRowProps: SharedRowProps = {
     sidebar,
     showBuddy,
@@ -2512,6 +2532,8 @@ export function main() {
     cancelRename,
     ask,
     drag,
+    dragSessionPending,
+    dragProjectPending,
     beginDrag,
     hoverDrag,
     consumeSuppressedPress,
@@ -2683,8 +2705,8 @@ export function main() {
         display: "flex",
         flexDirection: "column",
       }}
-      onMouseMove={handleRootMouseMove}
-      onMouseUp={finishDrag}
+      onMouseMove={dragPending() ? handleRootMouseMove : undefined}
+      onMouseUp={dragPending() ? finishDrag : undefined}
       onFileDrop={(e: any) => {
         const uris = Array.isArray(e?.uris) ? e.uris : [];
         const paths = decodeFileUris(uris);

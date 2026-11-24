@@ -8,12 +8,11 @@ import {
   call,
   command,
   currentTheme,
-  machineEntry,
-  machines,
+  machineMeta,
+  machineMetaEntry,
   openUrl,
   run,
   stableMemo,
-  state,
   t,
   viewShown,
   waitOnline,
@@ -275,7 +274,7 @@ export function createPageController(viewId: string, tabs: readonly Capabilities
 
   function currentMachineName(): string {
     const m = machine();
-    return machineEntry(m)?.name ?? "";
+    return machineMetaEntry(m)?.name ?? "";
   }
 
   function pendingText(): string {
@@ -424,7 +423,7 @@ export function createPageController(viewId: string, tabs: readonly Capabilities
       }
       if (Object.prototype.hasOwnProperty.call(args, "machine")) {
         let next = normalizeMachine(args.machine);
-        if (next !== null && !machineEntry(next)) {
+        if (next !== null && !machineMetaEntry(next)) {
           next = null;
         }
         if (next !== machine()) {
@@ -433,7 +432,7 @@ export function createPageController(viewId: string, tabs: readonly Capabilities
         }
       }
     }
-    if (machine() !== null && !machineEntry(machine())) {
+    if (machine() !== null && !machineMetaEntry(machine())) {
       selectMachine(null);
       return;
     }
@@ -470,7 +469,7 @@ export function createPageController(viewId: string, tabs: readonly Capabilities
   }
 
   function onMachinesChanged() {
-    if (machine() !== null && !machineEntry(machine())) {
+    if (machine() !== null && !machineMetaEntry(machine())) {
       selectMachine(null);
     }
   }
@@ -1401,5 +1400,5 @@ export function createPageController(viewId: string, tabs: readonly Capabilities
 export type PageController = ReturnType<typeof createPageController>;
 
 export function allMachineList(): any[] {
-  return machines();
+  return machineMeta();
 }

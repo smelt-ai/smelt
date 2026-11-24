@@ -604,14 +604,25 @@ pub(crate) fn observe_selection(
     cx.observe_global_in::<SettingsSelection>(window, f)
 }
 
+fn needs_attention(view: &smelt_plugin_api::ViewInfo, cx: &App) -> bool {
+    view.settings.is_some() && smelt_plugin_api::view_badge(&view.id, cx).is_some()
+}
+
+/// 设置里所有挂着角标的页（导航里每一页的红点看它）。只读内存。
+pub(super) fn attention_pages(cx: &App) -> std::collections::BTreeSet<SharedString> {
+    smelt_plugin_api::views(cx)
+        .into_iter()
+        .filter(|view| needs_attention(view, cx))
+        .map(|view| view.id)
+        .collect()
+}
+
 /// 设置里有没有要你处理的事，有的话落在哪一页：设置页挂着角标（比如「关于」页有新版本）→
-/// 那一页。导航里那一页的红点看它。只读内存。
+/// 那一页。只读内存。
 fn attention(cx: &App) -> Option<SharedString> {
     smelt_plugin_api::views(cx)
         .into_iter()
-        .find(|view| {
-            view.settings.is_some() && smelt_plugin_api::view_badge(&view.id, cx).is_some()
-        })
+        .find(|view| needs_attention(view, cx))
         .map(|view| view.id)
 }
 

@@ -2,7 +2,7 @@
 
 import { cleanup, computed, Scroll, Text, View } from "nsh";
 import { Input } from "nsh/base";
-import { SmeltButton, state as hostState, t } from "smelt/sdk";
+import { locale, SmeltButton, t } from "smelt/sdk";
 
 import {
   cliExecutableForAgent,
@@ -646,7 +646,7 @@ function ProfileRowCell(props: { profile: () => any }) {
 function CustomAgentsSection() {
   const look = currentTheme;
   const localSettings = computed(() => {
-    hostState();
+    locale();
     agentHostsSignal();
     return hostSettings(null);
   });

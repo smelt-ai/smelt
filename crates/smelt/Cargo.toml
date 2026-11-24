@@ -24,6 +24,7 @@ smelt-runtime-client = { path = "../smelt-runtime-client" }
 smelt-client-store = { path = "../smelt-client-store" }
 # 共享 GPUI 组件库（见它的 Cargo.toml 文件头注释）。
 smelt-ui = { path = "../smelt-ui" }
+smelt-terminal = { path = "../smelt-terminal" }
 smelt-plugin-api = { path = "../smelt-plugin-api" }
 smelt-nsh = { path = "../smelt-nsh" }
 serde = { version = "1", features = ["derive"] }

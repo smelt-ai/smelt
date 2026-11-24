@@ -50,15 +50,15 @@ which = "8"
 objc = "0.2"
 
 [build-dependencies]
-# `bench/` 入口照 `nsh build` 打包、编成字节码给 `examples/bench.rs`，见 build.rs。
+# `bench/` 入口照 `nsh build` 打包、编成字节码给 `examples/bench/`，见 build.rs。
 nsh-bundler = { version = "=0.6.1", features = ["bundle"] }
 nsh-core = "=0.6.1"
 nsh-js = "=0.6.1"
 nsh-base = { version = "=0.6.1", default-features = false }
 
 [dev-dependencies]
-# tests/*.rs：在测试平台的窗口里跑真引擎。
-gpui = { package = "gpui-fast", version = "=0.1.17", features = ["test-support"] }
-# examples/bench.rs：量 CPU 时间、接 NSH 的帧统计日志。
+# tests/*.rs：在测试平台的窗口里跑真引擎；`profiler` 给 `examples/bench/` 采集逐帧与分阶段耗时。
+gpui = { package = "gpui-fast", version = "=0.1.17", features = ["test-support", "profiler"] }
+# examples/bench/：量 CPU 时间、接 NSH 的帧统计日志。
 libc = "0.2"
 log = "0.4"

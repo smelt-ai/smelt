@@ -19,6 +19,17 @@ const PADDING = 4;
 // NSH 桌面覆盖滚动条宽 3pt + 0.75pt 描边、贴右缘 2pt；可滚时给列表右侧留出槽位，避免切过悬停高亮与星标。
 const SCROLLBAR_GUTTER = 9;
 
+const newSessionIconCache = new Map<string, string>();
+
+function cachedNewSessionIcon(action: any): string {
+  const key = `${action.kind ?? ""}\0${action.target ?? ""}\0${action.agentKind ?? ""}\0${action.provider ?? ""}\0${action.command ?? ""}`;
+  const hit = newSessionIconCache.get(key);
+  if (hit !== undefined) return hit;
+  const resolved = newSessionIcon(action);
+  newSessionIconCache.set(key, resolved);
+  return resolved;
+}
+
 function slotsContentHeight(items: any[]): number {
   let total = PADDING * 2;
   for (const s of items) {
@@ -331,7 +342,7 @@ function MenuBody(props: { menu: () => any; localTick?: () => number; maxHeight?
                   const index = s.index;
                   const entry = computed(() => menu()?.rows?.[index] ?? null);
                   const action = computed(() => entry()?.action ?? null);
-                  const iconPath = computed(() => (action() ? newSessionIcon(action()) : ""));
+                  const iconPath = computed(() => (action() ? cachedNewSessionIcon(action()) : ""));
                   const selected = computed(() => menu()?.selected === index);
                   const isCommon = computed(() => entry()?.section === 0);
                   const digit = computed(() => {

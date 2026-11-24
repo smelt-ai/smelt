@@ -8,8 +8,8 @@ import {
   call,
   clipboardWrite,
   initHost,
-  machineEntry,
-  machines,
+  machineMeta,
+  machineMetaEntry,
   onCommand,
   onEvent,
   registerCommands,
@@ -19,7 +19,6 @@ import {
   SmeltButton,
   SmeltNativeDesktop,
   stableMemo,
-  state as hostState,
   t,
   currentTheme,
   text,
@@ -55,7 +54,7 @@ function publishMenu() {
 }
 
 function syncMachineProbes() {
-  const { toAsk, removed } = planMachineProbes(machines(), probes);
+  const { toAsk, removed } = planMachineProbes(machineMeta(), probes);
   if (removed) {
     publishMenu();
   }
@@ -83,7 +82,7 @@ onEvent((event) => {
   if (event?.type === "machines_changed" || event?.type === "reconnected") {
     syncMachineProbes();
   }
-});
+}, ["machines_changed", "reconnected"]);
 
 onCommand(async ({ name, args }) => {
   if (name === OPEN_COMMAND_NAME) {
@@ -101,7 +100,7 @@ onCommand(async ({ name, args }) => {
 });
 
 bootTask(async () => {
-  await initHost();
+  await initHost(["machines_meta", "views"]);
   await registerViews([
     {
       name: VIEW_NAME,
@@ -175,7 +174,7 @@ export function desktop(props: { args?: { machine?: string | null } | null }) {
   const entry = computed(() => {
     const m = targetMachine();
     if (m === undefined) return null;
-    return machineEntry(m);
+    return machineMetaEntry(m);
   });
   const machineOnline = computed(() => {
     const e = entry();

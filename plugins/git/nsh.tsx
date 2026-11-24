@@ -25,7 +25,7 @@ import {
   localOs,
   onCommand,
   onEvent,
-  onState,
+  onSlices,
   openFile,
   openUrl,
   pathFileName,
@@ -41,7 +41,6 @@ import {
   SmeltIcon,
   SmeltVector,
   stableMemo,
-  state,
   t,
   text,
   currentTheme,
@@ -220,11 +219,13 @@ const stateVersion = signal<number>(0);
 // 缓存表（按 projectKey 索引）
 const repoCache = new Map<string, { value: RepoSet; stale: boolean; fetchedAt: number }>();
 const repoInflight = new Map<string, boolean>();
+const repoThrottleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 const statusCache = new Map<string, { value: GitStatusData; stale: boolean; fetchedAt: number }>();
 const statusGeneration = new Map<string, number>();
 const statusInflight = new Set<string>();
 const statusFailures = new Map<string, number>();
+const statusRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 const branchCache = new Map<string, { value: BranchList; stale: boolean; fetchedAt: number }>();
 const branchGeneration = new Map<string, number>();
@@ -238,6 +239,7 @@ const repoCollapsed = new Set<string>();
 const treeCollapsed = new Set<string>();
 const collapsedDiffFiles = new Set<string>();
 const watches = new Set<string>();
+const failedWatches = new Set<string>();
 const parked = new Map<string, ParkedUi>();
 const autofetchAt = new Map<string, number>();
 
@@ -308,16 +310,20 @@ function syncBadge() {
   }
   if (label === lastBadgeLabel) return;
   lastBadgeLabel = label;
-  void run(SET_VIEW_BADGE_CMD, { view: VIEW_ID, label }).catch(() => {});
+  void run(SET_VIEW_BADGE_CMD, { view: VIEW_ID, label }).catch(() => {
+    if (lastBadgeLabel === label) lastBadgeLabel = undefined;
+  });
 }
 
 // ---- 监听与失效 ----
 
 function ensureWatch(project: ProjectRef) {
   const k = projectKey(project.machine, project.root);
-  if (watches.has(k)) return;
+  if (watches.has(k) || failedWatches.has(k)) return;
   watches.add(k);
   void call(project.machine, "project.watch", { root: project.root }).catch((err) => {
+    watches.delete(k);
+    failedWatches.add(k);
     console.error(`[git] project.watch(${project.root}) failed:`, err);
   });
 }
@@ -334,25 +340,26 @@ function markBranchesStale(repoKey: string) {
   if (c) c.stale = true;
 }
 
+function splitProjectKey(k: string): [string | null, string] {
+  const sep = k.indexOf("\0");
+  return [sep > 0 ? k.slice(0, sep) : null, sep >= 0 ? k.slice(sep + 1) : k];
+}
+
 function markCachesStaleWhere(predicate: (machine: string | null, root: string) => boolean) {
-  const splitKey = (k: string): [string | null, string] => {
-    const sep = k.indexOf("\0");
-    return [sep > 0 ? k.slice(0, sep) : null, sep >= 0 ? k.slice(sep + 1) : k];
-  };
   for (const k of new Set([...statusCache.keys(), ...statusInflight])) {
-    const [m, r] = splitKey(k);
+    const [m, r] = splitProjectKey(k);
     if (predicate(m, r)) markStatusDirty(k);
   }
   for (const k of new Set([...branchCache.keys(), ...branchInflight])) {
-    const [m, r] = splitKey(k);
+    const [m, r] = splitProjectKey(k);
     if (predicate(m, r)) markBranchesStale(k);
   }
   for (const [k, c] of repoCache.entries()) {
-    const [m, r] = splitKey(k);
+    const [m, r] = splitProjectKey(k);
     if (predicate(m, r)) c.stale = true;
   }
   for (const k of repoInflight.keys()) {
-    const [m, r] = splitKey(k);
+    const [m, r] = splitProjectKey(k);
     if (predicate(m, r)) repoInflight.set(k, true);
   }
 }
@@ -375,10 +382,14 @@ function discoverRepos(project: ProjectRef) {
 
   if (wait > 0) {
     // 限频等待（非轮询）：仅在事件标旧后等满最小间隔再触发一次发现。
-    setTimeout(() => {
+    const prevTimer = repoThrottleTimers.get(k);
+    if (prevTimer != null) clearTimeout(prevTimer);
+    const timer = setTimeout(() => {
+      repoThrottleTimers.delete(k);
       repoInflight.delete(k);
       refreshVisible();
     }, wait);
+    repoThrottleTimers.set(k, timer);
     return;
   }
 
@@ -404,12 +415,12 @@ function discoverRepos(project: ProjectRef) {
       const existing = repoCache.get(k);
       if (existing) {
         existing.stale = changed;
-        existing.fetchedAt = Date.now();
+        existing.fetchedAt = changed ? 0 : Date.now();
       } else {
         repoCache.set(k, {
           value: { repos: [], truncated: false },
           stale: changed,
-          fetchedAt: Date.now(),
+          fetchedAt: 0,
         });
       }
       bump();
@@ -480,13 +491,17 @@ function handleStatusResult(repo: ProjectRef, k: string, reqGen: number, data: G
     }
     const delay = gitStatusRetryDelay(count);
     if (delay != null) {
-      setTimeout(() => {
+      const prevTimer = statusRetryTimers.get(k);
+      if (prevTimer != null) clearTimeout(prevTimer);
+      const timer = setTimeout(() => {
+        statusRetryTimers.delete(k);
         statusInflight.delete(k);
         const c = statusCache.get(k);
         if (c) c.stale = true;
         ensureStatus(repo);
         bump();
       }, delay);
+      statusRetryTimers.set(k, timer);
     } else {
       statusInflight.delete(k);
       if (changed) ensureStatus(repo);
@@ -1356,7 +1371,7 @@ function refreshVisible() {
 // ---- 启动注册与事件监听 ----
 
 bootTask(async () => {
-  await initHost();
+  await initHost(["window_active", "active_context", "machines_meta"]);
   await registerViews([
     {
       name: "main",
@@ -1428,46 +1443,84 @@ onCommand(async ({ name, args }) => {
   throw new Error(`unknown command: ${name}`);
 });
 
-onState((next) => {
-  lastWindowActive = next.window_active !== false;
+onSlices(["window_active", "active_context"], () => {
+  lastWindowActive = windowActive();
   syncProjectFromContext();
 });
 
-onEvent((event) => {
-  if (!event || typeof event !== "object") return;
-  if (event.type === "project_changed") {
-    const machine = event.machine ?? null;
-    const root = typeof event.root === "string" ? event.root : "";
-    if (!root || !watches.has(projectKey(machine, root))) return;
-    const st = pathStyle(machine);
-    markCachesStaleWhere((m, r) => m === machine && pathStartsWith(st, r, root));
-    refreshVisible();
-    return;
-  }
-  if (event.type === "reconnected") {
-    const machine = event.machine ?? null;
-    markCachesStaleWhere((m) => m === machine);
-    for (const k of [...watches]) {
-      const sep = k.indexOf("\0");
-      const m = sep > 0 ? k.slice(0, sep) : null;
-      if (m === machine) watches.delete(k);
+onEvent(
+  (event) => {
+    if (!event || typeof event !== "object") return;
+    if (event.type === "project_changed") {
+      const machine = event.machine ?? null;
+      const root = typeof event.root === "string" ? event.root : "";
+      if (!root || !watches.has(projectKey(machine, root))) return;
+      const st = pathStyle(machine);
+      markCachesStaleWhere((m, r) => m === machine && pathStartsWith(st, r, root));
+      refreshVisible();
+      return;
     }
-    refreshVisible();
-    return;
-  }
-  if (event.type === "window_activated") {
-    markCachesStaleWhere(() => true);
-    refreshVisible();
-    return;
-  }
-  if (event.type === "active_context_changed") {
-    syncProjectFromContext();
-    return;
-  }
-  if (event.type === "shown_views_changed" || event.type === "machines_changed") {
-    refreshVisible();
-  }
-});
+    if (event.type === "reconnected") {
+      const machine = event.machine ?? null;
+      markCachesStaleWhere((m) => m === machine);
+      for (const [k, c] of repoCache.entries()) {
+        const [m] = splitProjectKey(k);
+        if (m === machine) c.fetchedAt = 0;
+      }
+      for (const [k, timer] of [...repoThrottleTimers.entries()]) {
+        const [m] = splitProjectKey(k);
+        if (m === machine) {
+          clearTimeout(timer);
+          repoThrottleTimers.delete(k);
+          repoInflight.delete(k);
+        }
+      }
+      for (const k of [...statusFailures.keys()]) {
+        const [m] = splitProjectKey(k);
+        if (m === machine) statusFailures.delete(k);
+      }
+      for (const [k, timer] of [...statusRetryTimers.entries()]) {
+        const [m] = splitProjectKey(k);
+        if (m === machine) {
+          clearTimeout(timer);
+          statusRetryTimers.delete(k);
+          statusInflight.delete(k);
+        }
+      }
+      for (const k of [...watches]) {
+        const [m] = splitProjectKey(k);
+        if (m === machine) watches.delete(k);
+      }
+      for (const k of [...failedWatches]) {
+        const [m] = splitProjectKey(k);
+        if (m === machine) failedWatches.delete(k);
+      }
+      refreshVisible();
+      return;
+    }
+    if (event.type === "window_activated") {
+      failedWatches.clear();
+      markCachesStaleWhere(() => true);
+      refreshVisible();
+      return;
+    }
+    if (event.type === "active_context_changed") {
+      syncProjectFromContext();
+      return;
+    }
+    if (event.type === "shown_views_changed" || event.type === "machines_changed") {
+      refreshVisible();
+    }
+  },
+  [
+    "project_changed",
+    "reconnected",
+    "window_activated",
+    "active_context_changed",
+    "shown_views_changed",
+    "machines_changed",
+  ],
+);
 
 // ---- 主题与共用组件 ----
 
@@ -2792,12 +2845,13 @@ export function Main() {
                             }
                           }}
                           renderFileHeader={(file: any) => {
-                            const cur = gitDiff();
-                            const ops = hunkOpsFor(cur);
-                            const fullPath =
-                              cur && file?.path && file.status !== "deleted"
+                            const ops = computed(() => hunkOpsFor(gitDiff()));
+                            const fullPath = computed(() => {
+                              const cur = gitDiff();
+                              return cur && file?.path && file.status !== "deleted"
                                 ? fullFilePath(cur.root.root, file.path, false)
                                 : null;
+                            });
                             return (
                               <View
                                 style={{
@@ -2870,27 +2924,30 @@ export function Main() {
                                     </Text>
                                   </If>
                                 </View>
-                                <If when={!cur?.aggregate && ops !== "none"}>
+                                <If when={!gitDiff()?.aggregate && ops() !== "none"}>
                                   <SmeltButton
                                     quiet={true}
                                     small={true}
-                                    label={ops === "unstage" ? t("stage.unstage") : t("stage.stage")}
+                                    label={ops() === "unstage" ? t("stage.unstage") : t("stage.stage")}
                                     onPress={() => {
+                                      const cur = gitDiff();
                                       if (!cur) return;
-                                      stageFile(cur.root, cur.path, ops !== "unstage");
+                                      stageFile(cur.root, cur.path, ops() !== "unstage");
                                     }}
                                   />
                                 </If>
-                                <If when={Boolean(fullPath)}>
+                                <If when={Boolean(fullPath())}>
                                   <SmeltButton
                                     quiet={true}
                                     small={true}
                                     label={t("diff.open")}
                                     onPress={() => {
-                                      if (cur && fullPath) {
+                                      const cur = gitDiff();
+                                      const path = fullPath();
+                                      if (cur && path) {
                                         void openFile({
                                           machine: cur.root.machine,
-                                          path: fullPath,
+                                          path,
                                         }).catch((err: any) =>
                                           notifyError(err?.message ?? String(err)),
                                         );
@@ -2902,8 +2959,7 @@ export function Main() {
                             );
                           }}
                           renderSeparator={(sep: any) => {
-                            const cur = gitDiff();
-                            const ops = hunkOpsFor(cur);
+                            const ops = computed(() => hunkOpsFor(gitDiff()));
                             const hunkIx = Number(sep?.gap ?? 0);
                             return (
                               <View
@@ -2932,29 +2988,38 @@ export function Main() {
                                 >
                                   {sep?.header ? `@@ ${sep.header}` : "@@"}
                                 </Text>
-                                <If when={!cur?.aggregate && ops === "stage_discard"}>
+                                <If when={!gitDiff()?.aggregate && ops() === "stage_discard"}>
                                   <View style={{ display: "flex", flexDirection: "row", gap: 4 }}>
                                     <SmeltButton
                                       quiet={true}
                                       small={true}
                                       label={t("hunk.stage")}
-                                      onPress={() => cur && applyHunk(cur.root, hunkIx, "stage")}
+                                      onPress={() => {
+                                        const cur = gitDiff();
+                                        if (cur) applyHunk(cur.root, hunkIx, "stage");
+                                      }}
                                     />
                                     <SmeltButton
                                       quiet={true}
                                       danger={true}
                                       small={true}
                                       label={t("hunk.discard")}
-                                      onPress={() => cur && startDiscardHunk(cur.root, hunkIx)}
+                                      onPress={() => {
+                                        const cur = gitDiff();
+                                        if (cur) startDiscardHunk(cur.root, hunkIx);
+                                      }}
                                     />
                                   </View>
                                 </If>
-                                <If when={!cur?.aggregate && ops === "unstage"}>
+                                <If when={!gitDiff()?.aggregate && ops() === "unstage"}>
                                   <SmeltButton
                                     quiet={true}
                                     small={true}
                                     label={t("hunk.unstage")}
-                                    onPress={() => cur && applyHunk(cur.root, hunkIx, "unstage")}
+                                    onPress={() => {
+                                      const cur = gitDiff();
+                                      if (cur) applyHunk(cur.root, hunkIx, "unstage");
+                                    }}
                                   />
                                 </If>
                               </View>

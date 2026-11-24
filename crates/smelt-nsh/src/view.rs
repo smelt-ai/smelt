@@ -396,8 +396,8 @@ impl Drop for SmeltView {
         let Some(id) = self.ends.take() else {
             return;
         };
-        // 请求是阻塞的，不占主线程；结果没人等，失败了会话留着，侧栏看不到但守护里还在。
-        std::thread::spawn(move || {
+        // 请求是阻塞的，丢进专用阻塞池，不占主线程或 GPUI 后台池；结果没人等。
+        api::blocking::spawn_detached(move || {
             let _ = Runtime::local().client().request(
                 &json!({ "op": DaemonOperation::Kill, "id": id }),
                 DEFAULT_REQUEST_TIMEOUT,

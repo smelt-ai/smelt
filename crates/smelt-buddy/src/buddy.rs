@@ -18,7 +18,8 @@ mod paint;
 mod sprites;
 mod swing;
 
-use std::sync::Arc;
+use std::collections::{HashSet, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use gpui::{
@@ -37,6 +38,36 @@ pub(super) struct Sprite {
     start: usize,
     len: usize,
     anchor: (f32, f32),
+}
+
+struct PrewarmQueue {
+    running: bool,
+    seen: HashSet<Buddy>,
+    pending: VecDeque<Buddy>,
+}
+
+struct PrewarmRunningGuard {
+    finished: bool,
+}
+
+impl Drop for PrewarmRunningGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            let mut state = prewarm_queue().lock().unwrap_or_else(|e| e.into_inner());
+            state.running = false;
+        }
+    }
+}
+
+fn prewarm_queue() -> &'static Mutex<PrewarmQueue> {
+    static PREWARM: OnceLock<Mutex<PrewarmQueue>> = OnceLock::new();
+    PREWARM.get_or_init(|| {
+        Mutex::new(PrewarmQueue {
+            running: false,
+            seen: HashSet::new(),
+            pending: VecDeque::new(),
+        })
+    })
 }
 
 /// 一件戴的东西：可换色的主料（中性灰，乘色）和固定色的点缀各是哪张。两张的大小、锚点一样，
@@ -150,10 +181,48 @@ impl Buddy {
         Tint::Body(self.body)
     }
 
-    /// 把这个小人要的零件画好（画过的跳过）。在数据变化时调，不在 render 里。
+    /// 把这个小人要的零件画好（画过的跳过）。一般在后台预热线程调用。
     pub(crate) fn prepare(self) {
         for paint in self.paints() {
             paint.pixels();
+        }
+    }
+
+    /// 投递到 GPUI 后台执行器按串行队列异步解码与旋转，完全不占主线程，也不养常驻 OS 线程。
+    pub(crate) fn prewarm_in_background(self, cx: &App) {
+        let should_spawn = {
+            let mut state = prewarm_queue().lock().unwrap_or_else(|e| e.into_inner());
+            if !state.seen.insert(self) {
+                return;
+            }
+            state.pending.push_back(self);
+            if state.running {
+                false
+            } else {
+                state.running = true;
+                true
+            }
+        };
+        if should_spawn {
+            cx.background_executor()
+                .spawn(async move {
+                    let mut guard = PrewarmRunningGuard { finished: false };
+                    loop {
+                        let next = {
+                            let mut state =
+                                prewarm_queue().lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(buddy) = state.pending.pop_front() {
+                                buddy
+                            } else {
+                                state.running = false;
+                                guard.finished = true;
+                                return;
+                            }
+                        };
+                        next.prepare();
+                    }
+                })
+                .detach();
         }
     }
 

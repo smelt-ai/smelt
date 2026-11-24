@@ -42,7 +42,7 @@ pub struct StoredImageMeta {
 
 struct StoredImage {
     meta: StoredImageMeta,
-    data_b64: String,
+    data_b64: Arc<str>,
 }
 
 #[derive(Default)]
@@ -127,7 +127,10 @@ impl ImageStore {
             byte_len: bytes.len(),
             preview_uri,
         };
-        let stored = StoredImage { meta, data_b64 };
+        let stored = StoredImage {
+            meta,
+            data_b64: Arc::from(data_b64),
+        };
 
         let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
         Ok(guard.insert(stored, Some(b64_hash)))
@@ -174,24 +177,24 @@ impl ImageStore {
         Ok(meta)
     }
 
-    /// 取出用于提交给 `smeltd` 的 `AcpImage`（`PromptImage`）。
+    /// 取出用于提交给 `smeltd` 的 `AcpImage`（`PromptImage`）。只在锁内拷贝轻指针，构造留到锁外。
     pub fn get_prompt_image(&self, ref_id: &str) -> Option<AcpImage> {
-        let guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let stored = guard.by_ref.get(ref_id)?;
-        Some(AcpImage::new(
-            stored.meta.mime.clone(),
-            stored.data_b64.clone(),
-        ))
+        let (mime, data_b64) = {
+            let guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            let stored = guard.by_ref.get(ref_id)?;
+            (stored.meta.mime.clone(), Arc::clone(&stored.data_b64))
+        };
+        Some(AcpImage::new(mime, data_b64.to_string()))
     }
 
-    /// 取出原图完整 `data:<mime>;base64,...` 供点击放大预览。
+    /// 取出原图完整 `data:<mime>;base64,...` 供点击放大预览。只在锁内拷贝轻指针，拼接留到锁外。
     pub fn get_data_uri(&self, ref_id: &str) -> Option<String> {
-        let guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let stored = guard.by_ref.get(ref_id)?;
-        Some(format!(
-            "data:{};base64,{}",
-            stored.meta.mime, stored.data_b64
-        ))
+        let (mime, data_b64) = {
+            let guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            let stored = guard.by_ref.get(ref_id)?;
+            (stored.meta.mime.clone(), Arc::clone(&stored.data_b64))
+        };
+        Some(format!("data:{mime};base64,{data_b64}"))
     }
 
     /// 递归扫描快照 JSON，将大内联 `AcpImage` 落入缓存并替换为轻量 `ref_id` + `preview_uri`。

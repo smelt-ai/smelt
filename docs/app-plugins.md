@@ -1,6 +1,6 @@
 # 整个 app 插件化
 
-> 状态：方向定于 2026-11-09；2026-11-20 改定「插件只有 JS 一种，Rust 只做宿主和能力」；运行时已切到 **NSH A2**（`crates/smelt-nsh`），全部内置功能均已迁出 Rust（`crates/plugins/` 清零），对话能力拆分为纯非 UI 的 `crates/smelt-acp` 与 `"smelt/sdk"` 导出的纯 TSX `<SmeltConversation>`。
+> 状态：方向定于 2026-11-09；2026-11-20 切到 **NSH A2**（`crates/smelt-nsh`）；2026-11-24 收敛为「扩展型业务功能留在 JS/TSX 插件（按需订阅状态切片与离散事件），声明式纯主题与纯布局零 VM，宿主核心 / 预首帧偏好 / 纯 OS 集成留在 `crates/smelt/src/`，对话能力拆分为纯非 UI 的 `crates/smelt-acp` 与可 `fork` 覆写的共享 JS 模块插件 `plugins/conversation/`（`"smelt/conversation"`，id `smelt.conversation`）」。
 >
 > 本文先写终态，再写从现在走到终态的顺序。每块拆到时，它的接口细节再写回本文。
 
@@ -90,13 +90,13 @@
 | 路径 | 按运行时那台机器的系统切路径（`pathClean`、`pathJoin` 这些）、项目显示名 | `smelt-model` 的 `runtime_path`；JS 经 `"smelt/sdk"` 的 `path*`、`projectLabels` |
 | 插件的库 | 自己的 SQLite：查、写、事务、按版本迁移 | `smelt-client-store` 的 `PluginStore`；JS 经 `"smelt/sdk"` 的 `store` |
 | 终端 | 终端 GPU 画布、PTY 流、IME、Cmd+F 搜索与断线重连 | `crates/smelt-terminal`；JS 经 `smelt.terminal`（`SmeltNativeTerminal`） |
-| 对话 | 纯非 UI ACP 连接/帧镜像/节流中心/图片缓存（`crates/smelt-acp`）+ Mermaid SVG 渲染（`smelt-ui`）+ 通用纯 TSX `<SmeltConversation>`（`"smelt/sdk"`） | `crates/smelt-acp` + `crates/smelt-nsh/src/plugins/conversation/` |
+| 对话 | 纯非 UI ACP 连接/帧镜像/节流中心/图片缓存（`crates/smelt-acp`）+ Mermaid SVG 渲染（`smelt-ui`）+ 可 fork 共享 TSX 模块 `<SmeltConversation>`（`plugins/conversation/` -> `"smelt/conversation"`） | `crates/smelt-acp` + `plugins/conversation/` |
 | 组件库与原生件 | NSH 基础件（`"nsh"`、`"nsh/base"`）+ `smelt/host` 矢量图标 + 原生能力件（`smelt.view`、`smelt.terminal`、`smelt.desktop`、`smelt.buddy`、`smelt.window-bar`、`smelt.window-drag`、`smelt.backdrop-region`） | `crates/smelt-nsh` + `crates/smelt-ui` |
 | Git | 读写仓库 | `crates/smelt-git`，还没映射给 JS |
 | 远程桌面 | 画面与本地转发口组件 | `crates/smelt-desktop`；JS 经 `smelt.desktop`（`SmeltNativeDesktop`） |
 | 小人 | 会动的 3D 小人：零件、动作、合成、出帧节拍；演哪一出由插件给 | `crates/smelt-buddy`；JS 经 `smelt.buddy`（`SmeltNativeBuddy`） |
 | 资源量测 | 进程 CPU、内存 | 宿主桥 `sys.process_usage`（`crates/smelt-nsh`） |
-| 更新 | 替换签名过的 App 包（只给随 App 带的更新插件） | 宿主受控命令 `smelt.app/*`（`crates/smelt/src/updater/`） |
+| 宿主内置系统模块 | 在线更新与退出守卫、通知与菜单栏/Dock、CLI 安装与清理、预首帧界面语言、终端字号与配色同步 | 宿主内建模块（`crates/smelt/src/{updater,notifications,maintenance,language,terminal_settings}`，沿用 `smelt.*` 视图/数据目录，0 VM） |
 
 能力自己要登记视图、命令时，用自己的来源 id（如 `smelt.terminal`），和插件一样进注册表。
 
@@ -191,18 +191,18 @@
 
 ## 插件运行时（NSH A2）
 
-### 单引擎 + 每插件独立 QuickJS VM
+### 单引擎 + 共享内置 VM + 每用户插件独立 QuickJS VM
 
-- 实现位于 `crates/smelt-nsh`（基于 `smelt-ai/nsh` fork）：单引擎线程 + 单界面树（`AppView`）+ 每插件独立加固 QuickJS VM；主壳在 `crates/smelt-nsh/shell/MainShell.tsx`，承载各页 `nsh/base <DockArea>` 并与 `DockAreaState` 无损互转。
+- 实现位于 `crates/smelt-nsh`（基于 `smelt-ai/nsh` fork）：单引擎线程 + 单界面树（`AppView`）+ **1 个共享内置 VM（`__builtins__`，承载未被覆写的内置脚本插件）** + **每用户插件各自独立加固 QuickJS VM**（含同 `id` 覆写内置与引用了用户覆写共享模块的消费方）；主壳在 `crates/smelt-nsh/shell/MainShell.tsx`，承载各页 `nsh/base <DockArea>` 并与 `DockAreaState` 无损互转。
 - 插件入口使用 TSX/JS，启动和热重载时由 `nsh-bundler` 自动打包，装改删不用重编 Rust。
-- 同一插件的多个视图与设置页共享该插件 VM 内的模块状态；只有宿主外壳通过内部挂载机制将顶层插件视图摆进 `DockArea` / 出口 / 设置页，插件间不嵌套，重画布统一由原子原生能力组件承担。
+- 每个插件的多个视图与设置页共享自己的模块状态，按作用域 SDK 隔离 `pluginId`、`dataDir`、`texts`、`store`、`bootTask`、`onCommand` 与事件路由；只有宿主外壳通过内部挂载机制将顶层插件视图摆进 `DockArea` / 出口 / 设置页，插件间不嵌套，重画布统一由原子原生能力组件承担。
 - 加载失败的插件没有视图可登记，错误在设置的插件页、`smelt plugin status` 和 `~/.smelt/app.log` 里看。
 
 ### 随 App 带的插件
 
-- 放仓库根 `plugins/<name>/`，发版打包时经 `scripts/stage-plugins.sh` 预编译为 QuickJS 字节码（`bundle.nshc` + `bundle.meta.json`）并保留可编辑源码放入安装包（macOS 是 `Contents/Resources/plugins/`，Windows 是安装目录下的 `plugins\`），发版的 App 优先加载预编译字节码、零打包冷启（`crates/smelt/src/plugins/builtin.rs`），同时支持 `smelt plugin fork` 离线复制源码；开发用的包（调试构建和 `make dev`）直接读仓库，改了即热重载，只有改 Rust 要重编。
+- 放仓库根 `plugins/<name>/`，发版打包时经 `scripts/stage-plugins.sh` 将全部内置脚本插件合并预编译为顶层共享字节码（`builtins.nshc` + `builtins.meta.json`）并保留各插件可编辑源码放入安装包（macOS 是 `Contents/Resources/plugins/`，Windows 是安装目录下的 `plugins\`），发版的 App 优先加载预编译共享字节码、单内置 VM 零打包冷启（`crates/smelt/src/plugins/builtin.rs`），同时支持 `smelt plugin fork` 离线复制源码；开发用的包（调试构建和 `make dev`）直接读仓库，改了即热重载，只有改 Rust 要重编。
 - 在第一帧之前加载完，布局里摆的视图第一帧就画得出来，不闪空白。
-- 同来源（`~/.smelt/plugins/` 内或自带目录内）重复 id 报重复错误跳过；当 `~/.smelt/plugins/` 存在与自带插件同 id 的目录时，**用户插件优先加载并覆写自带插件**（包括首帧前 `register_initial_themes` 的主题包）。一旦用户覆写版在主题校验、文案解析、TSX 打包或 VM 启动阶段失败，宿主会自动回退加载自带版本保证功能不断，同时在 `LoadedPluginInfo`（`overrides_builtin`、`fallback_to_builtin`、`error`）、设置页和 `smelt plugin status` 中明确标出原因；用户修复源码会热重载切回覆写版，删除用户目录会立即恢复自带版。
+- 同来源（`~/.smelt/plugins/` 内或自带目录内）重复 id 报重复错误跳过；当 `~/.smelt/plugins/` 存在与自带插件同 id 的目录时，**用户插件优先加载进独立用户 VM 并将该插件从共享 `__builtins__` 中自动摘除**（包括首帧前 `register_initial_themes` 的主题包；若覆写的是共享模块如 `smelt.conversation`，则只将依赖该模块的消费方插件拆出独立 VM，其余内置插件继续留在 `__builtins__`）。一旦用户覆写版在主题校验、文案解析、TSX 打包或 VM 启动阶段失败，宿主会自动回退并将内置版收回共享 `__builtins__` 保证功能不断，同时在 `LoadedPluginInfo`（`overrides_builtin`、`fallback_to_builtin`、`error`）、设置页和 `smelt plugin status` 中明确标出原因；用户后续继续改写该覆写插件不会重建 `__builtins__`，删除用户目录会立即恢复纯内置单 VM。
 
 ### 画面和数据
 
@@ -222,15 +222,15 @@
 **用户插件**与**随 App 带的插件**同一种目录结构，清单文件固定为 `smelt-plugin.json`：
 
 ```text
-plugins/language/
-  smelt-plugin.json   清单（id、name、version、entry / themes / layouts 等）
-  nsh.tsx             入口（复杂插件可放 nsh/main.tsx 并按职责拆分模块）
+plugins/files/
+  smelt-plugin.json   清单（id、name、version、entry / themes / pages / layouts 等）
+  nsh.tsx             入口（复杂插件可放 nsh/main.tsx 并按职责拆分模块；纯主题或纯布局可省略 entry）
   locales/ui.yml      文案
   tests/              纯逻辑单测（用 bun test）
 ```
 
 1. **只 import 自己目录里的文件和宿主模块**（`"nsh"`、`"nsh/base"`、`"smelt/sdk"`、`"smelt/host"`），不设插件间共享目录，也不开放 `smelt/slots`：要复用的进组件库或原子能力。
-2. **发的是源码 + 预编译字节码**：仓库直发 TSX/JS 源码；发版安装包同时带预编译 `bundle.nshc` 与插件源码（跳过 `tests/`），兼顾零打包冷启动与通过 `smelt plugin fork` 直接修改任意内置功能。
+2. **发的是源码 + 预编译字节码**：仓库直发 TSX/JS 源码；发版安装包同时带合并预编译的 `builtins.nshc` 与各插件源码（跳过 `tests/`），兼顾单内置 VM 零打包冷启动与通过 `smelt plugin fork` 直接修改任意内置功能。
 3. **逻辑和画面分开放**：数据、规则放不 import NSH 的纯 JS/TS 文件，宿主函数从参数传进来，用 `bun test` 测。
 4. **迁过来的插件沿用原 id**，视图、命令、菜单、插槽的 id 都不变，同一个提交删掉 Rust 版。插件的数据目录、布局里的视图 id、用户的快捷键都不用迁。
 5. **数据放 `~/.smelt/plugin-data/<id>/`**（`dataDir()`，库是里面的 `store.sqlite3`，用 `store.migrate` / `store.query` / `store.execute`），见 `docs/local-storage.md`。
@@ -245,10 +245,11 @@ plugins/language/
 
 ## 终态：各功能怎么分
 
-### 已迁入 `plugins/*` 与能力层的内置功能（全部完成，`crates/plugins/` 0 个 Rust 插件）
+### 内置插件（`plugins/*`）与宿主内置系统模块（`crates/smelt/src/`）
 
-- 23 个独立内置 JS/TSX 插件（`plugins/*`）：`agents`、`archive`、`automations`、`capabilities`、`desktop`（画布留在 `crates/smelt-desktop`）、`files`、`git`、`history`、`ide`、`language`、`launcher`、`layouts`、`machines`、`maintenance`（受控底层操作留在宿主）、`notifications`（系统通知与菜单栏桥留在宿主，主壳常驻后台）、`quota`、`resources`、`session-list`（直接驱动 `crates/smelt-buddy` 3D 小人）、`sessions`（直接驱动 `crates/smelt-terminal` 终端画布与 `"smelt/sdk"` 的 `<SmeltConversation>`）、`skills`、`terminal`（终端字号设置与主题同步）、`themes`、`updater`（包下载/替换与退出守卫留在宿主）。
-- 对话能力（原第 24 个 Rust 插件 `conversation`）：拆分为纯非 UI 的 `crates/smelt-acp` + `smelt-nsh` 宿主能力 `acp.*` / `mermaid.render` + `"smelt/sdk"` 导出的纯 TSX `<SmeltConversation>`，供 `sessions`、`automations` 与任意第三方插件零跨 VM 嵌套直接嵌入。
+- 19 个内置插件（`plugins/*`：默认由 **1 个共享内置 VM** 承载全部 `16` 个内置脚本插件，另有 `1` 个共享 JS 模块 + `1` 个 0-VM 纯主题 + `1` 个 0-VM 纯布局；用户覆写哪个插件或共享模块时，仅对应受影响插件拆出跑独立用户 VM）：`agents`、`archive`、`automations`、`capabilities`、`conversation`（共享模块插件 `smelt.conversation` -> `"smelt/conversation"`，零独立 VM，纯 TSX `<SmeltConversation>` 与对话组件，供 `sessions`、`automations` 及任意第三方插件直接导入或 `smelt plugin fork smelt.conversation` 定制）、`desktop`（画布留在 `crates/smelt-desktop`）、`files`、`git`、`history`、`ide`、`launcher`、`layouts`（零 VM 声明式布局插件，`smelt-plugin.json` 声明 `pages` / `layouts`）、`machines`、`quota`、`resources`、`session-list`（直接驱动 `crates/smelt-buddy` 3D 小人）、`sessions`（直接驱动 `crates/smelt-terminal` 终端画布，并导入 `"smelt/conversation"` 的 `<SmeltConversation>`）、`skills`、`themes`（零 VM 声明式纯主题插件）。
+- 5 个宿主核心 / 纯 OS 集成与预首帧偏好模块保留在宿主 `crates/smelt/src/` 中（沿用原 `smelt.*` 视图 id 与 `~/.smelt/plugin-data/smelt.<name>/store.sqlite3` 路径，零 VM、零 IPC 开销）：`language`（预首帧恢复界面语言与系统切换）、`terminal_settings`（直接同步 `crates/smelt-terminal` 主题与全局字号）、`maintenance`（CLI 软链安装与 `~/.smelt` 残留清理）、`updater`（安装包校验/替换、移入「应用程序」与退出守卫）、`notifications`（`attention.changed` 系统通知、macOS 菜单栏与 Dock 角标）。
+- 对话底层宿主能力：纯非 UI 的 `crates/smelt-acp` + `smelt-nsh` 宿主能力 `acp.*` / `mermaid.render`（经 `"smelt/sdk"` 暴露），上层 UI 全部在 `plugins/conversation/` 中，零跨 VM 嵌套。
 
 ## 会话核心
 

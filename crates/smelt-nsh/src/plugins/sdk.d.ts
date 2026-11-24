@@ -301,15 +301,33 @@ export declare function resolveCliResume(
 ): ResolveResult<{ label: string; command: string }>;
 
 export declare function daemonStateStatus(stateObj: unknown): "needs_you" | "running" | "idle" | null;
-export declare function terminalThemeSnapshot(): any;
-export declare function setTerminalFontPx(px: number): Promise<void>;
-export declare function attentionTexts(item: unknown): { title: string; message: string };
 export declare function agentIdFromLaunch(launch: string): string | null;
 
 /** Plugin id from `smelt-plugin.json`. */
 export declare function pluginId(): string;
 /** Persistent writable data directory (`~/.smelt/plugin-data/<id>/`). */
 export declare function dataDir(): string;
+
+export type StateSlice =
+  | "locale"
+  | "system_locale"
+  | "locales"
+  | "window_active"
+  | "notification_permission"
+  | "machines_meta"
+  | "sessions_data"
+  | "connections"
+  | "active_context"
+  | "pages"
+  | "views"
+  | "commands"
+  | "js_views"
+  | "safe_areas"
+  | "bar_insets"
+  | "theme"
+  | "shell";
+
+export type EventFilter = HostEvent["type"] | `plugin:${string}`;
 
 export interface SmeltState {
   revision: number;
@@ -324,7 +342,8 @@ export interface SmeltState {
     | { kind: "denied" }
     | { kind: "unavailable"; reason: string }
     | { kind: "unsupported" };
-  machines: any[];
+  machines_meta: any[];
+  sessions_data: any[];
   connections: any;
   active_context: { project: any; session: any };
   pages: any[];
@@ -338,11 +357,15 @@ export interface SmeltState {
   shell?: any;
 }
 
-export declare const state: Signal<SmeltState>;
-
-export declare function initHost(): Promise<SmeltState>;
-export declare function onState(listener: (next: SmeltState) => void): () => void;
-export declare function onEvent(listener: (event: HostEvent) => void): () => void;
+export declare function initHost(initialSlices?: readonly StateSlice[]): Promise<SmeltState>;
+export declare function onSlices(
+  slices: readonly StateSlice[],
+  listener: (changed: readonly StateSlice[]) => void,
+): () => void;
+export declare function onEvent(
+  listener: (event: HostEvent) => void,
+  types: readonly EventFilter[],
+): () => void;
 export declare function onAcpEvent(listener: (event: any) => void): () => void;
 
 export declare function acpSubscribe(params: {
@@ -380,10 +403,14 @@ export declare function t(key: string, params?: Record<string, unknown>): string
 /** Build an i18n map from `locales/*.yml` for `registerViews` / `registerCommands`. */
 export declare function text(key: string): Record<string, string>;
 
+export declare function hostReady(): boolean;
+export declare function texts(): Record<string, Record<string, string>>;
 export declare function theme(): any;
 export declare const currentTheme: typeof theme;
 export declare function jsViews(): Record<string, { plugin: string; view: string }>;
 export declare function shellState(): any;
+export declare function machineMeta(): any[];
+export declare function machineMetaEntry(machine: string | null | undefined): any;
 export declare function machines(): any[];
 export declare function machineEntry(machine: string | null | undefined): any;
 export declare function pathStyle(machine: string | null | undefined): string;
@@ -497,7 +524,6 @@ export declare function launchPath(opts: {
 
 export declare function locales(): Array<{ code: string; name: string }>;
 export declare function systemLocale(): string;
-export declare function setLocale(locale: string | null): Promise<void>;
 
 export declare function registerViews(specs: ViewSpec[]): Promise<void>;
 export declare function registerCommands(specs: CommandSpec[], groupTitle?: LocalizedText): Promise<void>;
@@ -659,53 +685,3 @@ export declare function SmeltDiffView(props: {
   onFileToggle?: (event: { file: any }) => void;
   onStatsChange?: (event: { stats: any }) => void;
 }): JSX.Element;
-
-export declare function useHostEvent(listener: (event: HostEvent) => void): void;
-
-export interface SmeltConversationStart {
-  fork?: {
-    provider_session_id: string;
-    cut?: any;
-  } | null;
-  prefill?: string | null;
-}
-
-export interface SmeltConversationSpec {
-  agent: string;
-  cwd: string;
-  binding?: any;
-}
-
-export interface SmeltConversationProps {
-  machine: string | null;
-  sessionId: string;
-  directoryAcp?: any | null;
-  spec?: SmeltConversationSpec | null;
-  start?: SmeltConversationStart | null;
-  initialConfig?: Array<[string, string]>;
-  placeholder?: string | null;
-  embedded?: boolean;
-  title?: string | null;
-  safeArea?: {
-    title_bar?: boolean;
-    top_left?: number;
-    top_right?: number;
-  } | null;
-  reuseKey?: string;
-  focusSeq?: number;
-  insertText?: { seq: number; text: string } | null;
-  refreshModelsSeq?: number;
-  readOnly?: boolean;
-  style?: StyleProp<ViewStyle>;
-  onAtLatestChange?: (atLatest: boolean) => void;
-  onFocusIn?: () => void;
-  onFork?: (req: { provider_session_id: string; cut: any; prompt: string }) => void;
-  onNewSession?: () => void;
-  onOpenConversation?: (sid: string) => void;
-  onManageCapabilities?: (byAgent: boolean) => void;
-  onOpenAgentMemory?: (agentId: string) => void;
-  onConfigSelected?: (agentId: string, configId: string, valueId: string) => void;
-  onRevealInList?: () => void;
-}
-
-export declare function SmeltConversation(props: SmeltConversationProps): JSX.Element;

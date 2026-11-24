@@ -158,14 +158,23 @@ export class NewSession {
     }
   }
 
-  /** 换了机器（或刚打开）：清掉上一台的，重读新建目录；上次没读到智能体配置的，再读一次。 */
+  /** 换了机器（或刚打开）：优先同步命中缓存，超过 10 秒再静默后台刷新；没缓存才进 loading。 */
   load() {
     this.generation += 1;
-    this.catalog = { state: "loading" };
-    this.rows = [];
-    this.slots = [];
-    this.selected = null;
-    this.fetch_catalog();
+    const cached = this.list.cached_catalog?.(this.machine) ?? null;
+    if (cached?.catalog?.sections) {
+      this.catalog = { state: "ready" };
+      this.apply_sections(cached.catalog.sections);
+      if (Date.now() - cached.fetchedAt > 10_000) {
+        this.fetch_catalog({ refresh: false, silent: true });
+      }
+    } else {
+      this.catalog = { state: "loading" };
+      this.rows = [];
+      this.slots = [];
+      this.selected = null;
+      this.fetch_catalog({ refresh: false, silent: false });
+    }
     if (this.list.agent_settings_failure != null) {
       const generation = this.generation;
       const redraw = () => {
@@ -175,13 +184,15 @@ export class NewSession {
     }
   }
 
-  /** 读一次新建目录。读的时候列表照旧显示，回来了整份换掉，选中的尽量留在原处。 */
-  fetch_catalog() {
+  /** 读一次新建目录。silent 模式下已有缓存展示时出错不刷掉现有列表；成功则写入缓存并更新。 */
+  fetch_catalog({ refresh = false, silent = false } = {}) {
     this.catalog_request += 1;
     const generation = this.generation;
     const request = this.catalog_request;
-    return this.host.call(this.machine, "new_session.catalog", {}).then(
+    const params = refresh ? { refresh: true } : {};
+    return this.host.call(this.machine, "new_session.catalog", params).then(
       (catalog) => {
+        this.list.cache_catalog?.(this.machine, catalog);
         if (this.generation !== generation || this.catalog_request !== request) return;
         this.catalog = { state: "ready" };
         this.apply_sections(catalog.sections);
@@ -189,6 +200,7 @@ export class NewSession {
       },
       (error) => {
         if (this.generation !== generation || this.catalog_request !== request) return;
+        if (silent && this.catalog.state === "ready") return;
         this.catalog = { state: "failed", error: message(error) };
         this.rows = [];
         this.slots = [];
@@ -196,6 +208,15 @@ export class NewSession {
         this.redraw();
       },
     );
+  }
+
+  /** 后台收到 `new_session.catalog_changed` 推送：若菜单正展示同一台机器则就地刷新。 */
+  on_catalog_updated(catalog) {
+    if (!catalog?.sections) return;
+    if (this.catalog.state !== "ready" && this.catalog.state !== "loading") return;
+    this.catalog = { state: "ready" };
+    this.apply_sections(catalog.sections);
+    this.redraw();
   }
 
   apply_sections(sections) {
@@ -288,7 +309,9 @@ export class NewSession {
     const generation = this.generation;
     return this.host.call(this.machine, "new_session.pins.toggle", { key }).then(
       () => {
-        if (this.generation === generation) return this.fetch_catalog();
+        if (this.generation === generation) {
+          return this.fetch_catalog({ refresh: false, silent: true });
+        }
       },
       (error) => {
         if (this.generation !== generation) return;

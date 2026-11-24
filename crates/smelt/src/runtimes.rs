@@ -56,10 +56,9 @@ static LOCAL_NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::ne
 /// 初始化本机名字：启动时在后台读取硬件序列号，render 只读内存缓存。
 pub(crate) fn init_local_runtime_name(cx: &gpui::App) {
     cx.spawn(async move |cx| {
-        let name = cx
-            .background_executor()
-            .spawn(async { smelt_sys::hardware_serial().or_else(smelt_sys::hostname) })
-            .await;
+        let name =
+            smelt_sys::blocking::run(|| smelt_sys::hardware_serial().or_else(smelt_sys::hostname))
+                .await;
         let _ = LOCAL_NAME.set(name);
         cx.update(|cx| {
             update_hub(cx, |_| {});
@@ -435,10 +434,7 @@ pub(crate) fn reset_iroh_after_wake(cx: &mut gpui::App) {
         })
         .unwrap_or_default();
     cx.spawn(async move |cx| {
-        let reset = cx
-            .background_executor()
-            .spawn(async move { reset_iroh_client(&routes) })
-            .await;
+        let reset = smelt_sys::blocking::run(move || reset_iroh_client(&routes)).await;
         if reset {
             smelt_sys::app_log::log("info", "iroh", "系统睡醒，换掉旧的 iroh endpoint");
             cx.update(|cx| crate::runtime_events::probe_remotes(cx));
@@ -836,15 +832,13 @@ pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui:
         }
     });
     if let Some(connection) = learned {
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(error) = smelt_client_store::client_store()
-                    .and_then(|store| store.put_runtime_connection(&connection))
-                {
-                    eprintln!("[runtimes] 保存机器的系统失败：{error}");
-                }
-            })
-            .detach();
+        smelt_sys::blocking::spawn_detached(move || {
+            if let Err(error) = smelt_client_store::client_store()
+                .and_then(|store| store.put_runtime_connection(&connection))
+            {
+                eprintln!("[runtimes] 保存机器的系统失败：{error}");
+            }
+        });
     }
 }
 
@@ -948,14 +942,12 @@ fn sync_link_watch(key: &RuntimeKey, status: &RuntimeStatus, cx: &mut gpui::App)
     };
     cx.spawn(async move |cx| {
         let watched_id = runtime_id.clone();
-        let link = cx
-            .background_executor()
-            .spawn(async move {
-                route.watch(&watched_id, &events);
-                // 选路可能在装上之前就定了，装上后先读一次。
-                route.read()
-            })
-            .await;
+        let link = smelt_sys::blocking::run(move || {
+            route.watch(&watched_id, &events);
+            // 选路可能在装上之前就定了，装上后先读一次。
+            route.read()
+        })
+        .await;
         cx.update(|cx| apply_links(vec![(runtime_id, link)], cx));
     })
     .detach();
@@ -983,15 +975,13 @@ fn sample(targets: Vec<(String, RemoteRoute)>, cx: &mut gpui::App) {
         return;
     }
     cx.spawn(async move |cx| {
-        let links = cx
-            .background_executor()
-            .spawn(async move {
-                targets
-                    .into_iter()
-                    .map(|(runtime_id, route)| (runtime_id, route.read()))
-                    .collect::<Vec<_>>()
-            })
-            .await;
+        let links = smelt_sys::blocking::run(move || {
+            targets
+                .into_iter()
+                .map(|(runtime_id, route)| (runtime_id, route.read()))
+                .collect::<Vec<_>>()
+        })
+        .await;
         cx.update(|cx| apply_links(links, cx));
     })
     .detach();
@@ -1048,10 +1038,7 @@ pub(crate) fn add_runtime(
         return gpui::Task::ready(Err(t!("pair.empty").into_owned()));
     }
     cx.spawn(async move |cx| {
-        let remote = cx
-            .background_executor()
-            .spawn(async move { pair_with(&uri) })
-            .await?;
+        let remote = smelt_sys::blocking::run(move || pair_with(&uri)).await?;
         let added = (remote.runtime.key().clone(), remote.connection.name.clone());
         cx.update(|cx| {
             update_hub(cx, |hub| {
@@ -1142,15 +1129,13 @@ pub(crate) fn rename_runtime(runtime_id: String, name: String, cx: &mut gpui::Ap
     let Some(connection) = renamed else {
         return;
     };
-    cx.background_executor()
-        .spawn(async move {
-            if let Err(error) = smelt_client_store::client_store()
-                .and_then(|store| store.put_runtime_connection(&connection))
-            {
-                eprintln!("[runtimes] 保存机器名字失败：{error}");
-            }
-        })
-        .detach();
+    smelt_sys::blocking::spawn_detached(move || {
+        if let Err(error) = smelt_client_store::client_store()
+            .and_then(|store| store.put_runtime_connection(&connection))
+        {
+            eprintln!("[runtimes] 保存机器名字失败：{error}");
+        }
+    });
 }
 
 /// 最近一次探测是在线。
@@ -1189,47 +1174,42 @@ pub(crate) fn set_runtime_relay(
     connection.relay_url = (!relay.is_empty()).then(|| relay.clone());
     cx.spawn(async move |cx| {
         let saved = connection.clone();
-        cx.background_executor()
-            .spawn(async move {
-                if online {
-                    let client = remote.runtime.client();
-                    let timeout = smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT;
-                    let mut config = client
-                        .call::<RemoteConfigGet>(&EmptyParams::default(), timeout)
-                        .map_err(|error| t!("relay.read_failed", error = error).into_owned())?;
-                    if config.iroh_relay != relay {
-                        config.iroh_relay = relay.clone();
-                        match relay_set_reply(client.call::<RemoteConfigSet>(&config, timeout)) {
-                            RelaySetReply::Applied => {}
-                            RelaySetReply::Rejected(error) => {
-                                return Err(t!("relay.rejected", error = error).into_owned());
-                            }
-                            // 改没改成以它眼下的配置为准：按新中继连过去问一次。它要重绑
-                            // 新中继，拨号由 iroh 的拨号时限兜着，不另外等。
-                            RelaySetReply::Lost(error) => {
-                                let (confirm, _route) = remote_client(&saved)?;
-                                let now = confirm
-                                    .call::<RemoteConfigGet>(&EmptyParams::default(), timeout)
-                                    .map_err(|confirm_error| {
-                                        t!(
-                                            "relay.lost",
-                                            error = error,
-                                            confirm_error = confirm_error
-                                        )
+        smelt_sys::blocking::run(move || {
+            if online {
+                let client = remote.runtime.client();
+                let timeout = smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT;
+                let mut config = client
+                    .call::<RemoteConfigGet>(&EmptyParams::default(), timeout)
+                    .map_err(|error| t!("relay.read_failed", error = error).into_owned())?;
+                if config.iroh_relay != relay {
+                    config.iroh_relay = relay.clone();
+                    match relay_set_reply(client.call::<RemoteConfigSet>(&config, timeout)) {
+                        RelaySetReply::Applied => {}
+                        RelaySetReply::Rejected(error) => {
+                            return Err(t!("relay.rejected", error = error).into_owned());
+                        }
+                        // 改没改成以它眼下的配置为准：按新中继连过去问一次。它要重绑
+                        // 新中继，拨号由 iroh 的拨号时限兜着，不另外等。
+                        RelaySetReply::Lost(error) => {
+                            let (confirm, _route) = remote_client(&saved)?;
+                            let now = confirm
+                                .call::<RemoteConfigGet>(&EmptyParams::default(), timeout)
+                                .map_err(|confirm_error| {
+                                    t!("relay.lost", error = error, confirm_error = confirm_error)
                                         .into_owned()
-                                    })?;
-                                if now.iroh_relay != relay {
-                                    return Err(t!("relay.rejected", error = error).into_owned());
-                                }
+                                })?;
+                            if now.iroh_relay != relay {
+                                return Err(t!("relay.rejected", error = error).into_owned());
                             }
                         }
                     }
                 }
-                smelt_client_store::client_store()
-                    .and_then(|store| store.put_runtime_connection(&saved))
-                    .map_err(|error| t!("relay.save_failed", error = error).into_owned())
-            })
-            .await?;
+            }
+            smelt_client_store::client_store()
+                .and_then(|store| store.put_runtime_connection(&saved))
+                .map_err(|error| t!("relay.save_failed", error = error).into_owned())
+        })
+        .await?;
         cx.update(|cx| {
             route.retarget(parsed);
             update_hub(cx, |hub| {
@@ -1291,18 +1271,16 @@ pub(crate) fn remove_runtime(
     // 那台机器上的配对记录留着，要清就在那台机器上撤。
     let revoke = matches!(remote.status, RuntimeStatus::Online { .. });
     cx.spawn(async move |cx| {
-        let removed = cx
-            .background_executor()
-            .spawn({
-                let runtime_id = runtime_id.clone();
-                async move {
-                    smelt_client_store::client_store()
-                        .and_then(|store| store.delete_runtime_connection(&runtime_id))
-                        .map(|_| ())
-                        .map_err(|error| t!("runtime.remove_failed", error = error).into_owned())
-                }
-            })
-            .await;
+        let removed = smelt_sys::blocking::run({
+            let runtime_id = runtime_id.clone();
+            move || {
+                smelt_client_store::client_store()
+                    .and_then(|store| store.delete_runtime_connection(&runtime_id))
+                    .map(|_| ())
+                    .map_err(|error| t!("runtime.remove_failed", error = error).into_owned())
+            }
+        })
+        .await;
         removed?;
         cx.update(|cx| {
             update_hub(cx, |hub| {
@@ -1313,21 +1291,19 @@ pub(crate) fn remove_runtime(
         });
         if revoke {
             // 撤销不拖住移除：在后台发完就算。
-            cx.background_executor()
-                .spawn(async move {
-                    if let Ok(client) = iroh_client() {
-                        let _ = remote
-                            .runtime
-                            .client()
-                            .call::<smelt_model::control_api::DeviceRevoke>(
-                                &smelt_model::remote_config::DeviceIdParams {
-                                    endpoint_id: client.id().to_string(),
-                                },
-                                smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
-                            );
-                    }
-                })
-                .detach();
+            smelt_sys::blocking::spawn_detached(move || {
+                if let Ok(client) = iroh_client() {
+                    let _ = remote
+                        .runtime
+                        .client()
+                        .call::<smelt_model::control_api::DeviceRevoke>(
+                            &smelt_model::remote_config::DeviceIdParams {
+                                endpoint_id: client.id().to_string(),
+                            },
+                            smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
+                        );
+                }
+            });
         }
         Ok(())
     })

@@ -28,19 +28,7 @@ pub(crate) enum SystemCommand {
     Taken,
 }
 
-impl SystemCommand {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Unknown => "unknown",
-            Self::Installed => "installed",
-            Self::Missing => "missing",
-            Self::Stale => "stale",
-            Self::Taken => "taken",
-        }
-    }
-}
-
-/// 安装 `/usr/local/bin/smelt` 的结构化错误，具体多语言文案由 JS 插件按 code 渲染。
+/// 安装 `/usr/local/bin/smelt` 的结构化错误。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum InstallError {
     Taken,
@@ -49,26 +37,6 @@ pub(crate) enum InstallError {
     LinkFailed(String),
     OsascriptFailed(String),
     Failed(String),
-}
-
-impl InstallError {
-    pub(crate) fn code(&self) -> &'static str {
-        match self {
-            Self::Taken => "taken",
-            Self::Cancelled => "cancelled",
-            Self::NoHome => "no_home",
-            Self::LinkFailed(_) => "link_failed",
-            Self::OsascriptFailed(_) => "osascript_failed",
-            Self::Failed(_) => "failed",
-        }
-    }
-
-    pub(crate) fn detail(&self) -> &str {
-        match self {
-            Self::Taken | Self::Cancelled | Self::NoHome => "",
-            Self::LinkFailed(msg) | Self::OsascriptFailed(msg) | Self::Failed(msg) => msg,
-        }
-    }
 }
 
 fn managed_link() -> Option<PathBuf> {

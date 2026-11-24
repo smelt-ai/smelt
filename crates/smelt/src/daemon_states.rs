@@ -18,12 +18,14 @@ use smelt_client::runtime::RuntimeKey;
 /// 都要重建；运行时重发一份一样的状态不能惊动它们。
 #[derive(Default)]
 pub struct DaemonStates {
+    next_revision: u64,
     runtimes: HashMap<RuntimeKey, RuntimeMirror>,
 }
 
-#[derive(Default, PartialEq)]
+#[derive(Default)]
 struct RuntimeMirror {
     sessions: HashMap<String, DaemonSessionState>,
+    revision: u64,
     /// 收到过至少一帧快照（空目录也算）。
     primed: bool,
     /// 当前这条 subscribe 连接是否仍活着。守护 exec 后旧连接断开，必须先置
@@ -31,16 +33,31 @@ struct RuntimeMirror {
     subscription_live: bool,
 }
 
+impl RuntimeMirror {
+    fn same_content(&self, other: &Self) -> bool {
+        self.sessions == other.sessions
+            && self.primed == other.primed
+            && self.subscription_live == other.subscription_live
+    }
+}
+
 impl DaemonStates {
     fn mirror<'a>(runtime: &RuntimeKey, cx: &'a App) -> Option<&'a RuntimeMirror> {
         cx.try_global::<Self>()?.runtimes.get(runtime)
     }
 
-    fn mirror_mut<'a>(runtime: &RuntimeKey, cx: &'a mut App) -> &'a mut RuntimeMirror {
-        cx.default_global::<Self>()
-            .runtimes
-            .entry(runtime.clone())
-            .or_default()
+    fn mutate_mirror(runtime: &RuntimeKey, cx: &mut App, update: impl FnOnce(&mut RuntimeMirror)) {
+        let states = cx.default_global::<Self>();
+        states.next_revision = states.next_revision.wrapping_add(1).max(1);
+        let rev = states.next_revision;
+        let mirror = states.runtimes.entry(runtime.clone()).or_default();
+        update(mirror);
+        mirror.revision = rev;
+    }
+
+    /// 该运行时最近一次状态镜像变化后的单调修订号（未变动时保持不变）。
+    pub fn revision(runtime: &RuntimeKey, cx: &App) -> u64 {
+        Self::mirror(runtime, cx).map_or(0, |mirror| mirror.revision)
     }
 
     /// 一个运行时的完整快照：换掉它那份镜像。
@@ -50,18 +67,21 @@ impl DaemonStates {
                 .into_iter()
                 .map(|state| (state.id.clone(), state))
                 .collect(),
+            revision: 0,
             primed: true,
             subscription_live: true,
         };
-        if Self::mirror(runtime, cx) == Some(&mirror) {
+        if Self::mirror(runtime, cx).is_some_and(|current| current.same_content(&mirror)) {
             return;
         }
-        *Self::mirror_mut(runtime, cx) = mirror;
+        Self::mutate_mirror(runtime, cx, |slot| *slot = mirror);
     }
 
     pub fn remove(runtime: &RuntimeKey, id: &str, cx: &mut App) {
         if Self::mirror(runtime, cx).is_some_and(|mirror| mirror.sessions.contains_key(id)) {
-            Self::mirror_mut(runtime, cx).sessions.remove(id);
+            Self::mutate_mirror(runtime, cx, |mirror| {
+                mirror.sessions.remove(id);
+            });
         }
     }
 
@@ -70,22 +90,26 @@ impl DaemonStates {
         if current == Some(&state) {
             return;
         }
-        Self::mirror_mut(runtime, cx)
-            .sessions
-            .insert(state.id.clone(), state);
+        Self::mutate_mirror(runtime, cx, |mirror| {
+            mirror.sessions.insert(state.id.clone(), state);
+        });
     }
 
     /// 运行时被移除：它那份镜像整个丢掉。
     pub fn forget_runtime(runtime: &RuntimeKey, cx: &mut App) {
         if Self::mirror(runtime, cx).is_some() {
-            cx.default_global::<Self>().runtimes.remove(runtime);
+            let states = cx.default_global::<Self>();
+            states.next_revision = states.next_revision.wrapping_add(1).max(1);
+            states.runtimes.remove(runtime);
         }
     }
 
     /// 这个运行时的 subscribe 断开：它那份镜像不再代表活着的 daemon epoch。
     pub fn mark_subscription_disconnected(runtime: &RuntimeKey, cx: &mut App) {
         if Self::mirror(runtime, cx).is_some_and(|mirror| mirror.subscription_live) {
-            Self::mirror_mut(runtime, cx).subscription_live = false;
+            Self::mutate_mirror(runtime, cx, |mirror| {
+                mirror.subscription_live = false;
+            });
         }
     }
 
@@ -180,21 +204,28 @@ mod tests {
         });
         let local = RuntimeKey::Local;
         let report = |run: &dyn Fn(&mut App)| cx.update(|cx| run(cx));
+        let rev = || cx.read(|cx| DaemonStates::revision(&local, cx));
         report(&|cx| DaemonStates::replace_all(&local, vec![state("a")], cx));
         assert_eq!(signals.get(), 1);
+        let r1 = rev();
+        assert!(r1 > 0);
         report(&|cx| DaemonStates::replace_all(&local, vec![state("a")], cx));
         report(&|cx| DaemonStates::upsert(&local, state("a"), cx));
         report(&|cx| DaemonStates::remove(&local, "missing", cx));
         report(&|cx| DaemonStates::forget_runtime(&RuntimeKey::Remote("x".into()), cx));
         assert_eq!(signals.get(), 1, "什么都没变");
+        assert_eq!(rev(), r1, "未变动时修订号不能涨");
 
         let mut busy = state("a");
         busy.phase = smelt_client::daemon_state::DaemonPhase::Thinking;
         report(&|cx| DaemonStates::upsert(&local, busy.clone(), cx));
         assert_eq!(signals.get(), 2);
+        let r2 = rev();
+        assert!(r2 > r1);
 
         report(&|cx| DaemonStates::mark_subscription_disconnected(&local, cx));
         report(&|cx| DaemonStates::mark_subscription_disconnected(&local, cx));
         assert_eq!(signals.get(), 3, "断开第二次不算变");
+        assert!(rev() > r2);
     }
 }

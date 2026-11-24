@@ -6,19 +6,19 @@ import {
   call,
   clipboardWrite,
   command,
+  hostReady,
   initHost,
-  machineEntry,
-  machines,
+  machineMeta,
+  machineMetaEntry,
   newSessionId,
   onEvent,
-  onState,
+  onSlices,
   registerTopics,
   registerViews,
   request,
   run,
   sessionStates,
   stableMemo,
-  state,
   store,
   t,
   currentTheme,
@@ -284,14 +284,14 @@ export function readyAgentIdOn(machine: string | null | undefined): string {
 
 export function machineName(machine: string | null | undefined): string {
   const target = machine ?? null;
-  const entry = machineEntry(target);
+  const entry = machineMetaEntry(target);
   if (entry?.name) return String(entry.name);
   return target ?? t("machine.local");
 }
 
 export function machineUnavailable(machine: string | null | undefined): string | null {
   const target = machine ?? null;
-  const list = machines();
+  const list = machineMeta();
   if (list.length === 0) return null;
   const found = list.find((m) => (m.machine ?? null) === target);
   if (!found) return t("error.machine_removed");
@@ -305,7 +305,7 @@ export function isViewRegistered(viewId: string): boolean {
 }
 
 export function creationMachines(): Array<string | null> {
-  const list = machines();
+  const list = machineMeta();
   const ready: Array<string | null> = [];
   for (const item of list) {
     const m = item.machine ?? null;
@@ -322,7 +322,7 @@ export function automationMachineGroups(): Array<{
   automations: any[];
   status: string | null;
 }> {
-  const list = machines();
+  const list = machineMeta();
   const keys: Array<string | null> = list.length > 0 ? list.map((m) => m.machine ?? null) : [null];
   return keys.map((machine) => {
     const proj = machineAutomationsOn(machine);
@@ -398,6 +398,7 @@ function refreshBadge() {
   lastBadgeLabel = label;
   void run(SET_VIEW_BADGE_CMD, { view: VIEW, label }).catch((err) => {
     console.error("[automations] set-view-badge 失败：", errMsg(err));
+    if (lastBadgeLabel === label) lastBadgeLabel = undefined;
   });
 }
 
@@ -572,8 +573,8 @@ function onAutomationsTopic(machine: string | null, message: any) {
 }
 
 function onMachinesChanged() {
-  const list = machines();
-  if (list.length === 0 && state().revision === 0) return;
+  const list = machineMeta();
+  if (list.length === 0 && !hostReady()) return;
   const knownKeys = new Set(list.map((m) => machineKey(m.machine)));
 
   let removed = false;
@@ -603,9 +604,9 @@ export function reconcile() {
   const r = route();
   if (!r) return;
 
-  const knownMachines = machines();
+  const knownMachines = machineMeta();
   if (
-    state().revision > 0 &&
+    hostReady() &&
     knownMachines.length > 0 &&
     !knownMachines.some((m) => (m.machine ?? null) === r.machine)
   ) {
@@ -1399,40 +1400,51 @@ export function bootAutomations() {
   if (booted) return;
   booted = true;
 
-  onState(() => {
+  onSlices(["commands", "views", "machines_meta"], () => {
     syncAgentSettingsRegistry();
     reconcile();
   });
 
-  onEvent((event: any) => {
-    if (!event || typeof event !== "object") return;
-    if (event.type === "runtime_topic" && event.topic === TOPIC_AUTOMATIONS_CHANGED) {
-      onAutomationsTopic(event.machine ?? null, event.message);
-      return;
-    }
-    if (event.type === "plugin" && event.name === AGENT_SETTINGS_CHANGED_EVENT) {
-      applyAgentSettingsEvent(event.payload);
-      return;
-    }
-    if (event.type === "commands_changed") {
-      syncAgentSettingsRegistry();
-      return;
-    }
-    if (event.type === "machines_changed") {
-      onMachinesChanged();
-      return;
-    }
-    if (event.type === "views_changed" || event.type === "sessions_changed") {
-      reconcile();
-      return;
-    }
-    if (event.type === "view_opened" && event.view === VIEW) {
-      handleOpenArgs(event.args);
-    }
-  });
+  onEvent(
+    (event: any) => {
+      if (!event || typeof event !== "object") return;
+      if (event.type === "runtime_topic" && event.topic === TOPIC_AUTOMATIONS_CHANGED) {
+        onAutomationsTopic(event.machine ?? null, event.message);
+        return;
+      }
+      if (event.type === "plugin" && event.name === AGENT_SETTINGS_CHANGED_EVENT) {
+        applyAgentSettingsEvent(event.payload);
+        return;
+      }
+      if (event.type === "commands_changed") {
+        syncAgentSettingsRegistry();
+        return;
+      }
+      if (event.type === "machines_changed") {
+        onMachinesChanged();
+        return;
+      }
+      if (event.type === "views_changed" || event.type === "sessions_changed") {
+        reconcile();
+        return;
+      }
+      if (event.type === "view_opened" && event.view === VIEW) {
+        handleOpenArgs(event.args);
+      }
+    },
+    [
+      "runtime_topic",
+      `plugin:${AGENT_SETTINGS_CHANGED_EVENT}`,
+      "commands_changed",
+      "machines_changed",
+      "views_changed",
+      "sessions_changed",
+      "view_opened",
+    ],
+  );
 
   bootTask(async () => {
-    await initHost();
+    await initHost(["commands", "views", "machines_meta"]);
     await deliveredStore.open();
     const loaded = await deliveredStore.delivered();
     for (const item of loaded) deliveredSet.add(item);

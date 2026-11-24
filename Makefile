@@ -4,7 +4,7 @@
 BIN := smelt
 DAEMON := smeltd
 
-.PHONY: help build icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test test-sh pi-agent-check check-all smelt-agent ios
+.PHONY: help build icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test test-sh pi-agent-check check-all smelt-agent ios bench
 
 SMELT_AGENT := target/smelt-agent/smelt-agent
 PI_AGENT_SOURCES := $(shell find agent/src -type f -name '*.ts') $(shell find agent/skills -type f)
@@ -68,6 +68,9 @@ test-sh: ## 运行打包、安装、部署脚本的 shell 测试（scripts/test-
 
 # 不含 fmt-check：仓库还没整体 rustfmt 干净过，CI 也不查格式（见 ci.yml）。
 check-all: lint lint-sh lint-paths test test-sh pi-agent-check ## 完整检查 (Clippy + shell + 路径合规 + Rust/TS/脚本测试)
+
+bench: ## 运行 NSH/GPUI 核心性能基准套（可用 ARGS="--suite quick" 传参）
+	./scripts/bench-nsh.sh $(ARGS)
 
 $(SMELT_AGENT): agent/package.json agent/bun.lock agent/scripts/compile-smelt-agent.ts agent/scripts/build-smelt-agent.sh scripts/fetch-bun.sh $(PI_AGENT_SOURCES)
 	./agent/scripts/build-smelt-agent.sh

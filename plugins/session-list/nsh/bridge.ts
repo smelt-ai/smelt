@@ -5,6 +5,7 @@
 import { signal } from "nsh";
 import {
   activeContext,
+  bootTask,
   call,
   clipboardWrite,
   command,
@@ -16,11 +17,12 @@ import {
   initHost,
   locale,
   localOs,
+  machineMeta,
   machines,
   newSessionId,
   onCommand,
   onEvent,
-  onState,
+  onSlices,
   pathClean,
   pathFileName,
   pathIsAbsolute,
@@ -35,7 +37,6 @@ import {
   registerViews,
   run,
   sessionStates,
-  state,
   store as sdkStore,
   t,
   text,
@@ -56,11 +57,12 @@ import {
   SETTINGS_NAME,
 } from "../contract.js";
 import { new_sidebar_ui, same_conversation, session_ids } from "../model.js";
-import { ATTENTION_TOPIC, SessionList } from "../state.js";
+import * as peers from "../peers.js";
+import { ATTENTION_TOPIC, NEW_SESSION_CATALOG_TOPIC, SessionList } from "../state.js";
 import { ListStore } from "../store.js";
 import { message } from "../util.js";
 
-export { clipboardWrite, state, t };
+export { clipboardWrite, t };
 
 /** 列表每次 rebuild 或状态变化递增，驱动 TSX 细粒度刷新。 */
 export const tick = signal(0);
@@ -84,7 +86,7 @@ function syncBuddyStage() {
   const fresh: string[] = [];
   const seenMachines = new Set<string>();
 
-  for (const entry of machines()) {
+  for (const entry of machineMeta()) {
     const machine = entry.machine ?? null;
     const directory = workspaceDirectory(machine);
     if (!directory) continue;
@@ -184,7 +186,7 @@ function createMemoryInput(placeholder: string): MemoryInputState {
 
 export const hostAdapter = {
   machines() {
-    return machines().map((m: any) => ({
+    return machineMeta().map((m: any) => ({
       machine: m.machine ?? null,
       name: m.name ?? (m.machine == null ? t("machine.local") : String(m.machine)),
       unavailable: m.unavailable ?? null,
@@ -256,9 +258,6 @@ let storeReady = false;
 let stateReady = false;
 let booted = false;
 let pendingEvents: any[] = [];
-let prevMachinesKey = "";
-let prevSessionsKey = "";
-let prevLocale = "";
 
 const focusCallbacks = new Set<() => void>();
 
@@ -271,9 +270,9 @@ function triggerFocusList() {
   for (const fn of focusCallbacks) fn();
 }
 
-function syncFallbackSelection(next: any) {
+function syncFallbackSelection() {
   if (list.heard_selection) return;
-  const session = next?.active_context?.session;
+  const session = activeContext()?.session;
   if (!session || typeof session.id !== "string") {
     if (list.selection.kind !== "none") {
       list.selection = { kind: "none" };
@@ -295,40 +294,11 @@ function syncFallbackSelection(next: any) {
   }
 }
 
-function digestMachines(next: any): string {
-  const m = next?.machines ?? [];
-  const remotes = next?.connections?.remotes ?? [];
-  return JSON.stringify([
-    m.map((item: any) => [item.machine ?? null, item.name ?? "", item.unavailable ?? null]),
-    remotes.map((r: any) => [r.machine, r.state, r.link]),
-  ]);
-}
-
-function digestSessions(next: any): string {
-  const m = next?.machines ?? [];
-  return JSON.stringify(
-    m.map((item: any) => [
-      item.machine ?? null,
-      item.directory?.epoch ?? null,
-      item.directory?.revision ?? null,
-      item.directory?.projects?.length ?? 0,
-      item.directory?.conversations?.length ?? 0,
-      item.directory?.worksets?.length ?? 0,
-      item.facts,
-      item.states,
-    ]),
-  );
-}
-
 function maybeBoot() {
   if (booted || !storeReady || !stateReady) return;
   booted = true;
-  const current = state();
-  prevMachinesKey = digestMachines(current);
-  prevSessionsKey = digestSessions(current);
-  prevLocale = String(current.locale ?? "");
   syncBuddyStage();
-  syncFallbackSelection(current);
+  syncFallbackSelection();
   list.start().catch((error: unknown) => {
     console.error(`[session-list] 启动失败：${message(error)}`);
   });
@@ -346,15 +316,8 @@ function handleEvent(event: any) {
       if (event.args?.focus) triggerFocusList();
       return;
     }
-    if (event.type === "machines_changed") {
-      prevMachinesKey = digestMachines(state());
+    if (event.type === "machines_changed" || event.type === "context_menu_items_changed") {
       machineMenuVersion.set(machineMenuVersion() + 1);
-    } else if (event.type === "context_menu_items_changed") {
-      machineMenuVersion.set(machineMenuVersion() + 1);
-    } else if (event.type === "sessions_changed") {
-      prevSessionsKey = digestSessions(state());
-    } else if (event.type === "locale_changed") {
-      prevLocale = String(locale() ?? "");
     }
     list.on_event(event);
   } catch (error) {
@@ -362,7 +325,7 @@ function handleEvent(event: any) {
   }
 }
 
-onState((next) => {
+onSlices(["machines_meta", "sessions_data", "active_context", "locale"], () => {
   stateReady = true;
   syncBuddyStage();
   if (!booted) {
@@ -371,16 +334,34 @@ onState((next) => {
   }
   // 宿主在发出 sessions_changed / machines_changed / locale_changed 事件前总会先推 smelt.state；
   // 这些变化统一由 onEvent 处理，避免双倍 rebuild 与在无关 state 推送时无谓递增 tick。
-  syncFallbackSelection(next);
+  syncFallbackSelection();
 });
 
-onEvent((event) => {
-  if (!booted) {
-    pendingEvents.push(event);
-    return;
-  }
-  handleEvent(event);
-});
+onEvent(
+  (event) => {
+    if (!booted) {
+      pendingEvents.push(event);
+      return;
+    }
+    handleEvent(event);
+  },
+  [
+    "view_opened",
+    "machines_changed",
+    "context_menu_items_changed",
+    "sessions_changed",
+    "locale_changed",
+    "views_changed",
+    "commands_changed",
+    "window_activated",
+    "reconnected",
+    "open_paths",
+    "runtime_topic",
+    `plugin:${peers.SELECTION_CHANGED}`,
+    `plugin:${peers.CONVERSATION_CREATED}`,
+    `plugin:${peers.AGENT_SETTINGS_CHANGED}`,
+  ],
+);
 
 onCommand((call) => {
   switch (call.name) {
@@ -401,7 +382,8 @@ onCommand((call) => {
   throw new Error(`不认识的命令：${call.name}`);
 });
 
-initHost().then(() => {
+bootTask(async () => {
+  await initHost(["machines_meta", "sessions_data", "connections", "active_context", "locale", "views", "commands"]);
   stateReady = true;
   const commands = [
     {
@@ -416,48 +398,48 @@ initHost().then(() => {
     shortcut(PREV_SESSION, "command.prev_session", "cmd-up"),
     shortcut(NEXT_SESSION, "command.next_session", "cmd-down"),
   ];
-  registerViews([
-    {
-      name: LIST_NAME,
-      export: LIST_NAME,
-      title: text("view.list"),
-      icon: "icons/messages-square.svg",
-      draws_top_bar: true,
-    },
-    {
-      name: SETTINGS_NAME,
-      export: SETTINGS_NAME,
-      title: text("settings.title"),
-      icon: "icons/messages-square.svg",
-      settings: { group: "general", keywords: SETTINGS_KEYWORDS },
-    },
-  ]).catch((error) => console.error("[session-list] registerViews 失败：", error));
-  registerCommands(commands).catch((error) =>
-    console.error("[session-list] registerCommands 失败：", error),
-  );
-  registerTopics([ATTENTION_TOPIC]).catch((error) =>
-    console.error("[session-list] registerTopics 失败：", error),
-  );
-  maybeBoot();
-});
-
-(async () => {
-  const style = pathStyle(null);
-  const own = dataDir();
-  let legacy: string | null = null;
-  if (own) {
-    const parent = pathParent(style, pathClean(style, own));
-    if (parent) {
-      legacy = pathJoin(style, pathJoin(style, parent, "smelt.sessions"), "store.sqlite3");
-    }
-  }
-  await listStore.open(legacy);
-  const [ui, avatar] = await Promise.all([listStore.read_sidebar(), listStore.avatar_choice()]);
-  storeReady = true;
-  list.loaded(ui, avatar);
-  maybeBoot();
-})().catch((error: unknown) => {
-  console.error(`[session-list] 打开 SQLite 存储失败：${message(error)}`);
-  storeReady = true;
+  await Promise.all([
+    registerViews([
+      {
+        name: LIST_NAME,
+        export: LIST_NAME,
+        title: text("view.list"),
+        icon: "icons/messages-square.svg",
+        draws_top_bar: true,
+      },
+      {
+        name: SETTINGS_NAME,
+        export: SETTINGS_NAME,
+        title: text("settings.title"),
+        icon: "icons/messages-square.svg",
+        settings: { group: "general", keywords: SETTINGS_KEYWORDS },
+      },
+    ]),
+    registerCommands(commands),
+    registerTopics([ATTENTION_TOPIC, NEW_SESSION_CATALOG_TOPIC]),
+    (async () => {
+      try {
+        const style = pathStyle(null);
+        const own = dataDir();
+        let legacy: string | null = null;
+        if (own) {
+          const parent = pathParent(style, pathClean(style, own));
+          if (parent) {
+            legacy = pathJoin(style, pathJoin(style, parent, "smelt.sessions"), "store.sqlite3");
+          }
+        }
+        await listStore.open(legacy);
+        const [ui, avatar] = await Promise.all([
+          listStore.read_sidebar(),
+          listStore.avatar_choice(),
+        ]);
+        storeReady = true;
+        list.loaded(ui, avatar);
+      } catch (error: unknown) {
+        console.error(`[session-list] 打开 SQLite 存储失败：${message(error)}`);
+        storeReady = true;
+      }
+    })(),
+  ]);
   maybeBoot();
 });

@@ -1,19 +1,18 @@
-//! 给每个独立插件 VM 的 SQLite 存储能力（封装 [`smelt_plugin_api::PluginStore`]）。
+//! 给每个插件的 SQLite 存储能力（封装 [`smelt_plugin_api::PluginStore`]）。
 //!
 //! 四个通用调用挂在 [`PluginHost`] 上：`store.query`、`store.execute`、`store.write`、
 //! `store.migrate`。插件 id 由 Rust 闭包固定，插件无法越界读写其它插件的库。
 //!
-//! 所有磁盘 IO 都在独立后台线程串行执行（平时睡在 channel 上，零轮询，发端全放掉即退出），
-//! 不阻塞 GPUI 主线程，也不阻塞 NSH 引擎线程。
+//! 每个插件维护自己的 FIFO 队列，仅在非空时投递到共享阻塞池（`smelt-io`）按顺序排空：
+//! 同插件严格串行、跨插件零队头阻塞，空闲时零常驻线程，不阻塞 GPUI 主线程或 NSH 引擎线程。
 
 #[cfg(test)]
 use std::path::{Path, PathBuf};
 use std::{
-    collections::HashMap,
-    sync::{Arc, mpsc},
+    collections::{HashMap, VecDeque},
+    sync::{Arc, Mutex},
 };
 
-use nsh_engine::HostCall;
 use serde_json::{Map, Number, Value, json};
 use smelt_plugin_api::{
     self as api, PluginStore,
@@ -50,30 +49,43 @@ enum Op {
     },
 }
 
-struct Request {
-    plugin: String,
+struct PluginRequest {
     op: Op,
-    call: HostCall,
+    done: Box<dyn FnOnce(Result<Value, String>) + Send>,
 }
 
-/// 插件 SQLite 能力后端：持有后台工作线程发端，随 [`PluginHost`] 释放自动停机。
+struct QueueSlot {
+    running: bool,
+    pending: VecDeque<PluginRequest>,
+}
+
+/// 插件 SQLite 能力后端：按插件 id 维护 FIFO 队列，按需投递到共享阻塞池排空
+/// （同插件严格 FIFO、跨插件零队头阻塞、空闲零常驻线程）。
 #[derive(Clone)]
 pub(crate) struct StoreHub {
-    sender: mpsc::Sender<Request>,
+    root: Arc<StoreRoot>,
+    queues: Arc<Mutex<HashMap<String, QueueSlot>>>,
+    #[cfg(test)]
+    custom_stores: Arc<Mutex<HashMap<String, Arc<PluginStore>>>>,
 }
 
 impl StoreHub {
     pub(crate) fn global() -> Self {
-        Self::start(StoreRoot::Global)
+        Self::new(StoreRoot::Global)
     }
 
-    fn start(root: StoreRoot) -> Self {
-        let (sender, receiver) = mpsc::channel::<Request>();
-        std::thread::Builder::new()
-            .name("smelt-nsh-plugin-store".into())
-            .spawn(move || worker_loop(root, receiver))
-            .expect("spawn smelt-nsh plugin store worker");
-        Self { sender }
+    #[cfg(test)]
+    pub(crate) fn custom(root: PathBuf) -> Self {
+        Self::new(StoreRoot::Custom(root))
+    }
+
+    fn new(root: StoreRoot) -> Self {
+        Self {
+            root: Arc::new(root),
+            queues: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            custom_stores: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// 把四个通用 `store.*` 能力登记到 [`PluginHost`] 上。
@@ -96,43 +108,143 @@ impl StoreHub {
         });
     }
 
+    fn submit(
+        &self,
+        plugin: &str,
+        op: Op,
+        done: impl FnOnce(Result<Value, String>) + Send + 'static,
+    ) {
+        if plugin.is_empty() {
+            done(Err("插件没有来源身份，不能用库".to_owned()));
+            return;
+        }
+        let should_spawn = {
+            let mut queues = self.queues.lock().unwrap_or_else(|e| e.into_inner());
+            let slot = queues
+                .entry(plugin.to_owned())
+                .or_insert_with(|| QueueSlot {
+                    running: false,
+                    pending: VecDeque::new(),
+                });
+            slot.pending.push_back(PluginRequest {
+                op,
+                done: Box::new(done),
+            });
+            if slot.running {
+                false
+            } else {
+                slot.running = true;
+                true
+            }
+        };
+        if should_spawn {
+            let hub = self.clone();
+            let owner = plugin.to_owned();
+            api::blocking::spawn_detached(move || hub.drain_plugin(owner));
+        }
+    }
+
+    fn drain_plugin(&self, owner: String) {
+        struct DrainGuard<'a> {
+            hub: &'a StoreHub,
+            owner: &'a str,
+            finished: bool,
+        }
+
+        impl Drop for DrainGuard<'_> {
+            fn drop(&mut self) {
+                if self.finished {
+                    return;
+                }
+                let respawn = {
+                    let mut queues = self.hub.queues.lock().unwrap_or_else(|e| e.into_inner());
+                    match queues.get_mut(self.owner) {
+                        Some(slot) if slot.pending.is_empty() => {
+                            queues.remove(self.owner);
+                            false
+                        }
+                        Some(slot) => {
+                            slot.running = true;
+                            true
+                        }
+                        None => false,
+                    }
+                };
+                if respawn {
+                    let hub = self.hub.clone();
+                    let owner = self.owner.to_owned();
+                    api::blocking::spawn_detached(move || hub.drain_plugin(owner));
+                }
+            }
+        }
+
+        let mut guard = DrainGuard {
+            hub: self,
+            owner: &owner,
+            finished: false,
+        };
+
+        loop {
+            let request = {
+                let mut queues = self.queues.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(slot) = queues.get_mut(&owner) else {
+                    guard.finished = true;
+                    return;
+                };
+                if let Some(next) = slot.pending.pop_front() {
+                    next
+                } else {
+                    queues.remove(&owner);
+                    guard.finished = true;
+                    return;
+                }
+            };
+            let result = self
+                .open_cached_store(&owner)
+                .and_then(|store| execute_op(&store, request.op));
+            (request.done)(result);
+        }
+    }
+
+    fn open_cached_store(&self, owner: &str) -> Result<Arc<PluginStore>, String> {
+        match self.root.as_ref() {
+            StoreRoot::Global => open_store(&self.root, owner),
+            #[cfg(test)]
+            StoreRoot::Custom(_) => {
+                {
+                    let stores = self.custom_stores.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(store) = stores.get(owner) {
+                        return Ok(Arc::clone(store));
+                    }
+                }
+                let opened = open_store(&self.root, owner)?;
+                let mut stores = self.custom_stores.lock().unwrap_or_else(|e| e.into_inner());
+                Ok(Arc::clone(stores.entry(owner.to_owned()).or_insert(opened)))
+            }
+        }
+    }
+
     fn register(
         &self,
         plugins: &PluginHost,
         method: &'static str,
         parse: impl Fn(&Value) -> Result<Op, String> + Send + Sync + 'static,
     ) {
-        let sender = self.sender.clone();
+        let hub = self.clone();
         plugins.handle(method, move |plugin, call| {
+            if plugin == crate::plugins::BUILTINS_VM_ID {
+                return call.reject("共享内置插件调用存储缺少成员插件身份");
+            }
             let op = match parse(call.data()) {
                 Ok(op) => op,
                 Err(error) => return call.reject(error),
             };
-            if let Err(unsent) = sender.send(Request {
-                plugin: plugin.to_owned(),
-                op,
-                call,
-            }) {
-                unsent.0.call.reject("插件存储服务已关闭");
-            }
+            hub.submit(plugin, op, move |result| call.reply(result));
         });
     }
 }
 
-fn worker_loop(root: StoreRoot, receiver: mpsc::Receiver<Request>) {
-    let mut custom_stores: HashMap<String, Arc<PluginStore>> = HashMap::new();
-    while let Ok(request) = receiver.recv() {
-        let result = open_store(&root, &mut custom_stores, &request.plugin)
-            .and_then(|store| execute_op(&store, request.op));
-        request.call.reply(result);
-    }
-}
-
-fn open_store(
-    root: &StoreRoot,
-    _custom_stores: &mut HashMap<String, Arc<PluginStore>>,
-    owner: &str,
-) -> Result<Arc<PluginStore>, String> {
+fn open_store(root: &StoreRoot, owner: &str) -> Result<Arc<PluginStore>, String> {
     if owner.is_empty() {
         return Err("插件没有来源身份，不能用库".to_owned());
     }
@@ -141,13 +253,10 @@ fn open_store(
         #[cfg(test)]
         StoreRoot::Custom(base) => {
             validate_owner(owner)?;
-            if let Some(store) = _custom_stores.get(owner) {
-                return Ok(store.clone());
-            }
             let path = custom_store_path(base, owner);
-            let store = Arc::new(PluginStore::open(path).map_err(|error| error.to_string())?);
-            _custom_stores.insert(owner.to_owned(), store.clone());
-            Ok(store)
+            PluginStore::open(path)
+                .map(Arc::new)
+                .map_err(|error| error.to_string())
         }
     }
 }
@@ -328,6 +437,8 @@ fn parse_string_list(method: &str, value: Option<&Value>) -> Result<Vec<String>,
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
     use super::*;
 
     fn temp_root() -> PathBuf {
@@ -337,9 +448,8 @@ mod tests {
     #[test]
     fn migrate_write_query_and_plugin_isolation() {
         let root = temp_root();
-        let mut stores = HashMap::new();
-        let store_a = open_store(&StoreRoot::Custom(root.clone()), &mut stores, "alpha").unwrap();
-        let store_b = open_store(&StoreRoot::Custom(root.clone()), &mut stores, "beta").unwrap();
+        let store_a = open_store(&StoreRoot::Custom(root.clone()), "alpha").unwrap();
+        let store_b = open_store(&StoreRoot::Custom(root.clone()), "beta").unwrap();
 
         execute_op(
             &store_a,
@@ -418,6 +528,122 @@ mod tests {
         );
         assert!(isolated.is_err());
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn per_plugin_workers_do_not_block_each_other_and_preserve_fifo() {
+        let root = temp_root();
+        let hub = StoreHub::custom(root.clone());
+
+        let submit = |plugin: &str, op: Op| -> mpsc::Receiver<Result<Value, String>> {
+            let (tx, rx) = mpsc::channel();
+            hub.submit(plugin, op, move |result| {
+                let _ = tx.send(result);
+            });
+            rx
+        };
+
+        // 同插件按 FIFO 执行：migrate -> write -> query 依次成功。
+        submit(
+            "alpha",
+            Op::Migrate {
+                steps: vec!["CREATE TABLE kv (k TEXT PRIMARY KEY);".into()],
+            },
+        )
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+
+        submit(
+            "beta",
+            Op::Migrate {
+                steps: vec!["CREATE TABLE items (id INTEGER PRIMARY KEY);".into()],
+            },
+        )
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+
+        // 在外部连接上持住 alpha 的 EXCLUSIVE 锁，让 alpha worker 的写事务阻塞在 SQLite 锁里。
+        let blocker = rusqlite::Connection::open(custom_store_path(&root, "alpha")).unwrap();
+        blocker.execute_batch("BEGIN EXCLUSIVE;").unwrap();
+
+        let alpha_rx = submit(
+            "alpha",
+            Op::Write {
+                statements: vec![("INSERT INTO kv (k) VALUES ('k1')".into(), Vec::new())],
+            },
+        );
+        let alpha_rx2 = submit(
+            "alpha",
+            Op::Write {
+                statements: vec![("INSERT INTO kv (k) VALUES ('k2')".into(), Vec::new())],
+            },
+        );
+
+        // alpha 被外部锁阻塞期间，beta 自己的队列应立即完成查询，不受 alpha 队头阻塞。
+        let beta_rows = submit(
+            "beta",
+            Op::Query {
+                sql: "SELECT count(*) AS n FROM items".into(),
+                params: Vec::new(),
+            },
+        )
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+        assert_eq!(beta_rows, json!([{ "n": 0 }]));
+        assert!(
+            alpha_rx.try_recv().is_err(),
+            "alpha first write should still be waiting on lock"
+        );
+        assert!(
+            alpha_rx2.try_recv().is_err(),
+            "alpha second write should stay queued behind first write"
+        );
+
+        // 释放 alpha 的外部锁，alpha 两条写入按严格 FIFO 完成，后续读看得到顺序结果。
+        blocker.execute_batch("COMMIT;").unwrap();
+        drop(blocker);
+        alpha_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        alpha_rx2
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        let alpha_rows = submit(
+            "alpha",
+            Op::Query {
+                sql: "SELECT k FROM kv ORDER BY rowid".into(),
+                params: Vec::new(),
+            },
+        )
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+        assert_eq!(alpha_rows, json!([{ "k": "k1" }, { "k": "k2" }]));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            if hub
+                .queues
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "queues slot should be cleaned up after draining"
+            );
+            std::thread::yield_now();
+        }
+
+        drop(hub);
         let _ = std::fs::remove_dir_all(root);
     }
 }

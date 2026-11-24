@@ -156,3 +156,69 @@ test("启动时没读到智能体配置：菜单写出原因，下次打开再�
   expect(sessions.agent_settings_failure).toBe(null);
   expect(second.menu.launch(0)).toBe(true);
 });
+
+test("缓存命中时同步出表无 loading 闪烁；过期后台静默刷新失败也不擦掉现有条目", async () => {
+  const host = fake_host();
+  host.replies["new_session.catalog"] = {
+    sections: { terminal: [action("blank", "blankTerminal")] },
+  };
+  const sessions = list(host);
+
+  const first = open_menu(sessions, { machine: null, root: "/repo" });
+  expect(first.menu.catalog.state).toBe("loading");
+  await settle();
+  expect(first.menu.catalog.state).toBe("ready");
+  expect(first.menu.rows.map((r) => r.action.key)).toEqual(["blank"]);
+  first.menu.dispose();
+
+  // 新鲜缓存直接命中：同步 ready，不重发 RPC。
+  const callsBeforeSecond = host.calls.filter(([, m]) => m === "new_session.catalog").length;
+  const second = open_menu(sessions, { machine: null, root: "/repo" });
+  expect(second.menu.catalog.state).toBe("ready");
+  expect(second.menu.rows.map((r) => r.action.key)).toEqual(["blank"]);
+  expect(host.calls.filter(([, m]) => m === "new_session.catalog").length).toBe(callsBeforeSecond);
+  second.menu.dispose();
+
+  // 让缓存过期且下一次刷新失败：菜单仍保持 ready 与缓存条目（silent SWR）。
+  sessions.cached_catalog(null).fetchedAt = Date.now() - 20_000;
+  host.fail = (method) => method === "new_session.catalog";
+  const third = open_menu(sessions, { machine: null, root: "/repo" });
+  expect(third.menu.catalog.state).toBe("ready");
+  expect(third.menu.rows.map((r) => r.action.key)).toEqual(["blank"]);
+  await settle();
+  expect(third.menu.catalog.state).toBe("ready");
+  expect(third.menu.rows.map((r) => r.action.key)).toEqual(["blank"]);
+  third.menu.dispose();
+});
+
+test("收到 new_session.catalog_changed 话题推送会写入缓存并就地刷新已开菜单", async () => {
+  const host = fake_host();
+  host.replies["new_session.catalog"] = {
+    sections: { terminal: [action("blank", "blankTerminal")] },
+  };
+  const sessions = list(host);
+
+  const { menu } = open_menu(sessions, { machine: null, root: "/repo" });
+  await settle();
+  expect(menu.rows.map((r) => r.action.key)).toEqual(["blank"]);
+
+  sessions.on_event({
+    type: "runtime_topic",
+    machine: null,
+    topic: "new_session.catalog_changed",
+    message: {
+      kind: "event",
+      payload: {
+        sections: {
+          common: [action("pinned", "blankTerminal", { pinned: true })],
+          terminal: [action("blank", "blankTerminal")],
+        },
+      },
+    },
+  });
+
+  expect(menu.catalog.state).toBe("ready");
+  expect(menu.rows.map((r) => r.action.key)).toEqual(["pinned", "blank"]);
+  expect(sessions.cached_catalog(null)?.catalog.sections.common).toHaveLength(1);
+  menu.dispose();
+});

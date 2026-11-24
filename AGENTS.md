@@ -17,7 +17,7 @@
 
 ## 硬红线
 
-- **插件全在 JS，Rust 只做宿主和能力**：功能与界面一律写在 JS 插件（`plugins/<name>/`），不往 Rust 加功能；删掉任意插件 Rust 不改一行。
+- **业务功能与界面写在 JS 插件，宿主核心与纯系统集成留在 Rust**：扩展型业务功能与界面一律写在 JS 插件（`plugins/<name>/`）、共享模块（`module`）及零 VM 的声明式主题/布局插件；仅宿主生命周期、预首帧偏好与纯 OS 集成（如外观/快捷键/插件管理、CLI 安装与清理、更新、系统通知/菜单栏、预首帧语言/终端字号）留在宿主（`crates/smelt/src/`），删掉任意插件 Rust 不改一行。
 - **SQLite 持久化、单一权威、改表先确认**：业务数据按字段存 SQLite、不用 JSON、只存一处；改表结构或升 `SCHEMA_VERSION` 前先列清单等确认。
 - **Rust 运行时**：`render` 只读内存不做 IO；等待一律事件驱动，禁止轮询与空闲周期唤醒。
 - **编译与格式化**：改 Rust 自己分批串行跑 `cargo check/test -j 2 -p <crate>`（别跑全 workspace、别 `-j 4+` 防 OOM 137，核对 `passed > 0`）；不跑 `cargo fmt`，只单文件 `rustfmt` diff。

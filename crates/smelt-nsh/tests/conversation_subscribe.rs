@@ -36,7 +36,7 @@ export function Shell() {
 
 const PLUGIN: &str = r#"
 import { host, signal, View } from "nsh";
-import { SmeltConversation } from "smelt/sdk";
+import { SmeltConversation } from "smelt/conversation";
 
 const mode = signal<"workspace" | "automation">("workspace");
 const acpRev = signal(0);
@@ -130,7 +130,8 @@ fn conversation_subscribe_wire_contract(cx: &mut TestAppContext) {
         call.resolve(json!({
             "revision": 1,
             "locale": "zh-CN",
-            "machines": [],
+            "machines_meta": [],
+            "sessions_data": [],
         }));
     });
     host.handle("call", |_plugin, call| {
@@ -195,6 +196,14 @@ fn conversation_subscribe_wire_contract(cx: &mut TestAppContext) {
         SetDescription::from(smelt_nsh::testing::host_registry()),
     ];
     let mut plugins = Plugins::new(&root.join("stage"), SHELL, ui_sets).unwrap();
+    let repo_plugins = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins");
+    plugins.set_modules(smelt_nsh::discover_module_packages(&[
+        smelt_nsh::SourceDir {
+            path: repo_plugins,
+            source: smelt_nsh::PluginSource::Builtin,
+            watch: false,
+        },
+    ]));
     let plugin_dir = root.join("sources/probe");
     fs::create_dir_all(&plugin_dir).unwrap();
     fs::write(plugin_dir.join("main.tsx"), PLUGIN).unwrap();

@@ -1,7 +1,7 @@
 // 自动化目录：任务表、模板画廊、跨机器运行记录列表。
 import { computed, Scroll, Text, View } from "nsh";
 import { Menu } from "nsh/base";
-import { SmeltButton, SmeltIcon, state, t } from "smelt/sdk";
+import { SmeltButton, SmeltIcon, t } from "smelt/sdk";
 import {
   actionAgentDefinitionId,
   activeRunForAutomation,
@@ -85,7 +85,6 @@ function MachinePickingButton(props: {
   const look = currentTheme;
   const targets = computed(() => {
     storeVersion();
-    state();
     return creationMachines().map((m) => ({
       key: machineKey(m),
       machine: m,
@@ -171,7 +170,6 @@ function MachinePickingButton(props: {
 
 export function CatalogHeader() {
   const tabs = computed(() => {
-    state();
     return [
       { value: "tasks" as const, label: t("title") },
       { value: "runs" as const, label: t("catalog.runs") },
@@ -239,7 +237,6 @@ function AutomationTableRow(props: { machine: string | null; automation: any }) 
   const model = computed(() => {
     storeVersion();
     agentsVersion();
-    state();
     const auto = props.automation;
     const proj = machineAutomationsOn(props.machine) ?? createEmptyMachineAutomations();
     const agents = agentsOn(props.machine);
@@ -595,7 +592,6 @@ function TemplateCard(props: { template: any }) {
 function TemplatesSection() {
   const look = currentTheme;
   const filterOptions = computed(() => {
-    state();
     return [
       { value: "__all__", label: t("template.all") },
       ...TEMPLATE_CATEGORIES.map((cat) => ({
@@ -680,7 +676,6 @@ function TasksCatalogBody() {
   const look = currentTheme;
   const groups = computed(() => {
     storeVersion();
-    state();
     return automationMachineGroups();
   });
   const grouped = computed(() => groups().length > 1);
@@ -793,7 +788,6 @@ function RunsCatalogBody() {
 
   const allRuns = computed(() => {
     storeVersion();
-    state();
     const entries = allMachineAutomationsEntries();
     const showMachine = entries.length > 1;
     const flat: Array<{ key: string; machine: string | null; run: any; showMachine: boolean }> = [];

@@ -20,18 +20,34 @@ pub(super) fn run(dir: &Path) -> i32 {
     if !root.join(smelt_nsh::MANIFEST_FILE).is_file() {
         return fail(&t!("plugins.no_manifest", file = smelt_nsh::MANIFEST_FILE));
     }
-    match smelt_nsh::check_plugin(&root) {
+    let mut sources = super::module_sources();
+    if let Some(parent) = root.parent().filter(|p| !p.as_os_str().is_empty())
+        && !sources.iter().any(|s| s.path == parent)
+    {
+        sources.push(smelt_nsh::SourceDir {
+            path: parent.to_path_buf(),
+            source: smelt_nsh::PluginSource::Builtin,
+            watch: false,
+        });
+    }
+    match smelt_nsh::check_plugin_with_sources(&root, &sources) {
         Ok(report) => {
-            let out = serde_json::json!({
+            let mut out = serde_json::json!({
                 "ok": true,
                 "id": report.manifest.id,
                 "name": report.manifest.name,
                 "version": report.manifest.version,
                 "path": root,
                 "theme_only": report.theme_only,
+                "layout_only": report.layout_only,
                 "themes": report.themes,
                 "exports": report.exports,
             });
+            if let Some(module) = report.manifest.module
+                && let Some(obj) = out.as_object_mut()
+            {
+                obj.insert("module".to_owned(), serde_json::Value::String(module));
+            }
             println!("{out:#}");
             0
         }

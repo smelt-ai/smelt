@@ -11,7 +11,9 @@ use crate::workspace_directory::{WorkspaceAcp, WorkspaceConversation, WorkspaceD
 
 /// 可开对话的 agent 选项。出线（`new_session.catalog`）只带展示与回传用的字段；
 /// 启动规格和历史目录只在运行时那台机器上有意义，不出线，客户端解出来是空的。
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpAgentOption {
     pub id: String,

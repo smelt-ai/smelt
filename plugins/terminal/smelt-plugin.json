@@ -1,6 +1,0 @@
-{
-  "id": "smelt.terminal",
-  "name": "Terminal",
-  "version": "1.0.0",
-  "entry": "nsh.tsx"
-}

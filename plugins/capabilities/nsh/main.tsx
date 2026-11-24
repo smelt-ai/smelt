@@ -73,55 +73,66 @@ onCommand(async ({ name, args }) => {
   throw new Error(`Unknown command: ${name}`);
 });
 
-onEvent((event: any) => {
-  if (!event || typeof event !== "object") return;
-  switch (event.type) {
-    case "view_opened": {
-      const target = pageByViewId(String(event.view ?? ""));
-      target?.onOpen(event.args);
-      break;
-    }
-    case "shown_views_changed": {
-      for (const page of allPages) page.onShownChanged();
-      break;
-    }
-    case "machines_changed": {
-      for (const page of allPages) page.onMachinesChanged();
-      break;
-    }
-    case "runtime_topic": {
-      if (event.topic === TOPIC_PI_CONFIG_CHANGED) {
-        for (const page of allPages) {
-          page.onPiConfigChanged(event.machine ?? null, event.message);
+onEvent(
+  (event: any) => {
+    if (!event || typeof event !== "object") return;
+    switch (event.type) {
+      case "view_opened": {
+        const target = pageByViewId(String(event.view ?? ""));
+        target?.onOpen(event.args);
+        break;
+      }
+      case "shown_views_changed": {
+        for (const page of allPages) page.onShownChanged();
+        break;
+      }
+      case "machines_changed": {
+        for (const page of allPages) page.onMachinesChanged();
+        break;
+      }
+      case "runtime_topic": {
+        if (event.topic === TOPIC_PI_CONFIG_CHANGED) {
+          for (const page of allPages) {
+            page.onPiConfigChanged(event.machine ?? null, event.message);
+          }
         }
+        break;
       }
-      break;
-    }
-    case "reconnected": {
-      for (const page of allPages) {
-        page.onReconnected(event.machine ?? null);
+      case "reconnected": {
+        for (const page of allPages) {
+          page.onReconnected(event.machine ?? null);
+        }
+        break;
       }
-      break;
-    }
-    case "commands_changed": {
-      onAgentCommandsChanged();
-      break;
-    }
-    case "plugin": {
-      if (event.name === AGENT_SETTINGS_CHANGED) {
-        applyAgentSettingsEvent(event.payload);
+      case "commands_changed": {
+        onAgentCommandsChanged();
+        break;
       }
-      break;
+      case "plugin": {
+        if (event.name === AGENT_SETTINGS_CHANGED) {
+          applyAgentSettingsEvent(event.payload);
+        }
+        break;
+      }
+      default:
+        break;
     }
-    default:
-      break;
-  }
-});
+  },
+  [
+    "view_opened",
+    "shown_views_changed",
+    "machines_changed",
+    "runtime_topic",
+    "reconnected",
+    "commands_changed",
+    `plugin:${AGENT_SETTINGS_CHANGED}`,
+  ],
+);
 
 // ---- 启动注册 ----
 
 bootTask(async () => {
-  await initHost();
+  await initHost(["machines_meta", "views", "commands"]);
   await registerTopics([TOPIC_PI_CONFIG_CHANGED]);
   await registerViews([
     {

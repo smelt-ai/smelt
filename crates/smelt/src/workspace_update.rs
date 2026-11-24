@@ -34,10 +34,7 @@ impl Workspace {
     pub(crate) fn probe_daemon_outdated(&mut self, restart_if_idle: bool, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             // 只探测状态，不再在此 ensure（冷启动 ensure 由 restore 线程串行做完）。
-            let outdated = cx
-                .background_executor()
-                .spawn(async { crate::local_daemon::daemon_outdated() })
-                .await;
+            let outdated = smelt_sys::blocking::run(crate::local_daemon::daemon_outdated).await;
             let _ = this.update(cx, |this, cx| {
                 if !outdated {
                     this.daemon_restart_waiting_idle = false;
@@ -69,12 +66,11 @@ impl Workspace {
         }
         self.daemon_upgrading = true;
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .spawn(async {
-                    crate::local_daemon::restart_daemon();
-                    crate::local_daemon::ensure_daemon_running();
-                })
-                .await;
+            smelt_sys::blocking::run(|| {
+                crate::local_daemon::restart_daemon();
+                crate::local_daemon::ensure_daemon_running();
+            })
+            .await;
             let _ = this.update(cx, |this, _| this.daemon_upgrading = false);
         })
         .detach();

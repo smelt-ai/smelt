@@ -52,7 +52,12 @@ fn configured_launch(
 
 pub fn agent_options() -> Vec<AcpAgentOption> {
     let snapshot = load_agent_ui_snapshot();
-    let snapshot_ref = snapshot.as_ref();
+    agent_options_with(snapshot.as_ref())
+}
+
+pub(crate) fn agent_options_with(
+    snapshot: Option<&smelt_store::AgentUiSnapshot>,
+) -> Vec<AcpAgentOption> {
     let mut options = ConversationAgentKind::ALL
         .into_iter()
         .map(|kind| AcpAgentOption {
@@ -61,12 +66,11 @@ pub fn agent_options() -> Vec<AcpAgentOption> {
             label: kind.label().to_string(),
             profile: false,
             agent_definition_id: None,
-            launch: configured_launch(snapshot_ref, kind),
+            launch: configured_launch(snapshot, kind),
             history_dir: None,
         })
         .collect::<Vec<_>>();
     let profiles = snapshot
-        .as_ref()
         .map(|snapshot| {
             snapshot
                 .profiles
@@ -81,7 +85,7 @@ pub fn agent_options() -> Vec<AcpAgentOption> {
         let Ok(kind) = profile.validate() else {
             continue;
         };
-        let Ok(launch) = profile.launch_spec(configured_launch(snapshot_ref, kind)) else {
+        let Ok(launch) = profile.launch_spec(configured_launch(snapshot, kind)) else {
             continue;
         };
         let history_dir = profile.history_dir();
@@ -103,14 +107,22 @@ pub fn agent_options() -> Vec<AcpAgentOption> {
 /// 调用方误命中。launch 在这里就把工作方式与插件注入好，桌面与移动端同一份。
 pub fn agent_definition_options() -> Vec<AcpAgentOption> {
     let snapshot = load_agent_ui_snapshot();
-    let snapshot_ref = snapshot.as_ref();
-    crate::agent_definition_store::load_agent_definitions()
+    agent_definition_options_with(snapshot.as_ref())
+}
+
+pub(crate) fn agent_definition_options_with(
+    snapshot: Option<&smelt_store::AgentUiSnapshot>,
+) -> Vec<AcpAgentOption> {
+    let Some(snapshot) = snapshot else {
+        return Vec::new();
+    };
+    crate::agent_definition_store::agent_definitions_from_snapshot(snapshot)
         .into_iter()
         .filter(|definition| definition.is_conversation_ready())
         .filter_map(|definition| {
             let kind = definition.engine_kind()?;
             let launch = crate::agent_definition_store::prepare_agent_definition_launch(
-                configured_launch(snapshot_ref, kind),
+                configured_launch(Some(snapshot), kind),
                 Some(&definition),
             );
             Some(AcpAgentOption {

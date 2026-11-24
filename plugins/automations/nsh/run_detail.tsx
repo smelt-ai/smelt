@@ -2,14 +2,13 @@
 import { computed, Scroll, Text, View } from "nsh";
 import {
   SmeltButton,
-  SmeltConversation,
   SmeltDiffView,
   SmeltIcon,
   SmeltMarkdown,
   stableMemo,
-  state,
   t,
 } from "smelt/sdk";
+import { SmeltConversation } from "smelt/conversation";
 import {
   classifyAcpEntry,
   classifyToolOutputPart,
@@ -667,15 +666,12 @@ function ArchivedRunDetailBody(props: { machine: string | null; run: any }) {
   });
 
   const summary = computed(() => {
-    state();
     return runSummaryInfo(r(), t);
   });
   const errText = computed(() => {
-    state();
     return runErrorText(r(), t);
   });
   const metadata = computed(() => {
-    state();
     return runMetadataRows(r(), t);
   });
   const finalReply = computed(() => {
@@ -683,13 +679,11 @@ function ArchivedRunDetailBody(props: { machine: string | null; run: any }) {
     return d ? finalReplyIndex(d.output, d.transcript) : null;
   });
   const processMeta = computed(() => {
-    state();
     const d = detail();
     return d ? transcriptSummary(d.transcript, t) : "";
   });
 
   const inputMarkdown = computed(() => {
-    state();
     const runObj = r();
     if (isShellAction(runObj?.context?.action)) {
       const cmd = formatShellCommand(runObj.context.action).trim();
@@ -888,7 +882,6 @@ export function RunPane(props: { machine: string | null; run: any }) {
   const canCancel = () => isRunStatusActive(r().status);
 
   const liveStatus = stableMemo(() => {
-    state();
     return liveRunStatusFor(props.machine, r());
   });
   const liveKind = computed(() => liveStatus().kind);

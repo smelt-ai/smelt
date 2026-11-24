@@ -7,8 +7,8 @@ import {
   call,
   emitEvent,
   initHost,
-  machineEntry,
-  machines,
+  machineMeta,
+  machineMetaEntry,
   newSessionId,
   onCommand,
   onEvent,
@@ -19,9 +19,9 @@ import {
   run,
   sessionStates,
   stableMemo,
-  state as hostState,
   t,
   text,
+  texts,
   views,
   viewShown,
   currentTheme,
@@ -316,7 +316,7 @@ function receiveAgentHost(machine: string | null, message: any) {
 }
 
 function forgetRemovedMachines() {
-  const attached = new Set(machines().map((m: any) => machineKey(m.machine)));
+  const attached = new Set(machineMeta().map((m: any) => machineKey(m.machine)));
   for (const key of [...agentHostsMap.keys()]) {
     if (!attached.has(key)) {
       setAgentHost(machineFromKey(key), null);
@@ -428,7 +428,7 @@ export function automationNamesFor(machine: string | null, agentId: string): str
 // ---- 机器与默认对话智能体决议 ----
 
 export function attachedMachines(): any[] {
-  return sortMachines(machines());
+  return sortMachines(machineMeta());
 }
 
 export function agentMachines(): Array<string | null> {
@@ -443,13 +443,13 @@ export function creationMachines(): Array<string | null> {
 }
 
 export function machineDisplayName(machine: string | null): string {
-  const entry = machineEntry(machine);
+  const entry = machineMetaEntry(machine);
   if (entry?.name) return String(entry.name);
   return machine == null ? t("machine.local") : machine;
 }
 
 export function machineUnavailableReason(machine: string | null): string | null {
-  const reason = machineEntry(machine)?.unavailable;
+  const reason = machineMetaEntry(machine)?.unavailable;
   return typeof reason === "string" && reason.length > 0 ? reason : null;
 }
 
@@ -1638,7 +1638,7 @@ function buildNewConversationTitle(defaultName: string | null): Record<string, s
   if (defaultName == null) {
     return text("new_conversation.title");
   }
-  const tables = hostState().texts;
+  const tables = texts();
   const out: Record<string, string> = {};
   if (tables && typeof tables === "object") {
     const trimmed = defaultName.trim();
@@ -1703,7 +1703,7 @@ function syncNewConversationTitle() {
 // ---- 宿主事件同步 ----
 
 function onAgentsOrMachinesChanged() {
-  const attachedKeys = new Set(machines().map((m: any) => machineKey(m.machine)));
+  const attachedKeys = new Set(machineMeta().map((m: any) => machineKey(m.machine)));
   for (const key of [...watchedMemories]) {
     const sep = key.indexOf("\0");
     const mKey = sep >= 0 ? key.slice(0, sep) : "";
@@ -1866,78 +1866,89 @@ export function initPlugin() {
     }
   });
 
-  onEvent((event: any) => {
-    if (!event) return;
-    switch (event.type) {
-      case "runtime_topic": {
-        const machine =
-          typeof event.machine === "string" && event.machine.length > 0 ? event.machine : null;
-        onRuntimeTopic(machine, String(event.topic ?? ""), event.message);
-        break;
-      }
-      case "reconnected": {
-        const machine =
-          typeof event.machine === "string" && event.machine.length > 0 ? event.machine : null;
-        const prefix = `${machineKey(machine)}\0`;
-        for (const key of [...watchedMemories]) {
-          if (key.startsWith(prefix)) {
-            watchedMemories.delete(key);
+  onEvent(
+    (event: any) => {
+      if (!event) return;
+      switch (event.type) {
+        case "runtime_topic": {
+          const machine =
+            typeof event.machine === "string" && event.machine.length > 0 ? event.machine : null;
+          onRuntimeTopic(machine, String(event.topic ?? ""), event.message);
+          break;
+        }
+        case "reconnected": {
+          const machine =
+            typeof event.machine === "string" && event.machine.length > 0 ? event.machine : null;
+          const prefix = `${machineKey(machine)}\0`;
+          for (const key of [...watchedMemories]) {
+            if (key.startsWith(prefix)) {
+              watchedMemories.delete(key);
+            }
           }
+          const editing = editingAgent();
+          if (editing && machineKey(editing.machine) === machineKey(machine)) {
+            refreshAgentMemories();
+            refreshAgentPiConfig();
+          }
+          break;
         }
-        const editing = editingAgent();
-        if (editing && machineKey(editing.machine) === machineKey(machine)) {
-          refreshAgentMemories();
-          refreshAgentPiConfig();
+        case "sessions_changed": {
+          onSessionsChanged();
+          break;
         }
-        break;
+        case "machines_changed": {
+          forgetRemovedMachines();
+          const attachedKeys = new Set(machineMeta().map((m: any) => machineKey(m.machine)));
+          if (retainAutomationsMachines(automationsProj, attachedKeys)) {
+            automationsVersion.set(automationsVersion() + 1);
+          }
+          onAgentsOrMachinesChanged();
+          syncNewConversationTitle();
+          break;
+        }
+        case "shown_views_changed": {
+          if (!viewShown(VIEW)) {
+            armConversationOnCreate.set(false);
+            pickingForConversation.set(false);
+          }
+          const settingsShown = viewShown(SETTINGS_VIEW);
+          if (settingsShown && !settingsWasShown) {
+            onSettingsShown();
+          }
+          settingsWasShown = settingsShown;
+          break;
+        }
+        case "views_changed": {
+          const tab = editorTab();
+          if (tab.kind === "automations" && !automationsViewRegistered()) {
+            editorTab.set({ kind: "config" });
+          }
+          break;
+        }
+        case "view_opened": {
+          if (event.view === VIEW) {
+            handleMainViewOpened(event.args);
+          } else if (event.view === SETTINGS_VIEW) {
+            settingsWasShown = true;
+            onSettingsShown();
+          }
+          break;
+        }
       }
-      case "sessions_changed": {
-        onSessionsChanged();
-        break;
-      }
-      case "machines_changed": {
-        forgetRemovedMachines();
-        const attachedKeys = new Set(machines().map((m: any) => machineKey(m.machine)));
-        if (retainAutomationsMachines(automationsProj, attachedKeys)) {
-          automationsVersion.set(automationsVersion() + 1);
-        }
-        onAgentsOrMachinesChanged();
-        syncNewConversationTitle();
-        break;
-      }
-      case "shown_views_changed": {
-        if (!viewShown(VIEW)) {
-          armConversationOnCreate.set(false);
-          pickingForConversation.set(false);
-        }
-        const settingsShown = viewShown(SETTINGS_VIEW);
-        if (settingsShown && !settingsWasShown) {
-          onSettingsShown();
-        }
-        settingsWasShown = settingsShown;
-        break;
-      }
-      case "views_changed": {
-        const tab = editorTab();
-        if (tab.kind === "automations" && !automationsViewRegistered()) {
-          editorTab.set({ kind: "config" });
-        }
-        break;
-      }
-      case "view_opened": {
-        if (event.view === VIEW) {
-          handleMainViewOpened(event.args);
-        } else if (event.view === SETTINGS_VIEW) {
-          settingsWasShown = true;
-          onSettingsShown();
-        }
-        break;
-      }
-    }
-  });
+    },
+    [
+      "runtime_topic",
+      "reconnected",
+      "sessions_changed",
+      "machines_changed",
+      "shown_views_changed",
+      "views_changed",
+      "view_opened",
+    ],
+  );
 
   bootTask(async () => {
-    await initHost();
+    await initHost(["machines_meta", "views", "commands"]);
     await registerTopics([
       "automations.changed",
       "agent_host.changed",

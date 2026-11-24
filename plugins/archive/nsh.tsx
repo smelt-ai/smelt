@@ -2,11 +2,12 @@
 import { computed, Scroll, signal, Text, View } from "nsh";
 import { Dialog, Popover, Radio, Tooltip } from "nsh/base";
 import {
+  bootTask,
   call,
   DIALOG_SURFACE_CLASS,
   initHost,
-  machines as hostMachines,
-  onState,
+  machineMeta as hostMachines,
+  onSlices,
   pathClean,
   pathParent,
   pathStyle,
@@ -110,11 +111,12 @@ async function removeRow(machine: string | null, row: any) {
   }
 }
 
-onState(() => rebuild());
+onSlices(["machines_meta", "sessions_data", "locale"], () => rebuild());
 
-initHost().then(() => {
+bootTask(async () => {
+  await initHost(["machines_meta", "sessions_data"]);
   rebuild();
-  registerViews([
+  await registerViews([
     {
       name: BUTTON_NAME,
       export: BUTTON_NAME,
@@ -122,7 +124,7 @@ initHost().then(() => {
       icon: "icons/archive.svg",
       draws_top_bar: true,
     },
-  ]).catch((error) => console.error("[archive] registerViews 失败:", error));
+  ]);
 });
 
 type DialogState =

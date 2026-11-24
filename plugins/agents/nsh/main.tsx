@@ -3,7 +3,7 @@
 // - `settings`：设置里的「Agent」页（本机 CLI、Hooks、自定义 Agent、新建菜单启动项）
 
 import { computed, View } from "nsh";
-import { state as hostState } from "smelt/sdk";
+import { machineMeta } from "smelt/sdk";
 
 import { AgentCatalogView } from "./catalog.tsx";
 import { AgentEditorView } from "./editor.tsx";
@@ -21,7 +21,7 @@ initPlugin();
 
 export function main() {
   const isEditing = computed(() => {
-    hostState();
+    machineMeta();
     agentHostsSignal();
     const ref = editingAgent();
     if (!ref) return false;

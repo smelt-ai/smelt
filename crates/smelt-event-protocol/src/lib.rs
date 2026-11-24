@@ -119,6 +119,12 @@ pub const CORE_TOPIC_AGENT_HOST_CHANGED: &str = "agent_host.changed";
 /// 终端里的程序用 OSC 9;4（ConEmu 进度）报的进度变了。运行时变了就发，进度条还在时
 /// 每 5 秒重发一次（后连上的客户端据此补齐），15 秒没新报告就清掉。不进会话投影。
 pub const CORE_TOPIC_TERMINAL_PROGRESS: &str = "terminal.progress";
+/// 「新建会话」目录（智能体选项、分组动作、Pin 与 CLI 探测）在运行时更新了，载荷为
+/// `smelt_model::control_api::NewSessionCatalogResult`，带快照 [`CORE_SNAPSHOT_NEW_SESSION_CATALOG`]。
+///
+/// 加在事件协议 v7 之后、没有升版本，同 [`CORE_TOPIC_AGENT_HOST_CHANGED`] 只放在单独的一条
+/// 订阅里；不认识该话题的旧运行时只会拒掉那一条。
+pub const CORE_TOPIC_NEW_SESSION_CATALOG_CHANGED: &str = "new_session.catalog_changed";
 
 pub const CORE_CAPABILITY_SESSION_READ: &str = "session.read";
 pub const CORE_CAPABILITY_WORKSPACE_READ: &str = "workspace.read";
@@ -136,6 +142,7 @@ pub const CORE_SNAPSHOT_WORKSPACE: &str = "core.workspace.v1";
 pub const CORE_SNAPSHOT_AUTOMATIONS: &str = "core.automations.v1";
 pub const CORE_SNAPSHOT_ATTENTION: &str = "core.attention.v1";
 pub const CORE_SNAPSHOT_AGENT_HOST: &str = "core.agent_host.v1";
+pub const CORE_SNAPSHOT_NEW_SESSION_CATALOG: &str = "core.new_session_catalog.v1";
 
 pub const FIRST_PARTY_DESKTOP_PLUGIN_ID: &str = "core.desktop";
 
@@ -906,6 +913,13 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
             Some(CORE_SNAPSHOT_AGENT_HOST),
             1024 * 1024,
         )?,
+        // 新建会话目录包含智能体选项与分组启动项。
+        descriptor(
+            CORE_TOPIC_NEW_SESSION_CATALOG_CHANGED,
+            CORE_CAPABILITY_WORKSPACE_READ,
+            Some(CORE_SNAPSHOT_NEW_SESSION_CATALOG),
+            512 * 1024,
+        )?,
     ])
 }
 
@@ -1211,6 +1225,11 @@ mod tests {
             (
                 CORE_TOPIC_AGENT_HOST_CHANGED,
                 Some(CORE_SNAPSHOT_AGENT_HOST),
+                1,
+            ),
+            (
+                CORE_TOPIC_NEW_SESSION_CATALOG_CHANGED,
+                Some(CORE_SNAPSHOT_NEW_SESSION_CATALOG),
                 1,
             ),
         ];

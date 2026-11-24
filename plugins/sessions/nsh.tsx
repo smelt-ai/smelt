@@ -7,6 +7,7 @@
 import { computed, signal, Text, View } from "nsh";
 import { Dialog, ResizablePanel, ResizablePanelGroup } from "nsh/base";
 import {
+  bootTask,
   call,
   clipboardWrite,
   command,
@@ -15,11 +16,12 @@ import {
   daemonStateStatus,
   emitEvent,
   initHost,
+  machineMeta,
   machines,
   newSessionId,
   onCommand,
   onEvent,
-  onState,
+  onSlices,
   pathClean,
   pathIsAbsolute,
   pathJoin,
@@ -41,7 +43,6 @@ import {
   SmeltNativeWindowDrag,
   SmeltWindowBar,
   stableMemo,
-  state,
   store,
   t,
   text,
@@ -623,7 +624,7 @@ async function createAndOpenConversation(
 // ---- 宿主状态同步（纯事件驱动） ----
 
 function syncFromHost() {
-  const list = machines();
+  const list = machineMeta();
   const currentMachines = new Set<string>(list.map((m: any) => machineKey(m.machine)));
 
   // 1. 清理被彻底移除的机器
@@ -651,9 +652,9 @@ function syncFromHost() {
   for (const entry of list) {
     const machine: string | null = entry.machine ?? null;
     const mk = machineKey(machine);
-    const dir = entry.directory;
+    const dir = workspaceDirectory(machine);
     if (!dir) continue;
-    const facts = entry.facts ?? [];
+    const facts = conversationFacts(machine);
     const ver = `${dir.epoch ?? ""}:${dir.revision ?? 0}`;
     if (seenVersions.get(mk) !== ver) {
       seenVersions.set(mk, ver);
@@ -1086,191 +1087,196 @@ async function handleCommand(name: string, args: any): Promise<any> {
 
 onCommand(({ name, args }) => handleCommand(name, args));
 
-onState(() => {
+onSlices(["machines_meta", "sessions_data"], () => {
   syncFromHost();
 });
 
-onEvent((event: any) => {
-  if (!event) return;
-  if (event.type === "view_opened" && event.view === SESSION_VIEW) {
-    revealSessionArgs(event.args);
-    return;
-  }
-  if (event.type === "plugin" && event.name === AGENT_SETTINGS_CHANGED_EVENT) {
-    applyAgentSettingsChanged(event.payload);
-    return;
-  }
-  if (
-    event.type === "runtime_topic" &&
-    event.topic === TOPIC_PI_CONFIG_CHANGED &&
-    event.message?.kind !== "unavailable"
-  ) {
-    notifyPiConfigChanged();
-  }
-});
-
-initHost().then(() => {
-  knownMachines = new Set(machines().map((m: any) => machineKey(m.machine)));
-
-  registerTopics([TOPIC_PI_CONFIG_CHANGED]).catch((err) =>
-    console.error("[sessions] registerTopics 失败：", err),
-  );
-
-  registerViews([
-    {
-      name: SESSION_VIEW_NAME,
-      export: SESSION_VIEW_NAME,
-      title: text("view.session"),
-      icon: "icons/app-window.svg",
-      draws_top_bar: true,
-    },
-  ]).catch((err) => console.error("[sessions] registerViews 失败：", err));
-
-  registerCommands(
-    [
-      {
-        name: "activate",
-        title: text("command.activate"),
-        palette: false,
-        requires_args: true,
-      },
-      {
-        name: "start-conversation",
-        title: text("command.start_conversation"),
-        palette: false,
-        requires_args: true,
-      },
-      {
-        name: "fork",
-        title: text("command.fork"),
-        palette: false,
-        requires_args: true,
-      },
-      {
-        name: "resume",
-        title: text("command.resume"),
-        palette: false,
-        requires_args: true,
-      },
-      {
-        name: "resume-in-terminal",
-        title: text("command.resume_in_terminal"),
-        palette: false,
-        requires_args: true,
-      },
-      {
-        name: "handoff",
-        title: text("command.handoff"),
-        palette: false,
-        requires_args: true,
-      },
-      {
-        name: "send-text",
-        title: text("command.send_text"),
-        palette: false,
-        requires_args: true,
-      },
-      {
-        name: "selection",
-        title: text("command.selection"),
-        palette: false,
-        requires_args: false,
-      },
-      {
-        name: "create-conversation",
-        title: text("command.create_conversation"),
-        palette: false,
-        requires_args: true,
-      },
-      {
-        name: "select-project",
-        title: text("command.select_project"),
-        palette: false,
-        requires_args: true,
-      },
-      {
-        name: "prev-pane",
-        title: text("command.prev_pane"),
-        key: "cmd-[",
-        context: "Workspace",
-        palette: true,
-        requires_args: false,
-        args: [],
-        when_view_shown: SESSION_VIEW,
-        when_active_session: true,
-      },
-      {
-        name: "next-pane",
-        title: text("command.next_pane"),
-        key: "cmd-]",
-        context: "Workspace",
-        palette: true,
-        requires_args: false,
-        args: [],
-        when_view_shown: SESSION_VIEW,
-        when_active_session: true,
-      },
-      {
-        name: "split-right",
-        title: text("command.split_right"),
-        key: "cmd-d",
-        context: "Workspace",
-        palette: true,
-        requires_args: false,
-        args: [],
-        when_view_shown: SESSION_VIEW,
-        when_active_session: true,
-      },
-      {
-        name: "split-down",
-        title: text("command.split_down"),
-        key: "shift-cmd-d",
-        context: "Workspace",
-        palette: true,
-        requires_args: false,
-        args: [],
-        when_view_shown: SESSION_VIEW,
-        when_active_session: true,
-      },
-      {
-        name: "close-pane",
-        title: text("command.close_pane"),
-        key: "cmd-w",
-        context: "Workspace",
-        palette: true,
-        requires_args: false,
-        args: [],
-        when_view_shown: SESSION_VIEW,
-        when_active_session: true,
-      },
-      {
-        name: "copy-session-id",
-        title: text("menu.copy_session_id"),
-        context: "Workspace",
-        palette: true,
-        requires_args: false,
-        args: [],
-      },
-    ],
-    text("view.session"),
-  ).catch((err) => console.error("[sessions] registerCommands 失败：", err));
-
-  void (async () => {
-    await sessionsStore.open();
-    if (!initializedStore) {
-      initializedStore = true;
-      const saved = await sessionsStore.readSelection();
-      if (saved && selection().kind === "none") {
-        selection.set({
-          kind: "conversation",
-          machine: saved.machine,
-          conversation_id: saved.id,
-        });
-        announceSelection();
-      }
+onEvent(
+  (event: any) => {
+    if (!event) return;
+    if (event.type === "view_opened" && event.view === SESSION_VIEW) {
+      revealSessionArgs(event.args);
+      return;
     }
-    syncFromHost();
-  })();
+    if (event.type === "plugin" && event.name === AGENT_SETTINGS_CHANGED_EVENT) {
+      applyAgentSettingsChanged(event.payload);
+      return;
+    }
+    if (
+      event.type === "runtime_topic" &&
+      event.topic === TOPIC_PI_CONFIG_CHANGED &&
+      event.message?.kind !== "unavailable"
+    ) {
+      notifyPiConfigChanged();
+    }
+  },
+  ["view_opened", `plugin:${AGENT_SETTINGS_CHANGED_EVENT}`, "runtime_topic"],
+);
+
+bootTask(async () => {
+  await initHost(["machines_meta", "sessions_data", "connections", "views", "safe_areas"]);
+  knownMachines = new Set(machineMeta().map((m: any) => machineKey(m.machine)));
+
+  await Promise.all([
+    registerTopics([TOPIC_PI_CONFIG_CHANGED]),
+    registerViews([
+      {
+        name: SESSION_VIEW_NAME,
+        export: SESSION_VIEW_NAME,
+        title: text("view.session"),
+        icon: "icons/app-window.svg",
+        draws_top_bar: true,
+      },
+    ]),
+    registerCommands(
+      [
+        {
+          name: "activate",
+          title: text("command.activate"),
+          palette: false,
+          requires_args: true,
+        },
+        {
+          name: "start-conversation",
+          title: text("command.start_conversation"),
+          palette: false,
+          requires_args: true,
+        },
+        {
+          name: "fork",
+          title: text("command.fork"),
+          palette: false,
+          requires_args: true,
+        },
+        {
+          name: "resume",
+          title: text("command.resume"),
+          palette: false,
+          requires_args: true,
+        },
+        {
+          name: "resume-in-terminal",
+          title: text("command.resume_in_terminal"),
+          palette: false,
+          requires_args: true,
+        },
+        {
+          name: "handoff",
+          title: text("command.handoff"),
+          palette: false,
+          requires_args: true,
+        },
+        {
+          name: "send-text",
+          title: text("command.send_text"),
+          palette: false,
+          requires_args: true,
+        },
+        {
+          name: "selection",
+          title: text("command.selection"),
+          palette: false,
+          requires_args: false,
+        },
+        {
+          name: "create-conversation",
+          title: text("command.create_conversation"),
+          palette: false,
+          requires_args: true,
+        },
+        {
+          name: "select-project",
+          title: text("command.select_project"),
+          palette: false,
+          requires_args: true,
+        },
+        {
+          name: "prev-pane",
+          title: text("command.prev_pane"),
+          key: "cmd-[",
+          context: "Workspace",
+          palette: true,
+          requires_args: false,
+          args: [],
+          when_view_shown: SESSION_VIEW,
+          when_active_session: true,
+        },
+        {
+          name: "next-pane",
+          title: text("command.next_pane"),
+          key: "cmd-]",
+          context: "Workspace",
+          palette: true,
+          requires_args: false,
+          args: [],
+          when_view_shown: SESSION_VIEW,
+          when_active_session: true,
+        },
+        {
+          name: "split-right",
+          title: text("command.split_right"),
+          key: "cmd-d",
+          context: "Workspace",
+          palette: true,
+          requires_args: false,
+          args: [],
+          when_view_shown: SESSION_VIEW,
+          when_active_session: true,
+        },
+        {
+          name: "split-down",
+          title: text("command.split_down"),
+          key: "shift-cmd-d",
+          context: "Workspace",
+          palette: true,
+          requires_args: false,
+          args: [],
+          when_view_shown: SESSION_VIEW,
+          when_active_session: true,
+        },
+        {
+          name: "close-pane",
+          title: text("command.close_pane"),
+          key: "cmd-w",
+          context: "Workspace",
+          palette: true,
+          requires_args: false,
+          args: [],
+          when_view_shown: SESSION_VIEW,
+          when_active_session: true,
+        },
+        {
+          name: "copy-session-id",
+          title: text("menu.copy_session_id"),
+          context: "Workspace",
+          palette: true,
+          requires_args: false,
+          args: [],
+        },
+      ],
+      text("view.session"),
+    ),
+    (async () => {
+      try {
+        await sessionsStore.open();
+        if (!initializedStore) {
+          initializedStore = true;
+          const saved = await sessionsStore.readSelection();
+          if (saved && selection().kind === "none") {
+            selection.set({
+              kind: "conversation",
+              machine: saved.machine,
+              conversation_id: saved.id,
+            });
+            announceSelection();
+          }
+        }
+      } catch (err) {
+        console.error("[sessions] 打开 SQLite 存储失败：", err);
+      }
+    })(),
+  ]);
+  syncFromHost();
 });
 
 // ---- UI 组件 ----

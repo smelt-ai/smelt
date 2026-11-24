@@ -7766,7 +7766,6 @@ dependencies = [
 [[package]]
 name = "nsh-base"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "chrono",
  "html5ever 0.27.0",
@@ -7790,7 +7789,6 @@ dependencies = [
 [[package]]
 name = "nsh-bundler"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "anyhow",
  "dunce",
@@ -7816,7 +7814,6 @@ dependencies = [
 [[package]]
 name = "nsh-core"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "cap-std",
  "chrono",
@@ -7850,7 +7847,6 @@ dependencies = [
 [[package]]
 name = "nsh-engine"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "crossbeam-channel",
  "env_filter 2.1.0",
@@ -7871,7 +7867,6 @@ dependencies = [
 [[package]]
 name = "nsh-i18n"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "rust-i18n-support",
  "serde_json",
@@ -7880,7 +7875,6 @@ dependencies = [
 [[package]]
 name = "nsh-js"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "futures-util",
  "getrandom 0.4.3",
@@ -7903,7 +7897,6 @@ dependencies = [
 [[package]]
 name = "nsh-macros"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "imagesize 0.15.0",
  "proc-macro2",
@@ -7916,7 +7909,6 @@ dependencies = [
 [[package]]
 name = "nsh-package"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",
@@ -7931,7 +7923,6 @@ dependencies = [
 [[package]]
 name = "nsh-platform-gpui"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7964,7 +7955,6 @@ dependencies = [
 [[package]]
 name = "nsh-updater"
 version = "0.6.1"
-source = "git+https://github.com/smelt-ai/nsh?rev=128694be93679ff0962e4a72e7fa6b9a67de954e#128694be93679ff0962e4a72e7fa6b9a67de954e"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",
@@ -12579,6 +12569,7 @@ dependencies = [
  "smelt-runtime-client",
  "smelt-store",
  "smelt-sys",
+ "smelt-terminal",
  "smelt-ui",
  "smelt-version",
  "smol",

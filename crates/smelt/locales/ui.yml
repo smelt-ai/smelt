@@ -734,7 +734,434 @@ shortcuts:
   view_keys:
     en: "Keys Inside Views"
     zh-CN: "视图里的按键"
+language:
+  page:
+    title:
+      en: Language
+      zh-CN: 语言
+  section:
+    interface:
+      en: Interface
+      zh-CN: 界面
+  row:
+    language:
+      en: Display language
+      zh-CN: 显示语言
+    language_description:
+      en: Menus, settings and messages in the app. Conversations with agents are not translated.
+      zh-CN: App 里的菜单、设置和提示。和智能体的对话内容不翻译。
+  option:
+    system:
+      en: System (%{language})
+      zh-CN: 跟随系统（%{language}）
+maintenance:
+  cleanup:
+    title:
+      en: "Clean Up"
+      zh-CN: "清理残留"
+    row:
+      en: "Leftover files"
+      zh-CN: "历史残留"
+    scanning:
+      en: "Checking ~/.smelt…"
+      zh-CN: "正在检查 ~/.smelt…"
+    scan_failed:
+      en: "Couldn't read ~/.smelt: %{error}"
+      zh-CN: "读不了 ~/.smelt：%{error}"
+    empty:
+      en: "Everything in ~/.smelt is in use"
+      zh-CN: "~/.smelt 里都是在用的文件"
+    summary:
+      en: "Files in ~/.smelt that Smelt no longer uses: %{count} items, %{size}"
+      zh-CN: "~/.smelt 里已经不再使用的文件：%{count} 项，共 %{size}"
+    action:
+      en: "Clean Up…"
+      zh-CN: "清理…"
+    remove_failed:
+      en: "Couldn't delete: %{error}"
+      zh-CN: "删不掉：%{error}"
+    confirm:
+      title:
+        en: "Delete these %{count} items?"
+        zh-CN: "删除这 %{count} 项？"
+      description:
+        en: "Frees %{size}. They are deleted for good, not moved to the Trash."
+        zh-CN: "腾出 %{size}。直接删除，不进废纸篓，删了找不回来。"
+      action:
+        en: "Delete"
+        zh-CN: "删除"
+      cancel:
+        en: "Cancel"
+        zh-CN: "取消"
+  cli:
+    title:
+      en: "Command Line"
+      zh-CN: "命令行"
+    row:
+      en: "smelt command in Terminal"
+      zh-CN: "终端里的 smelt 命令"
+    status:
+      unknown:
+        en: "Not checked yet"
+        zh-CN: "还没检查"
+      installed:
+        en: "Installed: %{link} points to this app"
+        zh-CN: "已装好：%{link} 指向这个 App"
+      missing:
+        en: "Puts a smelt in /usr/local/bin that points to this app, so you can type smelt agent list right in Terminal. Usually asks for an administrator password once."
+        zh-CN: "在 /usr/local/bin 放一个指向这个 App 的 smelt，终端里就能直接敲 smelt agent list。一般要输一次管理员密码"
+      stale:
+        en: "%{link} doesn't point to this app. Install again to switch it over."
+        zh-CN: "%{link} 指向的不是这个 App，重新装一次就换过来"
+      taken:
+        en: "%{link} is another program and was left alone"
+        zh-CN: "%{link} 已经是别的程序，没有动它"
+    install:
+      action:
+        en: "Install"
+        zh-CN: "安装"
+      again:
+        en: "Reinstall"
+        zh-CN: "重新安装"
+      running:
+        en: "Installing…"
+        zh-CN: "安装中…"
+      done:
+        en: "The smelt command is installed. New Terminal windows can use it."
+        zh-CN: "已装好 smelt 命令，新开的终端里就能用"
+      failed:
+        en: "Couldn't install the smelt command: %{error}"
+        zh-CN: "装 smelt 命令失败：%{error}"
+      cancelled:
+        en: "Authorization was cancelled"
+        zh-CN: "已取消授权"
+      no_home:
+        en: "Can't find $HOME"
+        zh-CN: "找不到 $HOME"
+      link_failed:
+        en: "Couldn't place ~/.smelt/bin/smelt: %{error}"
+        zh-CN: "放 ~/.smelt/bin/smelt 失败：%{error}"
+      osascript_failed:
+        en: "Couldn't run osascript: %{error}"
+        zh-CN: "无法执行 osascript：%{error}"
+  notify:
+    done:
+      en: "Done"
+      zh-CN: "完成"
+    error:
+      en: "Error"
+      zh-CN: "错误"
+notifications:
+  page:
+    title:
+      en: Notifications
+      zh-CN: 通知
+  section:
+    system:
+      en: System Notifications
+      zh-CN: 系统通知
+    agent:
+      en: When Agents Call You
+      zh-CN: Agent 什么时候叫你
+    terminal:
+      en: Terminal
+      zh-CN: 终端
+  prefs:
+    approval:
+      en: Waiting for approval
+      zh-CN: 等待批准
+    input:
+      en: Waiting for input
+      zh-CN: 等待输入
+    input_description:
+      en: When it asks a question or waits for you to continue
+      zh-CN: 提问或等你继续时
+    success:
+      en: Task finished
+      zh-CN: 任务完成
+    failure:
+      en: Task failed
+      zh-CN: 任务失败
+    bell:
+      en: Bell
+      zh-CN: 响铃
+    bell_description:
+      en: Alert when the terminal outputs BEL
+      zh-CN: 终端输出 BEL 时提醒
+  permission:
+    unsupported:
+      en: This system has no notifications
+      zh-CN: 这个系统上没有通知
+    checking:
+      en: Checking…
+      zh-CN: 正在读取…
+    request:
+      en: Request Permission
+      zh-CN: 请求授权
+    open_settings:
+      en: Open System Settings ↗
+      zh-CN: 打开系统设置 ↗
+    granted:
+      en: System notifications are allowed
+      zh-CN: 系统通知已允许
+    no_banners:
+      en: Alert style is “None” — notifications only go to Notification Center, no banners
+      zh-CN: 提醒样式是「无」，只进通知中心，不弹横幅
+    no_badge:
+      en: The Dock badge is turned off in the system, so unread counts aren't shown
+      zh-CN: Dock 角标被系统关了，看不到未读数
+    no_banners_or_badge:
+      en: No banners, and the Dock doesn't show unread counts
+      zh-CN: 不弹横幅，Dock 也不显示未读数
+    not_requested:
+      en: System permission hasn't been requested yet
+      zh-CN: 尚未请求系统授权
+    denied:
+      en: Blocked by the system
+      zh-CN: 已被系统禁止
+  fallback:
+    conversation:
+      en: Conversation
+      zh-CN: 对话
+    terminal:
+      en: Terminal
+      zh-CN: 终端
+  status:
+    needs_you:
+      en: Needs you
+      zh-CN: 需要你
+    running:
+      en: Running
+      zh-CN: 运行中
+    unread:
+      en: Unread
+      zh-CN: 未读
+  menu:
+    show_main_window:
+      en: Open smelt Main Window
+      zh-CN: 打开 smelt 主窗口
+  tooltip:
+    both:
+      en: "%{attention}, %{running}"
+      zh-CN: "%{attention}，%{running}"
+    attention:
+      one:
+        en: 1 session needs attention
+        zh-CN: 1 个会话需要关注
+      other:
+        en: "%{count} sessions need attention"
+        zh-CN: "%{count} 个会话需要关注"
+    running:
+      one:
+        en: 1 session running
+        zh-CN: 1 个会话运行中
+      other:
+        en: "%{count} sessions running"
+        zh-CN: "%{count} 个会话运行中"
+terminal:
+  title:
+    en: Terminal
+    zh-CN: 终端
+  settings:
+    display:
+      en: Display
+      zh-CN: 显示
+    font_size:
+      en: Font size
+      zh-CN: 字号
+    smaller:
+      en: Decrease terminal font size
+      zh-CN: 终端字号减小
+    larger:
+      en: Increase terminal font size
+      zh-CN: 终端字号增大
 updater:
+  group:
+    en: Updates & Help
+    zh-CN: 更新与帮助
+  docs:
+    en: Documentation
+    zh-CN: 帮助文档
+  report_issue:
+    en: Report an Issue
+    zh-CN: 反馈问题
+  check_menu:
+    en: Check for Updates…
+    zh-CN: 检查更新…
+  badge:
+    en: New
+    zh-CN: 新
+  about:
+    title:
+      en: About
+      zh-CN: 关于
+  section:
+    update:
+      en: Updates
+      zh-CN: 更新
+    help:
+      en: Help & Feedback
+      zh-CN: 帮助与反馈
+  help:
+    docs_row:
+      en: User guide
+      zh-CN: 使用文档
+    report_description:
+      en: Open the log first, then drag it into the feedback page
+      zh-CN: 先打开日志，再把它拖进反馈页
+    open_log:
+      en: Open Log
+      zh-CN: 打开日志
+    source:
+      en: Source code
+      zh-CN: 源码
+  channel:
+    label:
+      en: Update channel
+      zh-CN: 更新通道
+    description:
+      en: Stable gets official releases; Beta gets test builds
+      zh-CN: 生产版接收正式发布；内测版接收测试构建
+    dev:
+      en: Beta
+      zh-CN: 内测版
+    prod:
+      en: Stable
+      zh-CN: 生产版
+  auto_install:
+    label:
+      en: Download and install automatically
+      zh-CN: 自动下载安装
+    description:
+      en: Download new versions in the background; when off, only notify
+      zh-CN: 发现新版本后在后台下载；关闭后仅提示
+  check:
+    idle:
+      en: Check for Updates
+      zh-CN: 检查更新
+    checking:
+      en: Checking…
+      zh-CN: 检查中…
+    downloading:
+      en: Downloading…
+      zh-CN: 下载中…
+    installing:
+      en: Preparing…
+      zh-CN: 准备中…
+    quitting:
+      en: Quitting…
+      zh-CN: 正在退出…
+    again:
+      en: Check for Newer Version
+      zh-CN: 检查新版本
+    retry_recovery:
+      en: Retry Recovery
+      zh-CN: 重试恢复
+  status:
+    idle:
+      en: Not checked yet
+      zh-CN: 尚未检查更新
+    idle_detail:
+      en: Click “Check for Updates” to get the latest %{channel} installer
+      zh-CN: 点击“检查更新”获取%{channel}的最新安装包
+    checking:
+      en: Checking for updates
+      zh-CN: 正在检查更新
+    checking_detail:
+      en: Fetching the latest %{channel} version…
+      zh-CN: 正在获取%{channel}的最新版本信息…
+    up_to_date:
+      en: Up to date
+      zh-CN: 当前已是最新
+    up_to_date_detail:
+      en: No %{channel} updates available
+      zh-CN: "%{channel}暂无可用更新"
+    available:
+      en: New version available
+      zh-CN: 发现新版本
+    available_detail:
+      en: "%{channel} %{version} is out. Click “Download and Update” to get it"
+      zh-CN: "%{channel}已发布 %{version}，点击“下载并更新”获取安装包"
+    downloading:
+      en: Downloading update
+      zh-CN: 正在下载更新
+    downloading_progress:
+      en: Downloading update %{version}… %{percent}% (%{received} / %{total} MB)
+      zh-CN: 正在下载更新包 %{version}… %{percent}%（%{received} / %{total} MB）
+    downloading_bytes:
+      en: Downloading update %{version}… (%{received} MB so far)
+      zh-CN: 正在下载更新包 %{version}…（已下载 %{received} MB）
+    installing:
+      en: Preparing update
+      zh-CN: 正在准备更新
+    installing_detail:
+      en: Verifying and preparing update %{version}…
+      zh-CN: 正在校验并准备更新包 %{version}…
+    applying:
+      en: Starting the installer
+      zh-CN: 正在启动更新安装器
+    applying_detail:
+      en: Starting the installer for update %{version}; the app quits only once it has started
+      zh-CN: 正在为更新包 %{version} 启动安装程序；启动成功后 App 才会退出
+    ready:
+      en: Update ready
+      zh-CN: 更新已准备就绪
+    ready_detail:
+      en: Update %{version} is downloaded. Click “Restart to Update” to apply it
+      zh-CN: 更新包 %{version} 已下载完成，点击“立即重启更新”生效
+    install_failed:
+      en: Couldn't install the update
+      zh-CN: 安装更新失败
+    install_failed_detail:
+      en: Update %{version} is still kept safely; retry, or check whether a newer version replaces it
+      zh-CN: 更新包 %{version} 仍已安全保留；可直接重试，或检查是否已有替代版本
+  failure:
+    check:
+      en: Couldn't check for updates
+      zh-CN: 检查更新失败
+    check_detail:
+      en: Can't reach the update service right now. Check your network and try again.
+      zh-CN: 暂时无法连接更新服务，请检查网络后重试。
+    download:
+      en: Couldn't download the update
+      zh-CN: 下载更新失败
+    download_detail:
+      en: Downloading or preparing the update failed. Check your network and free storage, then try again.
+      zh-CN: 更新包下载或准备失败，请检查网络和可用存储空间后重试。
+    recovery:
+      en: Couldn't recover the update
+      zh-CN: 恢复更新失败
+    recovery_detail:
+      en: The last update hasn't been recovered yet. Try again; the current installation won't be overwritten.
+      zh-CN: 上次更新事务尚未恢复，请重试；现有安装不会被覆盖。
+    location:
+      en: Move to Applications first
+      zh-CN: 需要先移到「应用程序」
+    location_detail:
+      en: Smelt is running from a read-only location (such as the installer disk image), so automatic updates can't be installed. After moving it reopens automatically; background sessions aren't affected.
+      zh-CN: Smelt 正从只读位置（比如安装盘映像）运行，自动更新装不上。移过去后会自动重新打开，后台会话不受影响。
+    not_installed:
+      en: This Smelt can't update itself
+      zh-CN: 这个 Smelt 不能自动更新
+    not_installed_detail:
+      en: It wasn't installed by the installer (a development build, for example). Download and run the installer from the download page, then you can update here.
+      zh-CN: 它不是安装程序装的（比如开发构建）。去下载页下载安装程序装好后，就能在这里更新。
+  action:
+    download:
+      en: Download and Update
+      zh-CN: 下载并更新
+    restart:
+      en: Restart to Update
+      zh-CN: 立即重启更新
+    retry_restart:
+      en: Retry Restart to Update
+      zh-CN: 重试重启更新
+    move:
+      en: Move to Applications and Reopen
+      zh-CN: 移到「应用程序」并重新打开
+    manual_download:
+      en: Go to Download Page
+      zh-CN: 去下载页
   move:
     moving:
       en: Moving…

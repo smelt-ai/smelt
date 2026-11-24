@@ -3,7 +3,7 @@
 
 import { cleanup, computed, effect, signal, Text, View } from "nsh";
 import {
-  machineEntry,
+  machineMetaEntry,
   run,
   SmeltButton,
   SmeltNativeTerminal,
@@ -89,7 +89,7 @@ export function TerminalPane(props: {
   const runtimeName = computed(() => {
     const s = spec();
     if (!s) return "";
-    const entry = machineEntry(s.machine);
+    const entry = machineMetaEntry(s.machine);
     if (entry?.name) return String(entry.name);
     return typeof s.machine === "string" ? s.machine : "";
   });

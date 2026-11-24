@@ -314,6 +314,40 @@ bootTask(async () => {{
     };
     std::fs::write(i18n_plugin_dir.join("nsh.tsx"), i18n_plugin_source(1)).unwrap();
 
+    let bg_plugin_dir = user_plugins.0.join("bg-topic-menu");
+    std::fs::create_dir_all(&bg_plugin_dir).unwrap();
+    std::fs::write(
+        bg_plugin_dir.join("smelt-plugin.json"),
+        json!({
+            "id": "test.bg-topic-menu",
+            "name": "Background Topic Menu",
+            "version": "1.0.0",
+            "entry": "nsh.tsx"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        bg_plugin_dir.join("nsh.tsx"),
+        r#"import { bootTask, initHost, onEvent, registerTopics, setStatusMenu } from "smelt/sdk";
+onEvent((event) => {
+  if (event.type !== "runtime_topic" || event.topic !== "attention.changed") return;
+  const sessions = event.message?.kind === "snapshot" ? (event.message?.payload?.sessions ?? []) : [];
+  const count = sessions.length;
+  void setStatusMenu(count > 0 ? {
+    title: `${count}@`,
+    tooltip: "attention",
+    items: [{ type: "action", label: "Open", command: "smelt.app/show-main-window", args: null }],
+  } : null);
+}, ["runtime_topic"]);
+bootTask(async () => {
+  await initHost();
+  await registerTopics(["attention.changed"]);
+});
+"#,
+    )
+    .unwrap();
+
     let recorded_regions: Rc<RefCell<BTreeMap<&'static str, Bounds<Pixels>>>> =
         Rc::new(RefCell::new(BTreeMap::new()));
     let reset_count = Rc::new(RefCell::new(0usize));
@@ -389,14 +423,9 @@ bootTask(async () => {{
         "smelt.files/main",
         "smelt.git/main",
         "smelt.history/main",
-        "smelt.language/settings",
         "smelt.launcher/nav",
         "smelt.launcher/settings",
         "smelt.machines/remote",
-        "smelt.maintenance/cleanup",
-        #[cfg(target_os = "macos")]
-        "smelt.maintenance/cli",
-        "smelt.notifications/main",
         "smelt.quota/bar",
         "smelt.quota/settings",
         "smelt.resources/main",
@@ -404,8 +433,6 @@ bootTask(async () => {{
         "smelt.session-list/settings",
         "smelt.sessions/session",
         "smelt.skills/main",
-        "smelt.terminal/settings",
-        "smelt.updater/about",
     ];
     let expected_commands = [
         "smelt.agents/agent-settings",
@@ -443,8 +470,6 @@ bootTask(async () => {{
         "smelt.sessions/split-down",
         "smelt.sessions/split-right",
         "smelt.sessions/start-conversation",
-        "smelt.updater/docs",
-        "smelt.updater/report-issue",
     ];
 
     let start = Instant::now();
@@ -452,25 +477,12 @@ bootTask(async () => {{
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
-        let settled = shell.read_with(cx, |s, _| s.initial_plugins_settled());
-        let ready = settled
-            && cx.update(|_, cx| {
-                let views_ok = expected_views.iter().all(|id| api::is_registered(id, cx));
-                let cmds_ok = expected_commands
-                    .iter()
-                    .all(|id| api::command(id, cx).is_some());
-                let page_ok =
-                    api::home_page(cx).is_some_and(|p| p.id.as_ref() == "smelt.layouts/workbench");
-                let layout_ok = api::layout("smelt.layouts/standard", cx).is_some();
-                let theme_ok = api::theme_contains("Ayu Dark", cx);
-                views_ok && cmds_ok && page_ok && layout_ok && theme_ok
-            });
-        if ready {
+        if shell.read_with(cx, |s, _| s.initial_plugins_settled()) {
             break;
         }
         assert!(
             start.elapsed() < Duration::from_secs(30),
-            "未等到全部内置 NSH 插件完成登记（settled={settled}）；已发现插件：{:?}；已登记视图：{:?}；已登记命令：{:?}；首页：{:?}",
+            "未等到全部内置 NSH 插件完成登记（settled=false）；已发现插件：{:?}；已登记视图：{:?}；已登记命令：{:?}；首页：{:?}",
             shell.read_with(cx, |s, _| s.installed_plugins()),
             cx.update(|_, cx| api::views(cx).into_iter().map(|v| v.id).collect::<Vec<_>>()),
             cx.update(|_, cx| api::commands(cx)
@@ -482,17 +494,69 @@ bootTask(async () => {{
         // 轮询例外：测试平台没有「引擎线程完成插件加载并登记」的单一事件；周期 20ms，上限 30s。
         std::thread::sleep(Duration::from_millis(20));
     }
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        let missing_views: Vec<_> = expected_views
+            .iter()
+            .copied()
+            .filter(|id| !api::is_registered(id, cx))
+            .collect();
+        assert!(
+            missing_views.is_empty(),
+            "initial_plugins_settled 时仍有视图未登记（bootTask 竞态）：{missing_views:?}"
+        );
+        let missing_commands: Vec<_> = expected_commands
+            .iter()
+            .copied()
+            .filter(|id| api::command(id, cx).is_none())
+            .collect();
+        assert!(
+            missing_commands.is_empty(),
+            "initial_plugins_settled 时仍有命令未登记（bootTask 竞态）：{missing_commands:?}"
+        );
+        assert_eq!(
+            api::home_page(cx).map(|p| p.id.to_string()).as_deref(),
+            Some("smelt.layouts/workbench"),
+            "initial_plugins_settled 时首页尚未登记"
+        );
+        assert!(
+            api::layout("smelt.layouts/standard", cx).is_some(),
+            "initial_plugins_settled 时标准布局尚未登记"
+        );
+        assert!(
+            api::theme_contains("Ayu Dark", cx),
+            "initial_plugins_settled 时 Ayu Dark 主题尚未登记"
+        );
+    });
 
-    // 所有 23 个内置插件都无编译/运行错误。
+    // 所有 19 个内置插件（含共享模块 smelt.conversation、纯主题 smelt.themes、纯布局 smelt.layouts）都无编译/运行错误。
     let plugins = shell.read_with(cx, |s, _| s.installed_plugins());
     let builtin_count = plugins
         .iter()
         .filter(|p| p.source == PluginSource::Builtin)
         .count();
-    assert_eq!(builtin_count, 23, "应发现 23 个内置插件：{plugins:?}");
+    assert_eq!(builtin_count, 19, "应发现 19 个内置插件：{plugins:?}");
     for p in &plugins {
         assert!(p.error.is_none(), "插件 {} 报错：{:?}", p.id, p.error);
     }
+    let conv = plugins
+        .iter()
+        .find(|p| p.id == "smelt.conversation")
+        .expect("应发现内置共享模块插件 smelt.conversation");
+    assert_eq!(conv.module.as_deref(), Some("smelt/conversation"));
+    let sessions = plugins
+        .iter()
+        .find(|p| p.id == "smelt.sessions")
+        .expect("应发现内置插件 smelt.sessions");
+    assert_eq!(sessions.used_modules, vec!["smelt.conversation"]);
+
+    let mut vm_ids = shell.read_with(cx, |s, _| s.plugin_vm_ids());
+    vm_ids.sort();
+    assert_eq!(
+        vm_ids,
+        vec!["__builtins__", "test.bg-topic-menu", "test.i18n-reload"],
+        "全部 16 个内置脚本插件应共享 1 个 __builtins__ VM，2 个用户插件各自独立 VM：{vm_ids:?}"
+    );
 
     // 验证 smelt.ide 登记的项目右键菜单仅本机可见、远程不可见（验证 machine: null 解析为 Some(Local)）。
     cx.update(|_, cx| {
@@ -735,17 +799,10 @@ bootTask(async () => {{
         ("smelt.agents/settings", "Agents"),
         ("smelt.capabilities/models", "Models"),
         ("smelt.capabilities/memory", "Memory"),
-        ("smelt.language/settings", "Language"),
         ("smelt.machines/remote", "Remote"),
-        ("smelt.maintenance/cleanup", "Clean Up"),
-        #[cfg(target_os = "macos")]
-        ("smelt.maintenance/cli", "Command Line"),
-        ("smelt.notifications/main", "Notifications"),
         ("smelt.quota/settings", "Quota"),
         ("smelt.resources/main", "Resource Usage"),
         ("smelt.session-list/settings", "Session List"),
-        ("smelt.terminal/settings", "Terminal"),
-        ("smelt.updater/about", "About"),
     ] {
         shell.update(cx, |shell, cx| {
             shell.set_settings_page(Some((id.into(), title.into())), cx);
@@ -851,7 +908,7 @@ bootTask(async () => {{
     );
 
     // 回归测试：主窗口关闭（detach_window）后引擎和后台插件仍常驻运行：
-    // 推来 attention.changed 时 smelt.notifications 照常更新菜单栏；重挂窗口（attach_window）后可恢复加载页面。
+    // 推来 attention.changed 时后台订阅插件照常更新菜单栏；重挂窗口（attach_window）后可恢复加载页面。
     shell.update(cx, |shell, cx| shell.detach_window(cx));
     cx.run_until_parked();
     cx.update(|_, cx| {
@@ -888,7 +945,7 @@ bootTask(async () => {{
         let menu_title = cx.update(|_, cx| {
             api::status_menus(cx)
                 .into_iter()
-                .find(|(owner, _)| owner == "smelt.notifications")
+                .find(|(owner, _)| owner == "test.bg-topic-menu")
                 .map(|(_, menu)| menu.title)
         });
         if menu_title.as_deref() == Some("1@") {
@@ -896,7 +953,7 @@ bootTask(async () => {{
         }
         assert!(
             start.elapsed() < Duration::from_secs(10),
-            "detach_window 后 smelt.notifications 未更新菜单栏标题为 1@，当前：{menu_title:?}"
+            "detach_window 后 test.bg-topic-menu 未更新菜单栏标题为 1@，当前：{menu_title:?}"
         );
         // 轮询例外：测试平台等待引擎线程处理后台话题并回传 set_status_menu；周期 20ms，上限 10s。
         std::thread::sleep(Duration::from_millis(20));

@@ -56,7 +56,13 @@ pub(crate) fn uninstall(root: &Path) -> Result<(), String> {
 
 fn import_into(source: &Path, plugins: &Path) -> Result<PluginManifest, String> {
     let manifest = read_import_manifest(source)?;
-    if !source.join(&manifest.entry).is_file() {
+    if manifest.is_layout_only() {
+        for layout in &manifest.layouts {
+            if !source.join(&layout.file).is_file() {
+                return Err(t!("plugins.no_entry", entry = layout.file).into_owned());
+            }
+        }
+    } else if !source.join(&manifest.entry).is_file() {
         return Err(t!("plugins.no_entry", entry = manifest.entry).into_owned());
     }
 
@@ -305,14 +311,14 @@ mod tests {
     #[test]
     fn import_allows_overriding_a_builtin_id_and_skips_precompiled_bytecode() {
         let scratch = Scratch::new();
-        let source = scratch.plugin("src/override", "smelt.language");
+        let source = scratch.plugin("src/override", "smelt.git");
         scratch.write("src/override/bundle.nshc", "bytecode");
         scratch.write("src/override/bundle.meta.json", "{}");
         let plugins = scratch.path("plugins");
 
         let manifest = import_into(&source, &plugins).unwrap();
-        assert_eq!(manifest.id, "smelt.language");
-        let target = plugins.join("smelt.language");
+        assert_eq!(manifest.id, "smelt.git");
+        let target = plugins.join("smelt.git");
         assert!(target.join("nsh.tsx").is_file());
         assert!(!target.join("bundle.nshc").exists());
         assert!(!target.join("bundle.meta.json").exists());

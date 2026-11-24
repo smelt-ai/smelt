@@ -210,10 +210,10 @@ Smelt 的界面插件运行在 **NSH**（独立加固的 QuickJS VM，由宿主 
 
 写、测、看、开的闭环：
 
-1. **脚手架创建**：直接用 `smelt plugin init <id> [--name "<显示名>"]` 在 `~/.smelt/plugins/<id>/` 生成起步 TSX 工程与 `.nsh/types/`（加 `--theme` 则生成纯主题插件，不含 JS/TSX；id 只含字母、数字和 `.-_`，不以 `.` 开头）。新插件避免和自带插件重名；如果要改预置插件，直接用下面的 `smelt plugin fork`。若要在已有插件目录补充/更新类型声明，运行 `smelt plugin types <目录>`。
-2. **查类型不要猜**：所有可用模块、组件、图标路径（`SmeltIconPath`）和宿主 RPC 方法（`ControlMethodName`）都在 `<插件目录>/.nsh/types/`（重点查 `smelt/sdk.d.ts`、`nsh/index.d.ts`、`nsh/base.d.ts`、`nsh/tokens.d.ts`）。按符号名搜索，不要盲写 API。
-3. **离线校验**：每改完跑 `smelt plugin check ~/.smelt/plugins/<id>`。它离线校验清单、`locales/` 翻译、主题 JSON、`nsh-bundler` TSX 打包、外部 `import` 白名单、未声明自由标识符及 QuickJS 字节码编译，并打印导出的符号表；不修改目录，过了退出 0，没过把错误写 stderr 并退出 1。`check` 不过不算写完。
-4. **确认运行挂载**：Smelt 开着时保存源码会自动热重载该插件的独立 VM（不重启其它插件和宿主）。保存一两秒后跑 `smelt plugin status <id>`：确认 `error` 为 `null`、`fallback_to_builtin` 为 `false`，且 `views` 里出现你登记的视图 id（不带 id 列全部，含 `source` 和 `overrides_builtin`）。
+1. **脚手架创建**：直接用 `smelt plugin init <id> [--name "<显示名>"]` 在 `~/.smelt/plugins/<id>/` 生成起步 TSX 工程与 `.nsh/types/`（加 `--theme` 则生成纯主题插件，不含 JS/TSX；id 只含字母、数字和 `.-_`，不以 `.` 开头）。新插件避免和自带插件重名；如果要改预置插件，直接用下面的 `smelt plugin fork`。若要在已有插件目录补充/更新类型声明，运行 `smelt plugin types <目录>`（会自动包含自带及用户覆写共享模块的 `.d.ts`）。
+2. **查类型不要猜**：所有可用模块、组件、图标路径（`SmeltIconPath`）和宿主 RPC 方法（`ControlMethodName`）都在 `<插件目录>/.nsh/types/`（重点查 `smelt/sdk.d.ts`、`smelt/conversation.d.ts`、`nsh/index.d.ts`、`nsh/base.d.ts`、`nsh/tokens.d.ts`）。按符号名搜索，不要盲写 API。
+3. **离线校验**：每改完跑 `smelt plugin check ~/.smelt/plugins/<id>`。它离线校验清单、`locales/` 翻译、主题 JSON、`nsh-bundler` TSX 打包、外部 `import` 白名单、未声明自由标识符及 QuickJS 字节码编译，并打印导出的符号表（共享模块插件还会带有 `module` 字段；纯主题 `entry: "*.json"` 与声明式纯布局 `pages`/`layouts` 插件零 VM 运行，分别标出 `theme_only: true` 或 `layout_only: true`）；不修改目录，过了退出 0，没过把错误写 stderr 并退出 1。`check` 不过不算写完。
+4. **确认运行挂载**：Smelt 开着时保存源码会自动热重载该插件的独立 VM（不重启其它插件和宿主；若修改了被其他插件 `import` 的共享模块插件，宿主只会自动增量重编引用它的插件）。保存一两秒后跑 `smelt plugin status <id>`：确认 `error` 为 `null`、`fallback_to_builtin` 为 `false`，且 `views` 里出现你登记的视图 id（不带 id 列全部，含 `source`、`overrides_builtin`、`module` 与 `uses_modules`）。
 5. **在 App 里亮出来**：check 和 status 都过了，用 `smelt app run smelt.app/open-view --args '{"view":"<id>/<视图名>"}'` 打开给用户看。不要用截屏或 AppleScript 点击界面。
 6. **日志与持久化**：运行时 `console.*` 与未捕获异常在 `~/.smelt/app.log`（`[plugin]` / `[smelt-nsh]`）。运行期文件写进 `dataDir()`（`~/.smelt/plugin-data/<id>/`）或调用 `store.*` SQLite，切勿写回插件目录，否则会反复触发热重载。
 7. **删除插件**：删掉 `~/.smelt/plugins/<id>/`（若要清数据再删 `~/.smelt/plugin-data/<id>/`），App 开着会自动卸载。删前必须跟用户确认。
@@ -229,9 +229,9 @@ Smelt 的界面插件运行在 **NSH**（独立加固的 QuickJS VM，由宿主 
 
 ### 改 Smelt 自带插件（覆写 / Fork）
 
-自带插件允许通过 `~/.smelt/plugins/<原id>/` **同名覆写**（热重载无缝接管原视图/命令/主题，跨插件引用不断链）；发版包内也保留了可编辑源码供直接 fork：
+自带插件与共享模块均允许通过 `~/.smelt/plugins/<原id>/` **同名覆写**（热重载无缝接管原视图/命令/主题/共享模块，跨插件引用不断链）；发版包内也保留了可编辑源码供直接 fork。特别注意：**对话界面（输入框 `Composer`、消息流、卡片等）不在 `smelt.sessions` 里，也不在 `smelt/sdk` 黑盒里，而是独立共享模块插件 `smelt.conversation`（`plugins/conversation/`）**，用户要改对话输入框或对话界面时直接 fork `smelt.conversation`：
 
-1. **原地覆写（推荐）**：运行 `smelt plugin fork <原id>`，会把自带源码拷贝到 `~/.smelt/plugins/<原id>/` 并自动生成 `.nsh/types/`（不带 `bundle.nshc` 与 `tests/`）。直接修改该目录的 TSX/主题后保存即可原地替换自带版，且直接继承 `~/.smelt/plugin-data/<原id>/store.sqlite3`（注意仅追加新表/列，别破坏原自带插件读取旧表的结构）。
-2. **校验与状态**：改完先跑 `smelt plugin check ~/.smelt/plugins/<原id>`，保存后再看 `smelt plugin status <原id>`，确认 `source: "user"`、`overrides_builtin: true`、`fallback_to_builtin: false`、`error: null`。
-3. **自动回退机制**：如果覆写版出现清单/主题/编译或启动崩溃，宿主会**自动回退到自带版本继续运行**（不致面板空白），同时在设置页和 `smelt plugin status` 标出 `fallback_to_builtin: true` 与 `error`；修好用户目录源码一保存会自动切回覆写版。
+1. **原地覆写（推荐）**：运行 `smelt plugin fork <原id>`（如 `smelt plugin fork smelt.conversation`、`smelt plugin fork smelt.sessions`），会把自带源码拷贝到 `~/.smelt/plugins/<原id>/` 并自动生成 `.nsh/types/`（不带 `tests/` 与预编译字节码）。直接修改该目录的 TSX/主题后保存即可原地从共享内置 VM 中摘出并跑在独立用户 VM 中（改共享模块 `smelt.conversation` 后宿主会自动重编 `smelt.sessions` 与 `smelt.automations`），且直接继承 `~/.smelt/plugin-data/<原id>/store.sqlite3`（注意仅追加新表/列，别破坏原自带插件读取旧表的结构）。
+2. **校验与状态**：改完先跑 `smelt plugin check ~/.smelt/plugins/<原id>`，保存后再看 `smelt plugin status <原id>`，确认 `source: "user"`、`overrides_builtin: true`、`fallback_to_builtin: false`、`error: null`（共享模块还会列出 `module`；引用它的插件会列出 `uses_modules`）。
+3. **自动回退机制**：如果覆写版（含被其他插件 `import` 的共享模块覆写版）出现清单/主题/编译或启动崩溃，宿主会**自动回退到自带版本继续运行**（不致面板空白），同时在设置页和 `smelt plugin status` 标出 `fallback_to_builtin: true` 与 `error`；修好用户目录源码一保存会自动切回覆写版。
 4. **一键恢复默认 / 改名并存**：删掉 `~/.smelt/plugins/<原id>/`（或在桌面「设置 → 面板插件」点「恢复默认…」），会立刻切回自带版；如想保留原自带插件并再挂一份，用 `smelt plugin fork <原id> --as <新id>`，若需搬迁数据再用 `sqlite3 <原库> ".backup '<新库>'"` 备份到 `~/.smelt/plugin-data/<新id>/store.sqlite3`。
