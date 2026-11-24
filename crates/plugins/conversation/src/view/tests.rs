@@ -4583,6 +4583,85 @@ fn tool_output_popover_scrolls_past_the_preview(cx: &mut gpui::TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn clicking_image_read_row_opens_popover_and_emits_preview_image(cx: &mut gpui::TestAppContext) {
+    use gpui::VisualTestContext;
+
+    const PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    let entries = vec![
+        AcpEntry::User("看一下图片".into()),
+        AcpEntry::ToolCall {
+            id: "read-img".into(),
+            title: "File sim_play_check3.png".into(),
+            kind: ToolKind::Read,
+            status: ToolCallStatus::Completed,
+            output: vec![ToolOutputPart::Image(
+                smelt_plugin_api::model::acp_chat::AcpImage::new("image/png", PNG_B64),
+            )],
+            children: Vec::new(),
+            subagents: Vec::new(),
+            peer: None,
+            asked: None,
+        },
+    ];
+    let layout = super::build_conversation_layout(&entries, false);
+    let group_ix = layout
+        .iter()
+        .find_map(|entry| entry.process_group.map(|group| group.first))
+        .expect("image read tool belongs to a process group");
+
+    cx.update(init_ui);
+    let previewed = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let previewed_for_sub = previewed.clone();
+    let (view, cx) = cx.add_window_view(move |_window, cx| {
+        let mut view = super::ConversationView::placeholder(
+            cx,
+            super::ConversationOrigin {
+                runtime: offline_runtime(),
+                launch_prep: None,
+                agent: ConversationAgentKind::Antigravity,
+                launch: ConversationLaunchSpec::from_command("true"),
+                profile_id: None,
+                cwd: Some("/tmp/smelt".into()),
+                reason: "image read popover".into(),
+                resume_session_id: None,
+                saved_sid: Some("acp-img-pop".into()),
+            },
+        );
+        view.apply_snapshot(tail_snapshot(0, 0, entries, DaemonPhase::Idle), cx);
+        view.expanded_process_groups.insert((group_ix, false));
+        view
+    });
+    let _sub = cx.update(|_, cx| {
+        cx.subscribe(&view, move |_, event, _| {
+            if matches!(event, super::ConversationViewEvent::PreviewImage(_)) {
+                previewed_for_sub.set(previewed_for_sub.get() + 1);
+            }
+        })
+    });
+    let cx: &mut VisualTestContext = cx;
+    draw_settled(cx);
+
+    let row = cx
+        .debug_bounds("ACP_TOOL_COMPACT_1")
+        .expect("completed image read should paint as a compact row");
+    cx.simulate_click(row.center(), Default::default());
+    draw_settled(cx);
+    draw_settled(cx);
+
+    let thumb = cx
+        .debug_bounds("ACP_TOOL_POP_IMAGE_read-img_0")
+        .expect("clicking image read row should open popover with image thumbnail");
+    cx.simulate_click(thumb.center(), Default::default());
+    draw_settled(cx);
+
+    assert_eq!(
+        previewed.get(),
+        1,
+        "clicking image thumbnail inside popover should emit PreviewImage"
+    );
+}
+
 fn draw_settled(cx: &mut gpui::VisualTestContext) {
     cx.run_until_parked();
     cx.update(|window, cx| {

@@ -3133,18 +3133,22 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
                     Some(image) => {
                         let preview_image = image.clone();
                         let on_preview = on_preview_image.clone();
+                        let debug_marker = format!("ACP_TOOL_POP_IMAGE_{tool_id}_{part_ix}");
                         col.child(
-                            div()
-                                .id(owner_part("acp-tool-pop-image", &tool_id, part_ix))
-                                .overflow_hidden()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(border)
-                                .hover(|s| s.border_color(ui_theme::hair_strong()))
-                                .on_click(move |_, window, cx| {
-                                    on_preview(preview_image.clone(), window, cx)
-                                })
-                                .child(image_thumb_element(image)),
+                            div().flex().items_start().child(
+                                div()
+                                    .id(owner_part("acp-tool-pop-image", &tool_id, part_ix))
+                                    .debug_selector(move || debug_marker)
+                                    .overflow_hidden()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(border)
+                                    .hover(|s| s.border_color(ui_theme::hair_strong()))
+                                    .on_click(move |_, window, cx| {
+                                        on_preview(preview_image.clone(), window, cx)
+                                    })
+                                    .child(image_thumb_element(image)),
+                            ),
                         )
                     }
                     None => col,
@@ -3160,9 +3164,14 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
     if !children.is_empty() {
         col = col.child(render_nested_transcript(children, muted));
     }
+    let image_only = children.is_empty()
+        && !output.is_empty()
+        && output
+            .iter()
+            .all(|part| matches!(part, ToolOutputPart::Image(_)));
     div()
         .id(owner_id("acp-tool-output-pop-body", &tool_id))
-        .min_w(px(280.))
+        .when(!image_only, |d| d.min_w(px(280.)))
         .max_w(px(520.))
         .max_h(px(360.))
         .overflow_y_scroll()
