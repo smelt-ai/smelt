@@ -484,7 +484,7 @@ export function Composer(props: {
         {/* @ / 补全弹层（锚定在输入框正上方） */}
         <If when={completionItems().length > 0}>
           <View
-            class="w-full rounded-xl border border-border bg-popover p-1.5 shadow-lg overflow-hidden"
+            class="w-full rounded-xl bg-soft p-1.5 shadow-floating overflow-hidden"
             style={{ maxHeight: 244 }}
           >
             <Scroll style={{ maxHeight: 232 }}>

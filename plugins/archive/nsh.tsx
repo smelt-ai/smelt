@@ -194,7 +194,7 @@ export function button() {
           placement="top"
           align="start"
           offset={6}
-          popupClass="rounded-xl border border-border bg-popover p-1 shadow-lg"
+          popupClass="rounded-xl border border-border bg-popover p-1 shadow-md"
           popupStyle={{ width: POPOVER_WIDTH }}
           trigger={
             <SmeltButton

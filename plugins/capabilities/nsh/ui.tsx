@@ -14,7 +14,6 @@ import {
   DIALOG_SURFACE_CLASS,
   INPUT_CLASS,
   MENU_ITEM_CLASS,
-  POPUP_CLASS,
   SmeltButton,
   SmeltDialog,
   SmeltIcon,
@@ -23,7 +22,7 @@ import {
   SmeltTooltip,
   t,
 } from "smelt/sdk";
-export { INPUT_CLASS, MENU_ITEM_CLASS, POPUP_CLASS };
+export { INPUT_CLASS, MENU_ITEM_CLASS };
 import { agentUsesItem } from "../model.js";
 import {
   agentSettingsOn,
@@ -666,7 +665,7 @@ export function UsesPopover(props: {
         placement="bottom"
         align="end"
         offset={4}
-        popupClass="rounded-xl border border-border bg-popover p-2 shadow-lg"
+        popupClass="rounded-xl border border-border bg-popover p-2 shadow-md"
         popupStyle={{ width: 240 }}
         trigger={
           <View

@@ -660,7 +660,10 @@ export interface SmeltButtonProps {
   children?: JSX.Element;
 }
 
+/** 弹出卡片的样子（`SmeltPopover` 默认的 `popupClass`）。 */
 export declare const POPUP_CLASS: string;
+/** 菜单、下拉、选择框的样子（`SmeltMenu`、`SmeltContextMenu`、`SmeltSelect` 默认的 `popupClass`）。 */
+export declare const MENU_CLASS: string;
 export declare const TOOLTIP_CLASS: string;
 /** Smelt 的浮层：`nsh/base` 的同名组件带上 Smelt 的样子（`popupClass` / `class` 换掉默认样子）和进出动效。 */
 export declare function SmeltPopover(

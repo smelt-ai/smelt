@@ -21,7 +21,7 @@ export function SubagentsControl(props: {
         placement="top"
         align="start"
         offset={8}
-        popupClass="rounded-xl border border-border bg-popover p-3 shadow-lg"
+        popupClass="rounded-xl border border-border bg-popover p-3 shadow-md"
         popupStyle={{ width: 344 }}
         trigger={
           <SmeltButton
@@ -110,7 +110,7 @@ export function BackgroundTasksControl(props: {
         placement="top"
         align="start"
         offset={8}
-        popupClass="rounded-xl border border-border bg-popover p-3 shadow-lg"
+        popupClass="rounded-xl border border-border bg-popover p-3 shadow-md"
         popupStyle={{ width: 344 }}
         trigger={
           <SmeltButton

@@ -10,13 +10,12 @@ import {
 import {
   DIALOG_SURFACE_CLASS,
   MENU_ITEM_CLASS,
-  POPUP_CLASS,
   SmeltButton,
   SmeltDialog,
   SmeltIcon,
   t,
 } from "smelt/sdk";
-export { MENU_ITEM_CLASS, POPUP_CLASS };
+export { MENU_ITEM_CLASS };
 import { deleteConfirmDescription } from "../model.js";
 import { confirmDeleteAutomation, currentTheme, deletePrompt } from "./state.ts";
 

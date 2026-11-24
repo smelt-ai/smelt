@@ -1,6 +1,6 @@
 // 点击改动标签弹出的文件差异弹窗：文件标签栏 + 一等 Rust `<SmeltDiffView>` +「在文件里打开」。
 import { computed, effect, Scroll, signal, Text, View } from "nsh";
-import { openFile, SmeltButton, SmeltDialog, SmeltDiffView, SmeltIcon, theme } from "smelt/sdk";
+import { DIALOG_SURFACE_CLASS, openFile, SmeltButton, SmeltDialog, SmeltDiffView, SmeltIcon, theme } from "smelt/sdk";
 import { ct } from "./i18n.ts";
 import { relativePathToCwd } from "./model.js";
 
@@ -107,7 +107,7 @@ export function EditDiffDialog(props: {
     >
       <If when={props.dialog() != null}>
         <View
-          class="flex-col rounded-xl border border-border bg-background shadow-xl overflow-hidden"
+          class={`flex-col ${DIALOG_SURFACE_CLASS} overflow-hidden`}
           style={{
             width: 920,
             maxWidth: "92%",

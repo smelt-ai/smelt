@@ -69,7 +69,6 @@ import {
   MenuDivider,
   MenuEntry,
   MenuSectionTitle,
-  POPUP_CLASS,
   Tip,
 } from "./menus.tsx";
 import { NewSessionPopover, PaletteDialog } from "./new_session_view.tsx";
@@ -576,7 +575,7 @@ function DragPreviewCard(props: { drag: () => DragState | null }) {
   return (
     <If when={d() != null && d()!.active}>
       <View
-        class="shadow-lg"
+        class="shadow-floating"
         style={{
           position: "absolute",
           left: d()!.previewLeft,
@@ -2061,7 +2060,7 @@ function OffscreenPill(props: { side: () => { tally: any; nearest: any }; up: bo
       >
         <View
           role="button"
-          class="flex-row items-center rounded-full border border-border bg-popover shadow-md hover:bg-accent"
+          class="flex-row items-center rounded-full bg-popover shadow-button-floating hover:bg-soft"
           style={{
             height: 24,
             paddingHorizontal: 10,

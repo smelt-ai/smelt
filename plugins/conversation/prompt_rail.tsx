@@ -81,7 +81,7 @@ export function PromptRail(props: {
 
           <If when={hovered() != null}>
             <View
-              class="w-72 px-3 py-2 rounded-[10px] border border-border bg-popover shadow-lg pointer-events-none"
+              class="w-72 px-3 py-2 rounded-[10px] border border-border bg-popover shadow-md pointer-events-none"
             >
               <Text
                 class="text-foreground"

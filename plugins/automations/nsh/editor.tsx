@@ -88,7 +88,6 @@ import {
   MultiSegmentedControl,
   NeutralIconMark,
   PageToolbar,
-  POPUP_CLASS,
   RowItem,
   RunLines,
   SectionHeading,

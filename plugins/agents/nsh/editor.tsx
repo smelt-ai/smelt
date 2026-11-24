@@ -97,7 +97,6 @@ import {
   MenuDivider,
   MenuEntry,
   PageToolbar,
-  POPUP_CLASS,
   QuietBadge,
   SegmentedControl,
   SegmentedOption,

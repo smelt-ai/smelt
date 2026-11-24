@@ -264,7 +264,7 @@ export function bar() {
           align="end"
           offset={6}
           style={{ minWidth: 0, flexShrink: 1, maxWidth: "100%" }}
-          popupClass="rounded-xl border border-border bg-popover p-1 shadow-lg"
+          popupClass="rounded-xl border border-border bg-popover p-1 shadow-md"
           popupStyle={{ width: POPOVER_WIDTH }}
           trigger={
             <View

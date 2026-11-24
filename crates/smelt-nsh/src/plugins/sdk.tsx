@@ -1543,10 +1543,15 @@ export interface SmeltButtonProps {
 
 // ---- 共享 NSH 原生 Tailwind 浮层样式（全插件统一质感，零 JS 闭包、引擎侧直接解析） ----
 
-/** 弹出卡片、下拉菜单、选择框的样子：圆角、描边、浮起阴影。传给 `SmeltPopover` 等的 `popupClass` 换掉的就是它。 */
-export const POPUP_CLASS = "rounded-lg border border-border bg-popover p-1 shadow-lg";
-/** 提示的样子。 */
-export const TOOLTIP_CLASS = "rounded-(--radius) border border-border bg-popover px-2 py-1 shadow-md";
+// 投影一律用主题令牌（宿主按 elevation 给）：菜单、下拉、提示 `shadow-floating`，弹出卡片 `shadow-md`，
+// 对话框 `shadow-overlay`，浮在内容上的按钮 `shadow-button-floating`。不用 Tailwind 自带的那几档。
+
+/** 弹出卡片的样子：`surface` 底、1px 细边、`md` 投影。传给 `SmeltPopover` 的 `popupClass` 换掉的就是它。 */
+export const POPUP_CLASS = "rounded-lg border border-border bg-popover p-1 shadow-md";
+/** 菜单、下拉、选择框的样子：`soft` 底，收边的细圈在 `floating` 投影里。 */
+export const MENU_CLASS = "rounded-lg bg-soft p-1 shadow-floating";
+/** 提示的样子：同菜单。 */
+export const TOOLTIP_CLASS = "rounded-(--radius) bg-soft px-2 py-1 shadow-floating";
 
 // 浮层进出（docs/ui-design-language.md「动效」overlay 档）：入场 240ms、ease_snap 曲线；出场 120ms
 // 淡出，比入场短，关掉的东西不该拖着。进出是浮层组件自己的行为，调用处只管样子。
@@ -1580,7 +1585,7 @@ export function SmeltMenu(props: any) {
   return (
     <Menu
       {...props}
-      popupClass={overlayClass(props.popupClass, POPUP_CLASS)}
+      popupClass={overlayClass(props.popupClass, MENU_CLASS)}
       popupStartingClass={FROM_TRIGGER}
       popupEndingClass={OVERLAY_EXIT}
     />
@@ -1592,19 +1597,19 @@ export function SmeltContextMenu(props: any) {
   return (
     <ContextMenu
       {...props}
-      popupClass={overlayClass(props.popupClass, POPUP_CLASS)}
+      popupClass={overlayClass(props.popupClass, MENU_CLASS)}
       popupStartingClass={FADE_IN}
       popupEndingClass={OVERLAY_EXIT}
     />
   );
 }
 
-/** 选择框：下拉列表同弹出卡片。 */
+/** 选择框：下拉列表同菜单。 */
 export function SmeltSelect(props: any) {
   return (
     <Select
       {...props}
-      popupClass={overlayClass(props.popupClass, POPUP_CLASS)}
+      popupClass={overlayClass(props.popupClass, MENU_CLASS)}
       popupStartingClass={FROM_TRIGGER}
       popupEndingClass={OVERLAY_EXIT}
     />
@@ -1626,7 +1631,8 @@ export function SmeltTooltip(props: any) {
 export const MENU_ITEM_CLASS =
   "flex-row items-center rounded-(--radius) px-2 hover:bg-accent focus:bg-accent";
 export const INPUT_CLASS = "rounded-(--radius) border border-input bg-card px-2 text-foreground";
-export const DIALOG_SURFACE_CLASS = "rounded-xl border border-border bg-popover shadow-xl";
+/** 对话框的面：`surface` 底，收边的细圈在 `overlay` 投影里。 */
+export const DIALOG_SURFACE_CLASS = "rounded-xl bg-popover shadow-overlay";
 
 /**
  * 对话框：`nsh/base` 的 `Dialog` 带上 Smelt 的进出和主题的遮罩色 `scrim`。整层（遮罩连卡片）淡入淡出，
@@ -1679,7 +1685,7 @@ export function SmeltButton(props: SmeltButtonProps) {
         hoverFg: p.text,
         pressBg: p.soft_hover,
         pressFg: p.text,
-        surfaceClass: "border border-border shadow-sm",
+        surfaceClass: "shadow-button-floating",
         disabledOpacity: 0.45,
       };
     }
@@ -1691,7 +1697,7 @@ export function SmeltButton(props: SmeltButtonProps) {
         hoverFg: primaryFg,
         pressBg: primary[2],
         pressFg: primaryFg,
-        surfaceClass: "shadow-xs",
+        surfaceClass: "shadow-button-primary",
         disabledOpacity: 0.35,
       };
     }
@@ -1715,7 +1721,7 @@ export function SmeltButton(props: SmeltButtonProps) {
         hoverFg: p.bad,
         pressBg: neutral[2],
         pressFg: p.bad,
-        surfaceClass: "border border-border shadow-xs",
+        surfaceClass: "shadow-button",
         disabledOpacity: 0.5,
       };
     }
@@ -1738,7 +1744,7 @@ export function SmeltButton(props: SmeltButtonProps) {
       hoverFg: neutralFg,
       pressBg: neutral[2],
       pressFg: neutralFg,
-      surfaceClass: "border border-border shadow-xs",
+      surfaceClass: "shadow-button",
       disabledOpacity: 0.5,
     };
   });
@@ -2005,7 +2011,7 @@ function MermaidDiagramBlock(props: { source: string }) {
           >
             <If when={previewOpen() && Boolean(result()?.ok)}>
               <View
-                class="rounded-xl border border-border bg-background p-4 shadow-xl items-center justify-center"
+                class={`${DIALOG_SURFACE_CLASS} p-4 items-center justify-center`}
                 style={{
                   width: 920,
                   maxWidth: "92%",

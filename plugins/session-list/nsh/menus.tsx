@@ -6,14 +6,13 @@ import { MenuItem, MenuSeparator, Submenu } from "nsh/base";
 import {
   DIALOG_SURFACE_CLASS,
   MENU_ITEM_CLASS,
-  POPUP_CLASS,
   SmeltButton,
   SmeltDialog,
   SmeltIcon,
   SmeltMenu,
   SmeltTooltip,
 } from "smelt/sdk";
-export { MENU_ITEM_CLASS, POPUP_CLASS };
+export { MENU_ITEM_CLASS };
 
 import { MACHINE_MENU } from "../contract.js";
 import { icon, message } from "../util.js";

@@ -10,7 +10,6 @@ import {
   DIALOG_SURFACE_CLASS,
   INPUT_CLASS,
   MENU_ITEM_CLASS,
-  POPUP_CLASS,
   SmeltButton,
   SmeltDialog,
   SmeltIcon,
@@ -18,7 +17,7 @@ import {
   SmeltTooltip,
   t,
 } from "smelt/sdk";
-export { INPUT_CLASS, MENU_ITEM_CLASS, POPUP_CLASS };
+export { INPUT_CLASS, MENU_ITEM_CLASS };
 
 import { agentCatalogMonogram } from "../model.js";
 import { ConfirmRequest, currentTheme, findEngineMeta } from "./state.ts";

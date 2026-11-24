@@ -521,6 +521,54 @@ fn drop_shadows_safe(
         && (!interactive || (colors.hover_bg.a >= 1. && colors.press_bg.a >= 1.))
 }
 
+/// 按钮该画的投影：加载中一圈内细边；任一状态透底时只留内细圈；浮起按钮 `raised`；其余按角色。
+fn role_shadows(
+    role: Role,
+    floating: bool,
+    loading: bool,
+    safe_drop_shadows: bool,
+) -> Vec<BoxShadow> {
+    let theme_elevation = elevation::current();
+    if loading {
+        button_shadows(role, &theme_elevation, true, ui_theme::hair())
+    } else if !safe_drop_shadows {
+        translucent_button_shadows(role, &theme_elevation, floating, ui_theme::hair())
+    } else if floating {
+        theme_elevation.raised.clone()
+    } else {
+        button_shadows(role, &theme_elevation, false, ui_theme::hair())
+    }
+}
+
+/// 别处画的按钮要和 [`Button`] 一样浮起时取的那组投影。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ButtonShadow {
+    /// 中性、危险按钮。
+    Neutral,
+    /// 主操作。
+    Primary,
+    /// 浮在内容上的按钮（`floating()`）。
+    Floating,
+}
+
+/// 一颗可点的按钮静止时的投影，和 [`Button`] 自己画的同一份（含「任一状态透底就只留内细圈」）。
+/// NSH 插件的按钮经主题令牌拿它，不自己推。
+pub fn resting_shadows(kind: ButtonShadow) -> Vec<BoxShadow> {
+    let (role, floating) = match kind {
+        ButtonShadow::Neutral => (Role::Secondary, false),
+        ButtonShadow::Primary => (Role::Primary, false),
+        ButtonShadow::Floating => (Role::Secondary, true),
+    };
+    let colors = role.colors_from(ui_theme::palette(), false);
+    let rest_bg = if floating {
+        Some(rgb(ui_theme::surface()))
+    } else {
+        colors.bg
+    };
+    let safe = drop_shadows_safe(rest_bg, colors, true, false, false);
+    role_shadows(role, floating, false, safe)
+}
+
 fn inset_ring(color: impl Into<Hsla>, width: f32) -> BoxShadow {
     BoxShadow::new(px(0.), px(0.), color.into())
         .spread_radius(px(width))
@@ -664,16 +712,7 @@ impl Button {
             (disabled && !loading) || style.opacity.is_some_and(|opacity| opacity < 1.),
             style.background.is_some(),
         );
-        let theme_elevation = elevation::current();
-        let shadows = if loading {
-            button_shadows(role, &theme_elevation, true, ui_theme::hair())
-        } else if !safe_drop_shadows {
-            translucent_button_shadows(role, &theme_elevation, floating, ui_theme::hair())
-        } else if floating {
-            theme_elevation.raised.clone()
-        } else {
-            button_shadows(role, &theme_elevation, false, ui_theme::hair())
-        };
+        let shadows = role_shadows(role, floating, loading, safe_drop_shadows);
         let focused_shadows =
             focused_button_shadows(&shadows, safe_drop_shadows, ui_theme::palette(), rest_bg);
 

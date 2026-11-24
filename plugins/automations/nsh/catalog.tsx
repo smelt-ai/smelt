@@ -59,7 +59,6 @@ import {
   MenuSectionHeader,
   NeutralIconMark,
   PageToolbar,
-  POPUP_CLASS,
   RowItem,
   RunLines,
   SegmentedControl,

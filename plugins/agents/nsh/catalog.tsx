@@ -47,7 +47,6 @@ import {
   MenuEntry,
   MenuSectionTitle,
   PageToolbar,
-  POPUP_CLASS,
   QuietBadge,
   SurfaceCard,
 } from "./ui.tsx";

@@ -57,7 +57,7 @@ export function ModelConfigPopover(props: {
       placement="top"
       align="start"
       offset={8}
-      popupClass="rounded-xl border border-border bg-popover p-0 shadow-lg overflow-hidden"
+      popupClass="rounded-xl border border-border bg-popover p-0 shadow-md overflow-hidden"
       popupStyle={{ width: 348 }}
       trigger={
         <SmeltButton
@@ -458,7 +458,7 @@ export function CapabilitiesPopover(props: {
       placement="top"
       align="start"
       offset={8}
-      popupClass="rounded-xl border border-border bg-popover p-0 shadow-lg overflow-hidden"
+      popupClass="rounded-xl border border-border bg-popover p-0 shadow-md overflow-hidden"
       popupStyle={{ width: 320 }}
       trigger={
         <SmeltButton
@@ -664,7 +664,7 @@ export function UsagePopover(props: {
         placement="top"
         align="end"
         offset={8}
-        popupClass="rounded-xl border border-border bg-popover p-3 shadow-lg"
+        popupClass="rounded-xl border border-border bg-popover p-3 shadow-md"
         popupStyle={{ width: 280 }}
         trigger={
           <SmeltButton

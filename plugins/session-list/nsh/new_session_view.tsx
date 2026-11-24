@@ -7,7 +7,7 @@ import { OPEN_PROJECT } from "../contract.js";
 import { digit_key, initial_location, NewSession, pinned_by_digit } from "../new_session.js";
 import { icon } from "../util.js";
 import { list, t, theme, tick } from "./bridge.ts";
-import { MenuDivider, MenuEntry, MenuSectionTitle, POPUP_CLASS, Tip } from "./menus.tsx";
+import { MenuDivider, MenuEntry, MenuSectionTitle, Tip } from "./menus.tsx";
 
 const WIDTH = 280;
 const PALETTE_WIDTH = 360;
@@ -524,7 +524,7 @@ export function NewSessionPopover(props: {
         align="start"
         offset={8}
         margin={8}
-        popupClass="rounded-xl border border-border bg-popover p-0 shadow-lg overflow-hidden"
+        popupClass="rounded-xl border border-border bg-popover p-0 shadow-md overflow-hidden"
         popupStyle={{ width: WIDTH }}
         trigger={
           <SmeltButton
