@@ -12,8 +12,6 @@ import {
   agentCatalog,
   call,
   DIALOG_SURFACE_CLASS,
-  forkCutAfter,
-  forkCutBefore,
   isInterruptMarker,
   newSessionId,
   onAcpEvent,
@@ -919,27 +917,24 @@ export function SmeltConversation(props: SmeltConversationProps) {
               onPreviewImage={handlePreviewImage}
               onForkAt={(globalIndex, role) => {
                 const acpId = snapshot()?.acp_session_id;
-                if (!acpId || !props.onFork) return;
-                const es = entriesState();
-                const localIndex = globalIndex - es.loadedOffset;
-                if (localIndex < 0 || localIndex >= es.entries.length) return;
-                if (role === "user") {
-                  if (!snapshot()?.supports_rewind || latestUserGlobalIndex() === globalIndex) return;
-                  const cut = forkCutBefore(es.entries, localIndex);
-                  if (!cut) return;
-                  props.onFork({
-                    provider_session_id: acpId,
-                    cut,
-                    prompt: cut.text,
-                  });
-                } else {
-                  const cut = forkCutAfter(es.entries, localIndex);
-                  props.onFork({
-                    provider_session_id: acpId,
-                    cut,
-                    prompt: "",
-                  });
+                const onFork = props.onFork;
+                if (!acpId || !onFork) return;
+                const editing = role === "user";
+                if (editing && (!snapshot()?.supports_rewind || latestUserGlobalIndex() === globalIndex)) {
+                  return;
                 }
+                // 同文本提问的序号要数整段对话，手里只有最近几页，切点让运行时算。
+                void call(props.machine ?? null, "conversation.fork_cut", {
+                  session_id: props.sessionId,
+                  entry_index: globalIndex,
+                  side: editing ? "before" : "after",
+                })
+                  .then((res: any) => {
+                    const cut = res?.cut ?? null;
+                    if (editing && !cut) return;
+                    onFork({ provider_session_id: acpId, cut, prompt: editing ? cut.text : "" });
+                  })
+                  .catch((err) => console.error("[conversation] 算分叉切点失败：", err));
               }}
               onEditResendAt={(globalIndex, _text) => {
                 sendAction({ RewindToMessage: { entry_index: globalIndex } });

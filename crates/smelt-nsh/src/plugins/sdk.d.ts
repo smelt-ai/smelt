@@ -223,14 +223,6 @@ export declare function diffLineStats(
   oldText: string | null,
   newText: string,
 ): { added: number; removed: number };
-export interface ForkCut {
-  text: string;
-  occurrence: number;
-}
-/** 从第 `throughIndex` 条回答分叉的切点，和运行时 `Rewind` 同语义；点在最后一回合时为 `null`。 */
-export declare function forkCutAfter(entries: unknown[], throughIndex: number): ForkCut | null;
-/** 改第 `userIndex` 条提问重发时的切点（切在它之前）。 */
-export declare function forkCutBefore(entries: unknown[], userIndex: number): ForkCut | null;
 /** 拖进窗口的 `file://` 按本机规则解成路径；不是文件 URL 的原样返回。 */
 export declare function fileUriToPath(uri: string): string;
 /** 工作目录是不是运行时按 id 给这条自动化分配的托管目录；`style` 是自动化所在机器的路径风格。 */

@@ -610,6 +610,17 @@ fn dispatch_control(
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
+        ControlMethod::ConversationForkCut => {
+            let params: smelt_core::control_api::ConversationForkCutParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::conversation_prompt_index::fork_cut(params, acp_sessions, event_hub) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
         ControlMethod::ConversationPrompt => {
             let params: smelt_core::control_api::ConversationPromptParams =
                 match params_or_error(control_version, &request_id, params) {
@@ -1968,6 +1979,21 @@ mod tests {
         );
         assert_eq!(missing["status"], "error");
         assert_eq!(missing["error"]["code"], "not_found");
+    }
+
+    #[test]
+    fn conversation_fork_cut_is_dispatched() {
+        let missing = dispatch_for_test(
+            "conversation.fork_cut",
+            serde_json::json!({"session_id": "acp-nope", "entry_index": 0, "side": "after"}),
+        );
+        assert_eq!(missing["error"]["code"], "not_found");
+
+        let bad_side = dispatch_for_test(
+            "conversation.fork_cut",
+            serde_json::json!({"session_id": "acp-nope", "entry_index": 0, "side": "middle"}),
+        );
+        assert_eq!(bad_side["error"]["code"], "invalid_params");
     }
 
     #[test]

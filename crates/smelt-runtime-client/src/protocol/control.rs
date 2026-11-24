@@ -210,6 +210,7 @@ define_control_methods! {
     SessionAgentBindings => (SESSION_AGENT_BINDINGS_METHOD, "session.agent_bindings"),
     ConversationImage => (CONVERSATION_IMAGE_METHOD, "conversation.image"),
     ConversationPromptIndex => (CONVERSATION_PROMPT_INDEX_METHOD, "conversation.prompt_index"),
+    ConversationForkCut => (CONVERSATION_FORK_CUT_METHOD, "conversation.fork_cut"),
     ConversationPrompt => (CONVERSATION_PROMPT_METHOD, "conversation.prompt"),
     ConversationTurnResult => (CONVERSATION_TURN_RESULT_METHOD, "conversation.turn_result"),
     SubagentTranscript => (SUBAGENT_TRANSCRIPT_METHOD, "subagent.transcript"),

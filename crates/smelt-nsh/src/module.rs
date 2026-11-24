@@ -12,10 +12,7 @@ use nsh_core::{
 use smelt_plugin_api::{
     self as api,
     model::{
-        acp_chat::{
-            AcpEntry, diff_line_stats, fork_cut_after, fork_cut_before, is_interrupt_marker,
-        },
-        acp_conn::AcpForkCut,
+        acp_chat::{diff_line_stats, is_interrupt_marker},
         agent_definition::agent_engine_kinds,
         agent_host::AgentHostSettings,
         agent_kind::{
@@ -94,14 +91,6 @@ fn parse_style(style: &str) -> Result<PathStyle, String> {
             "style 要是 \"posix\" 或 \"windows\"，收到 {other:?}"
         )),
     }
-}
-
-fn parse_entries(entries_json: &str, what: &str) -> Result<Vec<AcpEntry>, String> {
-    serde_json::from_str(entries_json).map_err(|error| format!("{what}：entries 不对：{error}"))
-}
-
-fn fork_cut_json((text, occurrence): (String, usize)) -> String {
-    serde_json::to_string(&AcpForkCut { text, occurrence }).unwrap_or_default()
 }
 
 fn parse_settings(settings_json: &str, what: &str) -> Result<AgentHostSettings, String> {
@@ -309,24 +298,6 @@ impl Smelt {
     pub fn diff_line_stats(old: String, new: String) -> Vec<usize> {
         let (added, removed) = diff_line_stats(&old, &new);
         vec![added, removed]
-    }
-
-    /// 从第 `through_index` 条回答分叉的切点 `{ text, occurrence }`，和运行时 `Rewind` 同语义。
-    pub fn fork_cut_after(
-        entries_json: String,
-        through_index: usize,
-    ) -> Result<Option<String>, String> {
-        let entries = parse_entries(&entries_json, "fork_cut_after")?;
-        Ok(fork_cut_after(&entries, through_index).map(fork_cut_json))
-    }
-
-    /// 改第 `user_index` 条提问重发时的切点（切在它之前），同上。
-    pub fn fork_cut_before(
-        entries_json: String,
-        user_index: usize,
-    ) -> Result<Option<String>, String> {
-        let entries = parse_entries(&entries_json, "fork_cut_before")?;
-        Ok(fork_cut_before(&entries, user_index).map(fork_cut_json))
     }
 
     /// 拖进窗口的 `file://` 按本机规则解成路径；不是文件 URL 的原样返回。
@@ -916,42 +887,6 @@ mod tests {
     use super::Smelt;
 
     /// 插件手里的条目是 hub 压过图片的线格式（多了 `ref_id`、`preview_uri`，`data_b64` 置空），
-    /// 切点照样按运行时那份规则算：中断标记不算提问、带图的提问和纯文字同文本一起数。
-    #[test]
-    fn fork_cut_reads_the_entries_plugins_hold() {
-        let entries = serde_json::json!([
-            { "User": "go" },
-            { "Assistant": { "text": "a1", "thought": false } },
-            { "User": "[Request interrupted by user]" },
-            { "User": "go" },
-            { "Assistant": { "text": "a2", "thought": false } },
-            { "UserWithImages": { "text": "go", "images": [{
-                "mime": "image/png", "data_b64": "", "ref_id": "r1",
-                "preview_uri": "smelt-image://r1", "width": 4, "height": 4
-            }] } },
-            { "Assistant": { "text": "a3", "thought": false } },
-        ])
-        .to_string();
-        let cut = |after: bool, index| {
-            let raw = if after {
-                Smelt::fork_cut_after(entries.clone(), index)
-            } else {
-                Smelt::fork_cut_before(entries.clone(), index)
-            };
-            raw.unwrap()
-                .map(|raw| serde_json::from_str::<serde_json::Value>(&raw).unwrap())
-        };
-        let at = |text: &str, occurrence: usize| {
-            Some(serde_json::json!({ "text": text, "occurrence": occurrence }))
-        };
-        assert_eq!(cut(true, 1), at("go", 1));
-        assert_eq!(cut(true, 4), at("go", 2));
-        assert_eq!(cut(true, 6), None);
-        assert_eq!(cut(false, 0), at("go", 0));
-        assert_eq!(cut(false, 2), None);
-        assert_eq!(cut(false, 5), at("go", 2));
-    }
-
     #[test]
     fn file_uris_become_local_paths() {
         assert_eq!(

@@ -177,21 +177,6 @@ export function diffLineStats(oldText: string | null, newText: string): { added:
   return { added, removed };
 }
 
-export interface ForkCut {
-  text: string;
-  occurrence: number;
-}
-
-export function forkCutAfter(entries: unknown[], throughIndex: number): ForkCut | null {
-  const raw = Smelt.forkCutAfter(JSON.stringify(entries), throughIndex);
-  return raw ? JSON.parse(raw) : null;
-}
-
-export function forkCutBefore(entries: unknown[], userIndex: number): ForkCut | null {
-  const raw = Smelt.forkCutBefore(JSON.stringify(entries), userIndex);
-  return raw ? JSON.parse(raw) : null;
-}
-
 export function fileUriToPath(uri: string): string {
   return Smelt.fileUriToPath(uri);
 }

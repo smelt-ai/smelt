@@ -1070,6 +1070,10 @@ pi_calls! {
     /// 对话里的每一问（提问一行加回答开头），给提问导航用。挂起的对话先唤醒，和往上翻页一样。
     ConversationPromptIndex => ConversationPromptIndex(ConversationPromptIndexParams)
         -> ConversationPromptIndexResult;
+    /// 从对话的某一条分叉时的切点（`session.create` / 打开分叉副本时带上）。同文本提问的序号
+    /// 要数整段对话，客户端只加载了最近几页数不对，所以在运行时算。挂起的对话先唤醒。
+    ConversationForkCut => ConversationForkCut(ConversationForkCutParams)
+        -> ConversationForkCutResult;
     /// 以一次外部投递的身份往对话里发一轮话（插件驱动对话用）。正在跑就排在这一轮后面，
     /// 不插进去。挂起的对话先唤醒。
     ConversationPrompt => ConversationPrompt(ConversationPromptParams) -> EmptyParams;
@@ -1281,6 +1285,29 @@ pub struct ConversationPromptIndexParams {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ConversationPromptIndexResult {
     pub prompts: Vec<crate::acp_chat::PromptIndexItem>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ConversationForkCutParams {
+    pub session_id: String,
+    /// 从哪一条分叉（全局条目下标）。
+    pub entry_index: u64,
+    pub side: ForkSide,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkSide {
+    /// 从这条回答分叉：新对话到这条回答为止（切在下一条提问之前）。
+    After,
+    /// 改这条提问重发：新对话到这条提问之前。
+    Before,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ConversationForkCutResult {
+    /// 没有切点时为空：从最后一条回答分叉（整段照抄），或这条不是能改的提问。
+    pub cut: Option<crate::acp_conn::AcpForkCut>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
