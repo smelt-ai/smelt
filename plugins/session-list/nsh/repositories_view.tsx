@@ -1,8 +1,8 @@
 // 项目的仓库对话框（NSH A2 版）：复用纯逻辑 `../repositories.js`。
 
 import { computed, Scroll, Text, View } from "nsh";
-import { Checkbox, Dialog, Input } from "nsh/base";
-import { DIALOG_SURFACE_CLASS, SmeltButton, SmeltIcon } from "smelt/sdk";
+import { Checkbox, Input } from "nsh/base";
+import { DIALOG_SURFACE_CLASS, SmeltButton, SmeltDialog, SmeltIcon } from "smelt/sdk";
 
 import { icon } from "../util.js";
 import { list, MemoryInputState, t, theme, tick } from "./bridge.ts";
@@ -87,12 +87,10 @@ export function RepositoriesDialog() {
   });
 
   return (
-    <Dialog
+    <SmeltDialog
       open={isOpen()}
-      animation="fade"
       closeOnBackdropPress={false}
       accessibilityLabel={isOpen() ? t(TITLES[mode()] ?? "repo.title_manage") : ""}
-      backdropClass="bg-black/40"
       onOpenChange={({ open }) => {
         if (!open) dialog()?.dismiss();
       }}
@@ -413,6 +411,6 @@ export function RepositoriesDialog() {
           </View>
         </View>
       </If>
-    </Dialog>
+    </SmeltDialog>
   );
 }

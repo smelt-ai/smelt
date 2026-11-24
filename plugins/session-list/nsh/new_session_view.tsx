@@ -1,8 +1,7 @@
 // 新建会话菜单（NSH A2 版）：复用纯逻辑 `../new_session.js`，支持项目/工作树行「+」弹层与 ⌘N 命令面板对话框。
 
 import { computed, Scroll, signal, Text, View } from "nsh";
-import { Dialog, Menu, Popover } from "nsh/base";
-import { DIALOG_SURFACE_CLASS, newSessionIcon, OVERLAY_MOTION_CLASS, popupMotion, SmeltButton, SmeltIcon } from "smelt/sdk";
+import { DIALOG_SURFACE_CLASS, newSessionIcon, SmeltButton, SmeltDialog, SmeltIcon, SmeltMenu, SmeltPopover } from "smelt/sdk";
 
 import { OPEN_PROJECT } from "../contract.js";
 import { digit_key, initial_location, NewSession, pinned_by_digit } from "../new_session.js";
@@ -112,11 +111,9 @@ function LocationRow(props: { menu: () => any }) {
         paddingBottom: 4,
       }}
     >
-      <Menu
+      <SmeltMenu
         placement="bottom"
         align="start"
-        popupClass={POPUP_CLASS}
-        {...popupMotion("bottom")}
         popupStyle={{ minWidth: 220 }}
         trigger={
           <View
@@ -171,7 +168,7 @@ function LocationRow(props: { menu: () => any }) {
             );
           }}
         />
-      </Menu>
+      </SmeltMenu>
     </View>
   );
 }
@@ -511,7 +508,7 @@ export function NewSessionPopover(props: {
       class={open() ? "opacity-100" : (props.hoverClass ?? "opacity-0 group-hover/row:opacity-100")}
       style={{ flexShrink: 0 }}
     >
-      <Popover
+      <SmeltPopover
         open={open()}
         onOpenChange={({ open: next }: any) => {
           if (next) openMenu();
@@ -527,8 +524,7 @@ export function NewSessionPopover(props: {
         align="start"
         offset={8}
         margin={8}
-        popupClass={`rounded-xl border border-border bg-popover p-0 shadow-lg overflow-hidden ${OVERLAY_MOTION_CLASS}`}
-        {...popupMotion("right")}
+        popupClass="rounded-xl border border-border bg-popover p-0 shadow-lg overflow-hidden"
         popupStyle={{ width: WIDTH }}
         trigger={
           <SmeltButton
@@ -544,7 +540,7 @@ export function NewSessionPopover(props: {
         {open() && activeMenu ? (
           <MenuBody menu={() => activeMenu} localTick={localTick} maxHeight={listMaxHeight} />
         ) : null}
-      </Popover>
+      </SmeltPopover>
     </View>
   );
 }
@@ -560,11 +556,9 @@ export function PaletteDialog() {
     return list.palette;
   };
   return (
-    <Dialog
+    <SmeltDialog
       open={paletteOpen()}
-      animation="fade"
       accessibilityLabel={t("menu.new_session")}
-      backdropClass="bg-black/40"
       onOpenChange={({ open }) => {
         if (!open) list.palette?.owner?.close?.();
       }}
@@ -572,6 +566,6 @@ export function PaletteDialog() {
       style={{ width: PALETTE_WIDTH, padding: 0, overflow: "hidden" }}
     >
       {paletteOpen() ? <MenuBody menu={menu} /> : null}
-    </Dialog>
+    </SmeltDialog>
   );
 }

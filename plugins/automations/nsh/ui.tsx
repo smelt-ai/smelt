@@ -2,7 +2,6 @@
 import { computed, Text, View } from "nsh";
 import {
   Button as BaseButton,
-  Dialog,
   Input,
   MenuItem,
   MenuSeparator,
@@ -13,6 +12,7 @@ import {
   MENU_ITEM_CLASS,
   POPUP_CLASS,
   SmeltButton,
+  SmeltDialog,
   SmeltIcon,
   t,
 } from "smelt/sdk";
@@ -594,12 +594,10 @@ export function DeleteConfirmDialog() {
   });
 
   return (
-    <Dialog
+    <SmeltDialog
       open={prompt() != null}
       role="alertdialog"
-      animation="fade"
       accessibilityLabel={t("delete.title")}
-      backdropClass="bg-black/40"
       onOpenChange={({ open }: { open: boolean }) => {
         if (!open) deletePrompt.set(null);
       }}
@@ -641,7 +639,7 @@ export function DeleteConfirmDialog() {
           />
         </View>
       </If>
-    </Dialog>
+    </SmeltDialog>
   );
 }
 

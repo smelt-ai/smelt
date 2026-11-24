@@ -352,19 +352,19 @@ diff 底色、`need` 和 `bad` 的浅底（悬停用的 8%–12% 透明度）都
 | 档 | 响应周期 | 用在哪 |
 |---|---|---|
 | `control` | 200ms | 控件自身的状态：开关滑块、分段选中块、停靠落点 |
-| `overlay` | 240ms | 浮层出现；浮层每次打开都是新挂上的元素，弹簧首帧就到位，入场改用定时过渡（`ease_snap` 曲线），出场 120ms 淡出。Rust 侧由 `smelt_ui::motion::overlay_enter` 取，JS 插件用 `smelt/sdk` 的 `POPUP_CLASS` / `TOOLTIP_CLASS`（带过渡）加 `popupMotion(side)`、`CONTEXT_MENU_MOTION`、`TOOLTIP_MOTION`（进出场的样子），自己写浮层 class 时拼上 `OVERLAY_MOTION_CLASS` |
-| `disclosure` | 300ms | 展开收起 |
+| `overlay` | 240ms | 浮层出现；浮层每次打开都是新挂上的元素，弹簧首帧就到位，入场改用定时过渡（`ease_snap` 曲线），出场 120ms 淡出。Rust 侧由 `smelt_ui::motion::overlay_enter` 取，JS 插件的浮层一律用 `smelt/sdk` 的 `SmeltPopover`、`SmeltMenu`、`SmeltContextMenu`、`SmeltSelect`、`SmeltTooltip`、`SmeltDialog`：进出是组件自己的，调用处只给样子（`popupClass` / `class` 换掉默认的 `POPUP_CLASS` / `TOOLTIP_CLASS`），不写过渡和进出场 class |
+| `disclosure` | 300ms | 展开收起。JS 插件用 `smelt/sdk` 的 `SmeltDisclosure`（同一弹簧），箭头 `SmeltDisclosureChevron` 同一时长 |
 
 | 组件 | 动什么 |
 |---|---|
 | 开关 | 滑块按 `control` 滑到另一头，底色、滑块颜色和轨道内阴影跟着过渡；悬停、按下的伸长不过渡 |
 | 分段控件（单选） | 选中块从旧段滑到新段，宽度跟着变；多选各段各自亮灭，不动 |
-| 弹出卡片、下拉菜单、选择框、悬停卡片 | 按 `overlay` 淡入，同时从触发点那一侧挪 4px 到位，交代它从哪弹出来。方向按声明的 `placement` 定；放不下翻边时仍按声明的那侧挪（位置布局后才知道，入场样子第一帧就得定） |
-| 右键菜单、提示 | 只淡入不挪：右键菜单放不下会翻到上面，提示贴着指针，都没有可靠的「从哪来」 |
+| 弹出卡片、下拉菜单、选择框、悬停卡片 | 按 `overlay` 淡入，同时从触发点那一侧挪 4px 到位，交代它从哪弹出来。方向按浮层实际落下的那一侧定：NSH 在第一帧前就把定位结果写到浮层上（`data-side`），入场 class 用 `data-[side=top]:` 这类变体分侧写，放不下翻边也对 |
+| 右键菜单、提示 | 只淡入不挪：右键菜单从指针处弹出、提示贴着指针，没有「从哪个触发点来」 |
 | 子菜单 | 打开和在各项间切换都不动：跟着指针来回换，每换一次都淡入淡出会闪。整个菜单关掉时跟着一起淡出 |
-| 对话框、命令面板 | 卡片淡入并从下面升 4px，最底下那张的遮罩一起淡入；叠上去的那张只动自己 |
+| 对话框、命令面板 | 宿主（`smelt_ui::dialog`）：卡片淡入并从下面升 4px，最底下那张的遮罩一起淡入；叠上去的那张只动自己。JS 插件（`SmeltDialog`）：NSH 原生模态层整层淡入淡出，卡片不升——NSH 的 `Dialog` 还没有给弹出层的入场 class |
 | 浮层关掉 | 120ms 淡出，期间不接点击和按键。Esc 关最上面那层，焦点立刻回到打开它的地方 |
-| 展开收起（详情块、记忆条目、计划、运行步骤、技能行、进程组） | 内容区高度从 0 弹到内容高度，下面的东西跟着挪，收起反过来（NSH `Collapsible reveal`，NSH 自带的 180ms 临界阻尼弹簧）。箭头统一用 `SmeltDisclosureChevron`：收起朝右、展开转 90° 朝下，150ms 过渡。标题和内容用一个 `Collapsible` 包住，`gap` 换成内容的上边距，收起时零高的内容区不多占间距 |
+| 展开收起（详情块、记忆条目、计划、运行步骤、技能行、进程组） | 内容区高度按 `disclosure` 弹簧从 0 弹到内容高度，下面的东西跟着挪，收起反过来（`SmeltDisclosure`，包 NSH 的 `Collapsible reveal`）。箭头统一用 `SmeltDisclosureChevron`：收起朝右、展开转 90° 朝下，300ms 跟内容同步。标题和内容用一个 `SmeltDisclosure` 包住；收起的内容区零高但仍在布局里，标题和内容的距离写成内容的上内边距，不用 `gap` |
 | 树和平铺列表的展开（文件树、改动树、子任务分组） | 只转箭头：子行是插进列表的新行，和 Finder、编辑器侧栏一样即时出现 |
 | 停靠区开合 | 左右和底部停靠区保持原尺寸从窗口边滑进滑出，中间区跟着变宽变窄（NSH `DockArea` 自带，reveal 弹簧）；收起后留在布局里不显示，面板状态不丢 |
 | 页签 | 不动：工作台面板切换和浏览器页签一样即时 |

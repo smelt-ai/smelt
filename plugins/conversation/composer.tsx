@@ -14,7 +14,7 @@ import {
   Text,
   View,
 } from "nsh";
-import { Collapsible, Input } from "nsh/base";
+import { Input } from "nsh/base";
 import {
   acpClipboardImages,
   acpPasteImage,
@@ -22,6 +22,7 @@ import {
   fileUriToPath,
   run,
   SmeltButton,
+  SmeltDisclosure,
   SmeltDisclosureChevron,
   SmeltIcon,
   theme,
@@ -559,9 +560,8 @@ export function Composer(props: {
 
           {/* 3. 可折叠计划条 */}
           <If when={planSummary() != null}>
-            <Collapsible
+            <SmeltDisclosure
               open={planExpanded()}
-              reveal={true}
               style={{
                 borderBottomWidth: 1,
                 borderBottomColor: look().palette.hair,
@@ -640,7 +640,7 @@ export function Composer(props: {
                   </Text>
                 </If>
               </View>
-            </Collapsible>
+            </SmeltDisclosure>
           </If>
 
           {/* 4. 排队中消息条 */}

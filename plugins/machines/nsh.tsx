@@ -4,7 +4,7 @@
 // - 角标：有机器离线、不兼容、高延迟或机器表读取失败时在「远程」页挂 "!" 角标。
 
 import { Canvas, cleanup, computed, Scroll, signal, Text, View } from "nsh";
-import { Dialog, Input, Switch, Tooltip } from "nsh/base";
+import { Input, Switch } from "nsh/base";
 import {
   bootTask,
   call,
@@ -21,13 +21,13 @@ import {
   registerViews,
   run,
   SmeltButton,
+  SmeltDialog,
   SmeltIcon,
+  SmeltTooltip,
   smeltVersion,
   t,
   text,
   theme,
-  TOOLTIP_CLASS,
-  TOOLTIP_MOTION,
   viewShown,
   waitOnline,
 } from "smelt/sdk";
@@ -1103,12 +1103,10 @@ export function root() {
   return (
     <>
       {/* 移除机器确认框 */}
-      <Dialog
+      <SmeltDialog
         open={removePrompt() != null}
         role="alertdialog"
-        animation="fade"
         accessibilityLabel={t("remove.title")}
-        backdropClass="bg-black/40"
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) removePrompt.set(null);
         }}
@@ -1143,15 +1141,13 @@ export function root() {
             />
           </View>
         </If>
-      </Dialog>
+      </SmeltDialog>
 
       {/* 重命名机器框 */}
-      <Dialog
+      <SmeltDialog
         open={renamePrompt() != null}
         role="dialog"
-        animation="fade"
         accessibilityLabel={t("rename.title")}
-        backdropClass="bg-black/40"
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) renamePrompt.set(null);
         }}
@@ -1196,15 +1192,13 @@ export function root() {
             />
           </View>
         </If>
-      </Dialog>
+      </SmeltDialog>
 
       {/* 改机器中继框 */}
-      <Dialog
+      <SmeltDialog
         open={relayPrompt() != null}
         role="dialog"
-        animation="fade"
         accessibilityLabel={t("relay.title", { name: relayPrompt()?.name ?? "" })}
-        backdropClass="bg-black/40"
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) closeRelayDialog();
         }}
@@ -1262,15 +1256,13 @@ export function root() {
             />
           </View>
         </If>
-      </Dialog>
+      </SmeltDialog>
 
       {/* 配对新设备二维码框 */}
-      <Dialog
+      <SmeltDialog
         open={pairingOpen()}
         role="dialog"
-        animation="fade"
         accessibilityLabel={t("pairing.title")}
-        backdropClass="bg-black/40"
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) {
             pairingOpen.set(false);
@@ -1332,11 +1324,11 @@ export function root() {
                   class="items-center justify-center rounded-(--radius) hover:bg-accent"
                   style={{ width: 24, height: 24, flexShrink: 0 }}
                   tooltip={
-                    <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
+                    <SmeltTooltip>
                       <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.text }}>
                         {pairingCopied() ? t("pairing.copied") : t("pairing.copy")}
                       </Text>
-                    </Tooltip>
+                    </SmeltTooltip>
                   }
                   onPress={() => {
                     const uri = offer()?.uri;
@@ -1374,7 +1366,7 @@ export function root() {
             }}
           />
         </View>
-      </Dialog>
+      </SmeltDialog>
     </>
   );
 }

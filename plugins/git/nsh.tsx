@@ -6,22 +6,17 @@
 // - 全事件驱动（project.watch / project_changed / reconnected / window_activated），仅前台可见时 60s 自动 fetch。
 import { computed, effect, Overlay, Scroll, signal, Text, View } from "nsh";
 import {
-  ContextMenu,
-  Dialog,
   Input,
-  Menu,
   MenuItem,
   MenuSeparator,
   ResizablePanel,
   ResizablePanelGroup,
-  Tooltip,
 } from "nsh/base";
 import {
   activeContext,
   bootTask,
   call,
   clipboardWrite,
-  CONTEXT_MENU_MOTION,
   currentTheme,
   DIALOG_SURFACE_CLASS,
   initHost,
@@ -36,22 +31,22 @@ import {
   pathJoin,
   pathStartsWith,
   pathStyle,
-  POPUP_CLASS,
-  popupMotion,
   registerCommands,
   registerViews,
   revealPath,
   run,
   SmeltButton,
+  SmeltContextMenu,
+  SmeltDialog,
   SmeltDiffView,
   SmeltDisclosureChevron,
   SmeltIcon,
+  SmeltMenu,
+  SmeltTooltip,
   SmeltVector,
   stableMemo,
   t,
   text,
-  TOOLTIP_CLASS,
-  TOOLTIP_MOTION,
   viewShown,
   windowActive,
 } from "smelt/sdk";
@@ -1645,11 +1640,9 @@ function OpsMenu(props: {
     fn(props.repo);
   };
   return (
-    <Menu
+    <SmeltMenu
       placement="bottom"
       align="end"
-      popupClass={POPUP_CLASS}
-      {...popupMotion("bottom")}
       popupStyle={{ minWidth: 168 }}
       trigger={
         <View
@@ -1711,7 +1704,7 @@ function OpsMenu(props: {
           onSelect={() => runOn(startDiscardAll)}
         />
       </If>
-    </Menu>
+    </SmeltMenu>
   );
 }
 
@@ -2016,11 +2009,9 @@ export function Main() {
 
           <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 6 }}>
             <If when={gitTab() === "changes"}>
-              <Menu
+              <SmeltMenu
                 placement="bottom"
                 align="end"
-                popupClass={POPUP_CLASS}
-                {...popupMotion("bottom")}
                 popupStyle={{ minWidth: 140 }}
                 trigger={
                   <View
@@ -2046,15 +2037,13 @@ export function Main() {
                 <MenuRow label={t("scope.all")} onSelect={() => setScope("all")} />
                 <MenuRow label={t("scope.staged")} onSelect={() => setScope("staged")} />
                 <MenuRow label={t("scope.unstaged")} onSelect={() => setScope("unstaged")} />
-              </Menu>
+              </SmeltMenu>
             </If>
 
             <If when={gitTab() === "log" && repos().length > 1}>
-              <Menu
+              <SmeltMenu
                 placement="bottom"
                 align="end"
-                popupClass={POPUP_CLASS}
-                {...popupMotion("bottom")}
                 popupStyle={{ minWidth: 168 }}
                 trigger={
                   <View
@@ -2092,7 +2081,7 @@ export function Main() {
                     />
                   )}
                 </Each>
-              </Menu>
+              </SmeltMenu>
             </If>
 
             <If when={gitTab() === "log" && activeRepo() != null}>
@@ -2208,9 +2197,7 @@ export function Main() {
                               return typeof sc === "object" && sc.branch === b();
                             };
                             return (
-                              <ContextMenu
-                                popupClass={POPUP_CLASS}
-                                {...CONTEXT_MENU_MOTION}
+                              <SmeltContextMenu
                                 popupStyle={{ minWidth: 168 }}
                                 disabled={isHead()}
                                 trigger={
@@ -2274,7 +2261,7 @@ export function Main() {
                                     activeRepo() && startDeleteBranch(activeRepo()!, b(), false)
                                   }
                                 />
-                              </ContextMenu>
+                              </SmeltContextMenu>
                             );
                           }}
                         </Each>
@@ -2300,9 +2287,7 @@ export function Main() {
                               return typeof sc === "object" && sc.branch === b();
                             };
                             return (
-                              <ContextMenu
-                                popupClass={POPUP_CLASS}
-                                {...CONTEXT_MENU_MOTION}
+                              <SmeltContextMenu
                                 popupStyle={{ minWidth: 168 }}
                                 trigger={
                                   <View
@@ -2363,7 +2348,7 @@ export function Main() {
                                     activeRepo() && startDeleteBranch(activeRepo()!, b(), true)
                                   }
                                 />
-                              </ContextMenu>
+                              </SmeltContextMenu>
                             );
                           }}
                         </Each>
@@ -3231,9 +3216,7 @@ export function Main() {
                                           when={row().kind === "tree_dir"}
                                           else={
                                             /* 改动文件行 */
-                                            <ContextMenu
-                                              popupClass={POPUP_CLASS}
-                                              {...CONTEXT_MENU_MOTION}
+                                            <SmeltContextMenu
                                               popupStyle={{ minWidth: 168 }}
                                               trigger={
                                                 <View
@@ -3382,7 +3365,7 @@ export function Main() {
                                                   startDiscardFile(row().repo, row().path)
                                                 }
                                               />
-                                            </ContextMenu>
+                                            </SmeltContextMenu>
                                           }
                                         >
                                           {/* 压缩目录行 */}
@@ -3651,7 +3634,7 @@ export function Main() {
                                 </Text>
                                 <Text
                                   tooltip={
-                                    <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
+                                    <SmeltTooltip>
                                       <Text
                                         style={{
                                           fontSize: look().type.text_xsmall.size,
@@ -3660,7 +3643,7 @@ export function Main() {
                                       >
                                         {row().branch}
                                       </Text>
-                                    </Tooltip>
+                                    </SmeltTooltip>
                                   }
                                   style={{
                                     maxWidth: 80,
@@ -3712,12 +3695,10 @@ export function Main() {
       </If>
 
       {/* 危险操作确认框（丢弃文件 / 丢弃全部 / 丢弃块 / 删除分支） */}
-      <Dialog
+      <SmeltDialog
         open={dangerDialog() != null}
         role="alertdialog"
-        animation="fade"
         accessibilityLabel={dangerDialog()?.title ?? ""}
-        backdropClass="bg-black/40"
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) dangerDialog.set(null);
         }}
@@ -3774,7 +3755,7 @@ export function Main() {
             />
           </View>
         </If>
-      </Dialog>
+      </SmeltDialog>
     </View>
   );
 }

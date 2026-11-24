@@ -1,6 +1,6 @@
 // 归档（NSH A2 独立 VM 版本）：复用纯逻辑 model.js 与 contract.js。
 import { computed, Scroll, signal, Text, View } from "nsh";
-import { Dialog, Popover, Radio, Tooltip } from "nsh/base";
+import { Radio } from "nsh/base";
 import {
   bootTask,
   call,
@@ -8,23 +8,22 @@ import {
   initHost,
   machineMeta as hostMachines,
   onSlices,
-  OVERLAY_MOTION_CLASS,
   pathClean,
   pathParent,
   pathStyle,
-  popupMotion,
   projectLabels,
   projectRootOf,
   registerViews,
   run,
   safeArea,
   SmeltButton,
+  SmeltDialog,
   SmeltIcon,
+  SmeltPopover,
+  SmeltTooltip,
   t,
   text,
   theme,
-  TOOLTIP_CLASS,
-  TOOLTIP_MOTION,
   workspaceDirectory,
 } from "smelt/sdk";
 
@@ -189,14 +188,13 @@ export function button() {
       }}
     >
       <If when={list().length > 0}>
-        <Popover
+        <SmeltPopover
           open={popoverOpen()}
           onOpenChange={({ open }: any) => popoverOpen.set(Boolean(open))}
           placement="top"
           align="start"
           offset={6}
-          popupClass={`rounded-xl border border-border bg-popover p-1 shadow-lg ${OVERLAY_MOTION_CLASS}`}
-          {...popupMotion("top")}
+          popupClass="rounded-xl border border-border bg-popover p-1 shadow-lg"
           popupStyle={{ width: POPOVER_WIDTH }}
           trigger={
             <SmeltButton
@@ -282,11 +280,11 @@ export function button() {
                               <View
                                 style={{ paddingLeft: 8, paddingRight: 8 }}
                                 tooltip={
-                                  <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
+                                  <SmeltTooltip>
                                     <Text style={{ fontSize: look().type.text_xsmall.size, color: p().text }}>
                                       {project().root}
                                     </Text>
-                                  </Tooltip>
+                                  </SmeltTooltip>
                                 }
                               >
                                 <Text
@@ -402,14 +400,12 @@ export function button() {
               </View>
             </Scroll>
           </View>
-        </Popover>
+        </SmeltPopover>
       </If>
 
-      <Dialog
+      <SmeltDialog
         open={dialog() != null}
         role="alertdialog"
-        animation="fade"
-        backdropClass="bg-black/40"
         onOpenChange={({ open }: any) => {
           if (!open) dialog.set(null);
         }}
@@ -545,7 +541,7 @@ export function button() {
             </View>
           </View>
         ) : null}
-      </Dialog>
+      </SmeltDialog>
     </View>
   );
 }

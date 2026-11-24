@@ -1,7 +1,7 @@
 // 输入框上方的交互卡片：权限审批卡、Elicitation 提问表单卡、记忆变更审核卡。
 import { computed, Scroll, signal, Text, View } from "nsh";
-import { Collapsible, Input } from "nsh/base";
-import { call, openUrl, SmeltButton, SmeltDisclosureChevron, SmeltIcon, theme } from "smelt/sdk";
+import { Input } from "nsh/base";
+import { call, openUrl, SmeltButton, SmeltDisclosure, SmeltDisclosureChevron, SmeltIcon, theme } from "smelt/sdk";
 import { ct } from "./i18n.ts";
 
 function isAllowPermissionKind(kind: unknown): boolean {
@@ -450,9 +450,8 @@ export function MemoryChangesCard(props: {
                   const armed = computed(() => deleteArmedKey() === rowKey());
                   const busy = computed(() => busyKey() === rowKey());
                   return (
-                    <Collapsible
+                    <SmeltDisclosure
                       open={expanded() && Boolean(entry().body || entry().content)}
-                      reveal={true}
                       style={{ paddingHorizontal: 8, paddingVertical: 6 }}
                       content={
                         <Scroll style={{ maxHeight: 140, marginTop: 4, paddingLeft: 18 }}>
@@ -523,7 +522,7 @@ export function MemoryChangesCard(props: {
                           }}
                         />
                       </View>
-                    </Collapsible>
+                    </SmeltDisclosure>
                   );
                 }}
               </Each>

@@ -1,7 +1,7 @@
 // 输入栏工具弹层：模型与推理强度/配置弹层、能力（Skills/MCP）弹层、上下文用量弹层。
 import { computed, Scroll, signal, Text, View } from "nsh";
-import { Input, Popover, Switch } from "nsh/base";
-import { OVERLAY_MOTION_CLASS, popupMotion, SmeltButton, SmeltIcon, theme } from "smelt/sdk";
+import { Input, Switch } from "nsh/base";
+import { SmeltButton, SmeltIcon, SmeltPopover, theme } from "smelt/sdk";
 import { ct } from "./i18n.ts";
 import {
   buildVisibleModels,
@@ -59,7 +59,7 @@ export function ModelConfigPopover(props: {
   const pendingNotice = () => Boolean(props.hasPendingNotice?.());
 
   return (
-    <Popover
+    <SmeltPopover
       open={open()}
       onOpenChange={({ open: next }: any) => {
         open.set(Boolean(next));
@@ -68,8 +68,7 @@ export function ModelConfigPopover(props: {
       placement="top"
       align="start"
       offset={8}
-      popupClass={`rounded-xl border border-border bg-popover p-0 shadow-lg overflow-hidden ${OVERLAY_MOTION_CLASS}`}
-      {...popupMotion("top")}
+      popupClass="rounded-xl border border-border bg-popover p-0 shadow-lg overflow-hidden"
       popupStyle={{ width: 348 }}
       trigger={
         <SmeltButton
@@ -535,7 +534,7 @@ export function ModelConfigPopover(props: {
           </View>
         </If>
       </View>
-    </Popover>
+    </SmeltPopover>
   );
 }
 
@@ -551,14 +550,13 @@ export function CapabilitiesPopover(props: {
   const total = computed(() => (props.skills()?.length ?? 0) + (props.mcpServers()?.length ?? 0));
 
   return (
-    <Popover
+    <SmeltPopover
       open={open()}
       onOpenChange={({ open: next }: any) => open.set(Boolean(next))}
       placement="top"
       align="start"
       offset={8}
-      popupClass={`rounded-xl border border-border bg-popover p-0 shadow-lg overflow-hidden ${OVERLAY_MOTION_CLASS}`}
-      {...popupMotion("top")}
+      popupClass="rounded-xl border border-border bg-popover p-0 shadow-lg overflow-hidden"
       popupStyle={{ width: 320 }}
       trigger={
         <SmeltButton
@@ -709,7 +707,7 @@ export function CapabilitiesPopover(props: {
           </View>
         </If>
       </View>
-    </Popover>
+    </SmeltPopover>
   );
 }
 
@@ -758,14 +756,13 @@ export function UsagePopover(props: {
 
   return (
     <If when={props.compacting() || props.usage() != null}>
-      <Popover
+      <SmeltPopover
         open={open()}
         onOpenChange={({ open: next }: any) => open.set(Boolean(next))}
         placement="top"
         align="end"
         offset={8}
-        popupClass={`rounded-xl border border-border bg-popover p-3 shadow-lg ${OVERLAY_MOTION_CLASS}`}
-        {...popupMotion("top")}
+        popupClass="rounded-xl border border-border bg-popover p-3 shadow-lg"
         popupStyle={{ width: 280 }}
         trigger={
           <SmeltButton
@@ -905,7 +902,7 @@ export function UsagePopover(props: {
             </View>
           </If>
         </View>
-      </Popover>
+      </SmeltPopover>
     </If>
   );
 }

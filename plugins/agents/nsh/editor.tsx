@@ -1,12 +1,13 @@
 // 智能体编辑页：页头（返回/缩写/标题/页签分段/开始对话）、配置页签、自动化页签与记忆页签。
 
 import { cleanup, computed, Scroll, Text, View } from "nsh";
-import { Collapsible, Input, Submenu } from "nsh/base";
+import { Input, Submenu } from "nsh/base";
 import {
   locale,
   pathJoin,
   pathStyle,
   SmeltButton,
+  SmeltDisclosure,
   SmeltDisclosureChevron,
   SmeltIcon,
   t,
@@ -221,8 +222,6 @@ function ModelControl(props: {
         <Each of={groups()} key={(g: any) => String(g.provider)}>
           {(group: () => any) => (
             <Submenu
-              popupClass={POPUP_CLASS}
-              popupStyle={{ minWidth: 200, maxHeight: 360 }}
               trigger={
                 <View class={MENU_ITEM_CLASS} style={{ height: 28, gap: 8 }}>
                   <Text
@@ -1041,10 +1040,8 @@ function MemorySection(props: {
               };
 
               return (
-                <Collapsible
+                <SmeltDisclosure
                   open={isExpanded()}
-                  reveal={true}
-                  style={{ display: "flex", flexDirection: "column" }}
                   content={
                     <Scroll
                       style={{
@@ -1238,7 +1235,7 @@ function MemorySection(props: {
                       }}
                     />
                   </View>
-                </Collapsible>
+                </SmeltDisclosure>
               );
             }}
           </Each>

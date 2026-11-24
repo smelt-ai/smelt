@@ -1,12 +1,14 @@
 // 技能插件（smelt.skills）：通过目标机器 smeltd 的 `skills.*` 控制 RPC 扫描与管理技能，
 // 桌面与远程机器行为一致，UI 进程不直接碰本地磁盘。
 import { computed, Scroll, signal, Text, View } from "nsh";
-import { Button as BaseButton, Collapsible, Dialog, Input } from "nsh/base";
+import { Button as BaseButton, Input } from "nsh/base";
 import { Menu } from "nsh/desktop";
 import {
   activeContext,
   bootTask,
   call,
+  currentTheme,
+  DIALOG_SURFACE_CLASS,
   initHost,
   machineMetaEntry,
   onEvent,
@@ -15,11 +17,11 @@ import {
   revealPath,
   run,
   SmeltButton,
+  SmeltDialog,
+  SmeltDisclosure,
   SmeltIcon,
   stableMemo,
   t,
-  currentTheme,
-  DIALOG_SURFACE_CLASS,
   text,
   viewShown,
 } from "smelt/sdk";
@@ -815,12 +817,10 @@ function ImportDialog() {
   );
 
   return (
-    <Dialog
+    <SmeltDialog
       open={importing()}
       role="dialog"
-      animation="fade"
       accessibilityLabel={t("import.title")}
-      backdropClass="bg-black/40"
       onOpenChange={({ open }: { open: boolean }) => {
         if (!open && !importPicking() && !importSubmitting()) closeImportDialog();
       }}
@@ -1036,7 +1036,7 @@ function ImportDialog() {
           </View>
         </View>
       </If>
-    </Dialog>
+    </SmeltDialog>
   );
 }
 
@@ -1075,10 +1075,8 @@ function SkillRow(props: { skill: any }) {
   const isLocal = computed(() => targetContext().machine === null);
 
   return (
-    <Collapsible
+    <SmeltDisclosure
       open={open()}
-      reveal={true}
-      style={{ display: "flex", flexDirection: "column" }}
       content={
         <View
           style={{
@@ -1404,7 +1402,7 @@ function SkillRow(props: { skill: any }) {
           <BadgePill label={summary().label} tone={summary().tone as any} />
         </If>
       </BaseButton>
-    </Collapsible>
+    </SmeltDisclosure>
   );
 }
 
@@ -1694,12 +1692,10 @@ export function main() {
       <ImportDialog />
 
       {/* 删除确认框 */}
-      <Dialog
+      <SmeltDialog
         open={deleteDialog() != null}
         role="alertdialog"
-        animation="fade"
         accessibilityLabel={t("delete.title", { name: deleteDialog()?.name ?? "" })}
-        backdropClass="bg-black/40"
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) deleteDialog.set(null);
         }}
@@ -1744,19 +1740,17 @@ export function main() {
             />
           </View>
         </If>
-      </Dialog>
+      </SmeltDialog>
 
       {/* 清理失效链接确认框 */}
-      <Dialog
+      <SmeltDialog
         open={pruneDialogOpen()}
         role="alertdialog"
-        animation="fade"
         accessibilityLabel={
           scanData().broken.length === 1
             ? t("broken.confirm_title.one")
             : t("broken.confirm_title.other", { count: scanData().broken.length })
         }
-        backdropClass="bg-black/40"
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) pruneDialogOpen.set(false);
         }}
@@ -1802,7 +1796,7 @@ export function main() {
             />
           </View>
         </If>
-      </Dialog>
+      </SmeltDialog>
     </View>
   );
 }

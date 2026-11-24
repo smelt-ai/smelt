@@ -1,17 +1,17 @@
-// 会话列表的菜单与确认框：使用 NSH 内置 Menu / MenuItem / MenuSeparator / Submenu / Dialog / Tooltip，
+// 会话列表的菜单与确认框：Smelt 的菜单、对话框、提示（`smelt/sdk`）加 NSH 的 MenuItem / MenuSeparator / Submenu，
 // 外观跟着宿主主题走，零硬编码颜色。
 
 import { Image, signal, Text, View } from "nsh";
-import { Dialog, Menu, MenuItem, MenuSeparator, Submenu, Tooltip } from "nsh/base";
+import { MenuItem, MenuSeparator, Submenu } from "nsh/base";
 import {
   DIALOG_SURFACE_CLASS,
   MENU_ITEM_CLASS,
   POPUP_CLASS,
-  popupMotion,
   SmeltButton,
+  SmeltDialog,
   SmeltIcon,
-  TOOLTIP_CLASS,
-  TOOLTIP_MOTION,
+  SmeltMenu,
+  SmeltTooltip,
 } from "smelt/sdk";
 export { MENU_ITEM_CLASS, POPUP_CLASS };
 
@@ -39,7 +39,7 @@ export interface ConfirmRequest {
 export function Tip(props: { text: string }) {
   const look = () => theme();
   return (
-    <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
+    <SmeltTooltip>
       <Text
         style={{
           color: look().palette.text,
@@ -49,7 +49,7 @@ export function Tip(props: { text: string }) {
       >
         {props.text}
       </Text>
-    </Tooltip>
+    </SmeltTooltip>
   );
 }
 
@@ -152,8 +152,6 @@ export function ContributedMenuItems(props: {
         {(item: () => ContributedMenuItem) =>
           item().submenu && item().submenu!.length > 0 ? (
             <Submenu
-              popupClass={POPUP_CLASS}
-              popupStyle={{ minWidth: 168 }}
               trigger={
                 <View class={MENU_ITEM_CLASS} style={{ height: 28, gap: space(2) }}>
                   {item().image ? (
@@ -261,8 +259,6 @@ export function MachinesMenuEntries(props: {
       <Each of={props.groups} key={(g: MachineMenuGroup) => g.machine ?? "local"}>
         {(g: () => MachineMenuGroup) => (
           <Submenu
-            popupClass={POPUP_CLASS}
-            popupStyle={{ minWidth: 168 }}
             trigger={
               <View class={MENU_ITEM_CLASS} style={{ height: 28, gap: space(2) }}>
                 <View style={{ width: 14, height: 14, flexShrink: 0 }}>
@@ -322,11 +318,9 @@ export function GroupingMenu(props: { onOpenChange?: (open: boolean) => void }) 
   const active = () => grouping() !== "project" || hideEmpty() || byMachine();
 
   return (
-    <Menu
+    <SmeltMenu
       placement="bottom"
       align="end"
-      popupClass={POPUP_CLASS}
-      {...popupMotion("bottom")}
       popupStyle={{ minWidth: 176 }}
       onOpenChange={({ open: next }) => {
         open.set(next);
@@ -388,7 +382,7 @@ export function GroupingMenu(props: { onOpenChange?: (open: boolean) => void }) 
           />
         </>
       ) : null}
-    </Menu>
+    </SmeltMenu>
   );
 }
 
@@ -400,13 +394,11 @@ export function ConfirmDialog(props: {
   const look = () => theme();
   const req = props.request;
   return (
-    <Dialog
+    <SmeltDialog
       open={req() != null}
       role="alertdialog"
-      animation="fade"
       accessibilityLabel={req()?.title ?? ""}
       accessibilityDescription={req()?.description ?? ""}
-      backdropClass="bg-black/40"
       onOpenChange={({ open }) => {
         if (!open) props.onDismiss();
       }}
@@ -457,6 +449,6 @@ export function ConfirmDialog(props: {
           </View>
         </>
       ) : null}
-    </Dialog>
+    </SmeltDialog>
   );
 }

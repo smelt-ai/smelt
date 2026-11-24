@@ -1,8 +1,7 @@
 // 设置「通用 → 会话列表」（NSH A2 版）：行首显示 3D 小人头像或图标。
 
 import { computed, Scroll, Text, View } from "nsh";
-import { Select } from "nsh/base";
-import { OVERLAY_MOTION_CLASS, popupMotion, SmeltIcon } from "smelt/sdk";
+import { SmeltIcon, SmeltSelect } from "smelt/sdk";
 
 import { show_buddy_avatar } from "../model.js";
 import { icon } from "../util.js";
@@ -75,7 +74,7 @@ export function SessionListSettings() {
             </Text>
           </View>
 
-          <Select
+          <SmeltSelect
             items={options()}
             value={currentValue()}
             accessibilityLabel={t("settings.avatar")}
@@ -83,8 +82,7 @@ export function SessionListSettings() {
               if (!value) return;
               list.set_avatar(value === ICON ? { kind: "icon" } : { kind: "unset" });
             }}
-            popupClass={`rounded-(--radius) border border-border bg-popover p-1 ${OVERLAY_MOTION_CLASS}`}
-            {...popupMotion("bottom")}
+            popupClass="rounded-(--radius) border border-border bg-popover p-1"
             itemClass="flex-row items-center rounded-(--radius) px-2 py-1 text-sm hover:bg-accent focus:bg-accent"
             trigger={
               <View

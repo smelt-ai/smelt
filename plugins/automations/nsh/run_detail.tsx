@@ -1,9 +1,9 @@
 // 选中运行的右侧详情页：支持挂载实时对话现场，以及落库结果、执行过程（含真实 SmeltDiffView）、输入与元数据。
 import { computed, Scroll, Text, View } from "nsh";
-import { Collapsible } from "nsh/base";
 import {
   SmeltButton,
   SmeltDiffView,
+  SmeltDisclosure,
   SmeltDisclosureChevron,
   SmeltIcon,
   SmeltMarkdown,
@@ -63,10 +63,9 @@ function DetailDisclosure(props: {
 }) {
   const look = currentTheme;
   return (
-    <Collapsible
+    <SmeltDisclosure
       open={props.expanded}
-      reveal={true}
-      style={{ width: "100%", display: "flex", flexDirection: "column" }}
+      style={{ width: "100%" }}
       content={<View style={{ width: "100%", paddingTop: 8 }}>{props.children}</View>}
     >
       <RowItem
@@ -105,7 +104,7 @@ function DetailDisclosure(props: {
           </Text>
         </If>
       </RowItem>
-    </Collapsible>
+    </SmeltDisclosure>
   );
 }
 
@@ -294,10 +293,9 @@ function TranscriptStep(props: {
     props.flag === "failed" ? look().palette.bad : look().palette.faint;
 
   return (
-    <Collapsible
+    <SmeltDisclosure
       open={props.expandable && props.expanded}
-      reveal={true}
-      style={{ width: "100%", display: "flex", flexDirection: "column" }}
+      style={{ width: "100%" }}
       content={
         <View
           style={{
@@ -357,7 +355,7 @@ function TranscriptStep(props: {
           <SmeltDisclosureChevron open={props.expanded} size={12} color={look().palette.faint} />
         </If>
       </RowItem>
-    </Collapsible>
+    </SmeltDisclosure>
   );
 }
 

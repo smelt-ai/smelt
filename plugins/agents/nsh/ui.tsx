@@ -2,24 +2,21 @@
 
 import { signal, Text, View } from "nsh";
 import {
-  Dialog,
-  Menu,
   MenuItem,
   MenuSeparator,
   Switch,
-  Tooltip,
 } from "nsh/base";
 import {
   DIALOG_SURFACE_CLASS,
   INPUT_CLASS,
   MENU_ITEM_CLASS,
   POPUP_CLASS,
-  popupMotion,
   SmeltButton,
+  SmeltDialog,
   SmeltIcon,
+  SmeltMenu,
+  SmeltTooltip,
   t,
-  TOOLTIP_CLASS,
-  TOOLTIP_MOTION,
 } from "smelt/sdk";
 export { INPUT_CLASS, MENU_ITEM_CLASS, POPUP_CLASS };
 
@@ -29,7 +26,7 @@ import { ConfirmRequest, currentTheme, findEngineMeta } from "./state.ts";
 export function Tip(props: { text: string }) {
   const look = currentTheme;
   return (
-    <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
+    <SmeltTooltip>
       <Text
         style={{
           color: look().palette.text,
@@ -39,7 +36,7 @@ export function Tip(props: { text: string }) {
       >
         {props.text}
       </Text>
-    </Tooltip>
+    </SmeltTooltip>
   );
 }
 
@@ -366,11 +363,9 @@ export function DropdownButton(props: {
     return look().palette.button_secondary?.[0] ?? look().palette.soft;
   };
   return (
-    <Menu
+    <SmeltMenu
       placement="bottom"
       align={props.align ?? "start"}
-      popupClass={POPUP_CLASS}
-      {...popupMotion("bottom")}
       popupStyle={{ minWidth: props.minWidth ?? 168 }}
       onOpenChange={({ open: next }: { open: boolean }) => open.set(Boolean(next))}
       trigger={
@@ -430,7 +425,7 @@ export function DropdownButton(props: {
       }
     >
       {props.children}
-    </Menu>
+    </SmeltMenu>
   );
 }
 
@@ -514,13 +509,11 @@ export function ConfirmDialog(props: {
   const look = currentTheme;
   const req = props.request;
   return (
-    <Dialog
+    <SmeltDialog
       open={req() != null}
       role="alertdialog"
-      animation="fade"
       accessibilityLabel={req()?.title ?? ""}
       accessibilityDescription={req()?.description ?? ""}
-      backdropClass="bg-black/40"
       onOpenChange={({ open }: { open: boolean }) => {
         if (!open) props.onDismiss();
       }}
@@ -577,6 +570,6 @@ export function ConfirmDialog(props: {
           />
         </View>
       </If>
-    </Dialog>
+    </SmeltDialog>
   );
 }

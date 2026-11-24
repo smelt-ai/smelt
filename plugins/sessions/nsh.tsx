@@ -5,7 +5,7 @@
 // - 分屏重构时通过 `smelt.view` 的 `reuseKey` 同帧接管活体 `ViewInstance`，分屏/关格不丢输入草稿与滚动位置；
 // - 等待一律事件驱动（目录版本号比对 + 宿主状态推送），无轮询定时器。
 import { computed, signal, Text, View } from "nsh";
-import { Dialog, ResizablePanel, ResizablePanelGroup } from "nsh/base";
+import { ResizablePanel, ResizablePanelGroup } from "nsh/base";
 import {
   bootTask,
   call,
@@ -13,7 +13,9 @@ import {
   command,
   connections,
   conversationFacts,
+  currentTheme,
   daemonStateStatus,
+  DIALOG_SURFACE_CLASS,
   emitEvent,
   initHost,
   machineMeta,
@@ -39,6 +41,7 @@ import {
   sessionStates,
   setActiveContext,
   SmeltButton,
+  SmeltDialog,
   SmeltIcon,
   SmeltNativeWindowDrag,
   SmeltWindowBar,
@@ -46,8 +49,6 @@ import {
   store,
   t,
   text,
-  currentTheme,
-  DIALOG_SURFACE_CLASS,
   viewShown,
   workspaceDirectory,
 } from "smelt/sdk";
@@ -1874,12 +1875,10 @@ export function root() {
   const look = currentTheme;
   return (
     <View style={{ width: 0, height: 0, overflow: "hidden" }}>
-      <Dialog
+      <SmeltDialog
         open={closeConfirm() != null}
         role="alertdialog"
-        animation="fade"
         accessibilityLabel={closeConfirm()?.question ?? ""}
-        backdropClass="bg-black/40"
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) closeConfirm.set(null);
         }}
@@ -1924,7 +1923,7 @@ export function root() {
             />
           </View>
         </If>
-      </Dialog>
+      </SmeltDialog>
     </View>
   );
 }

@@ -1,7 +1,6 @@
 // 通用 `<SmeltConversation>` 能力组件（通过 `import { SmeltConversation } from "smelt/sdk"` 供所有插件直接嵌入）。
 // 零跨 VM 插槽跳转，零 Rust UI 视图；直接对接宿主纯非 UI ACP 订阅中心 `acp.*` 与 `mermaid.render`。
 import { cleanup, computed, effect, Image, signal, Text, View } from "nsh";
-import { Dialog } from "nsh/base";
 import {
   acpAction,
   acpHistory,
@@ -16,6 +15,7 @@ import {
   newSessionId,
   onAcpEvent,
   SmeltButton,
+  SmeltDialog,
   SmeltIcon,
   SmeltNativeWindowDrag,
   theme,
@@ -1213,9 +1213,8 @@ export function SmeltConversation(props: SmeltConversationProps) {
       <EditDiffDialog dialog={diffDialog} onClose={() => diffDialog.set(null)} />
 
       {/* 大图预览弹窗 */}
-      <Dialog
+      <SmeltDialog
         open={imagePreview() != null}
-        animation="fade"
         backdropClass="bg-black/65"
         onOpenChange={({ open }: any) => {
           if (!open) imagePreview.set(null);
@@ -1248,7 +1247,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
             </View>
           </View>
         </If>
-      </Dialog>
+      </SmeltDialog>
     </View>
   );
 }

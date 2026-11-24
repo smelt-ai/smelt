@@ -1,8 +1,7 @@
 // 智能体目录页：页头工具行、默认智能体选择器、新建菜单、选默认提示条、按机器分组列表与空状态。
 
 import { computed, Scroll, Text, View } from "nsh";
-import { ContextMenu } from "nsh/base";
-import { CONTEXT_MENU_MOTION, locale, SmeltButton, SmeltIcon, t } from "smelt/sdk";
+import { locale, SmeltButton, SmeltContextMenu, SmeltIcon, t } from "smelt/sdk";
 
 import {
   agentCardPrompt,
@@ -260,9 +259,7 @@ function AgentCatalogRow(props: { machine: string | null; agent: () => any }) {
   };
 
   return (
-    <ContextMenu
-      popupClass={POPUP_CLASS}
-      {...CONTEXT_MENU_MOTION}
+    <SmeltContextMenu
       popupStyle={{ minWidth: 184 }}
       trigger={
         <View
@@ -362,7 +359,7 @@ function AgentCatalogRow(props: { machine: string | null; agent: () => any }) {
         disabled={autoCount() !== 0}
         onSelect={() => requestDeleteAgent(ref())}
       />
-    </ContextMenu>
+    </SmeltContextMenu>
   );
 }
 

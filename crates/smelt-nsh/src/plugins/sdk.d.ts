@@ -1,5 +1,6 @@
 import type { Signal } from "../nsh/index";
 import type { JSX, StyleProp, TextStyle, ViewStyle } from "../nsh/types";
+import type { Collapsible, ContextMenu, Dialog, Menu, Popover, Select, Tooltip } from "../nsh/base";
 
 export type LocalizedText = string | Record<string, string>;
 
@@ -621,6 +622,10 @@ export declare function SmeltIcon(props: {
   testID?: string;
 }): JSX.Element;
 
+/** 展开收起：`nsh/base` 的 `Collapsible` 带上 Smelt 的展开动效（`disclosure` 弹簧）。标题和内容的间距写成内容的上内边距。 */
+export declare function SmeltDisclosure(
+  props: Omit<Parameters<typeof Collapsible>[0], "reveal" | "revealSpring">,
+): JSX.Element;
 export declare function SmeltDisclosureChevron(props: {
   open: boolean;
   size?: number;
@@ -655,19 +660,29 @@ export interface SmeltButtonProps {
   children?: JSX.Element;
 }
 
-export type OverlaySide = "top" | "bottom" | "left" | "right";
-export declare const OVERLAY_MOTION_CLASS: string;
-export declare function popupMotion(side?: OverlaySide): {
-  popupStartingClass: string;
-  popupEndingClass: string;
-};
-export declare const CONTEXT_MENU_MOTION: { popupStartingClass: string; popupEndingClass: string };
-export declare const TOOLTIP_MOTION: { startingClass: string; endingClass: string };
 export declare const POPUP_CLASS: string;
 export declare const TOOLTIP_CLASS: string;
+/** Smelt 的浮层：`nsh/base` 的同名组件带上 Smelt 的样子（`popupClass` / `class` 换掉默认样子）和进出动效。 */
+export declare function SmeltPopover(
+  props: Omit<Parameters<typeof Popover>[0], "popupStartingClass" | "popupEndingClass">,
+): JSX.Element;
+export declare function SmeltMenu(
+  props: Omit<Parameters<typeof Menu>[0], "popupStartingClass" | "popupEndingClass">,
+): JSX.Element;
+export declare function SmeltContextMenu(
+  props: Omit<Parameters<typeof ContextMenu>[0], "popupStartingClass" | "popupEndingClass">,
+): JSX.Element;
+export declare function SmeltSelect(
+  props: Omit<Parameters<typeof Select>[0], "popupStartingClass" | "popupEndingClass">,
+): JSX.Element;
+export declare function SmeltTooltip(
+  props: Omit<Parameters<typeof Tooltip>[0], "startingClass" | "endingClass">,
+): JSX.Element;
 export declare const MENU_ITEM_CLASS: string;
 export declare const INPUT_CLASS: string;
 export declare const DIALOG_SURFACE_CLASS: string;
+/** 对话框：`nsh/base` 的 `Dialog` 带上 Smelt 的进出（淡入淡出）和遮罩；`backdropClass` 换掉默认遮罩。 */
+export declare function SmeltDialog(props: Omit<Parameters<typeof Dialog>[0], "animation">): JSX.Element;
 
 export declare function SmeltButton(props: SmeltButtonProps): JSX.Element;
 export declare function SmeltWindowBar(props: { view: string }): JSX.Element;

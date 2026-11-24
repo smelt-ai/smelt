@@ -15,9 +15,14 @@ import {
 } from "nsh";
 import {
   Button as BaseButton,
+  Collapsible,
+  ContextMenu,
   Dialog,
   DiffView as BaseDiffView,
   Editor as BaseEditor,
+  Menu,
+  Popover,
+  Select,
   TextView,
   Tooltip,
 } from "nsh/base";
@@ -1509,10 +1514,19 @@ export function SmeltIcon(props: {
   );
 }
 
+// 展开收起（docs/ui-design-language.md「动效」disclosure 档）：300ms 临界阻尼弹簧，同 Rust 的
+// `kit::MOTION.disclosure`（`Spring::new(300ms)`：刚度 (2π/0.3)²、阻尼 2·2π/0.3）。
+const DISCLOSURE_SPRING = { stiffness: 438.6, damping: 41.9 };
+
 /**
- * 展开收起的指示箭头：收起时朝右，展开时转到朝下，跟着转过去（会话列表同一手感）。
- * 配 `nsh/base` 的 `<Collapsible reveal>` 用，内容跟着展开。
+ * 展开收起：`nsh/base` 的 `Collapsible` 带上 Smelt 的展开动效，内容区高度按 `disclosure` 弹簧弹开弹收，
+ * 下面的东西跟着挪。收起时内容区零高、仍在布局里，标题和内容之间的距离写成内容的上内边距，别用 `gap`。
  */
+export function SmeltDisclosure(props: any) {
+  return <Collapsible {...props} reveal revealSpring={DISCLOSURE_SPRING} />;
+}
+
+/** 展开收起的指示箭头：收起时朝右，展开时转到朝下，和内容同一时长转过去。配 `SmeltDisclosure` 用。 */
 export function SmeltDisclosureChevron(props: {
   open: boolean;
   size?: number;
@@ -1527,7 +1541,7 @@ export function SmeltDisclosureChevron(props: {
       color={props.color}
       opacity={props.opacity}
       testID={props.testID}
-      class="transition-transform duration-150"
+      class="transition-transform duration-[300ms] ease-[cubic-bezier(0.32,0.72,0,1)]"
       rotate={props.open ? 90 : 0}
     />
   );
@@ -1561,41 +1575,95 @@ export interface SmeltButtonProps {
 
 // ---- 共享 NSH 原生 Tailwind 浮层样式（全插件统一质感，零 JS 闭包、引擎侧直接解析） ----
 
-// 浮层进出（docs/ui-design-language.md「动效」）：入场 240ms、ease_snap 曲线淡入；出场 120ms 淡出，
-// 比入场短，关掉的东西不该拖着。过渡写在浮层自己的 class 上，进出场的样子由组件的
-// `popupStartingClass` / `popupEndingClass`（提示是 `startingClass` / `endingClass`）给。
-export const OVERLAY_MOTION_CLASS =
-  "transition-[opacity,transform] duration-[240ms] ease-[cubic-bezier(0.32,0.72,0,1)]";
-const OVERLAY_EXIT_CLASS = "opacity-0 duration-[120ms] ease-in";
-const OVERLAY_FROM: Record<OverlaySide, string> = {
-  bottom: "-translate-y-1",
-  top: "translate-y-1",
-  right: "-translate-x-1",
-  left: "translate-x-1",
-};
-export type OverlaySide = "top" | "bottom" | "left" | "right";
+/** 弹出卡片、下拉菜单、选择框的样子：圆角、描边、浮起阴影。传给 `SmeltPopover` 等的 `popupClass` 换掉的就是它。 */
+export const POPUP_CLASS = "rounded-lg border border-border bg-popover p-1 shadow-lg";
+/** 提示的样子。 */
+export const TOOLTIP_CLASS = "rounded-(--radius) border border-border bg-popover px-2 py-1 shadow-md";
 
-/**
- * 弹出卡片、下拉菜单、选择框的进出：淡入，同时从触发点那一侧挪 4px 到位，交代它从哪弹出来；
- * 关掉淡出。`side` 是浮层在触发点的哪一侧，即组件的 `placement`（默认下方）。放不下翻边时
- * 仍按声明的那侧挪：位置要等布局后才知道，入场样子得在第一帧就定。
- */
-export function popupMotion(side: OverlaySide = "bottom") {
-  return { popupStartingClass: `opacity-0 ${OVERLAY_FROM[side]}`, popupEndingClass: OVERLAY_EXIT_CLASS };
+// 浮层进出（docs/ui-design-language.md「动效」overlay 档）：入场 240ms、ease_snap 曲线；出场 120ms
+// 淡出，比入场短，关掉的东西不该拖着。进出是浮层组件自己的行为，调用处只管样子。
+const OVERLAY_TRANSITION =
+  "transition-[opacity,transform] duration-[240ms] ease-[cubic-bezier(0.32,0.72,0,1)]";
+const OVERLAY_EXIT = "opacity-0 duration-[120ms] ease-in";
+// 从触发点那一侧挪 4px 到位：按浮层实际落下的那一侧（NSH 的 `data-side`，第一帧前就定了），翻边也对。
+const FROM_TRIGGER =
+  "opacity-0 data-[side=bottom]:-translate-y-1 data-[side=top]:translate-y-1 " +
+  "data-[side=right]:-translate-x-1 data-[side=left]:translate-x-1";
+// 右键菜单贴着指针、提示跟着指针，没有可靠的「从哪来」，只淡入。
+const FADE_IN = "opacity-0";
+
+const overlayClass = (look: string | undefined, fallback: string) =>
+  `${look ?? fallback} ${OVERLAY_TRANSITION}`;
+
+/** 弹出卡片：`nsh/base` 的 `Popover` 带上 Smelt 的样子和进出动效。 */
+export function SmeltPopover(props: any) {
+  return (
+    <Popover
+      {...props}
+      popupClass={overlayClass(props.popupClass, POPUP_CLASS)}
+      popupStartingClass={FROM_TRIGGER}
+      popupEndingClass={OVERLAY_EXIT}
+    />
+  );
 }
 
-/** 右键菜单的进出：只淡入淡出不挪，放不下会翻边，没有可靠的「从哪来」。 */
-export const CONTEXT_MENU_MOTION = { popupStartingClass: "opacity-0", popupEndingClass: OVERLAY_EXIT_CLASS };
+/** 下拉菜单：`nsh/base` 的 `Menu` 带上 Smelt 的样子和进出动效；子菜单（`Submenu`）跟着它。 */
+export function SmeltMenu(props: any) {
+  return (
+    <Menu
+      {...props}
+      popupClass={overlayClass(props.popupClass, POPUP_CLASS)}
+      popupStartingClass={FROM_TRIGGER}
+      popupEndingClass={OVERLAY_EXIT}
+    />
+  );
+}
 
-/** 提示的进出：只淡入淡出不挪，它贴着指针。 */
-export const TOOLTIP_MOTION = { startingClass: "opacity-0", endingClass: OVERLAY_EXIT_CLASS };
+/** 右键菜单：只淡入淡出。 */
+export function SmeltContextMenu(props: any) {
+  return (
+    <ContextMenu
+      {...props}
+      popupClass={overlayClass(props.popupClass, POPUP_CLASS)}
+      popupStartingClass={FADE_IN}
+      popupEndingClass={OVERLAY_EXIT}
+    />
+  );
+}
 
-export const POPUP_CLASS = `rounded-lg border border-border bg-popover p-1 shadow-lg ${OVERLAY_MOTION_CLASS}`;
-export const TOOLTIP_CLASS = `rounded-(--radius) border border-border bg-popover px-2 py-1 shadow-md ${OVERLAY_MOTION_CLASS}`;
+/** 选择框：下拉列表同弹出卡片。 */
+export function SmeltSelect(props: any) {
+  return (
+    <Select
+      {...props}
+      popupClass={overlayClass(props.popupClass, POPUP_CLASS)}
+      popupStartingClass={FROM_TRIGGER}
+      popupEndingClass={OVERLAY_EXIT}
+    />
+  );
+}
+
+/** 提示：只淡入淡出。 */
+export function SmeltTooltip(props: any) {
+  return (
+    <Tooltip
+      {...props}
+      class={overlayClass(props.class, TOOLTIP_CLASS)}
+      startingClass={FADE_IN}
+      endingClass={OVERLAY_EXIT}
+    />
+  );
+}
+
 export const MENU_ITEM_CLASS =
   "flex-row items-center rounded-(--radius) px-2 hover:bg-accent focus:bg-accent";
 export const INPUT_CLASS = "rounded-(--radius) border border-input bg-card px-2 text-foreground";
 export const DIALOG_SURFACE_CLASS = "rounded-xl border border-border bg-popover shadow-xl";
+
+/** 对话框：`nsh/base` 的 `Dialog` 带上 Smelt 的进出（淡入淡出）和遮罩；`backdropClass` 换掉默认遮罩。 */
+export function SmeltDialog(props: any) {
+  return <Dialog {...props} animation="fade" backdropClass={props.backdropClass ?? "bg-black/40"} />;
+}
 
 /** 统一纯 JS/NSH 按钮（建在 `nsh/base <Button>` 上）：无 `BlockMouse` 悬停断层，完整遵循宿主主题色阶。 */
 export function SmeltButton(props: SmeltButtonProps) {
@@ -1764,14 +1832,14 @@ export function SmeltButton(props: SmeltButtonProps) {
       }}
       tooltip={
         hasTooltip() ? (
-          <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
+          <SmeltTooltip>
             <View class="flex-row items-center gap-1.5">
               <Text class="text-xs text-foreground">{props.tooltip}</Text>
               <If when={shortcut() != null}>
                 <Text class="text-xs text-muted-foreground">{shortcut() ?? ""}</Text>
               </If>
             </View>
-          </Tooltip>
+          </SmeltTooltip>
         ) : undefined
       }
       style={{
@@ -1952,9 +2020,8 @@ function MermaidDiagramBlock(props: { source: string }) {
               }}
             />
           </View>
-          <Dialog
+          <SmeltDialog
             open={previewOpen()}
-            animation="fade"
             backdropClass="bg-black/65"
             onOpenChange={({ open }: any) => previewOpen.set(Boolean(open))}
             class="m-auto"
@@ -1975,7 +2042,7 @@ function MermaidDiagramBlock(props: { source: string }) {
                 />
               </View>
             </If>
-          </Dialog>
+          </SmeltDialog>
         </If>
       </If>
     </View>

@@ -1,7 +1,6 @@
 // 自动化下钻头、左侧运行列表与任务表单编辑器。
 import { computed, Scroll, Text, View } from "nsh";
-import { Menu } from "nsh/base";
-import { isManagedAutomationWorkspace, pathStyle, popupMotion, SmeltButton, SmeltIcon, t } from "smelt/sdk";
+import { isManagedAutomationWorkspace, pathStyle, SmeltButton, SmeltIcon, SmeltMenu, t } from "smelt/sdk";
 import {
   actionKindLabel,
   automationAccessNote,
@@ -237,11 +236,9 @@ export function DrillHeader() {
                 onPress={() => void runOnceFromEditor()}
               />
 
-              <Menu
+              <SmeltMenu
                 placement="bottom"
                 align="end"
-                popupClass={POPUP_CLASS}
-                {...popupMotion("bottom")}
                 popupStyle={{ minWidth: 168 }}
                 trigger={
                   <View
@@ -273,7 +270,7 @@ export function DrillHeader() {
                     }
                   }}
                 />
-              </Menu>
+              </SmeltMenu>
             </View>
           }
         >
@@ -828,11 +825,9 @@ function AddTriggerButton() {
   const advancedPresets = BUILTIN_AUTOMATION_TRIGGER_PRESETS.filter((p) => triggerPresetIsAdvanced(p));
 
   return (
-    <Menu
+    <SmeltMenu
       placement="bottom"
       align="start"
-      popupClass={POPUP_CLASS}
-      {...popupMotion("bottom")}
       popupStyle={{ minWidth: 220 }}
       trigger={
         <View
@@ -887,7 +882,7 @@ function AddTriggerButton() {
           )}
         </Each>
       </If>
-    </Menu>
+    </SmeltMenu>
   );
 }
 
@@ -1031,11 +1026,9 @@ export function EditorForm(props: { editor: EditorState }) {
                   </If>
                 }
               >
-                <Menu
+                <SmeltMenu
                   placement="bottom"
                   align="end"
-                  popupClass={POPUP_CLASS}
-                  {...popupMotion("bottom")}
                   popupStyle={{ minWidth: 168 }}
                   trigger={
                     <View
@@ -1077,7 +1070,7 @@ export function EditorForm(props: { editor: EditorState }) {
                       />
                     )}
                   </Each>
-                </Menu>
+                </SmeltMenu>
               </If>
             </If>
           </View>

@@ -1,6 +1,6 @@
 // 历史会话（NSH A2 独立 VM 版本）：复用纯逻辑 model.js 与 Rust 一等 <TextView>（SmeltMarkdown）。
 import { computed, Scroll, signal, Text, View } from "nsh";
-import { ContextMenu, Dialog, Input, MenuItem, MenuSeparator, Submenu } from "nsh/base";
+import { Input, MenuItem, MenuSeparator, Submenu } from "nsh/base";
 import {
   activeContext,
   agentCatalog,
@@ -9,7 +9,6 @@ import {
   call,
   clipboardWrite,
   command,
-  CONTEXT_MENU_MOTION,
   currentTheme,
   DIALOG_SURFACE_CLASS,
   handoffPrompt,
@@ -20,12 +19,13 @@ import {
   MENU_ITEM_CLASS,
   onEvent,
   onSlices,
-  POPUP_CLASS,
   registerTopics,
   registerViews,
   request,
   run,
   SmeltButton,
+  SmeltContextMenu,
+  SmeltDialog,
   SmeltIcon,
   SmeltMarkdown,
   stableMemo,
@@ -1258,9 +1258,7 @@ export function Main() {
                           );
                           return (
                             <View style={{ paddingLeft: 8, paddingRight: 8, paddingBottom: 4 }}>
-                              <ContextMenu
-                                popupClass={POPUP_CLASS}
-                                {...CONTEXT_MENU_MOTION}
+                              <SmeltContextMenu
                                 popupStyle={{ minWidth: 184 }}
                                 trigger={
                                   <View
@@ -1325,8 +1323,6 @@ export function Main() {
                                   />
                                   <If when={sourceMeta().acp_id != null && handoffList().length > 0}>
                                     <Submenu
-                                      popupClass={POPUP_CLASS}
-                                      popupStyle={{ minWidth: 168 }}
                                       trigger={
                                         <View
                                           class={MENU_ITEM_CLASS}
@@ -1399,7 +1395,7 @@ export function Main() {
                                     }
                                   />
                                 </If>
-                              </ContextMenu>
+                              </SmeltContextMenu>
                             </View>
                           );
                         }}
@@ -1414,12 +1410,10 @@ export function Main() {
       </If>
 
       {/* 重命名框 */}
-      <Dialog
+      <SmeltDialog
         open={renameDialog() != null}
         role="dialog"
-        animation="fade"
         accessibilityLabel={t("rename")}
-        backdropClass="bg-black/40"
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) renameDialog.set(null);
         }}
@@ -1460,15 +1454,13 @@ export function Main() {
             />
           </View>
         </If>
-      </Dialog>
+      </SmeltDialog>
 
       {/* 删除确认框 */}
-      <Dialog
+      <SmeltDialog
         open={deleteDialog() != null}
         role="alertdialog"
-        animation="fade"
         accessibilityLabel={t("delete.confirm")}
-        backdropClass="bg-black/40"
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) deleteDialog.set(null);
         }}
@@ -1512,7 +1504,7 @@ export function Main() {
             />
           </View>
         </If>
-      </Dialog>
+      </SmeltDialog>
     </View>
   );
 }

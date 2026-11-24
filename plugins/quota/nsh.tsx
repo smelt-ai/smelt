@@ -1,25 +1,23 @@
 // 账户额度（NSH A2 独立 VM 版本）：复用纯逻辑 model.js 与 contract.js，使用 NSH <Canvas> 画抗锯齿额度环。
 import { Canvas, computed, Scroll, signal, Text, View } from "nsh";
-import { Popover, Switch, Tooltip } from "nsh/base";
+import { Switch } from "nsh/base";
 import {
   bootTask,
   call,
   initHost,
   locale,
   onEvent,
-  OVERLAY_MOTION_CLASS,
-  popupMotion,
   quotaFacts,
   quotaTarget,
   registerViews,
   safeArea,
   SmeltButton,
   SmeltIcon,
+  SmeltPopover,
+  SmeltTooltip,
   t,
   text,
   theme,
-  TOOLTIP_CLASS,
-  TOOLTIP_MOTION,
   viewShown,
   waitOnline,
 } from "smelt/sdk";
@@ -259,15 +257,14 @@ export function bar() {
       }}
     >
       <If when={data().rows.length > 0}>
-        <Popover
+        <SmeltPopover
           open={popoverOpen()}
           onOpenChange={({ open }: any) => popoverOpen.set(Boolean(open))}
           placement="top"
           align="end"
           offset={6}
           style={{ minWidth: 0, flexShrink: 1, maxWidth: "100%" }}
-          popupClass={`rounded-xl border border-border bg-popover p-1 shadow-lg ${OVERLAY_MOTION_CLASS}`}
-          {...popupMotion("top")}
+          popupClass="rounded-xl border border-border bg-popover p-1 shadow-lg"
           popupStyle={{ width: POPOVER_WIDTH }}
           trigger={
             <View
@@ -289,11 +286,11 @@ export function bar() {
               }}
               tooltip={
                 data().shown.length === 0 ? (
-                  <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
+                  <SmeltTooltip>
                     <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.text }}>
                       {t(data().loading ? "loading" : "empty_trigger")}
                     </Text>
-                  </Tooltip>
+                  </SmeltTooltip>
                 ) : undefined
               }
             >
@@ -321,11 +318,11 @@ export function bar() {
                             gap: 4,
                           }}
                           tooltip={
-                            <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
+                            <SmeltTooltip>
                               <Text style={{ fontSize: look().type.text_xsmall.size, color: p().text }}>
                                 {tip()}
                               </Text>
-                            </Tooltip>
+                            </SmeltTooltip>
                           }
                         >
                           <View
@@ -460,11 +457,11 @@ export function bar() {
                       gap: 8,
                     }}
                     tooltip={
-                      <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
+                      <SmeltTooltip>
                         <Text style={{ fontSize: look().type.text_xsmall.size, color: p().text }}>
                           {row().tip}
                         </Text>
-                      </Tooltip>
+                      </SmeltTooltip>
                     }
                     onPress={() => requestRefresh(row().id)}
                   >
@@ -529,7 +526,7 @@ export function bar() {
               }}
             </Each>
           </View>
-        </Popover>
+        </SmeltPopover>
       </If>
     </View>
   );

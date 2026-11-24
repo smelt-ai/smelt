@@ -1,7 +1,6 @@
 // Pi 子智能体与后台任务入口：工具栏计数胶囊、弹层列表、以及查看单个子智能体过程的侧边抽屉。
 import { cleanup, computed, effect, Scroll, signal, Text, View } from "nsh";
-import { Popover } from "nsh/base";
-import { call, OVERLAY_MOTION_CLASS, popupMotion, SmeltButton, SmeltIcon, SmeltMarkdown, theme } from "smelt/sdk";
+import { call, SmeltButton, SmeltIcon, SmeltMarkdown, SmeltPopover, theme } from "smelt/sdk";
 import { ct } from "./i18n.ts";
 import { formatDuration, runningBackgroundTasks, runningSubagents } from "./model.js";
 
@@ -16,14 +15,13 @@ export function SubagentsControl(props: {
 
   return (
     <If when={active().length > 0}>
-      <Popover
+      <SmeltPopover
         open={open()}
         onOpenChange={({ open: next }: any) => open.set(Boolean(next))}
         placement="top"
         align="start"
         offset={8}
-        popupClass={`rounded-xl border border-border bg-popover p-3 shadow-lg ${OVERLAY_MOTION_CLASS}`}
-        {...popupMotion("top")}
+        popupClass="rounded-xl border border-border bg-popover p-3 shadow-lg"
         popupStyle={{ width: 344 }}
         trigger={
           <SmeltButton
@@ -91,7 +89,7 @@ export function SubagentsControl(props: {
             </View>
           </Scroll>
         </View>
-      </Popover>
+      </SmeltPopover>
     </If>
   );
 }
@@ -106,14 +104,13 @@ export function BackgroundTasksControl(props: {
 
   return (
     <If when={active().length > 0}>
-      <Popover
+      <SmeltPopover
         open={open()}
         onOpenChange={({ open: next }: any) => open.set(Boolean(next))}
         placement="top"
         align="start"
         offset={8}
-        popupClass={`rounded-xl border border-border bg-popover p-3 shadow-lg ${OVERLAY_MOTION_CLASS}`}
-        {...popupMotion("top")}
+        popupClass="rounded-xl border border-border bg-popover p-3 shadow-lg"
         popupStyle={{ width: 344 }}
         trigger={
           <SmeltButton
@@ -174,7 +171,7 @@ export function BackgroundTasksControl(props: {
             </View>
           </Scroll>
         </View>
-      </Popover>
+      </SmeltPopover>
     </If>
   );
 }

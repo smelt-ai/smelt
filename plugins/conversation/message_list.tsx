@@ -1,16 +1,16 @@
 // 对话消息流列表：自然时间序虚拟列表（initialScrollAtEnd + maintainVisibleContentPosition 自动粘底，
 // 零 inverted 空闲唤醒）、局部流式信号、跨气泡选区、折叠过程行、差异弹窗入口、子智能体卡片与右键菜单。
 import { cleanup, computed, Image, List, Scroll, signal, Text, View } from "nsh";
-import { Collapsible, ContextMenu, MenuItem, MenuSeparator } from "nsh/base";
+import { MenuItem, MenuSeparator } from "nsh/base";
 import {
   clipboardWrite,
-  CONTEXT_MENU_MOTION,
   contextMenuItems,
   diffLineStats,
   isInterruptMarker,
-  POPUP_CLASS,
   run,
   SmeltButton,
+  SmeltContextMenu,
+  SmeltDisclosure,
   SmeltDisclosureChevron,
   SmeltIcon,
   SmeltMarkdown,
@@ -197,9 +197,7 @@ function MessageContextWrapper(props: {
   };
 
   return (
-    <ContextMenu
-      popupClass={POPUP_CLASS}
-      {...CONTEXT_MENU_MOTION}
+    <SmeltContextMenu
       popupStyle={{ minWidth: 184 }}
       onOpenChange={({ open }: any) => {
         if (open) loadContributed();
@@ -260,7 +258,7 @@ function MessageContextWrapper(props: {
           )}
         </Each>
       </If>
-    </ContextMenu>
+    </SmeltContextMenu>
   );
 }
 
@@ -415,9 +413,8 @@ function ToolCallRow(props: {
       }
     >
       {/* 展开后的文本 / 终端 / 图片 / 嵌套子条目 */}
-      <Collapsible
+      <SmeltDisclosure
         open={expanded()}
-        reveal={true}
         style={{ width: "100%" }}
         content={
           <View style={{ paddingLeft: 22, paddingTop: 8, gap: 6 }}>
@@ -649,7 +646,7 @@ function ToolCallRow(props: {
             </View>
           </If>
         </View>
-      </Collapsible>
+      </SmeltDisclosure>
     </If>
   );
 }
@@ -978,9 +975,8 @@ export function MessageList(props: {
                         <If
                           when={!isThought()}
                           else={
-                            <Collapsible
+                            <SmeltDisclosure
                               open={thoughtExpanded()}
-                              reveal={true}
                               style={{ width: "100%" }}
                               content={
                                 <View
@@ -1022,7 +1018,7 @@ export function MessageList(props: {
                                   {isStreamingCell() ? ct("status.thinking") : ct("status.thinking").replace("…", "")}
                                 </Text>
                               </View>
-                            </Collapsible>
+                            </SmeltDisclosure>
                           }
                         >
                           <MessageContextWrapper
@@ -1195,9 +1191,8 @@ export function MessageList(props: {
                         return title ? `${title} · ${st}` : st;
                       };
                       return (
-                        <Collapsible
+                        <SmeltDisclosure
                           open={expanded() && tail().length > 0}
-                          reveal={true}
                           style={{
                             paddingHorizontal: 10,
                             paddingVertical: 6,
@@ -1238,7 +1233,7 @@ export function MessageList(props: {
                               />
                             </If>
                           </View>
-                        </Collapsible>
+                        </SmeltDisclosure>
                       );
                     })()}
                   </If>

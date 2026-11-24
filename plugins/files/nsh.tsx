@@ -5,14 +5,11 @@
 // - 全事件驱动：project.watch / project_changed / reconnected / window_activated / active_context，无轮询。
 import { computed, effect, Image, Scroll, signal, Text, View } from "nsh";
 import {
-  ContextMenu,
-  Dialog,
   Input,
   MenuItem,
   MenuSeparator,
   ResizablePanel,
   ResizablePanelGroup,
-  Tooltip,
 } from "nsh/base";
 import { Menu } from "nsh/desktop";
 import {
@@ -21,7 +18,6 @@ import {
   call,
   callDetail,
   clipboardWrite,
-  CONTEXT_MENU_MOTION,
   currentTheme,
   DIALOG_SURFACE_CLASS,
   initHost,
@@ -36,23 +32,23 @@ import {
   pathStartsWith,
   pathStripPrefix,
   pathStyle,
-  POPUP_CLASS,
   registerCommands,
   registerFileOpener,
   registerViews,
   revealPath,
   run,
   SmeltButton,
+  SmeltContextMenu,
+  SmeltDialog,
   SmeltDisclosureChevron,
   SmeltEditor,
   SmeltIcon,
   SmeltMarkdown,
+  SmeltTooltip,
   stableMemo,
   store,
   t,
   text,
-  TOOLTIP_CLASS,
-  TOOLTIP_MOTION,
   viewShown,
   windowActive,
 } from "smelt/sdk";
@@ -1843,9 +1839,7 @@ export function Main() {
                                         when={isRoot()}
                                         else={
                                           /* 普通目录 / 文件行 */
-                                          <ContextMenu
-                                            popupClass={POPUP_CLASS}
-                                            {...CONTEXT_MENU_MOTION}
+                                          <SmeltContextMenu
                                             popupStyle={{ minWidth: 168 }}
                                             trigger={
                                               <View
@@ -1861,7 +1855,7 @@ export function Main() {
                                                 }}
                                                 tooltip={
                                                   nameLikelyTruncated(row().name, row().depth, treeWidth()) ? (
-                                                    <Tooltip class={TOOLTIP_CLASS} {...TOOLTIP_MOTION}>
+                                                    <SmeltTooltip>
                                                       <Text
                                                         style={{
                                                           fontSize: look().type.text_xsmall.size,
@@ -1870,7 +1864,7 @@ export function Main() {
                                                       >
                                                         {row().name}
                                                       </Text>
-                                                    </Tooltip>
+                                                    </SmeltTooltip>
                                                   ) : undefined
                                                 }
                                                 style={{
@@ -1974,7 +1968,7 @@ export function Main() {
                                               danger={true}
                                               onSelect={() => startDelete(row().path, Boolean(row().isDir))}
                                             />
-                                          </ContextMenu>
+                                          </SmeltContextMenu>
                                         }
                                       >
                                         {/* 多根时的根标题行 */}
@@ -2027,9 +2021,7 @@ export function Main() {
                                             </View>
                                           }
                                         >
-                                          <ContextMenu
-                                            popupClass={POPUP_CLASS}
-                                            {...CONTEXT_MENU_MOTION}
+                                          <SmeltContextMenu
                                             popupStyle={{ minWidth: 168 }}
                                             trigger={
                                               <View
@@ -2083,7 +2075,7 @@ export function Main() {
                                               label={t("pin.remove")}
                                               onSelect={() => unpinRoot(row().path)}
                                             />
-                                          </ContextMenu>
+                                          </SmeltContextMenu>
                                         </If>
                                       </If>
                                     }
@@ -2236,12 +2228,10 @@ export function Main() {
       </View>
 
       {/* 未保存切换确认框 */}
-      <Dialog
+      <SmeltDialog
         open={unsavedDialog() != null}
         role="alertdialog"
-        animation="fade"
         accessibilityLabel={t("switch.title", { name: unsavedDialog()?.currentName ?? "" })}
-        backdropClass="bg-black/40"
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) unsavedDialog.set(null);
         }}
@@ -2301,17 +2291,15 @@ export function Main() {
             />
           </View>
         </If>
-      </Dialog>
+      </SmeltDialog>
 
       {/* 删除确认框 */}
-      <Dialog
+      <SmeltDialog
         open={deleteDialog() != null}
         role="alertdialog"
-        animation="fade"
         accessibilityLabel={
           deleteDialog()?.isDir ? t("delete.folder_confirm") : t("delete.file_confirm")
         }
-        backdropClass="bg-black/40"
         onOpenChange={({ open }: { open: boolean }) => {
           if (!open) deleteDialog.set(null);
         }}
@@ -2354,7 +2342,7 @@ export function Main() {
             />
           </View>
         </If>
-      </Dialog>
+      </SmeltDialog>
     </View>
   );
 }

@@ -6,8 +6,18 @@
 // - `settings`：设置「通用 → 会话列表」行首头像选择。
 
 import { cleanup, computed, effect, Overlay, Scroll, signal, Text, View } from "nsh";
-import { Collapsible, ContextMenu, Input, Menu, Submenu } from "nsh/base";
-import { CONTEXT_MENU_MOTION, fileUriToPath, popupMotion, SmeltButton, SmeltIcon, SmeltNativeBuddy, SmeltWindowBar } from "smelt/sdk";
+import { Input, Submenu } from "nsh/base";
+import {
+  fileUriToPath,
+  SmeltButton,
+  SmeltContextMenu,
+  SmeltDisclosure,
+  SmeltDisclosureChevron,
+  SmeltIcon,
+  SmeltMenu,
+  SmeltNativeBuddy,
+  SmeltWindowBar,
+} from "smelt/sdk";
 
 import * as actions from "../actions.js";
 import {
@@ -248,13 +258,11 @@ function DisclosureSlot(props: {
           accessibilityLabel={props.onToggle ? (props.collapsed ? "Expand" : "Collapse") : "icons/chevron-right.svg"}
           class="absolute inset-0 items-center justify-center opacity-0 invisible group-hover/row:opacity-100 group-hover/row:visible"
         >
-          <SmeltIcon
-            path={icon("chevron-right")}
+          <SmeltDisclosureChevron
+            open={!props.collapsed}
             size={14}
             color={look().palette.muted}
             opacity={iconOpacity()}
-            class="transition-transform duration-150"
-            rotate={props.collapsed ? 0 : 90}
           />
         </View>
       </If>
@@ -744,9 +752,7 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
   cleanup(() => props.registerRowRef(id(), null));
 
   return (
-    <ContextMenu
-      popupClass={POPUP_CLASS}
-      {...CONTEXT_MENU_MOTION}
+    <SmeltContextMenu
       popupStyle={{ minWidth: 184 }}
       onOpenChange={({ open }) => {
         if (open) loadContributed();
@@ -1121,7 +1127,7 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
         danger={true}
         onSelect={triggerClose}
       />
-    </ContextMenu>
+    </SmeltContextMenu>
   );
 }
 
@@ -1200,9 +1206,9 @@ function ProjectSection(props: SharedRowProps & { project: () => any; byMachine:
   cleanup(() => props.registerRowRef(key(), null));
 
   return (
-    <Collapsible
+    <SmeltDisclosure
       open={!collapsed()}
-      reveal={true}
+     
       content={
         <View style={{ gap: 2, paddingTop: 2 }}>
           <Each
@@ -1262,9 +1268,7 @@ function ProjectSection(props: SharedRowProps & { project: () => any; byMachine:
         </View>
       }
     >
-      <ContextMenu
-        popupClass={POPUP_CLASS}
-        {...CONTEXT_MENU_MOTION}
+      <SmeltContextMenu
         popupStyle={{ minWidth: 184 }}
         onOpenChange={({ open }) => {
           if (open) loadContributed();
@@ -1498,8 +1502,6 @@ function ProjectSection(props: SharedRowProps & { project: () => any; byMachine:
           <>
             <MenuDivider />
             <Submenu
-              popupClass={POPUP_CLASS}
-              popupStyle={{ minWidth: 168 }}
               trigger={
                 <View class={MENU_ITEM_CLASS} style={{ height: 28, gap: space(2) }}>
                   <Text
@@ -1551,8 +1553,8 @@ function ProjectSection(props: SharedRowProps & { project: () => any; byMachine:
             />
           </>
         ) : null}
-      </ContextMenu>
-    </Collapsible>
+      </SmeltContextMenu>
+    </SmeltDisclosure>
   );
 }
 
@@ -1574,9 +1576,9 @@ function WorksetSection(props: SharedRowProps & { workset: () => any; level: num
   cleanup(() => props.registerRowRef(key(), null));
 
   return (
-    <Collapsible
+    <SmeltDisclosure
       open={!collapsed()}
-      reveal={true}
+     
       content={
         <View style={{ gap: 2, paddingTop: 2 }}>
           <Each of={workset().sessions} key={(row: any) => session_flip(row.key)}>
@@ -1606,9 +1608,7 @@ function WorksetSection(props: SharedRowProps & { workset: () => any; level: num
         </View>
       }
     >
-      <ContextMenu
-        popupClass={POPUP_CLASS}
-        {...CONTEXT_MENU_MOTION}
+      <SmeltContextMenu
         popupStyle={{ minWidth: 184 }}
         trigger={
           <View
@@ -1742,8 +1742,6 @@ function WorksetSection(props: SharedRowProps & { workset: () => any; level: num
           />
         ) : (
           <Submenu
-            popupClass={POPUP_CLASS}
-            popupStyle={{ minWidth: 168 }}
             trigger={
               <View class={MENU_ITEM_CLASS} style={{ height: 28, gap: space(2) }}>
                 <View style={{ width: 14, height: 14, flexShrink: 0 }}>
@@ -1795,8 +1793,8 @@ function WorksetSection(props: SharedRowProps & { workset: () => any; level: num
             actions.finish_workset(list, props.ask, workset().machine, workset().id, workset().task)
           }
         />
-      </ContextMenu>
-    </Collapsible>
+      </SmeltContextMenu>
+    </SmeltDisclosure>
   );
 }
 
@@ -1829,9 +1827,7 @@ function MachineHeaderRow(props: {
   const collapsible = () => Boolean(props.machine().received);
 
   return (
-    <ContextMenu
-      popupClass={POPUP_CLASS}
-      {...CONTEXT_MENU_MOTION}
+    <SmeltContextMenu
       popupStyle={{ minWidth: 184 }}
       onOpenChange={({ open }) => {
         if (open) loadMenu();
@@ -1921,11 +1917,9 @@ function MachineHeaderRow(props: {
               <SmeltIcon path={icon("folder-plus")} size={14} color={look().palette.muted} />
             </View>
             <If when={menuItems().length > 0}>
-              <Menu
+              <SmeltMenu
                 placement="bottom"
                 align="end"
-                popupClass={POPUP_CLASS}
-                {...popupMotion("bottom")}
                 popupStyle={{ minWidth: 176 }}
                 onOpenChange={({ open }) => {
                   menuOpen.set(open);
@@ -1953,7 +1947,7 @@ function MachineHeaderRow(props: {
                     list.notify_error(list.failed(t("action.run_command", { command }), message(err)))
                   }
                 />
-              </Menu>
+              </SmeltMenu>
             </If>
           </View>
         </View>
@@ -1966,7 +1960,7 @@ function MachineHeaderRow(props: {
           list.notify_error(list.failed(t("action.run_command", { command }), message(err)))
         }
       />
-    </ContextMenu>
+    </SmeltContextMenu>
   );
 }
 
@@ -1981,9 +1975,7 @@ function WaitingMachineRow(props: { machine: () => any }) {
   };
 
   return (
-    <ContextMenu
-      popupClass={POPUP_CLASS}
-      {...CONTEXT_MENU_MOTION}
+    <SmeltContextMenu
       popupStyle={{ minWidth: 184 }}
       onOpenChange={({ open }) => {
         if (open) loadMenu();
@@ -2047,7 +2039,7 @@ function WaitingMachineRow(props: { machine: () => any }) {
           list.notify_error(list.failed(t("action.run_command", { command }), message(err)))
         }
       />
-    </ContextMenu>
+    </SmeltContextMenu>
   );
 }
 
@@ -2553,11 +2545,9 @@ export function main() {
         </View>
       }
     >
-      <Menu
+      <SmeltMenu
         placement="bottom"
         align="end"
-        popupClass={POPUP_CLASS}
-        {...popupMotion("bottom")}
         popupStyle={{ minWidth: 176 }}
         onOpenChange={({ open }) => addProjectOpen.set(open)}
         trigger={
@@ -2586,7 +2576,7 @@ export function main() {
             />
           )}
         </Each>
-      </Menu>
+      </SmeltMenu>
     </If>
   );
 
@@ -2657,11 +2647,9 @@ export function main() {
         <GroupingMenu onOpenChange={(open) => groupingOpen.set(open)} />
         {addProjectButton()}
         <If when={machinesMenuGroups().length > 0}>
-          <Menu
+          <SmeltMenu
             placement="bottom"
             align="end"
-            popupClass={POPUP_CLASS}
-            {...popupMotion("bottom")}
             popupStyle={{ minWidth: 176 }}
             onOpenChange={({ open }) => {
               machinesMenuOpen.set(open);
@@ -2682,7 +2670,7 @@ export function main() {
             }
           >
             <MachinesMenuEntries groups={machinesMenuGroups()} hasRemote={hasRemote()} />
-          </Menu>
+          </SmeltMenu>
         </If>
       </View>
     </View>
@@ -2773,9 +2761,9 @@ export function main() {
             {/* 「对话」段 */}
             <If when={hasConversations()}>
               <View style={{ paddingBottom: space(1) }}>
-                <Collapsible
+                <SmeltDisclosure
                   open={!conversationsCollapsed()}
-                  reveal={true}
+                 
                   content={
                     <View style={{ gap: 2, paddingTop: 2 }}>
                       <Each
@@ -2831,7 +2819,7 @@ export function main() {
                       />
                     </If>
                   </View>
-                </Collapsible>
+                </SmeltDisclosure>
               </View>
             </If>
 
@@ -2840,9 +2828,7 @@ export function main() {
               when={machinesMenuGroups().length > 0}
               else={projectsHeaderRow}
             >
-              <ContextMenu
-                popupClass={POPUP_CLASS}
-                {...CONTEXT_MENU_MOTION}
+              <SmeltContextMenu
                 popupStyle={{ minWidth: 184 }}
                 onOpenChange={({ open }) => {
                   if (open) refreshMachinesMenu();
@@ -2850,7 +2836,7 @@ export function main() {
                 trigger={projectsHeaderRow}
               >
                 <MachinesMenuEntries groups={machinesMenuGroups()} hasRemote={hasRemote()} />
-              </ContextMenu>
+              </SmeltContextMenu>
             </If>
 
             {/* 区域：按机器或整份 */}
@@ -2879,9 +2865,9 @@ export function main() {
                               const bKey = () => bucket_flip(group().key);
                               const bucketCollapsed = computed(() => group().collapsed);
                               return (
-                                <Collapsible
+                                <SmeltDisclosure
                                   open={!bucketCollapsed()}
-                                  reveal={true}
+                                 
                                   content={
                                     <View style={{ gap: 2, paddingTop: 2 }}>
                                       <Each
@@ -2939,7 +2925,7 @@ export function main() {
                                       />
                                     </If>
                                   </View>
-                                </Collapsible>
+                                </SmeltDisclosure>
                               );
                             }}
                           </Each>
@@ -3020,13 +3006,13 @@ export function main() {
 
                 return (
                   <If when={machineInfo() != null} else={areaBody}>
-                    <Collapsible open={!areaCollapsed()} reveal={true} content={areaBody}>
+                    <SmeltDisclosure open={!areaCollapsed()} content={areaBody}>
                       <MachineHeaderRow
                         machine={() => machineInfo()!}
                         area={area}
                         registerRowRef={registerRowRef}
                       />
-                    </Collapsible>
+                    </SmeltDisclosure>
                   </If>
                 );
               }}

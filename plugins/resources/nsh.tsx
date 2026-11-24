@@ -11,7 +11,7 @@
 // - 可见期间收到 `sessions_changed` / `machines_changed` / `locale_changed` 立即重建快照。
 
 import { cleanup, computed, effect, Scroll, signal, Text, View } from "nsh";
-import { Button as BaseButton, Collapsible } from "nsh/base";
+import { Button as BaseButton } from "nsh/base";
 import {
   bootTask,
   call,
@@ -24,6 +24,7 @@ import {
   registerViews,
   run,
   SmeltButton,
+  SmeltDisclosure,
   SmeltDisclosureChevron,
   SmeltVector,
   t,
@@ -666,10 +667,8 @@ function MachineSection(props: { section: () => any }) {
             const hasParts = () => (row().parts?.length ?? 0) > 0;
             const isOpen = () => expanded().has(row().id);
             return (
-              <Collapsible
+              <SmeltDisclosure
                 open={hasParts() && isOpen()}
-                reveal={true}
-                style={{ display: "flex", flexDirection: "column" }}
                 content={
                   <View
                     style={{
@@ -775,7 +774,7 @@ function MachineSection(props: { section: () => any }) {
                     />
                   </BaseButton>
                 </If>
-              </Collapsible>
+              </SmeltDisclosure>
             );
           }}
         </Each>
@@ -796,10 +795,8 @@ function MachineSection(props: { section: () => any }) {
             };
 
             return (
-              <Collapsible
+              <SmeltDisclosure
                 open={isOpen()}
-                reveal={true}
-                style={{ display: "flex", flexDirection: "column" }}
                 content={
                   <View
                     style={{
@@ -953,7 +950,7 @@ function MachineSection(props: { section: () => any }) {
                     color={look().palette.text}
                   />
                 </View>
-              </Collapsible>
+              </SmeltDisclosure>
             );
           }}
         </Each>
