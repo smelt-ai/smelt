@@ -292,7 +292,7 @@ describe("DeliveredStore (SQLite)", () => {
   });
 });
 
-// ---- 4. 投影缓存与单调性（crates/smelt-model/src/automation_projection.rs） ----
+// ---- 4. 投影缓存与单调性 ----
 
 describe("projection cache & decoding", () => {
   test("decodeAutomationsPayload validates envelope and handles null data", () => {

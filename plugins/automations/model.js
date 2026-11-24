@@ -573,8 +573,8 @@ export function snapshotIsCurrentStore(machine, snapshot) {
 }
 
 /**
- * 与 Rust `MachineAutomations::replace_snapshot` 完全一致：
- * 同 store_id 拒绝旧 revision 及同内容重复推送；切换 store_id 时旧 store_id 退休。
+ * 收下运行时推来的一份库：同 store_id 拒绝旧 revision 及同内容重复推送；
+ * 切换 store_id（运行时重建了库）时旧 store_id 退休，它迟到的快照不再收。
  */
 export function replaceMachineSnapshot(current, snapshot) {
   if (snapshot.store_id === current.store_id) {
