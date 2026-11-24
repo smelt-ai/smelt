@@ -126,6 +126,7 @@ mod memory_peer_auth;
 mod memory_watch;
 #[cfg(target_os = "macos")]
 mod menubar;
+mod peer_mcp;
 mod peer_messages;
 mod peer_nodes;
 mod pi_control;
@@ -2410,6 +2411,10 @@ fn shutdown_handlers_leave_child_signals_unblocked_and_wake_listener() {
 }
 
 fn main() {
+    // 第三方 ACP 会话经 `mcpServers` 注入的内置 stdio MCP 桥：极速启动、不碰库和守护状态。
+    if std::env::args().nth(1).as_deref() == Some("--peer-mcp") {
+        std::process::exit(peer_mcp::run());
+    }
     // GUI 从 libdispatch 工作线程 posix_spawn 本进程时，会把那套「屏蔽 SIGCHLD」
     // 的线程掩码遗传进来。async-process 靠 SIGCHLD 回收子进程；掩码不清掉，
     // Pi 退出后 status() 永远等不到通知，会话就停在「正在启动」。

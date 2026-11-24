@@ -111,7 +111,15 @@ describe("Pi session peers", () => {
 		expect(text).toContain("pm-2（message）：已交给对方");
 		expect(text).toContain("pm-3（message）：没送到：Smelt 桌面没开");
 		expect(text).toContain("acp-c 〈部署〉 还没打开");
-		expect(sessionListText([])).toContain("没有别的 Pi 对话");
+		expect(sessionListText([])).toContain("没有别的对话");
+		const withAgents = sessionListText(
+			[{ id: "acp-codex", title: "重构", agent: "codex", agentLabel: "Codex", state: "idle" }],
+			[],
+			[{ id: "codex", kind: "codex", label: "Codex", category: "engine" }],
+		);
+		expect(withAgents).toContain("acp-codex 〈重构〉 [Codex] 空闲");
+		expect(withAgents).toContain("可用于 session_spawn 的智能体");
+		expect(withAgents).toContain("- codex（Codex）");
 	});
 
 	test("conversations on other machines name the machine, and unreachable machines are listed last", () => {

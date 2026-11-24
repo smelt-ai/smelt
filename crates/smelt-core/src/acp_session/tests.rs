@@ -4343,6 +4343,95 @@ fn a_new_prompt_clears_the_memory_card() {
     assert_eq!(state.memory_changes, None);
 }
 
+#[test]
+fn note_peer_message_sent_records_task_note_instead_of_user_bubble() {
+    let mut state = fresh_state();
+    let delivery = crate::acp_session::PeerDelivery {
+        id: "pm-112233445566".into(),
+        source_session_id: "acp-from".into(),
+        source_title: "主控".into(),
+        kind: crate::acp_session::PeerMessageKind::Task,
+        hops: 7,
+        reply_to: None,
+        text: "实现刷新逻辑".into(),
+    };
+    crate::acp_session::note_peer_message_sent(&mut state, &delivery);
+    assert_eq!(state.entries().len(), 1);
+    match &state.entries()[0] {
+        AcpEntry::TaskNote(note) => {
+            assert_eq!(note.kind, crate::acp_chat::TaskNoteKind::PeerMessage);
+            assert_eq!(note.id, "pm-112233445566");
+            assert_eq!(note.output_tail, "实现刷新逻辑");
+            assert_eq!(note.peer.as_ref().unwrap().source_session_id, "acp-from");
+        }
+        other => panic!("expected TaskNote, got {other:?}"),
+    }
+    assert_eq!(state.active_delivery_id.as_deref(), Some("pm-112233445566"));
+    assert_eq!(state.phase, DaemonPhase::Thinking);
+}
+
+#[test]
+fn history_replay_converts_peer_message_user_chunks_into_task_note() {
+    let mut state = fresh_state();
+    let delivery = crate::acp_session::PeerDelivery {
+        id: "pm-aabbccddeeff".into(),
+        source_session_id: "acp-claude".into(),
+        source_title: "Claude".into(),
+        kind: crate::acp_session::PeerMessageKind::Task,
+        hops: 6,
+        reply_to: None,
+        text: "跑一下测试".into(),
+    };
+    let text = crate::acp_chat::format_peer_message_text(
+        &delivery,
+        Some("Claude Code"),
+        crate::acp_chat::PeerReplyChannel::Tool,
+    );
+    let mid = text
+        .char_indices()
+        .nth(text.chars().count() / 2)
+        .expect("non-empty envelope")
+        .0;
+    let (head, tail) = text.split_at(mid);
+    apply_event(&mut state, ConversationEvent::HistoryReplayStarted);
+    apply_event(&mut state, ConversationEvent::UserChunk(head.to_string()));
+    apply_event(&mut state, ConversationEvent::UserChunk(tail.to_string()));
+    apply_event(&mut state, ConversationEvent::HistoryReplayFinished);
+    assert_eq!(state.entries().len(), 1);
+    match &state.entries()[0] {
+        AcpEntry::TaskNote(note) => {
+            assert_eq!(note.kind, crate::acp_chat::TaskNoteKind::PeerMessage);
+            assert_eq!(note.id, "pm-aabbccddeeff");
+            assert_eq!(note.output_tail, "跑一下测试");
+            assert_eq!(note.peer.as_ref().unwrap().source_session_id, "acp-claude");
+        }
+        other => panic!("expected TaskNote after replay, got {other:?}"),
+    }
+}
+
+#[test]
+fn mcp_session_send_tool_call_attaches_peer_send_projection() {
+    use agent_client_protocol::v1::schema::{ToolCall, ToolCallId, ToolCallStatus};
+    let mut state = fresh_state();
+    let mut tc = ToolCall::new(ToolCallId::new("call-1"), "mcp__smelt-peers__session_send");
+    tc.status = ToolCallStatus::InProgress;
+    tc.raw_input = Some(serde_json::json!({
+        "to": "acp-codex",
+        "text": "请帮我实现这个接口",
+        "kind": "task"
+    }));
+    apply_event(&mut state, ConversationEvent::ToolCall(tc));
+    match &state.entries()[0] {
+        AcpEntry::ToolCall { peer, .. } => {
+            let send = peer.as_ref().expect("MCP session_send should populate peer");
+            assert_eq!(send.to_id, "acp-codex");
+            assert_eq!(send.kind, crate::acp_session::PeerMessageKind::Task);
+            assert_eq!(send.text, "请帮我实现这个接口");
+        }
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+}
+
 /// 回合刚结束时回车：宿主以为还在跑，挂成插话；Pi 其实空了，直接开了新一轮。
 /// 输入框上方那条要撤掉，按新回合只写一个气泡，之后的队列快照也不能再补一个。
 #[test]
