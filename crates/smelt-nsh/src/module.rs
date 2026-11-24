@@ -12,7 +12,10 @@ use nsh_core::{
 use smelt_plugin_api::{
     self as api,
     model::{
-        acp_chat::is_interrupt_marker,
+        acp_chat::{
+            AcpEntry, diff_line_stats, fork_cut_after, fork_cut_before, is_interrupt_marker,
+        },
+        acp_conn::AcpForkCut,
         agent_definition::agent_engine_kinds,
         agent_host::AgentHostSettings,
         agent_kind::{
@@ -20,11 +23,13 @@ use smelt_plugin_api::{
             agent_id_from_launch,
         },
         agent_status::AgentStatus,
+        automation::is_managed_workspace,
         chrono::DateTime,
         copilot_quota::format_amount,
         daemon_state::DaemonSessionState,
         file_link::parse_file_link,
         new_session::{LaunchEntry, NewSessionAction, default_launch_entries},
+        pi_mcp::PI_MCP_PRESETS,
         provider_quota::ProviderQuotaData,
         quota_service::QuotaTarget,
         runtime_path::PathStyle,
@@ -89,6 +94,18 @@ fn parse_style(style: &str) -> Result<PathStyle, String> {
             "style 要是 \"posix\" 或 \"windows\"，收到 {other:?}"
         )),
     }
+}
+
+fn parse_entries(entries_json: &str, what: &str) -> Result<Vec<AcpEntry>, String> {
+    serde_json::from_str(entries_json).map_err(|error| format!("{what}：entries 不对：{error}"))
+}
+
+fn fork_cut_json((text, occurrence): (String, usize)) -> String {
+    serde_json::to_string(&AcpForkCut { text, occurrence }).unwrap_or_default()
+}
+
+fn parse_settings(settings_json: &str, what: &str) -> Result<AgentHostSettings, String> {
+    serde_json::from_str(settings_json).map_err(|error| format!("{what}：settings 不对：{error}"))
 }
 
 #[module]
@@ -286,6 +303,103 @@ impl Smelt {
     /// 识别 agent 回显的中断标记（和对话流共用 `smelt-model` 规则）。
     pub fn is_interrupt_marker(text: String) -> bool {
         is_interrupt_marker(&text)
+    }
+
+    /// 一处改动的增删行数 `[added, removed]`，和 `<SmeltDiffView>` 同一份按行比对。新建文件 `old` 传空串。
+    pub fn diff_line_stats(old: String, new: String) -> Vec<usize> {
+        let (added, removed) = diff_line_stats(&old, &new);
+        vec![added, removed]
+    }
+
+    /// 从第 `through_index` 条回答分叉的切点 `{ text, occurrence }`，和运行时 `Rewind` 同语义。
+    pub fn fork_cut_after(
+        entries_json: String,
+        through_index: usize,
+    ) -> Result<Option<String>, String> {
+        let entries = parse_entries(&entries_json, "fork_cut_after")?;
+        Ok(fork_cut_after(&entries, through_index).map(fork_cut_json))
+    }
+
+    /// 改第 `user_index` 条提问重发时的切点（切在它之前），同上。
+    pub fn fork_cut_before(
+        entries_json: String,
+        user_index: usize,
+    ) -> Result<Option<String>, String> {
+        let entries = parse_entries(&entries_json, "fork_cut_before")?;
+        Ok(fork_cut_before(&entries, user_index).map(fork_cut_json))
+    }
+
+    /// 拖进窗口的 `file://` 按本机规则解成路径；不是文件 URL 的原样返回。
+    pub fn file_uri_to_path(uri: String) -> String {
+        url::Url::parse(&uri)
+            .ok()
+            .filter(|url| url.scheme() == "file")
+            .and_then(|url| url.to_file_path().ok())
+            .map_or(uri, |path| path.to_string_lossy().into_owned())
+    }
+
+    /// 工作目录是不是运行时按 id 给这条自动化分配的托管目录。`style` 是自动化所在机器的路径风格。
+    pub fn is_managed_automation_workspace(
+        style: String,
+        path: String,
+        automation_id: String,
+    ) -> Result<bool, String> {
+        Ok(is_managed_workspace(
+            parse_style(&style)?,
+            &path,
+            &automation_id,
+        ))
+    }
+
+    /// 内置 MCP 一键添加预设，按这台机器装没装远程桌面挑那一套，名字和说明按界面语言。
+    pub fn pi_mcp_presets(remote_desktop: bool) -> String {
+        let presets: Vec<_> = PI_MCP_PRESETS
+            .iter()
+            .map(|preset| {
+                let preset = preset.for_machine(remote_desktop);
+                serde_json::json!({
+                    "id": preset.id,
+                    "name": preset.name(),
+                    "summary": preset.summary(),
+                    "needs_sign_in": preset.transport.needs_sign_in(),
+                    "extension_url": preset.extension_url,
+                })
+            })
+            .collect();
+        serde_json::Value::Array(presets).to_string()
+    }
+
+    /// 某个 agent 记住的最近选择（去重后），新会话先铺这一份。
+    pub fn remembered_acp_config(
+        settings_json: String,
+        agent_id: String,
+    ) -> Result<String, String> {
+        let settings = parse_settings(&settings_json, "remembered_acp_config")?;
+        let pairs = ConversationAgentKind::from_id(&agent_id)
+            .map(|agent| settings.remembered_acp_config(agent))
+            .unwrap_or_default();
+        serde_json::to_string(&pairs).map_err(|error| format!("remembered_acp_config：{error}"))
+    }
+
+    /// 记一次用户显式选择，返回改后的设置；不该记或没变化时返回 `None`。
+    pub fn remember_acp_config_value(
+        settings_json: String,
+        agent_id: String,
+        config_id: String,
+        value_id: String,
+    ) -> Result<Option<String>, String> {
+        let before = parse_settings(&settings_json, "remember_acp_config_value")?;
+        let Some(agent) = ConversationAgentKind::from_id(&agent_id) else {
+            return Ok(None);
+        };
+        let mut after = before.clone();
+        after.remember_acp_config_value(agent, config_id, value_id);
+        if after == before {
+            return Ok(None);
+        }
+        serde_json::to_string(&after)
+            .map(Some)
+            .map_err(|error| format!("remember_acp_config_value：{error}"))
     }
 
     /// 导出内置 `HistorySourceKind::ALL`、`ConversationAgentKind::ALL`、产品智能体引擎与终端内置项元数据（与运行时同一份表）。
@@ -800,6 +914,55 @@ mod tests {
     use gpui::AssetSource as _;
 
     use super::Smelt;
+
+    /// 插件手里的条目是 hub 压过图片的线格式（多了 `ref_id`、`preview_uri`，`data_b64` 置空），
+    /// 切点照样按运行时那份规则算：中断标记不算提问、带图的提问和纯文字同文本一起数。
+    #[test]
+    fn fork_cut_reads_the_entries_plugins_hold() {
+        let entries = serde_json::json!([
+            { "User": "go" },
+            { "Assistant": { "text": "a1", "thought": false } },
+            { "User": "[Request interrupted by user]" },
+            { "User": "go" },
+            { "Assistant": { "text": "a2", "thought": false } },
+            { "UserWithImages": { "text": "go", "images": [{
+                "mime": "image/png", "data_b64": "", "ref_id": "r1",
+                "preview_uri": "smelt-image://r1", "width": 4, "height": 4
+            }] } },
+            { "Assistant": { "text": "a3", "thought": false } },
+        ])
+        .to_string();
+        let cut = |after: bool, index| {
+            let raw = if after {
+                Smelt::fork_cut_after(entries.clone(), index)
+            } else {
+                Smelt::fork_cut_before(entries.clone(), index)
+            };
+            raw.unwrap()
+                .map(|raw| serde_json::from_str::<serde_json::Value>(&raw).unwrap())
+        };
+        let at = |text: &str, occurrence: usize| {
+            Some(serde_json::json!({ "text": text, "occurrence": occurrence }))
+        };
+        assert_eq!(cut(true, 1), at("go", 1));
+        assert_eq!(cut(true, 4), at("go", 2));
+        assert_eq!(cut(true, 6), None);
+        assert_eq!(cut(false, 0), at("go", 0));
+        assert_eq!(cut(false, 2), None);
+        assert_eq!(cut(false, 5), at("go", 2));
+    }
+
+    #[test]
+    fn file_uris_become_local_paths() {
+        assert_eq!(
+            Smelt::file_uri_to_path("file:///tmp/my%20shot%20%E6%88%AA%E5%9B%BE.png".into()),
+            "/tmp/my shot 截图.png"
+        );
+        assert_eq!(
+            Smelt::file_uri_to_path("/plain/path.png".into()),
+            "/plain/path.png"
+        );
+    }
 
     /// 校验 smelt-ui 资源表里全部 SVG（Phosphor 图标与第三方智能体图标）都能被 NSH 矢量管线无报错解析。
     #[test]

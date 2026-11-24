@@ -28,7 +28,6 @@ import {
   memoryKeyPlaceholder,
   memoryStatusLine,
   mergeProviders,
-  modelsEndpoint,
   normalizeAuthProvider,
   normalizePiConfig,
   normalizeProviderApi,
@@ -40,7 +39,6 @@ import {
   PROVIDER_API_PROTOCOLS,
   providerHasCredential,
   rerankModelLabel,
-  resolveMcpPresets,
   summarizePlugins,
   thinkingLevelLabel,
   unwrapRustResult,
@@ -68,18 +66,6 @@ const EN_DICT = {
   "mcp.local_command": "Local command · %{command} %{args}",
   "mcp.local_command_bare": "Local command · %{command}",
   "mcp.missing_transport": "Missing url or command",
-  "mcp_preset.figma.name": "Figma",
-  "mcp_preset.figma.summary": "Figma summary",
-  "mcp_preset.rea.name": "REA Reverse Engineering",
-  "mcp_preset.rea.summary": "REA summary",
-  "mcp_preset.browser_mcp.name": "Agent360 Browser",
-  "mcp_preset.browser_mcp.summary": "Browser MCP summary",
-  "mcp_preset.playwright.name": "Playwright Browser",
-  "mcp_preset.playwright.summary": "Playwright local summary",
-  "mcp_preset.playwright.summary_remote_desktop": "Playwright remote desktop summary",
-  "mcp_preset.chrome_devtools.name": "Chrome DevTools",
-  "mcp_preset.chrome_devtools.summary": "DevTools local summary",
-  "mcp_preset.chrome_devtools.summary_remote_desktop": "DevTools remote desktop summary",
   "memory.key_set": "Set",
   "memory.key_empty": "Optional; local services usually don't need one",
   "memory.loading": "Loading…",
@@ -106,8 +92,6 @@ const EN_DICT = {
   "pi_login.sign_in_in_browser": "Sign in in browser",
   "pi_login.wrong_callback": "Wrong callback, expected %{expected}",
   "pi_model.base_url_invalid": "The API URL must be a full HTTP(S) URL",
-  "pi_model.base_url_required": "Enter the API URL first",
-  "pi_model.base_url_scheme": "The API URL must start with http:// or https://: %{url}",
   "pi_model.provider_id_invalid": "Provider ID \"%{id}\" is invalid",
   "pi_model.provider_id_required": "Enter a Provider ID",
   "plugins.origin_builtin": "Built into %{origin}",
@@ -120,7 +104,6 @@ const EN_DICT = {
   "plugins.user_separator": ", ",
   "provider.auto_synced": "synced from the endpoint",
   "provider.base_url_required": "Enter the API address",
-  "provider.discovery_failed": "%{error}; or enter at least one model by hand",
   "provider.model_count": "%{count} models",
   "provider.no_key": "no API key",
 };
@@ -241,19 +224,6 @@ describe("Provider protocols, validation & discovery", () => {
     expect(validateApiBaseUrl("http://localhost:11434/v1", t).ok).toBe(true);
     expect(validateApiBaseUrl("ftp://example.com", t).ok).toBe(false);
     expect(validateApiBaseUrl("not-a-url", t).ok).toBe(false);
-  });
-
-  test("modelsEndpoint normalizes trailing slashes and /models suffix", () => {
-    expect(modelsEndpoint("https://api.example.com/v1/", t)).toEqual({
-      ok: true,
-      url: "https://api.example.com/v1/models",
-    });
-    expect(modelsEndpoint("https://api.example.com/v1/models/", t)).toEqual({
-      ok: true,
-      url: "https://api.example.com/v1/models",
-    });
-    expect(modelsEndpoint("", t).ok).toBe(false);
-    expect(modelsEndpoint("api.example.com", t).ok).toBe(false);
   });
 
   test("parseOptionalUint parses clean integers and rejects garbage", () => {
@@ -551,24 +521,7 @@ describe("OAuth / API key login event reducer", () => {
   });
 });
 
-describe("MCP presets & transport formatting", () => {
-  test("resolveMcpPresets switches Playwright & Chrome DevTools on remote desktop", () => {
-    const local = resolveMcpPresets(false, [{ name: "figma" }], t);
-    expect(local.find((p) => p.id === "figma")?.added).toBe(true);
-    expect(local.find((p) => p.id === "figma")?.needsSignIn).toBe(true);
-    expect(local.find((p) => p.id === "playwright")?.extensionUrl).toContain("chromewebstore");
-    expect(local.find((p) => p.id === "playwright")?.summary).toBe("Playwright local summary");
-
-    const remote = resolveMcpPresets(true, [], t);
-    expect(remote.find((p) => p.id === "playwright")?.extensionUrl).toBe(null);
-    expect(remote.find((p) => p.id === "playwright")?.summary).toBe(
-      "Playwright remote desktop summary",
-    );
-    expect(remote.find((p) => p.id === "chrome-devtools")?.summary).toBe(
-      "DevTools remote desktop summary",
-    );
-  });
-
+describe("MCP transport formatting", () => {
   test("formatMcpTransportDetail and isMcpServerHttp", () => {
     expect(isMcpServerHttp({ transport: { type: "http", url: "https://a" } })).toBe(true);
     expect(isMcpServerHttp({ transport: { type: "stdio", command: "bun", args: [] } })).toBe(false);

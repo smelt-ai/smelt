@@ -19,6 +19,7 @@ import {
   acpClipboardImages,
   acpPasteImage,
   call,
+  fileUriToPath,
   run,
   SmeltButton,
   SmeltIcon,
@@ -31,7 +32,6 @@ import {
   buildCompletionCandidates,
   colorWithAlpha,
   composerSweepMode,
-  decodeFileUri,
   detectCompletionTrigger,
   isNewConversationCommand,
 } from "./model.js";
@@ -305,7 +305,7 @@ export function Composer(props: {
 
     const uris: string[] = Array.isArray(ev?.uris) ? ev.uris : [];
     if (uris.length > 0) {
-      await attachPaths(uris.map(decodeFileUri));
+      await attachPaths(uris.map(fileUriToPath));
       return;
     }
 

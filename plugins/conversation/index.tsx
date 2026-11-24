@@ -12,6 +12,10 @@ import {
   agentCatalog,
   call,
   DIALOG_SURFACE_CLASS,
+  diffLineStats,
+  forkCutAfter,
+  forkCutBefore,
+  isInterruptMarker,
   newSessionId,
   onAcpEvent,
   SmeltButton,
@@ -28,17 +32,13 @@ import {
   buildAcpLaunchPayload,
   buildConversationLayout,
   buildDisplayRows,
-  buildForkCutAfter,
-  buildForkCutBefore,
   compactPathLeaf,
   confirmedConfigValue,
   consumeComposerRestore,
   entryUserText,
-  isInterruptMarker,
   isPhaseActive,
   isStreamingMetaUnchanged,
   isUserEntry,
-  latestUserMessageIndex,
   mergeEnvelope,
   mergeSnapshotEntries,
   overlayModelState,
@@ -248,6 +248,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
       es.loadedOffset,
       expandedTurnFolds(),
       expandedProcessGroups(),
+      diffLineStats,
     );
   });
 
@@ -269,7 +270,14 @@ export function SmeltConversation(props: SmeltConversationProps) {
 
   const latestUserGlobalIndex = computed(() => {
     const es = entriesState();
-    const local = latestUserMessageIndex(es.entries);
+    let local: number | null = null;
+    for (let i = es.entries.length - 1; i >= 0; i--) {
+      const entry = es.entries[i];
+      if (isUserEntry(entry) && !isInterruptMarker(entryUserText(entry))) {
+        local = i;
+        break;
+      }
+    }
     return local != null ? es.loadedOffset + local : null;
   });
 
@@ -918,7 +926,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
                 if (localIndex < 0 || localIndex >= es.entries.length) return;
                 if (role === "user") {
                   if (!snapshot()?.supports_rewind || latestUserGlobalIndex() === globalIndex) return;
-                  const cut = buildForkCutBefore(es.entries, localIndex);
+                  const cut = forkCutBefore(es.entries, localIndex);
                   if (!cut) return;
                   props.onFork({
                     provider_session_id: acpId,
@@ -926,7 +934,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
                     prompt: cut.text,
                   });
                 } else {
-                  const cut = buildForkCutAfter(es.entries, localIndex);
+                  const cut = forkCutAfter(es.entries, localIndex);
                   props.onFork({
                     provider_session_id: acpId,
                     cut,

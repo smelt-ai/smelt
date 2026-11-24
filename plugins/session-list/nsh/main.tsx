@@ -7,7 +7,7 @@
 
 import { cleanup, computed, effect, Overlay, Scroll, signal, Text, View } from "nsh";
 import { Collapsible, ContextMenu, Input, Menu, Submenu } from "nsh/base";
-import { SmeltButton, SmeltIcon, SmeltNativeBuddy, SmeltWindowBar } from "smelt/sdk";
+import { fileUriToPath, SmeltButton, SmeltIcon, SmeltNativeBuddy, SmeltWindowBar } from "smelt/sdk";
 
 import * as actions from "../actions.js";
 import {
@@ -173,22 +173,6 @@ function rowMeta(row: any, selected: boolean) {
     return { text: span(Math.max(nowSec - row.turn_started_at, 0), t), color: palette.run, unread };
   }
   return { text: relative_time(row.activity, nowSec, t), color: rowFaint(palette, selected), unread };
-}
-
-function decodeFileUris(uris: string[]): string[] {
-  const paths: string[] = [];
-  for (const raw of uris) {
-    if (raw.startsWith("file://")) {
-      try {
-        paths.push(decodeURIComponent(raw.slice("file://".length)));
-      } catch {
-        paths.push(raw.slice("file://".length));
-      }
-    } else if (raw.length > 0) {
-      paths.push(raw);
-    }
-  }
-  return paths;
 }
 
 function isRenamingTarget(rename: RenameState | null, target: RenameState["target"]): boolean {
@@ -2709,7 +2693,7 @@ export function main() {
       onMouseUp={dragPending() ? finishDrag : undefined}
       onFileDrop={(e: any) => {
         const uris = Array.isArray(e?.uris) ? e.uris : [];
-        const paths = decodeFileUris(uris);
+        const paths = uris.filter((uri: string) => uri.length > 0).map(fileUriToPath);
         if (paths.length > 0) {
           actions.open_dropped_paths(list, paths);
         }

@@ -5,6 +5,8 @@ import { ContextMenu, MenuItem, MenuSeparator } from "nsh/base";
 import {
   clipboardWrite,
   contextMenuItems,
+  diffLineStats,
+  isInterruptMarker,
   run,
   SmeltButton,
   SmeltIcon,
@@ -17,7 +19,6 @@ import {
   collectEditFilesFromTool,
   entryUserText,
   formatDuration,
-  isInterruptMarker,
   isUserEntry,
   relativePathToCwd,
   stripCodeFence,
@@ -279,7 +280,7 @@ function ToolCallRow(props: {
   // 2. Pi smelt_ask_user 问答事件行
   const asked = computed(() => tc()?.asked ?? null);
   // 3. 普通工具或子智能体派发
-  const editFiles = computed(() => collectEditFilesFromTool(tc()));
+  const editFiles = computed(() => collectEditFilesFromTool(tc(), diffLineStats));
   const textOutputs = computed(() =>
     (tc()?.output ?? [])
       .map((part: any) => {

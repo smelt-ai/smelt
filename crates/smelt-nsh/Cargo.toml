@@ -44,6 +44,8 @@ uuid = { version = "1", features = ["v4"] }
 qrcode = { version = "0.14", default-features = false }
 # 跨平台在 PATH（含 Windows PATHEXT）中定位可执行文件（`os_apps.rs`）。
 which = "8"
+# 拖进来的 `file://` 按本机规则解成路径（Windows 盘符、百分号转义）。
+url = "2"
 
 # macOS：通过 Launch Services 探测本机 `.app` 并读取应用图标（`os_apps.rs`）。
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -277,48 +277,6 @@ mcp:
   waiting:
     en: "Waiting for authorization…"
     zh-CN: "等待授权…"
-mcp_preset:
-  browser_mcp:
-    name:
-      en: "Agent360 Browser"
-      zh-CN: "Agent360 浏览器"
-    summary:
-      en: "Drives the Chrome you're signed in to: open pages, click and fill forms, take screenshots, and stop to ask you at captchas or two-factor prompts. Install the Agent360 Browser MCP extension first (click \"Install Extension\")."
-      zh-CN: "操作你已登录的 Chrome：打开网页、点击填表、截图，遇到验证码或二次验证会停下来问你。需先安装 Agent360 Browser MCP 扩展（点「安装扩展」）。"
-  chrome_devtools:
-    name:
-      en: "Chrome DevTools"
-      zh-CN: "Chrome 开发调试"
-    summary:
-      en: "Inspect Chrome's network, console, performance and memory. Needs Chrome 144 or later with remote debugging turned on and allowed at chrome://inspect/#remote-debugging. Tries Smelt's bundled Bun (upstream doesn't support Bun)."
-      zh-CN: "检查 Chrome 的网络、控制台、性能和内存。需 Chrome 144 以上，在 chrome://inspect/#remote-debugging 开启远程调试并授权。尝试用 Smelt 自带 Bun 运行（上游不支持 Bun）。"
-    summary_remote_desktop:
-      en: "Inspect the network, console, performance and memory of the remote desktop's Chrome. Tries Smelt's bundled Bun (upstream doesn't support Bun)."
-      zh-CN: "检查远程桌面 Chrome 的网络、控制台、性能和内存。尝试用 Smelt 自带 Bun 运行（上游不支持 Bun）。"
-  figma:
-    name:
-      en: "Figma"
-      zh-CN: "Figma"
-    summary:
-      en: "Read Figma designs, components and variables, and generate code from them. Sign in with your Figma account in the browser."
-      zh-CN: "读取 Figma 设计稿、组件和变量，按设计生成代码。用 Figma 账号在浏览器里授权。"
-  playwright:
-    name:
-      en: "Playwright Browser"
-      zh-CN: "Playwright 浏览器"
-    summary:
-      en: "Drives the Chrome you're using through the Playwright extension, keeping your sign-ins: open pages, click and fill forms, read page structure, take screenshots. Install the Playwright extension first (click \"Install Extension\") and confirm the connection in the browser."
-      zh-CN: "通过 Playwright 扩展操作你正在用的 Chrome，沿用已登录的状态：打开网页、点击填表、读页面结构、截图。需先安装 Playwright 扩展（点「安装扩展」），连接时在浏览器里确认。"
-    summary_remote_desktop:
-      en: "Drives the always-on Chrome in this machine's remote desktop, keeping its sign-ins: open pages, click and fill forms, read page structure, take screenshots. A person takes over in the remote desktop for captchas and payments."
-      zh-CN: "操作这台机器远程桌面里常驻的 Chrome，沿用里面已登录的状态：打开网页、点击填表、读页面结构、截图；遇到验证码、付款，人在远程桌面里接管。"
-  rea:
-    name:
-      en: "REA Reverse Engineering"
-      zh-CN: "REA 逆向分析"
-    summary:
-      en: "Takes apart apps, binaries, web pages and packet captures on this machine and explains, with evidence, how a feature works. Runs on Smelt's bundled Bun; no Node needed."
-      zh-CN: "在本机拆解应用、二进制、网页和抓包，带证据讲清某个功能是怎么实现的。用 Smelt 自带的 Bun 运行，不用装 Node。"
 memory:
   api_key:
     en: "API Key (optional)"
@@ -526,12 +484,6 @@ pi_model:
   base_url_invalid:
     en: "The API URL must be a full HTTP(S) URL"
     zh-CN: "API 地址必须是完整的 HTTP(S) URL"
-  base_url_required:
-    en: "Enter the API URL first"
-    zh-CN: "请先填写 API 地址"
-  base_url_scheme:
-    en: "The API URL must start with http:// or https://: %{url}"
-    zh-CN: "API 地址需要以 http:// 或 https:// 开头：%{url}"
   provider_id_invalid:
     en: "Provider ID \"%{id}\" is invalid: it must start with a letter and contain only letters, digits and hyphens"
     zh-CN: "Provider ID「%{id}」无效：须以字母开头，只能含字母、数字和短连字符"
@@ -668,9 +620,6 @@ provider:
   base_url_required:
     en: "Enter the API address"
     zh-CN: "请填写 API 地址"
-  discovery_failed:
-    en: "%{error}; or enter at least one model by hand"
-    zh-CN: "%{error}；或手动填写至少一个模型"
   edit:
     en: "Edit…"
     zh-CN: "编辑…"

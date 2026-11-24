@@ -4,6 +4,8 @@
 import { cleanup, computed, effect, signal, Text, View } from "nsh";
 import {
   machineMetaEntry,
+  rememberAcpConfigValue,
+  rememberedAcpConfig,
   run,
   sessionStates,
   stableMemo,
@@ -99,13 +101,7 @@ export function notifyPiConfigChanged() {
 
 function initialConfigFor(machine: string | null, agentId: string): Array<[string, string]> {
   void agentSettingsRev();
-  if (!agentId || agentId === "custom") return [];
-  const settings = agentSettingsByMachine.get(machineKey(machine));
-  const mem = settings?.config_memory?.[agentId];
-  if (!Array.isArray(mem)) return [];
-  return mem
-    .filter((pair: any) => Array.isArray(pair) && pair.length >= 2)
-    .map((pair: any) => [String(pair[0]), String(pair[1])]);
+  return rememberedAcpConfig(agentSettingsByMachine.get(machineKey(machine)), agentId);
 }
 
 function rememberConfigValue(
@@ -114,26 +110,12 @@ function rememberConfigValue(
   configId: string,
   valueId: string,
 ) {
-  if (!agentId || agentId === "custom" || !configId.trim() || !valueId.trim()) return;
-  // 对齐 Rust `ConversationAgentKind::remembers_config`：Pi 的默认模型与推理档位归引擎配置，不写入会话记忆。
-  if (agentId === "pi" && (configId === "model" || configId === "thought_level")) return;
   const mk = machineKey(machine);
   const before = agentSettingsByMachine.get(mk);
   if (!before) return;
-  const prevList: Array<[string, string]> = Array.isArray(before.config_memory?.[agentId])
-    ? before.config_memory[agentId].map((p: any) => [String(p[0]), String(p[1])])
-    : [];
-  const existingIdx = prevList.findIndex(([k]) => k === configId);
-  if (existingIdx >= 0 && prevList[existingIdx][1] === valueId) return;
-  const nextList = prevList.filter(([k]) => k !== configId);
-  nextList.push([configId, valueId]);
-  const after = {
-    ...before,
-    config_memory: {
-      ...(before.config_memory ?? {}),
-      [agentId]: nextList,
-    },
-  };
+  // 记不记、怎么去重按运行时同一份规则（Pi 的默认模型与推理档位归引擎配置，不记）。
+  const after = rememberAcpConfigValue(before, agentId, configId, valueId);
+  if (!after) return;
   void run(EDIT_AGENT_SETTINGS_CMD, {
     machine: machine ?? null,
     before,

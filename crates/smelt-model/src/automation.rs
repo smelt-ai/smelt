@@ -6,6 +6,8 @@ use chrono::{
 use serde::de::{Deserializer, Error as DeError};
 use serde::{Deserialize, Serialize};
 
+use crate::runtime_path::PathStyle;
+
 pub use smelt_runtime_client::protocol::reason::{AutomationProblem, AutomationRunFailure};
 
 /// v2：删掉从未投递过的飞书 / Webhook 通知 sink，旧数据在载入时迁移。
@@ -597,15 +599,13 @@ pub fn managed_workspace_name(automation_id: &str) -> String {
         })
 }
 
-/// `path` 是不是运行时给这条自动化分配的托管目录（不管在哪个根下）。
-pub fn is_managed_workspace(path: &str, automation_id: &str) -> bool {
-    let path = std::path::Path::new(path);
-    path.file_name()
-        .is_some_and(|name| name.to_str() == Some(&managed_workspace_name(automation_id)))
-        && path
-            .parent()
-            .and_then(std::path::Path::file_name)
-            .is_some_and(|parent| parent == "automations")
+/// `path` 是不是运行时给这条自动化分配的托管目录（不管在哪个根下）。`style` 是自动化
+/// 所在那台机器的路径风格：客户端看的可能是另一种系统上的目录。
+pub fn is_managed_workspace(style: PathStyle, path: &str, automation_id: &str) -> bool {
+    style.file_name(path) == Some(managed_workspace_name(automation_id).as_str())
+        && style
+            .parent(path)
+            .is_some_and(|parent| style.file_name(&parent) == Some("automations"))
 }
 
 impl Automation {
@@ -615,9 +615,9 @@ impl Automation {
 
     /// 用户自己选的工作目录；没选、用的是托管目录时是 `None`。
     pub fn custom_workspace(&self) -> Option<&str> {
-        self.workspace_dir
-            .as_deref()
-            .filter(|dir| !dir.trim().is_empty() && !is_managed_workspace(dir, &self.id))
+        self.workspace_dir.as_deref().filter(|dir| {
+            !dir.trim().is_empty() && !is_managed_workspace(PathStyle::LOCAL, dir, &self.id)
+        })
     }
 
     pub fn is_ready(&self) -> bool {
@@ -2272,14 +2272,26 @@ mod workspace_tests {
             "/h/.smelt/agents/a/automations",
         ] {
             let dir = format!("{root}/{name}");
-            assert!(is_managed_workspace(&dir, "automation-1"));
+            assert!(is_managed_workspace(PathStyle::Posix, &dir, "automation-1"));
+            assert!(is_managed_workspace(
+                PathStyle::Posix,
+                &format!("{dir}/"),
+                "automation-1"
+            ));
             assert_eq!(with_dir(Some(&dir)).custom_workspace(), None);
         }
+        assert!(is_managed_workspace(
+            PathStyle::Windows,
+            &format!(r"C:\Users\a\.smelt\workspaces\automations\{name}"),
+            "automation-1"
+        ));
         assert!(!is_managed_workspace(
+            PathStyle::Posix,
             &format!("/h/x/{name}"),
             "automation-1"
         ));
         assert!(!is_managed_workspace(
+            PathStyle::Posix,
             &format!("/h/.smelt/workspaces/automations/{name}"),
             "automation-2"
         ));

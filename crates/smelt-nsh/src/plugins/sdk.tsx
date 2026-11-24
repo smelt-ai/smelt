@@ -172,6 +172,65 @@ export function isInterruptMarker(text: string): boolean {
   return Boolean(Smelt.isInterruptMarker(text));
 }
 
+export function diffLineStats(oldText: string | null, newText: string): { added: number; removed: number } {
+  const [added, removed] = Smelt.diffLineStats(oldText ?? "", newText);
+  return { added, removed };
+}
+
+export interface ForkCut {
+  text: string;
+  occurrence: number;
+}
+
+export function forkCutAfter(entries: unknown[], throughIndex: number): ForkCut | null {
+  const raw = Smelt.forkCutAfter(JSON.stringify(entries), throughIndex);
+  return raw ? JSON.parse(raw) : null;
+}
+
+export function forkCutBefore(entries: unknown[], userIndex: number): ForkCut | null {
+  const raw = Smelt.forkCutBefore(JSON.stringify(entries), userIndex);
+  return raw ? JSON.parse(raw) : null;
+}
+
+export function fileUriToPath(uri: string): string {
+  return Smelt.fileUriToPath(uri);
+}
+
+export function isManagedAutomationWorkspace(
+  style: string,
+  path: string,
+  automationId: string,
+): boolean {
+  return Boolean(Smelt.isManagedAutomationWorkspace(style, path, automationId));
+}
+
+export interface PiMcpPreset {
+  id: string;
+  name: string;
+  summary: string;
+  needs_sign_in: boolean;
+  extension_url: string | null;
+}
+
+export function piMcpPresets(remoteDesktop: boolean): PiMcpPreset[] {
+  return JSON.parse(Smelt.piMcpPresets(remoteDesktop));
+}
+
+export function rememberedAcpConfig(settings: unknown, agentId: string): Array<[string, string]> {
+  if (!settings) return [];
+  return JSON.parse(Smelt.rememberedAcpConfig(JSON.stringify(settings), agentId));
+}
+
+export function rememberAcpConfigValue(
+  settings: unknown,
+  agentId: string,
+  configId: string,
+  valueId: string,
+): unknown | null {
+  const raw = Smelt.rememberAcpConfigValue(JSON.stringify(settings), agentId, configId, valueId);
+  return raw ? JSON.parse(raw) : null;
+}
+
 export interface AgentSourceMeta {
   id: string;
   label: string;

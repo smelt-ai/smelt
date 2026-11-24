@@ -5,8 +5,6 @@ import {
   buildCompletionCandidates,
   buildConversationLayout,
   buildDisplayRows,
-  buildForkCutAfter,
-  buildForkCutBefore,
   buildVisibleModels,
   collectEditFilesFromRange,
   colorWithAlpha,
@@ -14,9 +12,7 @@ import {
   composerSweepMode,
   computePromptRailWindow,
   consumeComposerRestore,
-  decodeFileUri,
   detectCompletionTrigger,
-  diffLineStats,
   effortDotColor,
   effortProgress,
   isStreamingMetaUnchanged,
@@ -115,10 +111,12 @@ describe("buildConversationLayout & buildDisplayRows", () => {
     expect(layout[1].turnFold.tally.reads).toBe(1);
     expect(layout[1].turnFold.tally.edits).toBe(1);
 
-    const collapsed = buildDisplayRows(entries, layout, 0, new Set(), new Set());
+    // 宿主的 diffLineStats 在 bun 里没有；这里只验证按文件归并，行数由替身给。
+    const lineStats = () => ({ added: 2, removed: 1 });
+    const collapsed = buildDisplayRows(entries, layout, 0, new Set(), new Set(), lineStats);
     expect(collapsed.map((r) => r.kind)).toEqual(["entry", "turn_fold", "entry"]);
 
-    const edits = collectEditFilesFromRange(entries, 0, entries.length);
+    const edits = collectEditFilesFromRange(entries, 0, entries.length, lineStats);
     expect(edits.length).toBe(1);
     expect(edits[0].added).toBe(2);
     expect(edits[0].removed).toBe(1);
@@ -200,7 +198,6 @@ describe("model search, pending config overlay, prompt rail, formatting", () => 
     expect(usagePercent(50_000, 200_000)).toBe(25);
     expect(compactTokenCount(12_340)).toBe("12.3k");
     expect(compactTokenCount(1_500_000)).toBe("1.5M");
-    expect(diffLineStats("a\nb\nc", "a\nx\nc")).toEqual({ added: 1, removed: 1 });
     expect(consumeComposerRestore(2, 2, ["a"], []).restoreTexts).toBeNull();
     expect(consumeComposerRestore(2, 3, ["restored"], []).restoreTexts).toEqual(["restored"]);
   });
@@ -241,26 +238,6 @@ describe("ACP launch & fork wire contract", () => {
     });
     expect(auto.conversation_binding).toEqual({ type: "automation", run_id: "run-9" });
     expect(auto.initial_prompt).toBeNull();
-  });
-
-  test("computes AcpForkCut matching smelt-model fork_cut_after and fork_cut_before", () => {
-    const entries = [
-      { User: "go" },
-      { Assistant: { text: "a1", thought: false } },
-      { User: "[Request interrupted by user]" },
-      { User: "go" },
-      { Assistant: { text: "a2", thought: false } },
-      { UserWithImages: { text: "go", images: [] } },
-      { Assistant: { text: "a3", thought: false } },
-    ];
-    expect(buildForkCutAfter(entries, 1)).toEqual({ text: "go", occurrence: 1 });
-    expect(buildForkCutAfter(entries, 4)).toEqual({ text: "go", occurrence: 2 });
-    expect(buildForkCutAfter(entries, 6)).toBeNull();
-
-    expect(buildForkCutBefore(entries, 0)).toEqual({ text: "go", occurrence: 0 });
-    expect(buildForkCutBefore(entries, 2)).toBeNull();
-    expect(buildForkCutBefore(entries, 3)).toEqual({ text: "go", occurrence: 1 });
-    expect(buildForkCutBefore(entries, 5)).toEqual({ text: "go", occurrence: 2 });
   });
 
   test("recognizes thinking config via is_thought_level and smelt marker", () => {
@@ -318,13 +295,6 @@ describe("ACP launch & fork wire contract", () => {
     expect(merged.acp_session_id).toBe("acp-live-1");
     expect(merged.provider_retry).toBeNull();
     expect(mergeEnvelope(null, incoming)).toBe(incoming);
-  });
-
-  test("decodeFileUri strips file:// and percent-decodes paths with spaces and CJK", () => {
-    expect(decodeFileUri("file:///tmp/my%20shot%20%E6%88%AA%E5%9B%BE.png")).toBe(
-      "/tmp/my shot 截图.png",
-    );
-    expect(decodeFileUri("/plain/path.png")).toBe("/plain/path.png");
   });
 
   test("effortProgress, effortDotColor, and selectedConfigIndex map reasoning tiers consistently", () => {

@@ -34,7 +34,6 @@ import {
   emptyCustomModelRow,
   MEMORY_KEYS,
   machineKey,
-  modelsEndpoint,
   normalizeAuthProvider,
   normalizeDiscoveredModel,
   normalizeMachine,
@@ -653,12 +652,8 @@ export function createPageController(viewId: string, tabs: readonly Capabilities
   function discoverCustomModels() {
     const cur = customProviderEditor();
     if (!cur || cur.discovery?.status === "loading") return;
+    // 地址拼得对不对由运行时判断（和真正发请求同一份规则），错了照样走下面的失败分支。
     const baseUrl = cur.baseUrl.trim();
-    const check = modelsEndpoint(baseUrl, t);
-    if (!check.ok) {
-      customProviderEditor.set({ ...cur, discovery: { status: "failed", error: check.error } });
-      return;
-    }
     const callEpoch = epoch;
     customProviderEditor.set({ ...cur, discovery: { status: "loading" } });
     const params = {
@@ -709,11 +704,7 @@ export function createPageController(viewId: string, tabs: readonly Capabilities
     if (!cur || modelEditorSaving()) return;
     const check = validateAndBuildSaveCustomProviderParams(cur, setDefault, t);
     if (!check.ok) {
-      if (check.target === "discovery") {
-        customProviderEditor.set({ ...cur, discovery: { status: "failed", error: check.error } });
-      } else {
-        modelEditorError.set(check.error);
-      }
+      modelEditorError.set(check.error);
       return;
     }
     const callEpoch = epoch;

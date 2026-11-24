@@ -12815,6 +12815,7 @@ dependencies = [
  "smelt-terminal",
  "smelt-ui",
  "tokio",
+ "url",
  "uuid",
  "which",
 ]

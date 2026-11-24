@@ -218,6 +218,45 @@ export declare function parseFileLink(
   cwd?: string | null,
 ): { path: string; line: number | null; fragment: string } | null;
 export declare function isInterruptMarker(text: string): boolean;
+/** 一处改动的增删行数，和 `<SmeltDiffView>` 同一份按行比对；新建文件 `oldText` 传 `null`。 */
+export declare function diffLineStats(
+  oldText: string | null,
+  newText: string,
+): { added: number; removed: number };
+export interface ForkCut {
+  text: string;
+  occurrence: number;
+}
+/** 从第 `throughIndex` 条回答分叉的切点，和运行时 `Rewind` 同语义；点在最后一回合时为 `null`。 */
+export declare function forkCutAfter(entries: unknown[], throughIndex: number): ForkCut | null;
+/** 改第 `userIndex` 条提问重发时的切点（切在它之前）。 */
+export declare function forkCutBefore(entries: unknown[], userIndex: number): ForkCut | null;
+/** 拖进窗口的 `file://` 按本机规则解成路径；不是文件 URL 的原样返回。 */
+export declare function fileUriToPath(uri: string): string;
+/** 工作目录是不是运行时按 id 给这条自动化分配的托管目录；`style` 是自动化所在机器的路径风格。 */
+export declare function isManagedAutomationWorkspace(
+  style: string,
+  path: string,
+  automationId: string,
+): boolean;
+export interface PiMcpPreset {
+  id: string;
+  name: string;
+  summary: string;
+  needs_sign_in: boolean;
+  extension_url: string | null;
+}
+/** 内置 MCP 一键添加预设，按这台机器装没装远程桌面挑那一套。 */
+export declare function piMcpPresets(remoteDesktop: boolean): PiMcpPreset[];
+/** 某个 agent 记住的最近选择（去重后）。 */
+export declare function rememberedAcpConfig(settings: unknown, agentId: string): Array<[string, string]>;
+/** 记一次用户显式选择，返回改后的设置；不该记或没变化时为 `null`。 */
+export declare function rememberAcpConfigValue(
+  settings: unknown,
+  agentId: string,
+  configId: string,
+  valueId: string,
+): unknown | null;
 
 export interface AgentSourceMeta {
   id: string;

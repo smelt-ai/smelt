@@ -56,61 +56,6 @@ export const MEMORY_KEYS = {
   RERANK_MODEL_ID: "memory.rerank_model_id",
 };
 
-/**
- * 内置 MCP 一键添加预设（与 smelt_model::pi_mcp::PI_MCP_PRESETS 一一对应）。
- * 实际写入内容由运行时按 id 与该机器的 remote_desktop 决定；这里只负责界面展示与扩展链接。
- */
-export const PI_MCP_PRESETS = [
-  {
-    id: "figma",
-    nameKey: "mcp_preset.figma.name",
-    summaryKey: "mcp_preset.figma.summary",
-    needsSignIn: true,
-    extensionUrl: null,
-    remoteDesktop: null,
-  },
-  {
-    id: "rea",
-    nameKey: "mcp_preset.rea.name",
-    summaryKey: "mcp_preset.rea.summary",
-    needsSignIn: false,
-    extensionUrl: null,
-    remoteDesktop: null,
-  },
-  {
-    id: "browser-mcp",
-    nameKey: "mcp_preset.browser_mcp.name",
-    summaryKey: "mcp_preset.browser_mcp.summary",
-    needsSignIn: false,
-    extensionUrl:
-      "https://chromewebstore.google.com/detail/agent360-browser-mcp/jdehgalffmffhfhmmhaokfbfnafnmgcl",
-    remoteDesktop: null,
-  },
-  {
-    id: "playwright",
-    nameKey: "mcp_preset.playwright.name",
-    summaryKey: "mcp_preset.playwright.summary",
-    needsSignIn: false,
-    extensionUrl:
-      "https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm",
-    remoteDesktop: {
-      summaryKey: "mcp_preset.playwright.summary_remote_desktop",
-      extensionUrl: null,
-    },
-  },
-  {
-    id: "chrome-devtools",
-    nameKey: "mcp_preset.chrome_devtools.name",
-    summaryKey: "mcp_preset.chrome_devtools.summary",
-    needsSignIn: false,
-    extensionUrl: null,
-    remoteDesktop: {
-      summaryKey: "mcp_preset.chrome_devtools.summary_remote_desktop",
-      extensionUrl: null,
-    },
-  },
-];
-
 // ---- 通用辅助 ----
 
 export function machineKey(machine) {
@@ -343,21 +288,6 @@ export function validateCustomProviderId(id, t) {
     return { ok: true };
   }
   return { ok: false, error: t("pi_model.provider_id_invalid", { id: value }) };
-}
-
-/** 拼出 GET 模型列表的完整 URL，与 smelt_model::pi_model_discovery::models_endpoint 一致。 */
-export function modelsEndpoint(baseUrl, t) {
-  const trimmed = typeof baseUrl === "string" ? baseUrl.trim().replace(/\/+$/, "") : "";
-  if (trimmed.length === 0) {
-    return { ok: false, error: t("pi_model.base_url_required") };
-  }
-  if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
-    return { ok: false, error: t("pi_model.base_url_scheme", { url: trimmed }) };
-  }
-  if (trimmed.endsWith("/models")) {
-    return { ok: true, url: trimmed };
-  }
-  return { ok: true, url: `${trimmed}/models` };
 }
 
 export function parseOptionalUint(raw) {
@@ -630,15 +560,15 @@ export function validateAndBuildSaveCustomProviderParams(draft, setDefault, t) {
   const id = String(draft?.id ?? "").trim();
   const idCheck = validateCustomProviderId(id, t);
   if (!idCheck.ok) {
-    return { ok: false, target: "form", error: idCheck.error };
+    return { ok: false, error: idCheck.error };
   }
   const baseUrl = String(draft?.baseUrl ?? "").trim();
   if (baseUrl.length === 0) {
-    return { ok: false, target: "form", error: t("provider.base_url_required") };
+    return { ok: false, error: t("provider.base_url_required") };
   }
   const urlCheck = validateApiBaseUrl(baseUrl, t);
   if (!urlCheck.ok) {
-    return { ok: false, target: "form", error: urlCheck.error };
+    return { ok: false, error: urlCheck.error };
   }
 
   const models = [];
@@ -658,17 +588,6 @@ export function validateAndBuildSaveCustomProviderParams(draft, setDefault, t) {
   const displayName = displayNameRaw.length > 0 ? displayNameRaw : id;
   const apiKey = String(draft?.apiKey ?? "").trim();
   const fromEndpoint = models.length === 0;
-
-  if (fromEndpoint) {
-    const ep = modelsEndpoint(baseUrl, t);
-    if (!ep.ok) {
-      return {
-        ok: false,
-        target: "discovery",
-        error: t("provider.discovery_failed", { error: ep.error }),
-      };
-    }
-  }
 
   return {
     ok: true,
@@ -850,23 +769,6 @@ export function applyLoginEvent(view, event, t) {
 }
 
 // ---- MCP ----
-
-export function resolveMcpPresets(remoteDesktop, servers, t) {
-  const names = new Set((servers ?? []).map((s) => s.name));
-  return PI_MCP_PRESETS.map((preset) => {
-    const variant = remoteDesktop && preset.remoteDesktop ? preset.remoteDesktop : null;
-    const summaryKey = variant ? variant.summaryKey : preset.summaryKey;
-    const extensionUrl = variant ? variant.extensionUrl : preset.extensionUrl;
-    return {
-      id: preset.id,
-      name: t(preset.nameKey),
-      summary: t(summaryKey),
-      added: names.has(preset.id),
-      needsSignIn: preset.needsSignIn,
-      extensionUrl,
-    };
-  });
-}
 
 export function isMcpServerHttp(server) {
   return server?.transport?.type === "http";

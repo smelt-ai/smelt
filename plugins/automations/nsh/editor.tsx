@@ -1,7 +1,7 @@
 // 自动化下钻头、左侧运行列表与任务表单编辑器。
 import { computed, Scroll, Text, View } from "nsh";
 import { Menu } from "nsh/base";
-import { SmeltButton, SmeltIcon, t } from "smelt/sdk";
+import { isManagedAutomationWorkspace, pathStyle, SmeltButton, SmeltIcon, t } from "smelt/sdk";
 import {
   actionKindLabel,
   automationAccessNote,
@@ -10,7 +10,6 @@ import {
   BUILTIN_AUTOMATION_ACTIONS,
   BUILTIN_AUTOMATION_TRIGGER_PRESETS,
   compactInstructions,
-  customWorkspace,
   DEFAULT_WEBHOOK_BASE_URL,
   findAutomation,
   formatRelativeUntil,
@@ -940,7 +939,12 @@ export function EditorForm(props: { editor: EditorState }) {
 
   const isAgent = () => ed().actionKind === "agent";
   const isWebhook = () => ed().entries.some((e) => e.triggerKind === "webhook");
-  const customDir = () => customWorkspace(ed().workspaceDir, ed().id);
+  /** 用户自选的工作目录；没选或是运行时分配的托管目录时为 `null`。 */
+  const customDir = () => {
+    const { machine, workspaceDir, id } = ed();
+    if (typeof workspaceDir !== "string" || workspaceDir.trim().length === 0) return null;
+    return isManagedAutomationWorkspace(pathStyle(machine), workspaceDir, id) ? null : workspaceDir;
+  };
   const canOpenAgents = computed(() => {
     return isViewRegistered(AGENTS_VIEW);
   });

@@ -1,12 +1,11 @@
 // 能力库「MCP」页签：内置预设一键添加、已配置服务器启停/登录/移除/智能体勾选、mcp.json 入口。
 
 import { computed, Text, View } from "nsh";
-import { openUrl, SmeltButton, t } from "smelt/sdk";
+import { openUrl, piMcpPresets, SmeltButton, t } from "smelt/sdk";
 import {
   formatMcpTransportDetail,
   formatUsedByLine,
   isMcpServerHttp,
-  resolveMcpPresets,
 } from "../model.js";
 import { LoginPanel } from "./auth.tsx";
 import { agentSettingsOn, currentTheme, type PageController } from "./state.ts";
@@ -27,9 +26,13 @@ export function McpTab(props: { page: PageController }) {
     cfg() ? cfg()!.mcpServers : { ok: false, error: props.page.pendingText() },
   );
   const servers = computed(() => (mcpResult().ok ? (mcpResult() as any).value : []));
-  const presets = computed(() =>
-    resolveMcpPresets(props.page.remoteDesktop(), servers(), t),
-  );
+  const presets = computed(() => {
+    const names = new Set(servers().map((server: any) => server.name));
+    return piMcpPresets(props.page.remoteDesktop()).map((preset) => ({
+      ...preset,
+      added: names.has(preset.id),
+    }));
+  });
   const isRemote = computed(() => props.page.machine() !== null);
   const mcpPath = computed(() => cfg()?.paths.mcp ?? "");
 
@@ -47,14 +50,14 @@ export function McpTab(props: { page: PageController }) {
           {(preset: () => any, ix: () => number) => (
             <SectionCell divider={ix() > 0}>
               <SettingsRow title={preset().name} description={preset().summary}>
-                <If when={Boolean(preset().extensionUrl)}>
+                <If when={Boolean(preset().extension_url)}>
                   <SmeltButton
                     quiet={true}
                     small={true}
                     label={t("mcp.install_extension")}
                     tooltip={t("mcp.install_extension_tooltip")}
                     onPress={() => {
-                      const url = preset().extensionUrl;
+                      const url = preset().extension_url;
                       if (url) void openUrl(url).catch(() => {});
                     }}
                   />
@@ -66,7 +69,7 @@ export function McpTab(props: { page: PageController }) {
                       small={true}
                       label={t("mcp.add")}
                       tooltip={
-                        preset().needsSignIn
+                        preset().needs_sign_in
                           ? t("mcp.add_tooltip_sign_in")
                           : t("mcp.add_tooltip")
                       }

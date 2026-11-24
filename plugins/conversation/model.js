@@ -6,18 +6,6 @@ export const MAX_COMPLETION_ITEMS = 12;
 export const PROMPT_RAIL_MAX_TICKS = 11;
 export const PROMPT_RAIL_EDGE_FADE = 2;
 
-const INTERRUPT_PREFIXES = [
-  "[Request interrupted by user",
-  "[User interrupted",
-  "Request interrupted by user",
-];
-
-export function isInterruptMarker(text) {
-  if (typeof text !== "string") return false;
-  const trimmed = text.trim();
-  return INTERRUPT_PREFIXES.some((p) => trimmed.startsWith(p));
-}
-
 export function isNewConversationCommand(text) {
   return typeof text === "string" && text.trim().toLowerCase() === "/clear";
 }
@@ -118,15 +106,6 @@ export function entryUserText(entry) {
   if ("User" in entry) return String(entry.User ?? "");
   if ("UserWithImages" in entry) return String(entry.UserWithImages?.text ?? "");
   return "";
-}
-
-export function latestUserMessageIndex(entries) {
-  for (let i = entries.length - 1; i >= 0; i--) {
-    if (isUserEntry(entries[i]) && !isInterruptMarker(entryUserText(entries[i]))) {
-      return i;
-    }
-  }
-  return null;
 }
 
 /**
@@ -477,6 +456,7 @@ export function buildDisplayRows(
   entriesOffset,
   expandedTurnFolds,
   expandedProcessGroups,
+  lineStats,
 ) {
   const rows = [];
   let i = 0;
@@ -510,7 +490,7 @@ export function buildDisplayRows(
     if (group && i === group.first) {
       const groupKey = `pg:${entriesOffset + group.first}`;
       const expanded = expandedProcessGroups.has(groupKey);
-      const editFiles = collectEditFilesFromRange(entries, group.first, group.end);
+      const editFiles = collectEditFilesFromRange(entries, group.first, group.end, lineStats);
       rows.push({
         key: groupKey,
         kind: "process_group",
@@ -812,49 +792,6 @@ export function buildAcpLaunchPayload({
   };
 }
 
-/**
- * 从回答分叉时的切点（对齐 `smelt_model::acp_chat::fork_cut_after`）。
- * 返回 `{ text, occurrence }` 或 `null`（点在最后一回合时整份历史照抄、不设切点）。
- */
-export function buildForkCutAfter(entries, throughIndex) {
-  let nextIndex = -1;
-  let text = "";
-  for (let i = throughIndex + 1; i < entries.length; i++) {
-    if (!isUserEntry(entries[i])) continue;
-    const candidate = entryUserText(entries[i]);
-    if (isInterruptMarker(candidate)) continue;
-    nextIndex = i;
-    text = candidate;
-    break;
-  }
-  if (nextIndex < 0) return null;
-  let occurrence = 0;
-  for (let i = 0; i < nextIndex; i++) {
-    if (isUserEntry(entries[i]) && entryUserText(entries[i]) === text) {
-      occurrence += 1;
-    }
-  }
-  return { text, occurrence };
-}
-
-/**
- * 从较早用户消息分叉编辑时的切点（对齐 `smelt_model::acp_chat::fork_cut_before`）。
- */
-export function buildForkCutBefore(entries, userIndex) {
-  if (userIndex < 0 || userIndex >= entries.length || !isUserEntry(entries[userIndex])) {
-    return null;
-  }
-  const text = entryUserText(entries[userIndex]);
-  if (isInterruptMarker(text)) return null;
-  let occurrence = 0;
-  for (let i = 0; i < userIndex; i++) {
-    if (isUserEntry(entries[i]) && entryUserText(entries[i]) === text) {
-      occurrence += 1;
-    }
-  }
-  return { text, occurrence };
-}
-
 export function applyPendingConfigSelection(pending, configId, valueId, confirmedValue) {
   const next = pending.filter(([id]) => id !== configId);
   if (confirmedValue !== valueId) {
@@ -942,43 +879,6 @@ export function computePromptRailWindow(prompts, readingGlobalIndex, maxVisible 
 
 // ---- Diff 提取与统计（对齐 edit_diff.rs） ----
 
-export function diffLineStats(oldText, newText) {
-  const oldLines = oldText == null ? [] : String(oldText).split("\n");
-  const newLines = String(newText ?? "").split("\n");
-  if (oldText == null) {
-    return { added: newLines.length, removed: 0 };
-  }
-  // 轻量公共前后缀裁剪 + 多重集计数，用于卡片标签汇总（完整差异交 Rust <SmeltDiffView> 算）。
-  let prefix = 0;
-  while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) {
-    prefix += 1;
-  }
-  let suffix = 0;
-  while (
-    suffix < oldLines.length - prefix &&
-    suffix < newLines.length - prefix &&
-    oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]
-  ) {
-    suffix += 1;
-  }
-  const oldMid = oldLines.slice(prefix, oldLines.length - suffix);
-  const newMid = newLines.slice(prefix, newLines.length - suffix);
-  const counts = new Map();
-  for (const l of oldMid) counts.set(l, (counts.get(l) ?? 0) + 1);
-  let common = 0;
-  for (const l of newMid) {
-    const n = counts.get(l) ?? 0;
-    if (n > 0) {
-      counts.set(l, n - 1);
-      common += 1;
-    }
-  }
-  return {
-    added: newMid.length - common,
-    removed: oldMid.length - common,
-  };
-}
-
 export function compactPathLeaf(path) {
   const parts = String(path ?? "")
     .split(/[\/\\]/)
@@ -993,14 +893,15 @@ export function relativePathToCwd(path, cwd) {
   return path;
 }
 
-export function collectEditFilesFromTool(tc) {
+/** `lineStats(old, new)` 给出一处改动的 `{ added, removed }`，运行时传宿主的 `diffLineStats`。 */
+export function collectEditFilesFromTool(tc, lineStats) {
   const byPath = new Map();
   const order = [];
   for (const part of tc?.output ?? []) {
     if (!part || typeof part !== "object" || !("Diff" in part)) continue;
     const d = part.Diff;
     if (!d?.path) continue;
-    const stats = diffLineStats(d.old_text ?? null, d.new_text ?? "");
+    const stats = lineStats(d.old_text ?? null, d.new_text ?? "");
     let file = byPath.get(d.path);
     if (!file) {
       file = {
@@ -1020,13 +921,13 @@ export function collectEditFilesFromTool(tc) {
   return order;
 }
 
-export function collectEditFilesFromRange(entries, start, end) {
+export function collectEditFilesFromRange(entries, start, end, lineStats) {
   const byPath = new Map();
   const order = [];
   for (let i = start; i < end; i++) {
     const e = entries[i];
     if (!e || typeof e !== "object" || !("ToolCall" in e)) continue;
-    for (const f of collectEditFilesFromTool(e.ToolCall)) {
+    for (const f of collectEditFilesFromTool(e.ToolCall, lineStats)) {
       let existing = byPath.get(f.path);
       if (!existing) {
         existing = { ...f, edits: [...f.edits] };
@@ -1074,17 +975,6 @@ export function runningSubagents(subagents) {
 
 export function runningBackgroundTasks(tasks) {
   return (tasks ?? []).filter((t) => t?.status === "running");
-}
-
-export function decodeFileUri(uri) {
-  const raw = String(uri ?? "");
-  if (!raw.startsWith("file://")) return raw;
-  const path = raw.slice(7);
-  try {
-    return decodeURIComponent(path);
-  } catch {
-    return path;
-  }
 }
 
 /**

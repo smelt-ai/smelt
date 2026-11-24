@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import * as contract from "../contract.js";
@@ -39,7 +39,6 @@ import {
   countFailingAutomations,
   createEmptyMachineAutomations,
   createTriggerEntryDraft,
-  customWorkspace,
   decodeAutomationsPayload,
   deleteConfirmDescription,
   deliveredKey,
@@ -57,8 +56,6 @@ import {
   formatRelativeUntil,
   intervalTitle,
   isAgentReady,
-  isManagedWorkspace,
-  managedWorkspaceName,
   missingFieldLabel,
   newSessionLabel,
   newWebhookSecret,
@@ -76,7 +73,6 @@ import {
   runSummaryInfo,
   scheduleFromValues,
   scheduleSummary,
-  sha256Hex,
   taskNoteSummary,
   templateCategoryLabel,
   templatePlaceholders,
@@ -90,7 +86,6 @@ import {
   triggerPresetSchedule,
   triggerSummary,
   turnFailedText,
-  utf8Bytes,
   validateAutomation,
   validateSchedule,
   validateTrigger,
@@ -249,51 +244,9 @@ describe("contract & locales", () => {
   });
 });
 
-// ---- 2. 纯 JS SHA-256、托管工作目录与 Webhook Secret ----
+// ---- 2. Webhook Secret ----
 
-describe("managed workspace & webhook secret", () => {
-  test("pure-JS sha256Hex matches node:crypto across empty, ASCII, multi-block, and UTF-8", () => {
-    const vectors = [
-      "",
-      "abc",
-      "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
-      "a".repeat(200),
-      "自动化-工作区-🚀",
-    ];
-    for (const input of vectors) {
-      const expected = createHash("sha256").update(Buffer.from(input, "utf8")).digest("hex");
-      expect(sha256Hex(utf8Bytes(input))).toBe(expected);
-    }
-  });
-
-  test("managedWorkspaceName matches exact Rust domain-separated SHA-256 vector", () => {
-    for (const id of ["", "auto-1", "550e8400-e29b-41d4-a716-446655440000", "晨报-🚀"]) {
-      const idBuf = Buffer.from(id, "utf8");
-      const lenBuf = Buffer.alloc(8);
-      lenBuf.writeBigUInt64BE(BigInt(idBuf.length));
-      const expected = createHash("sha256")
-        .update(Buffer.from("smelt.automation-workspace.v1\0", "utf8"))
-        .update(lenBuf)
-        .update(idBuf)
-        .digest("hex");
-      expect(managedWorkspaceName(id)).toBe(expected);
-    }
-  });
-
-  test("isManagedWorkspace & customWorkspace match POSIX and Windows paths", () => {
-    const id = "auto-42";
-    const hash = managedWorkspaceName(id);
-    expect(isManagedWorkspace(`/Users/a/.smelt/automations/${hash}`, id)).toBe(true);
-    expect(isManagedWorkspace(`/Users/a/.smelt/automations/${hash}/`, id)).toBe(true);
-    expect(isManagedWorkspace(`C:\\Users\\a\\.smelt\\automations\\${hash}`, id)).toBe(true);
-    expect(isManagedWorkspace(`/Users/a/.smelt/other/${hash}`, id)).toBe(false);
-    expect(isManagedWorkspace(`/Users/a/.smelt/automations/${hash}`, "other-id")).toBe(false);
-    expect(isManagedWorkspace("/Users/a/project", id)).toBe(false);
-    expect(customWorkspace(`/Users/a/.smelt/automations/${hash}`, id)).toBeNull();
-    expect(customWorkspace("   ", id)).toBeNull();
-    expect(customWorkspace("/Users/a/repo", id)).toBe("/Users/a/repo");
-  });
-
+describe("webhook secret", () => {
   test("newWebhookSecret formats UUID v4 as 32-char lowercase hex", () => {
     const fixed = newWebhookSecret(() => "550E8400-E29B-41D4-A716-446655440000");
     expect(fixed).toBe("550e8400e29b41d4a716446655440000");
