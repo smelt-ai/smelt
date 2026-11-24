@@ -4193,6 +4193,36 @@ fn undo_prompt_sent_refuses_a_finished_turn() {
     assert_eq!(state.entries().len(), 1);
 }
 
+/// 挂起裁掉已提交前缀后（`entries_base > 0`），新回合计时必须记绝对下标，撤回也按绝对下标对齐。
+#[test]
+fn turn_timing_uses_global_index_when_entries_base_is_nonzero() {
+    let mut state = AcpSessionState::default();
+    state.phase = DaemonPhase::Idle;
+    state.entries_mut().extend([
+        AcpEntry::User("第一问".into()),
+        AcpEntry::Assistant {
+            text: "第一答".into(),
+            thought: false,
+        },
+        AcpEntry::User("第二问".into()),
+        AcpEntry::Assistant {
+            text: "第二答".into(),
+            thought: false,
+        },
+    ]);
+    state.trim_to_current_turn();
+    assert_eq!(state.entries_base(), 2);
+    assert_eq!(state.entries().len(), 2);
+
+    crate::acp_session::note_prompt_sent(&mut state, "第三问".into(), Vec::new());
+    assert_eq!(state.turn_timings.last().map(|t| t.user_index), Some(4));
+
+    let (text, _) =
+        crate::acp_session::undo_prompt_sent(&mut state).expect("刚写下的第三问必须可撤回");
+    assert_eq!(text, "第三问");
+    assert!(state.turn_timings.is_empty());
+}
+
 fn memory_change(
     layer: crate::control_api::AgentMemoryLayer,
     file: &str,

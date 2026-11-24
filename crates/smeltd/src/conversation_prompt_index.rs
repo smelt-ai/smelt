@@ -21,15 +21,43 @@ pub(crate) fn prompt_index(
     let gone =
         || ControlError::because(ControlErrorCode::NotFound, ControlReason::ConversationGone);
     let slot = acp_sessions.get(&session_id).ok_or_else(gone)?;
-    let needs_wake = acp_sessions
+    enum PrefixPrep {
+        None,
+        Wake,
+        WaitReady,
+    }
+    let prep = acp_sessions
         .with_current(&session_id, &slot, |session| {
             let reduced = session.reduced.lock();
-            reduced.entries_base() > 0 && before > 0 && session.idle.is_suspended()
+            if reduced.entries_base() == 0 || before == 0 {
+                PrefixPrep::None
+            } else if session.idle.is_suspended() {
+                PrefixPrep::Wake
+            } else if crate::acp_idle::acp_ready_outcome(&reduced).is_none() {
+                PrefixPrep::WaitReady
+            } else {
+                PrefixPrep::None
+            }
         })
         .ok_or_else(gone)?;
-    if needs_wake {
-        crate::acp_idle::wake_suspended_acp_session(&session_id, &slot, acp_sessions, subscribers)
+    match prep {
+        PrefixPrep::None => {}
+        PrefixPrep::Wake => {
+            crate::acp_idle::wake_suspended_acp_session(
+                &session_id,
+                &slot,
+                acp_sessions,
+                subscribers,
+            )
             .map_err(|error| ControlError::new(ControlErrorCode::OperationFailed, error))?;
+        }
+        PrefixPrep::WaitReady => {
+            crate::acp_idle::wait_for_acp_ready(
+                &slot.value,
+                crate::acp_idle::ACP_WAKE_READY_TIMEOUT,
+            )
+            .map_err(|error| ControlError::new(ControlErrorCode::OperationFailed, error))?;
+        }
     }
     acp_sessions
         .with_current(&session_id, &slot, |session| {

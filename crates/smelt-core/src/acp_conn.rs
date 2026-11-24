@@ -247,6 +247,12 @@ impl std::fmt::Display for ConversationRestoreFailure {
 }
 
 const ACP_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+/// `session/load` 响应后等待异步重放流安静的窗口。
+/// ACP 规范要求重放先于响应，但部分 agent（如 `agy acp` 1.5.14）会在返回
+/// `LoadSessionResponse` 后继续由后台协程推送剩余历史 `session/update`，且没有
+/// 显式重放结束标记。
+const POST_LOAD_REPLAY_QUIET_WINDOW: Duration = Duration::from_millis(250);
+const POST_LOAD_REPLAY_MAX_WAIT: Duration = Duration::from_secs(15);
 
 async fn wait_for_acp_request<T, F>(
     request: F,
@@ -2190,9 +2196,13 @@ async fn run_connection(
                                 loaded.modes.as_ref(),
                                 &channels.event_tx,
                             );
-                            // 响应前的重放在会话自己的队列里，还没进事件通道。先排空，
-                            // 再收尾：草稿要等正文全部到齐才一次性换上；先发收尾会让
-                            // 草稿以空正文提交，随后的历史被当成实时消息。
+                            // `session/load` RPC 已返回，握手阶段完成；后面的重放排空自带
+                            // 静默窗口与总时长上限，不能让大历史重放撞上握手看门狗。
+                            signal_acp_handshake_complete(&handshake_complete);
+                            // 响应前的重放在会话自己的队列里，还没进事件通道；部分 agent
+                            // 也会在响应后继续异步推送剩余历史。先排空并等重放流安静，
+                            // 再收尾：草稿要等正文全部到齐才一次性换上；提前发收尾会让
+                            // 守护过早开闸，把新消息插进旧回合中间。
                             drain_loaded_replay(
                                 &mut session,
                                 &channels.event_tx,
@@ -2203,7 +2213,6 @@ async fn run_connection(
                             let _ = channels
                                 .event_tx
                                 .try_send(ConversationEvent::HistoryReplayFinished);
-                            signal_acp_handshake_complete(&handshake_complete);
                             return drive_session(
                                 session,
                                 channels,
@@ -2286,9 +2295,8 @@ async fn run_connection(
     result
 }
 
-/// 把 `session/load` 响应前已经入队的重放翻译进投影，并记下当前这一轮的形状。
-///
-/// 只取已经就绪的更新。`poll_once` 拿不到就停，不会把还没到的消息从队列里丢掉。
+/// 把 `session/load` 响应前已经入队的重放翻译进投影，并等待响应后可能仍在异步推送的
+/// 历史更新安静下来。
 async fn drain_loaded_replay<S: SessionDrive>(
     session: &mut S,
     event_tx: &smol::channel::Sender<ConversationEvent>,
@@ -2307,9 +2315,36 @@ async fn drain_loaded_replay<S: SessionDrive>(
                 observe_replay(&update, replay);
                 translate_update(update, event_tx, read_images).await?;
             }
-            None => return Ok(()),
+            None => break,
         }
     }
+
+    let deadline = Instant::now() + POST_LOAD_REPLAY_MAX_WAIT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let quiet = remaining.min(POST_LOAD_REPLAY_QUIET_WINDOW);
+        let next = {
+            let read = session.read_update();
+            smol::future::race(async move { Some(read.await) }, async move {
+                // 轮询例外：ACP 在 session/load 响应后没有异步重放结束事件，只能以静默窗口作为读取上限；周期 250ms，上限 15s。
+                smol::Timer::after(quiet).await;
+                None
+            })
+            .await
+        };
+        match next {
+            Some(update) => {
+                let update = update?;
+                observe_replay(&update, replay);
+                translate_update(update, event_tx, read_images).await?;
+            }
+            None => break,
+        }
+    }
+    Ok(())
 }
 
 /// `session/load` 重放里，最后一条用户消息之后的内容。用来判断交接里的
@@ -2505,14 +2540,16 @@ async fn drive_session<S: SessionDrive>(
                 turn_active = false;
                 flush_pending_config_options(
                     &mut pending_config_options,
-                    session.connection().clone(),
-                    session.session_id().clone(),
+                    &mut session,
                     &channels.event_tx,
                     &in_flight_rpc,
+                    &mut read_images,
                 )
-                .await;
+                .await?;
             }
             Next::Cmd(Some(ConversationCommand::Prompt { text, images })) => {
+                // 发起新一轮 prompt 前先排空队列里已经到达的更新，避免迟到通知落进新回合。
+                drain_ready_updates(&mut session, &channels.event_tx, &mut read_images).await?;
                 // 文本和带图走同一条自己拼请求的路径。曾经纯文本走 SDK 的
                 // `send_prompt`，但它的回调对错误响应做 `?`：agent 回一个
                 // JSON-RPC error（比如「没配 API key」）会让回调任务失败，
@@ -2596,14 +2633,14 @@ async fn drive_session<S: SessionDrive>(
                     );
                 } else {
                     send_config_option(
-                        session.connection().clone(),
-                        session.session_id().clone(),
+                        &mut session,
                         config_id,
                         value,
                         &channels.event_tx,
                         Arc::clone(&in_flight_rpc),
+                        &mut read_images,
                     )
-                    .await;
+                    .await?;
                 }
             }
             Next::Update(update) => {
@@ -2615,12 +2652,12 @@ async fn drive_session<S: SessionDrive>(
                     finish_rpc(&in_flight_rpc);
                     flush_pending_config_options(
                         &mut pending_config_options,
-                        session.connection().clone(),
-                        session.session_id().clone(),
+                        &mut session,
                         &channels.event_tx,
                         &in_flight_rpc,
+                        &mut read_images,
                     )
-                    .await;
+                    .await?;
                 }
             }
         }
@@ -2757,21 +2794,26 @@ fn config_option_wire_value(value: ConfigValue) -> SessionConfigOptionValue {
 
 /// 发送一个已经到安全边界的配置变更。响应里的全量 config options 是唯一可信
 /// 的确认，不能在客户端收到点击时直接把 current value 当成已生效。
-async fn send_config_option(
-    connection: ConnectionTo<Agent>,
-    session_id: SessionId,
+async fn send_config_option<S: SessionDrive>(
+    session: &mut S,
     config_id: String,
     value: ConfigValue,
     event_tx: &smol::channel::Sender<ConversationEvent>,
     in_flight_rpc: Arc<AtomicUsize>,
-) {
+    read_images: &mut read_image::ReadImageHydrator,
+) -> Result<(), agent_client_protocol::Error> {
     let _guard = RpcCompletionGuard(in_flight_rpc);
+    let connection = session.connection().clone();
     let req = SetSessionConfigOptionRequest::new(
-        session_id,
+        session.session_id().clone(),
         SessionConfigId::new(config_id),
         config_option_wire_value(value),
     );
-    match connection.send_request(req).block_task().await {
+    let response = connection.send_request(req).block_task().await;
+    // 配置请求阻塞等待响应期间，agent 线序上更早发出的 session/update 会留在
+    // update 队列里；先排空再发配置确认，避免确认事件超车唤醒守护开闸。
+    drain_ready_updates(session, event_tx, read_images).await?;
+    match response {
         Ok(resp) => {
             publish_config_options(Some(&resp.config_options), event_tx);
         }
@@ -2783,27 +2825,29 @@ async fn send_config_option(
             ));
         }
     }
+    Ok(())
 }
 
-async fn flush_pending_config_options(
+async fn flush_pending_config_options<S: SessionDrive>(
     pending: &mut Vec<(String, ConfigValue)>,
-    connection: ConnectionTo<Agent>,
-    session_id: SessionId,
+    session: &mut S,
     event_tx: &smol::channel::Sender<ConversationEvent>,
     in_flight_rpc: &Arc<AtomicUsize>,
-) {
+    read_images: &mut read_image::ReadImageHydrator,
+) -> Result<(), agent_client_protocol::Error> {
     let pending = std::mem::take(pending);
     for (config_id, value) in pending {
         send_config_option(
-            connection.clone(),
-            session_id.clone(),
+            session,
             config_id,
             value,
             event_tx,
             Arc::clone(in_flight_rpc),
+            read_images,
         )
-        .await;
+        .await?;
     }
+    Ok(())
 }
 
 /// 握手时声明的 client 能力。声明了就必须实现对应方法，否则 agent 一调用就会挂起。

@@ -1115,6 +1115,7 @@ fn merge_snapshot_entries(
         let suffix_start = overlap.min(entries.len());
         let mut merged = incoming;
         merged.extend(entries.drain(suffix_start..));
+        merged.truncate(incoming_total.saturating_sub(incoming_offset));
         *entries = merged;
         *loaded_offset = incoming_offset;
         return Some(0);

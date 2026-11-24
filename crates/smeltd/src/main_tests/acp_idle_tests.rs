@@ -1183,3 +1183,105 @@ fn updating_activity_reorders_eviction_priority() {
         assert!(!slot.value.idle.is_suspended());
     }
 }
+
+/// 唤醒流程已经把 `idle` 标回运行中、但历史重放还没把裁掉的前缀装回来时，
+/// 翻页读更早正文不能直接返回空切片，必须等到重放完成再读。
+#[test]
+fn read_history_page_waits_for_replay_while_waking_trimmed_session() {
+    use smelt_core::acp_chat::AcpEntry;
+    use smelt_core::acp_conn::{ConversationEvent, ReadyKind};
+
+    let acp_sessions = new_test_acp_sessions();
+    let subscribers = new_event_hub();
+    let mut state = quiet_state();
+    state.entries_mut().extend([
+        AcpEntry::User("第一问".into()),
+        AcpEntry::Assistant {
+            text: "第一答".into(),
+            thought: false,
+        },
+        AcpEntry::User("第二问".into()),
+        AcpEntry::Assistant {
+            text: "第二答".into(),
+            thought: false,
+        },
+    ]);
+    state.trim_to_current_turn();
+    assert_eq!(state.entries_base(), 2);
+    state.phase = DaemonPhase::Connecting;
+    state.replaying_history = true;
+    let (slot, _rx) = reserve_live_session(
+        &acp_sessions,
+        "acp-waking-page",
+        state,
+        crate::event_hub::now_ms(),
+    );
+    assert!(
+        !slot.value.idle.is_suspended(),
+        "拉起后 idle 已标为运行中，但重放尚未完成"
+    );
+
+    let sessions_for_thread = Arc::clone(&acp_sessions);
+    let subs_for_thread = subscribers.clone();
+    let reader = std::thread::spawn(move || {
+        crate::acp_host::read_history_page(
+            "acp-waking-page",
+            &sessions_for_thread,
+            &subs_for_thread,
+            2,
+            2,
+            false,
+        )
+    });
+
+    std::thread::sleep(Duration::from_millis(40));
+    assert!(
+        !reader.is_finished(),
+        "重放未完成时翻页应等待，不能直接回空页"
+    );
+    {
+        let mut reduced = slot.value.reduced.lock();
+        smelt_core::acp_session::apply_event(&mut reduced, ConversationEvent::HistoryReplayStarted);
+        smelt_core::acp_session::apply_event(
+            &mut reduced,
+            ConversationEvent::UserChunk("第一问".into()),
+        );
+        smelt_core::acp_session::apply_event(
+            &mut reduced,
+            ConversationEvent::AgentChunk {
+                thought: false,
+                text: "第一答".into(),
+                parent_id: None,
+            },
+        );
+        smelt_core::acp_session::apply_event(
+            &mut reduced,
+            ConversationEvent::UserChunk("第二问".into()),
+        );
+        smelt_core::acp_session::apply_event(
+            &mut reduced,
+            ConversationEvent::AgentChunk {
+                thought: false,
+                text: "第二答".into(),
+                parent_id: None,
+            },
+        );
+        smelt_core::acp_session::apply_event(
+            &mut reduced,
+            ConversationEvent::HistoryReplayFinished,
+        );
+        smelt_core::acp_session::apply_event(
+            &mut reduced,
+            ConversationEvent::Ready {
+                session_id: agent_client_protocol::v1::schema::SessionId::new("restored"),
+                kind: ReadyKind::ResumedWithReplay,
+                supports_image: false,
+            },
+        );
+    }
+
+    let page = reader.join().unwrap().expect("重放完成后翻页应成功");
+    assert_eq!(page.entries_offset, 0);
+    assert_eq!(page.entries.len(), 2);
+    assert!(matches!(&page.entries[0], AcpEntry::User(text) if text == "第一问"));
+}

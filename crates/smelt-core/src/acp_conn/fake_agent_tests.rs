@@ -17,6 +17,10 @@ const FAKE_IMAGE_ENV: &str = "SMELT_TEST_FAKE_ACP_IMAGE";
 
 /// `session/load` 时先重放两条历史再回响应。
 const SCRIPT_REPLAY: &str = "replay";
+/// `session/load` 响应后仍异步续推剩余重放（模拟 `agy acp` 1.5.14 行为）。
+const SCRIPT_ASYNC_REPLAY: &str = "async-replay";
+/// `session/set_config_option` 响应前线序上有正文更新（验证配置确认不会超车）。
+const SCRIPT_CONFIG_ORDER: &str = "config-order";
 /// `session/prompt` 时连吐几段正文增量，紧接着回收尾响应。
 const SCRIPT_STREAM: &str = "stream";
 /// 实时 `read_file` 读图但不带 `content`（模拟 `agy acp` 行为）。
@@ -70,6 +74,43 @@ fn serve(script: &str) {
                     update(session_id, "agent_message_chunk", "早先的回答"),
                 );
                 json!({})
+            }
+            "session/load" if script == SCRIPT_ASYNC_REPLAY => {
+                send(
+                    &mut out,
+                    update(session_id, "user_message_chunk", "早先的问题"),
+                );
+                send(&mut out, json!({"jsonrpc": "2.0", "id": id, "result": {}}));
+                // 模拟 agent 返回 LoadSessionResponse 后继续在后台流式推送剩余历史。
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                send(
+                    &mut out,
+                    update(session_id, "agent_message_chunk", "早先的回答前半"),
+                );
+                std::thread::sleep(std::time::Duration::from_millis(15));
+                send(
+                    &mut out,
+                    update(session_id, "agent_message_chunk", "早先的回答后半"),
+                );
+                continue;
+            }
+            "session/set_config_option" if script == SCRIPT_CONFIG_ORDER => {
+                send(
+                    &mut out,
+                    update(session_id, "agent_message_chunk", "配置确认前的正文"),
+                );
+                json!({
+                    "configOptions": [{
+                        "id": "mode",
+                        "name": "Mode",
+                        "type": "select",
+                        "currentValue": "auto",
+                        "options": [
+                            {"value": "default", "name": "Default"},
+                            {"value": "auto", "name": "Auto"}
+                        ]
+                    }]
+                })
             }
             "session/load" if script == SCRIPT_READ_IMAGE_REPLAY => {
                 let path = std::env::var(FAKE_IMAGE_ENV).unwrap_or_default();
@@ -444,5 +485,91 @@ fn replayed_image_read_without_content_is_hydrated_from_disk() {
         has_image,
         "无 content 的历史重放图片 read 应按磁盘路径回填 ToolOutputPart::Image：{:?}",
         state.entries()
+    );
+}
+
+/// `agy acp` 1.5.14 等 agent 会在 `LoadSessionResponse` 返回后继续推送剩余历史更新。
+/// 连接层必须等这批异步重放流安静后再发 `HistoryReplayFinished` 和 `Ready`，
+/// 否则守护会提前开启动闸并把新用户消息插到旧回合中间。
+#[test]
+fn post_load_async_replay_finishes_before_history_replay_finished() {
+    let handle = launch_fake_agent(SCRIPT_ASYNC_REPLAY, Some("session-from-disk"));
+    let events = collect_events_until(&handle, connection_settled);
+    let _ = handle.cmd_tx.send_blocking(ConversationCommand::Shutdown);
+
+    let mut state = crate::acp_session::AcpSessionState::default();
+    let mut seen = Vec::new();
+    for event in events {
+        let name = event_name(&event);
+        if name != "other" {
+            seen.push(name);
+        }
+        let _ = crate::acp_session::apply_event(&mut state, event);
+    }
+
+    let position = |name: &str| seen.iter().position(|entry| *entry == name);
+    let finished = position("Finished").unwrap_or_else(|| panic!("没有收尾信号：{seen:?}"));
+    let ready = position("Ready").unwrap_or_else(|| panic!("没有 Ready：{seen:?}"));
+    let last_agent = seen
+        .iter()
+        .rposition(|entry| *entry == "Agent")
+        .unwrap_or_else(|| panic!("响应后的重放正文没送达：{seen:?}"));
+    assert!(
+        last_agent < finished && finished < ready,
+        "响应后异步到达的重放正文也必须全部先于 HistoryReplayFinished 和 Ready：{seen:?}"
+    );
+    assert_eq!(
+        state.entries().len(),
+        2,
+        "重放完成后应完整包含旧问旧答：{:?}",
+        state.entries()
+    );
+    assert!(
+        matches!(
+            &state.entries()[1],
+            crate::acp_chat::AcpEntry::Assistant { text, thought: false }
+                if text == "早先的回答前半早先的回答后半"
+        ),
+        "响应后的两段历史正文应完整合进旧回答：{:?}",
+        state.entries()
+    );
+}
+
+/// `session/set_config_option` 响应回来时，线序上更早到达的 `session/update` 必须先于
+/// `ConfigOptions` 进事件通道，否则守护看到配置确认后开闸发新消息，会把迟到正文挤到新消息后面。
+#[test]
+fn updates_arriving_before_set_config_response_precede_config_options() {
+    let handle = launch_fake_agent(SCRIPT_CONFIG_ORDER, None);
+    let (seen, _) = collect_until(&handle, connection_settled);
+    assert!(seen.contains(&"Ready"), "握手没成功：{seen:?}");
+
+    handle
+        .cmd_tx
+        .send_blocking(ConversationCommand::SetConfigOption {
+            config_id: "mode".to_string(),
+            value: ConfigValue::Select("auto".to_string()),
+        })
+        .expect("发 SetConfigOption");
+    let events = collect_events_until(&handle, |event| {
+        matches!(
+            event,
+            ConversationEvent::ConfigOptions(_) | ConversationEvent::Fatal(_)
+        )
+    });
+    let _ = handle.cmd_tx.send_blocking(ConversationCommand::Shutdown);
+
+    let agent_pos = events.iter().position(|event| {
+        matches!(
+            event,
+            ConversationEvent::AgentChunk { text, thought: false, .. }
+                if text == "配置确认前的正文"
+        )
+    });
+    let config_pos = events
+        .iter()
+        .position(|event| matches!(event, ConversationEvent::ConfigOptions(_)));
+    assert!(
+        matches!((agent_pos, config_pos), (Some(a), Some(c)) if a < c),
+        "配置响应前到达的更新必须先于 ConfigOptions 送达：agent={agent_pos:?} config={config_pos:?}"
     );
 }
