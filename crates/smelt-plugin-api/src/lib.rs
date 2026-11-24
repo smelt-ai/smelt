@@ -292,9 +292,17 @@ pub enum HostEvent {
     MachinesChanged,
     /// 活动上下文变了：当前项目或露着的会话（读 [`active_context`]）。
     ActiveContextChanged,
-    /// 有机器的会话状态或工作区目录变了（读 [`Host::session_states`]、
-    /// [`Host::workspace_directory`]）。
+    /// 有机器的会话状态、会话提醒或工作区目录变了（读 [`Host::session_states`]、
+    /// [`Host::session_attention`]、[`Host::workspace_directory`]）。
     SessionsChanged,
+    /// 那台机器上一段会话刚来了一条该响一下的提醒（系统通知、推送用）。运行时判定、同一段
+    /// 会话同样的提醒 60 秒内只来一次；重新连上时的快照里没有，后连上的不补响。发之前镜像
+    /// 已经更新（[`Host::session_attention`]）。`session` 是这段会话此刻的提醒。
+    AttentionAlert {
+        machine: RuntimeKey,
+        session: model::daemon_state::SessionAttention,
+        alert: model::daemon_state::AttentionItem,
+    },
     /// 系统通知的授权变了（读 [`Host::notification_permission`]）。
     NotificationPermissionChanged,
     /// 看得见的视图变了：有的露出来、有的被挡住或收起，设置换了页、开了或关了（读
@@ -421,7 +429,17 @@ pub trait Host: 'static {
         machine: &RuntimeKey,
         cx: &App,
     ) -> Option<model::workspace_directory::WorkspaceDirectory>;
-    /// 那台机器的 `(工作区目录修订, 会话状态修订)`；宿主提供时用于增量缓存，未提供返回 `None`。
+    /// 那台机器上有提醒的会话（运行时推来的镜像，权威在运行时）：等你处理的事、还没看过的
+    /// 提醒。还没收到快照（没连上过、刚连上）是 `None`，这时不能拿「没有」当「看过了」。变了
+    /// 发 [`HostEvent::SessionsChanged`]。
+    fn session_attention(
+        &self,
+        _machine: &RuntimeKey,
+        _cx: &App,
+    ) -> Option<Vec<model::daemon_state::SessionAttention>> {
+        None
+    }
+    /// 那台机器的 `(工作区目录修订, 会话状态与提醒修订)`；宿主提供时用于增量缓存，未提供返回 `None`。
     fn sessions_revision(&self, _machine: &RuntimeKey, _cx: &App) -> Option<(u64, u64)> {
         None
     }

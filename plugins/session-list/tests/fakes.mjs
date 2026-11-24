@@ -25,6 +25,7 @@ export function fake_host(machines = { "": local_directory() }) {
     workspace_directory: (machine) => host.data[machine ?? ""]?.directory ?? null,
     session_states: (machine) => host.data[machine ?? ""]?.states ?? [],
     conversation_facts: (machine) => host.data[machine ?? ""]?.facts ?? [],
+    session_attention: (machine) => host.data[machine ?? ""]?.attention ?? null,
     path,
     /** 方法 → 回什么（值或 (params) => 值）；没写的回 null。 */
     replies: {},

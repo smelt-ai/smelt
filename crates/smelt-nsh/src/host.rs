@@ -1868,6 +1868,22 @@ impl Bridge {
             HostEvent::SessionsChanged => {
                 ("sessions_changed", json!({ "type": "sessions_changed" }))
             }
+            // 标题、内容按当前语言说好一起带上：响一下就过去了，不跟着换语言。
+            HostEvent::AttentionAlert {
+                machine,
+                session,
+                alert,
+            } => (
+                "attention_alert",
+                json!({
+                    "type": "attention_alert",
+                    "machine": machine_value(machine),
+                    "session": session,
+                    "alert": alert,
+                    "title": alert.title_text(),
+                    "message": alert.message_text(),
+                }),
+            ),
             HostEvent::MachinesChanged => {
                 ("machines_changed", json!({ "type": "machines_changed" }))
             }
@@ -2716,7 +2732,8 @@ pub(crate) fn context_menu_json(item: &ContextMenuItem, context: &Value, cx: &Ap
 /// 按离散宿主事件精确映射受影响的顶层状态切片，避免每次变化全量重算所有切片。
 pub(crate) fn dirty_slices_for_event(event: &HostEvent) -> SliceMask {
     match event {
-        HostEvent::SessionsChanged => SliceMask::SESSIONS_DATA,
+        // 提醒镜像在发这条之前已经更新，转发前先把它推过去：插件收到时读到的是新的。
+        HostEvent::SessionsChanged | HostEvent::AttentionAlert { .. } => SliceMask::SESSIONS_DATA,
         HostEvent::MachinesChanged => {
             SliceMask::MACHINES_META | SliceMask::SESSIONS_DATA | SliceMask::CONNECTIONS
         }
@@ -2818,6 +2835,7 @@ fn build_machine_sessions_json(
         "directory": directory,
         "states": states,
         "facts": facts,
+        "attention": host.session_attention(machine, cx),
     })
 }
 
@@ -3286,6 +3304,20 @@ mod tests {
         assert_eq!(
             dirty_slices_for_event(&HostEvent::SessionsChanged),
             SliceMask::SESSIONS_DATA
+        );
+        assert_eq!(
+            dirty_slices_for_event(&HostEvent::AttentionAlert {
+                machine: RuntimeKey::Local,
+                session: Default::default(),
+                alert: api::model::daemon_state::AttentionItem {
+                    kind: api::model::daemon_state::AttentionKind::Success,
+                    title: String::new(),
+                    message: String::new(),
+                    note: None,
+                },
+            }),
+            SliceMask::SESSIONS_DATA,
+            "提醒先推镜像再转发"
         );
         assert_eq!(
             dirty_slices_for_event(&HostEvent::ThemesChanged),

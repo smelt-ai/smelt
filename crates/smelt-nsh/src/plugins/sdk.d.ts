@@ -456,6 +456,20 @@ export declare function pathStyle(machine: string | null | undefined): string;
 export declare function workspaceDirectory(machine: string | null | undefined): any;
 export declare function sessionStates(machine: string | null | undefined): any[];
 export declare function conversationFacts(machine: string | null | undefined): any[];
+export interface AttentionItem {
+  kind: string;
+  title: string;
+  message: string;
+  note?: unknown;
+}
+export interface SessionAttention {
+  session_id: string;
+  action?: AttentionItem;
+  unread?: AttentionItem;
+}
+export declare function sessionAttention(
+  machine: string | null | undefined,
+): SessionAttention[] | null;
 export declare function connections(): any;
 export declare function activeContext(): { project: any; session: any };
 export declare function views(): any[];

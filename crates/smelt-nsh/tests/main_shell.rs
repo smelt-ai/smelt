@@ -529,13 +529,13 @@ bootTask(async () => {
         );
     });
 
-    // 所有 19 个内置插件（含共享模块 smelt.conversation、纯主题 smelt.themes、纯布局 smelt.layouts）都无编译/运行错误。
+    // 所有 20 个内置插件（含共享模块 smelt.conversation、纯主题 smelt.themes、纯布局 smelt.layouts）都无编译/运行错误。
     let plugins = shell.read_with(cx, |s, _| s.installed_plugins());
     let builtin_count = plugins
         .iter()
         .filter(|p| p.source == PluginSource::Builtin)
         .count();
-    assert_eq!(builtin_count, 19, "应发现 19 个内置插件：{plugins:?}");
+    assert_eq!(builtin_count, 20, "应发现 20 个内置插件：{plugins:?}");
     for p in &plugins {
         assert!(p.error.is_none(), "插件 {} 报错：{:?}", p.id, p.error);
     }

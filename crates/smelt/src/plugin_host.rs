@@ -115,6 +115,14 @@ impl api::Host for SmeltHost {
             .cloned()
     }
 
+    fn session_attention(
+        &self,
+        machine: &RuntimeKey,
+        cx: &App,
+    ) -> Option<Vec<api::model::daemon_state::SessionAttention>> {
+        DaemonStates::attention(machine, cx)
+    }
+
     fn sessions_revision(&self, machine: &RuntimeKey, cx: &App) -> Option<(u64, u64)> {
         Some((
             crate::WorkspaceDirectoriesGlobal::revision(machine, cx),

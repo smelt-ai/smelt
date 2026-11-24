@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 
-import { Unread } from "../attention.js";
 import { new_sidebar_ui, set_pinned } from "../model.js";
 import {
   Sidebar,
@@ -370,9 +369,9 @@ function host_input(overrides = {}) {
     ],
     connections: { remotes: [{ machine: "box", os: "linux", state: { state: "connecting" }, link: null }] },
     local_os: "darwin",
-    data: (machine) => (machine === null ? { style: "posix", directory, states, facts } : null),
+    data: (machine) =>
+      machine === null ? { style: "posix", directory, states, facts, attention: overrides.attention ?? null } : null,
     agent_names: new Map(),
-    unread: new Unread(),
     workset_checks: new Map(),
     ui: new_sidebar_ui(),
     project_filter: "",
@@ -454,8 +453,8 @@ test("整份算：手动顺序、置顶、折叠、搜索、按机器分开", ()
 test("重算侧栏：没变的行、机器沿用上一份的对象，变了的是新的", () => {
   const pool = new ValuePool();
   const first = build_sidebar(host_input({ pool }));
-  const unread = { has: (_machine, id) => id === "t5" };
-  const second = build_sidebar(host_input({ pool, unread }));
+  const attention = [{ session_id: "t5", unread: { kind: "success", title: "", message: "" } }];
+  const second = build_sidebar(host_input({ pool, attention }));
   const row = (sidebar, root) => sidebar.projects.find((p) => p.root === root).items[0].row;
   expect(row(second, "/repo")).toBe(row(first, "/repo"));
   expect(second.conversations.rows[0]).toBe(first.conversations.rows[0]);

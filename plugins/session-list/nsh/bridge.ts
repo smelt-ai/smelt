@@ -36,6 +36,7 @@ import {
   registerTopics,
   registerViews,
   run,
+  sessionAttention,
   sessionStates,
   store as sdkStore,
   t,
@@ -58,7 +59,7 @@ import {
 } from "../contract.js";
 import { new_sidebar_ui, same_conversation, session_ids } from "../model.js";
 import * as peers from "../peers.js";
-import { ATTENTION_TOPIC, NEW_SESSION_CATALOG_TOPIC, SessionList } from "../state.js";
+import { NEW_SESSION_CATALOG_TOPIC, SessionList } from "../state.js";
 import { ListStore } from "../store.js";
 import { message } from "../util.js";
 
@@ -198,6 +199,7 @@ export const hostAdapter = {
   workspace_directory: workspaceDirectory,
   session_states: sessionStates,
   conversation_facts: conversationFacts,
+  session_attention: sessionAttention,
   active_context: activeContext,
   path: {
     clean: pathClean,
@@ -416,7 +418,7 @@ bootTask(async () => {
       },
     ]),
     registerCommands(commands),
-    registerTopics([ATTENTION_TOPIC, NEW_SESSION_CATALOG_TOPIC]),
+    registerTopics([NEW_SESSION_CATALOG_TOPIC]),
     (async () => {
       try {
         const style = pathStyle(null);

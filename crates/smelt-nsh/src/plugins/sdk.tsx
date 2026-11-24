@@ -1012,7 +1012,7 @@ export function machines(): any[] {
   wantSlice("sessions_data");
   const sessions = sessionsDataSlice();
   if (sessions.length === 0) {
-    return metas.map((m) => ({ ...m, directory: null, states: [], facts: [] }));
+    return metas.map((m) => ({ ...m, directory: null, states: [], facts: [], attention: null }));
   }
   const byMachine = new Map<string | null, any>();
   for (const s of sessions) {
@@ -1025,6 +1025,7 @@ export function machines(): any[] {
       directory: s?.directory ?? null,
       states: s?.states ?? [],
       facts: s?.facts ?? [],
+      attention: s?.attention ?? null,
     };
   });
 }
@@ -1039,6 +1040,7 @@ export function machineEntry(machine: string | null | undefined): any {
     directory: s?.directory ?? null,
     states: s?.states ?? [],
     facts: s?.facts ?? [],
+    attention: s?.attention ?? null,
   };
 }
 
@@ -1056,6 +1058,29 @@ export function sessionStates(machine: string | null | undefined): any[] {
 
 export function conversationFacts(machine: string | null | undefined): any[] {
   return sessionEntry(machine)?.facts ?? [];
+}
+
+export interface AttentionItem {
+  /** approval、input、success、failure、bell、notice，或比这个客户端新的种类。 */
+  kind: string;
+  title: string;
+  message: string;
+  note?: unknown;
+}
+
+export interface SessionAttention {
+  session_id: string;
+  action?: AttentionItem;
+  unread?: AttentionItem;
+}
+
+/**
+ * 那台机器上有提醒的会话（运行时推来的镜像）：[{ session_id, action?, unread? }]。action 是等你
+ * 处理的事（看过也留着），unread 是还没看过的那条。还没收到快照是 null，这时说不准谁看过了。
+ * 变了发 sessions_changed。刚来、该响一下的那条另发 attention_alert 事件。
+ */
+export function sessionAttention(machine: string | null | undefined): SessionAttention[] | null {
+  return sessionEntry(machine)?.attention ?? null;
 }
 
 export function connections(): any {

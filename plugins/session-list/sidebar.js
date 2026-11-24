@@ -288,15 +288,21 @@ function folded(key, rows) {
   return first ? { key, tally, session: first } : null;
 }
 
+/** 有没看过的提醒的守护会话 id。 */
+function unread_ids(attention) {
+  return new Set((attention ?? []).filter((session) => session.unread != null).map((session) => session.session_id));
+}
+
 /**
  * 按眼下的数据算一遍。只读内存（目录、会话状态都是宿主的内存缓存），不碰库。
  *
  * input：
  * - machines：宿主的机器表 [{ machine, name, unavailable }]。
  * - connections：宿主的连接表。local_os：这台电脑的系统（os.platform()）。
- * - data(machine)：那台机器的 { style, directory, states, facts }；目录还没收到时 directory 是 null。
+ * - data(machine)：那台机器的 { style, directory, states, facts, attention }；目录还没收到时 directory
+ *   是 null。attention 是宿主的提醒镜像（[{ session_id, action?, unread? }]），还没收到快照是 null。
  * - agent_names：machine_key → (智能体定义 id → 名字)。
- * - unread：attention.js 的 Unread。workset_checks：workset_key → check。
+ * - workset_checks：workset_key → check。
  * - ui：SidebarUi。project_filter：项目搜索框里的字。now：Date，按时间分组的日界按它算。
  * - t：文案。path：{ clean(style, path), file_name(style, path), join(style, base, child) }。
  */
@@ -320,7 +326,7 @@ export function build_sidebar(input) {
         states: data.states,
         facts: data.facts,
         agents: input.agent_names.get(machine_key(machine.machine)) ?? new Map(),
-        unread: input.unread,
+        unread: unread_ids(data.attention),
         link,
         remote_name: machine.machine != null ? machine.name : null,
         checks: input.workset_checks,
@@ -587,7 +593,7 @@ function session_row(conversation, fact, input, ui, group, machine_name = null) 
     pinned: is_pinned(ui, { kind: "conversation", machine: input.machine, id: conversation.id }),
     activity,
     turn_started_at,
-    unread: ids.some((id) => input.unread.has(input.machine, id)),
+    unread: ids.some((id) => input.unread.has(id)),
     unavailable: input.link.unavailable,
     /** 悬停的说明：完整标题（窄侧栏里常被截断）。 */
     tooltip: name,

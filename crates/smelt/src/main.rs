@@ -19,7 +19,6 @@ mod keymap;
 mod language;
 mod local_daemon;
 mod maintenance;
-mod notifications;
 mod overlay;
 mod plugin_host;
 mod plugins;
@@ -906,12 +905,11 @@ fn main() {
         runtimes::start_runtime_hub(cx);
         // 插件要读机器列表，在 RuntimeHub 之后、开主窗口之前装。
         plugin_host::install(current_ws.clone(), cx);
-        // 内置设置与系统模块：界面语言、终端设置、清理与命令行、在线更新、通知与菜单栏。
+        // 内置设置与系统模块：界面语言、终端设置、清理与命令行、在线更新。
         language::register(cx);
         terminal_settings::register(cx);
         maintenance::register(cx);
         updater::register(cx);
-        notifications::register(cx);
         // 快捷键（命令的出厂键位 + 用户改过的）和应用菜单栏，见 `keymap`。要订阅宿主事件，
         // 在插件宿主之后装；命令随后由工作台和插件登记，登记一次重装一次键表。
         keymap::init(cx);
@@ -923,7 +921,15 @@ fn main() {
             commands: command_rx,
         } = runtime_events::start(cx);
         app_commands::serve(command_rx, cx);
-        // 单独订阅的话题，原样转给插件。
+        // 会话提醒是宿主镜像给插件读的（见 `DaemonStates`），宿主自己要这个话题。
+        if let Err(error) = smelt_plugin_api::register_topics(
+            "smelt.app",
+            [smelt_event_protocol::CORE_TOPIC_ATTENTION_CHANGED],
+            cx,
+        ) {
+            eprintln!("[attention] 话题登记失败：{error}");
+        }
+        // 单独订阅的话题，原样转给插件；会话提醒先记进镜像，该响的另发一条。
         cx.spawn(async move |cx| {
             use smelt_client::daemon_state::TopicMessage;
             while let Ok((runtime, topic, message)) = topic_rx.recv().await {
@@ -940,14 +946,27 @@ fn main() {
                     }
                 };
                 cx.update(|cx| {
+                    let alert = (topic == smelt_event_protocol::CORE_TOPIC_ATTENTION_CHANGED)
+                        .then(|| DaemonStates::apply_attention(&runtime, &message, cx))
+                        .flatten();
                     smelt_plugin_api::emit(
                         smelt_plugin_api::HostEvent::RuntimeTopic {
-                            machine: runtime,
+                            machine: runtime.clone(),
                             topic,
                             message,
                         },
                         cx,
-                    )
+                    );
+                    if let Some((session, alert)) = alert {
+                        smelt_plugin_api::emit(
+                            smelt_plugin_api::HostEvent::AttentionAlert {
+                                machine: runtime,
+                                session,
+                                alert,
+                            },
+                            cx,
+                        );
+                    }
                 });
             }
         })

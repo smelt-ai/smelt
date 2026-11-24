@@ -35,7 +35,6 @@ import {
   set_pinned,
   set_project_order,
 } from "./model.js";
-import { Unread } from "./attention.js";
 import { initial_location, NewSession } from "./new_session.js";
 import { Repositories } from "./repositories.js";
 import { bucket_flip, build_sidebar, project_flip, session_flip, Sidebar, ValuePool, workset_flip } from "./sidebar.js";
@@ -43,7 +42,6 @@ import { due_checks, WORKSET_GIT_TIMEOUT, workset_key } from "./worksets.js";
 import { message } from "./util.js";
 
 /** 运行时推「哪些会话有没看过的提醒」的话题。 */
-export const ATTENTION_TOPIC = "attention.changed";
 /** 运行时推「新建会话菜单可用目录变了」的话题。 */
 export const NEW_SESSION_CATALOG_TOPIC = "new_session.catalog_changed";
 
@@ -66,7 +64,7 @@ export function fail_key(target) {
 /**
  * host（main.js 拼，测试里换成假的）：
  * - machines()、connections()、local_os、path_style(m)、workspace_directory(m)、session_states(m)、
- *   conversation_facts(m)、active_context()、path：{ clean, file_name, join, is_absolute, starts_with }、
+ *   conversation_facts(m)、session_attention(m)、active_context()、path：{ clean, file_name, join, is_absolute, starts_with }、
  *   project_labels(style, roots)
  * - call(m, method, params, timeout_ms)、run(command, args)
  * - t(key, params)、redraw()（重画本插件的视图和插件的根）、
@@ -122,8 +120,6 @@ export class SessionList {
     this.heard_selection = false;
     /** workset_key → 上一次问到的合并情况（权威在运行时）。只由 inspect 改。 */
     this.workset_checks = new Map();
-    /** 哪些格有没看过的提醒（运行时推来的只读缓存）。 */
-    this.unread = new Unread();
     /** 行首头像用哪个（库里那份的缓存）。只经 set_avatar 改。 */
     this.avatar = avatar;
     /** 「项目」标题上搜索框里的字。只在内存里。 */
@@ -203,10 +199,10 @@ export class SessionList {
           directory,
           states: host.session_states(machine),
           facts: host.conversation_facts(machine),
+          attention: host.session_attention(machine),
         };
       },
       agent_names: this.agent_names,
-      unread: this.unread,
       workset_checks: this.workset_checks,
       ui: this.ui,
       project_filter: this.project_filter,
@@ -345,13 +341,12 @@ export class SessionList {
 
   /**
    * 宿主的事件流（HostEvent）：
-   * - sessions_changed（目录或会话状态变了）：那台机器的目录版本变了才清库；侧栏重算。工作树
+   * - sessions_changed（目录、会话状态或提醒变了）：那台机器的目录版本变了才清库；侧栏重算。工作树
    *   顺便看一眼合没合进去。
    * - window_activated：人常常是去浏览器合完 PR 回来，工作树再看一眼。
    * - machines_changed：机器表里真的消失了的（和上一份比，不是离线）忘掉；重算侧栏。
    * - locale_changed：侧栏缓存里有按语言算好的字，重算。
    * - views_changed、context_menu_items_changed：行首头像、菜单项是画的时候现取的，重画。
-   * - runtime_topic 的 attention.changed：收进 unread，有没看过的会话变了就重算侧栏。
    * - open_paths（从访达拖进来的）：本机上是目录的当项目打开。
    * - plugin：会话插件的选中换了、新会话写进目录了，智能体插件的配置换了。
    *
@@ -382,9 +377,7 @@ export class SessionList {
         void this.sync_peer_commands();
         return;
       case "runtime_topic":
-        if (event.topic === ATTENTION_TOPIC && this.unread.apply(event.machine, event.message)) {
-          this.rebuild();
-        } else if (event.topic === NEW_SESSION_CATALOG_TOPIC) {
+        if (event.topic === NEW_SESSION_CATALOG_TOPIC) {
           this.on_catalog_topic(event.machine, event.message);
         }
         return;
@@ -458,7 +451,6 @@ export class SessionList {
       forget_machine_ui(this.ui, machine);
       this.store.forget_machine(machine);
       this.seen.delete(key);
-      this.unread.forget(machine);
       this.catalogs.delete(key);
     }
     this.known_machines = current;
