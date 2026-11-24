@@ -5,6 +5,10 @@
 //! cargo run -j 2 --release -p smelt-nsh --example bench -- --list
 //! cargo run -j 2 --release -p smelt-nsh --example bench -- <场景> [--warmup 3] [--measure 6] [--json]
 //! ```
+//!
+//! `real-*` 整窗场景另有两个开关：`--running <N>` 让前 N 个模拟会话处于运行中（侧栏头像一直在
+//! 演），`--user-plugins <目录>` 把目录当用户插件目录一起加载（同 id 覆写自带插件），用来比较
+//! 自带插件和用户改过的版本。
 
 mod fixtures;
 mod metrics;
@@ -40,7 +44,7 @@ use tokio::sync::oneshot;
 
 use crate::{
     fixtures::{
-        BootCompileResult, RealConvMode, RealShellSetup, conv_stream_chunks,
+        BootCompileResult, RealConvMode, RealShellSetup, ShellOptions, conv_stream_chunks,
         make_conv_assistant_entry, make_conv_tool_entry, run_boot_compile_probe, setup_real_conv,
         setup_real_shell, sync_shell_visibility,
     },
@@ -187,6 +191,8 @@ struct CliArgs {
     measure: Duration,
     json: bool,
     list: bool,
+    running: usize,
+    user_plugins: Option<PathBuf>,
 }
 
 fn parse_cli() -> Result<CliArgs, String> {
@@ -196,6 +202,8 @@ fn parse_cli() -> Result<CliArgs, String> {
     let mut measure_s = DEFAULT_MEASURE_SECS;
     let mut json = false;
     let mut list = false;
+    let mut running = 0;
+    let mut user_plugins = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -212,6 +220,17 @@ fn parse_cli() -> Result<CliArgs, String> {
                 measure_s = raw
                     .parse::<f64>()
                     .map_err(|_| format!("--measure 非法数字：{raw}"))?;
+            }
+            "--running" => {
+                let raw = args.next().ok_or("--running 需要会话数")?;
+                running = raw
+                    .parse::<usize>()
+                    .map_err(|_| format!("--running 非法数字：{raw}"))?;
+            }
+            "--user-plugins" => {
+                user_plugins = Some(PathBuf::from(
+                    args.next().ok_or("--user-plugins 需要目录参数")?,
+                ));
             }
             "--help" | "-h" => {
                 list = true;
@@ -243,6 +262,8 @@ fn parse_cli() -> Result<CliArgs, String> {
         measure: Duration::from_secs_f64(measure_s),
         json,
         list,
+        running,
+        user_plugins,
     })
 }
 
@@ -489,7 +510,11 @@ impl Bench {
                 } else {
                     None
                 };
-                let setup = setup_real_shell(staged, connector, window, cx);
+                let shell_options = ShellOptions {
+                    running: cli.running,
+                    user_plugins: cli.user_plugins.clone(),
+                };
+                let setup = setup_real_shell(staged, connector, shell_options, window, cx);
                 boot_t0 = Some(setup.boot_started);
                 if let Some(dir) = setup.temp_dir.clone() {
                     temp_dirs.push(dir);

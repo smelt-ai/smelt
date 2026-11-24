@@ -541,6 +541,8 @@ pub struct BenchHostState {
     pub main_window: Rc<RefCell<Option<AnyWindowHandle>>>,
     pub connector: Option<Arc<ArcTerminalConnector>>,
     pub rpc_counters: Arc<BenchRpcCounters>,
+    /// 前几个模拟会话处于运行中（见 [`ShellOptions::running`]）。
+    pub running: usize,
 }
 
 impl BenchHostState {
@@ -555,6 +557,7 @@ impl BenchHostState {
             main_window: Rc::new(RefCell::new(main_window)),
             connector,
             rpc_counters: Arc::new(BenchRpcCounters::default()),
+            running: 0,
         }
     }
 }
@@ -781,8 +784,22 @@ impl Host for BenchHost {
         PathStyle::Posix
     }
 
-    fn session_states(&self, _machine: &RuntimeKey, _cx: &App) -> Vec<DaemonSessionState> {
-        Vec::new()
+    fn session_states(&self, machine: &RuntimeKey, _cx: &App) -> Vec<DaemonSessionState> {
+        if *machine != RuntimeKey::Local {
+            return Vec::new();
+        }
+        // 会话状态按终端 id 对上对话（见 `workspace_directory` 的 `t-{i}`）。
+        (0..self.state.running.min(BENCH_CONVERSATIONS))
+            .map(|i| {
+                serde_json::from_value(json!({
+                    "id": format!("t-{i}"),
+                    "phase": "thinking",
+                    "runtime": true,
+                    "turn_events": true,
+                }))
+                .expect("running session state")
+            })
+            .collect()
     }
 
     fn session_presence(
@@ -796,7 +813,7 @@ impl Host for BenchHost {
 
     fn workspace_directory(&self, _machine: &RuntimeKey, _cx: &App) -> Option<WorkspaceDirectory> {
         let rev = self.state.dir_revision.load(Ordering::Relaxed);
-        let conversations = (0..30)
+        let conversations = (0..BENCH_CONVERSATIONS)
             .map(|i| WorkspaceConversation {
                 id: format!("conv-{i}"),
                 custom_title: Some(format!("Session #{i}: NSH performance benchmark")),
@@ -947,9 +964,21 @@ pub struct RealShellSetup {
     pub _subscriptions: Vec<Subscription>,
 }
 
+/// 模拟的工作区里有几段对话。
+const BENCH_CONVERSATIONS: usize = 30;
+
+/// 整窗场景的可选项（命令行 `--running`、`--user-plugins`）。
+pub struct ShellOptions {
+    /// 前几个模拟会话处于运行中。
+    pub running: usize,
+    /// 当用户插件目录一起加载，同 id 覆写自带插件。
+    pub user_plugins: Option<PathBuf>,
+}
+
 pub fn setup_real_shell(
     staged: bool,
     connector: Option<Arc<ArcTerminalConnector>>,
+    options: ShellOptions,
     window: &mut Window,
     cx: &mut Context<impl Render>,
 ) -> RealShellSetup {
@@ -979,7 +1008,8 @@ pub fn setup_real_shell(
 
     // 从预编译阶段之后起算冷启动挂载耗时，保持与原 real-boot-staged 口径一致。
     let boot_started = Instant::now();
-    let host_state = BenchHostState::new(connector, Some(window.window_handle()));
+    let mut host_state = BenchHostState::new(connector, Some(window.window_handle()));
+    host_state.running = options.running;
     smelt_ui::init(cx);
     api::set_locale("zh-CN", cx);
     api::install(BenchHost::new(host_state.clone()), cx);
@@ -997,11 +1027,17 @@ pub fn setup_real_shell(
     let shell = cx.new(|cx| {
         MainShell::new(
             ShellConfig {
-                sources: vec![SourceDir {
+                sources: std::iter::once(SourceDir {
                     path: plugins_dir,
                     source: PluginSource::Builtin,
                     watch: false,
-                }],
+                })
+                .chain(options.user_plugins.map(|path| SourceDir {
+                    path,
+                    source: PluginSource::User,
+                    watch: false,
+                }))
+                .collect(),
                 backdrop: BackdropHooks::default(),
                 corners: WindowCorners {
                     lights: px(78.),
