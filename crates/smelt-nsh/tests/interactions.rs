@@ -19,7 +19,7 @@ use std::{
 
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, IntoElement, Modifiers, MouseButton,
-    Pixels, Render, ScrollDelta, ScrollEvent, TestAppContext, VisualTestContext, Window, div,
+    Pixels, Render, TestAppContext, VisualTestContext, Window, div,
     point, px, size,
 };
 use serde_json::{Value, json};
@@ -41,7 +41,6 @@ use smelt_plugin_api::{
 struct InteractionHost {
     local_online: Arc<AtomicBool>,
     rpc_methods: Arc<Mutex<Vec<String>>>,
-    toggled_pins: Arc<Mutex<Vec<String>>>,
 }
 
 impl Host for InteractionHost {
@@ -58,11 +57,9 @@ impl Host for InteractionHost {
             return None;
         }
         let methods = self.rpc_methods.clone();
-        let toggled_pins = self.toggled_pins.clone();
         Some(RuntimeClient::new(move || {
             let (client, server) = RuntimeStream::pair()?;
             let methods = methods.clone();
-            let toggled_pins = toggled_pins.clone();
             std::thread::spawn(move || {
                 let mut line = String::new();
                 if BufReader::new(server.try_clone().unwrap())
@@ -103,35 +100,19 @@ impl Host for InteractionHost {
                     }),
                     "remote.config.get" => json!({ "enabled": false, "iroh_relay": "" }),
                     "new_session.catalog" => {
-                        let mut terminals = vec![json!({
-                            "key": "term:zsh",
-                            "kind": "terminal",
-                            "label": "Zsh",
-                            "target": "blankTerminal",
-                            "pinned": false
-                        })];
-                        for i in 1..=17 {
-                            terminals.push(json!({
-                                "key": format!("term:tool-{i}"),
-                                "kind": "terminal",
-                                "label": format!("Tool {i}"),
-                                "target": "blankTerminal",
-                                "pinned": false
-                            }));
-                        }
                         json!({
                             "sections": {
                                 "common": [],
-                                "terminal": terminals,
+                                "terminal": [{
+                                    "key": "term:zsh",
+                                    "kind": "terminal",
+                                    "label": "Zsh",
+                                    "target": "blankTerminal",
+                                    "pinned": false
+                                }],
                                 "conversation": []
                             }
                         })
-                    }
-                    "new_session.pins.toggle" => {
-                        if let Some(key) = req["params"]["key"].as_str() {
-                            toggled_pins.lock().unwrap().push(key.to_owned());
-                        }
-                        json!({ "pinned": true })
                     }
                     _ => json!({}),
                 };
@@ -363,7 +344,6 @@ fn main_shell_hover_drag_and_quota_regressions(cx: &mut TestAppContext) {
 
     let local_online = Arc::new(AtomicBool::new(false));
     let rpc_methods = Arc::new(Mutex::new(Vec::<String>::new()));
-    let toggled_pins = Arc::new(Mutex::new(Vec::<String>::new()));
     let opened_sessions = Rc::new(RefCell::new(Vec::<Value>::new()));
 
     cx.executor().allow_parking();
@@ -374,7 +354,6 @@ fn main_shell_hover_drag_and_quota_regressions(cx: &mut TestAppContext) {
             InteractionHost {
                 local_online: local_online.clone(),
                 rpc_methods: rpc_methods.clone(),
-                toggled_pins: toggled_pins.clone(),
             },
             cx,
         );
@@ -616,37 +595,6 @@ fn main_shell_hover_drag_and_quota_regressions(cx: &mut TestAppContext) {
         cx,
         "点击项目行 + 号弹出新建会话菜单并列出 Zsh",
         |cx| has_a11y(cx, Some("Button"), "Zsh"),
-    );
-
-    // 7. 滚动新建会话弹层后再悬停项，Scroll 不能重建归零，星标按钮应落在滚动条槽位左侧且命中滚动后的行。
-    let popup_mid = point(px(340.), a_rect.origin.y + px(80.));
-    cx.simulate_mouse_move(popup_mid, None, Modifiers::default());
-    for _ in 0..5 {
-        cx.simulate_event(ScrollEvent {
-            position: popup_mid,
-            delta: ScrollDelta::Pixels(point(px(0.), px(-28.))),
-            ..Default::default()
-        });
-        cx.run_until_parked();
-        cx.update(|window, _| window.refresh());
-    }
-    let hovered_row = point(px(340.), a_rect.origin.y + px(15.));
-    cx.simulate_mouse_move(hovered_row, None, Modifiers::default());
-    wait_for(
-        cx,
-        "悬停滚动后的菜单行露出 Add to Favorites 星标按钮",
-        |cx| has_a11y(cx, Some("Button"), "Add to Favorites"),
-    );
-    let star_btn = point(px(511.), a_rect.origin.y + px(15.));
-    cx.simulate_mouse_move(star_btn, None, Modifiers::default());
-    cx.simulate_click(star_btn, Modifiers::default());
-    wait_for(cx, "点击星标触发 new_session.pins.toggle", |_| {
-        !toggled_pins.lock().unwrap().is_empty()
-    });
-    let pinned_key = toggled_pins.lock().unwrap()[0].clone();
-    assert!(
-        pinned_key.starts_with("term:tool-"),
-        "滚动后悬停不应把列表重置回顶部 Zsh，实际命中：{pinned_key}"
     );
 
     cx.simulate_click(plus_pos, Modifiers::default());

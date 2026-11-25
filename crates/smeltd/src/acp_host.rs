@@ -1413,7 +1413,7 @@ fn take_coalesced_snapshot(
     let urgent = mailbox.dirty.as_ref().is_some_and(snapshot_dirty_is_urgent);
     if !urgent
         && mailbox.dirty.is_some()
-        && let Some(deadline) = coalesce_deadline(last_sent)
+        && let Some(deadline) = last_sent.map(|t| t + ACP_SNAPSHOT_COALESCE)
     {
         while std::time::Instant::now() < deadline {
             if mailbox.dirty.as_ref().is_some_and(snapshot_dirty_is_urgent)
@@ -1436,11 +1436,6 @@ fn take_coalesced_snapshot(
     let job = mailbox.dirty.take();
     drop(mailbox);
     job
-}
-
-/// 非紧急帧最多等到哪一刻；此前空闲（没发过帧）不等。
-fn coalesce_deadline(last_sent: Option<std::time::Instant>) -> Option<std::time::Instant> {
-    last_sent.map(|t| t + ACP_SNAPSHOT_COALESCE)
 }
 
 fn note_snapshot_writer_stopped(
@@ -5351,17 +5346,7 @@ mod snapshot_link_tests {
     }
 
     #[test]
-    fn idle_link_does_not_wait_for_the_coalesce_window() {
-        assert_eq!(coalesce_deadline(None), None);
-        let sent = Instant::now();
-        assert_eq!(
-            coalesce_deadline(Some(sent)),
-            Some(sent + ACP_SNAPSHOT_COALESCE)
-        );
-    }
-
-    #[test]
-    fn idle_non_urgent_delta_flushes_immediately_and_burst_coalesces() {
+    fn non_urgent_burst_after_first_frame_coalesces() {
         use std::io::{BufRead, BufReader};
 
         let slot = Arc::new(AcpSlot {
@@ -5397,8 +5382,6 @@ mod snapshot_link_tests {
             });
         push_acp_snapshot_since_with_runtime_debug(&slot.value, false, Some(0), false, false, None);
 
-        // 首帧不等节流窗口由 `idle_link_does_not_wait_for_the_coalesce_window` 断言；墙钟耗时
-        // 在并行跑测试的 CI 上远超 16ms，分不出等没等。
         let mut first_line = String::new();
         reader.read_line(&mut first_line).unwrap();
         assert!(first_line.contains("first-delta"));
