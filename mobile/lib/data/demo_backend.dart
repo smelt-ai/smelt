@@ -518,11 +518,6 @@ class DemoBackend implements Backend {
   @override
   Future<void> networkChanged() async {}
 
-  @override
-  Future<List<RuntimeRecord>> importRuntimes(
-    List<RuntimeImport> runtimes,
-  ) async => const [];
-
   /// 演示数据里没有真机器，登记无处可去。
   @override
   void setPushRegistration(PushRegistration? registration) {}

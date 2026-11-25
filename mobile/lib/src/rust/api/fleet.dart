@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// 机队流：订阅时先推一次当前整份，之后登记或任何一台的连接状态变了就整份推一次。
 Stream<FleetView> fleetEvents() =>
@@ -55,12 +55,6 @@ Future<void> verifyConnections() =>
 /// 机器在新 endpoint 上重新连（旧 endpoint 跨网络后常常再也连不上 relay）。
 Future<void> networkChanged() =>
     RustLib.instance.api.crateApiFleetNetworkChanged();
-
-/// 一次性导入旧版存的机器，返回这次新登记的。已登记的（同一 `runtime_id` 或 endpoint）
-/// 和不合法的跳过。导入的机器立刻开始连。
-Future<List<RuntimeRecord>> importRuntimes({
-  required List<RuntimeImport> runtimes,
-}) => RustLib.instance.api.crateApiFleetImportRuntimes(runtimes: runtimes);
 
 enum ConnectionState {
   /// 已停止：未配对 / 被撤销、版本不兼容、配对失败，或还没开始连。
@@ -154,38 +148,6 @@ enum LinkPath {
 
   /// 还没选出路径，或路径类型认不出。
   unknown,
-}
-
-/// 旧版（钥匙串里的 `smelt.runtimes.v1`）存的一台机器。
-class RuntimeImport {
-  final String runtimeId;
-  final String endpointId;
-  final String? relayUrl;
-  final String name;
-
-  const RuntimeImport({
-    required this.runtimeId,
-    required this.endpointId,
-    this.relayUrl,
-    required this.name,
-  });
-
-  @override
-  int get hashCode =>
-      runtimeId.hashCode ^
-      endpointId.hashCode ^
-      relayUrl.hashCode ^
-      name.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is RuntimeImport &&
-          runtimeType == other.runtimeType &&
-          runtimeId == other.runtimeId &&
-          endpointId == other.endpointId &&
-          relayUrl == other.relayUrl &&
-          name == other.name;
 }
 
 /// 一台登记过的机器。没有 token：运行时按这台手机的设备密钥认人。

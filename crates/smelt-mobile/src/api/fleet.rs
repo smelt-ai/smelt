@@ -87,15 +87,6 @@ pub struct FleetView {
     pub runtimes: Vec<FleetRuntime>,
 }
 
-/// 旧版（钥匙串里的 `smelt.runtimes.v1`）存的一台机器。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RuntimeImport {
-    pub runtime_id: String,
-    pub endpoint_id: String,
-    pub relay_url: Option<String>,
-    pub name: String,
-}
-
 /// 机队流：订阅时先推一次当前整份，之后登记或任何一台的连接状态变了就整份推一次。
 pub fn fleet_events(sink: StreamSink<FleetView>) {
     crate::fleet::fleet().subscribe(Box::new(move |view| {
@@ -141,10 +132,4 @@ pub fn verify_connections() {
 /// 机器在新 endpoint 上重新连（旧 endpoint 跨网络后常常再也连不上 relay）。
 pub fn network_changed() {
     crate::fleet::fleet().network_changed();
-}
-
-/// 一次性导入旧版存的机器，返回这次新登记的。已登记的（同一 `runtime_id` 或 endpoint）
-/// 和不合法的跳过。导入的机器立刻开始连。
-pub fn import_runtimes(runtimes: Vec<RuntimeImport>) -> Result<Vec<RuntimeRecord>, SmeltError> {
-    crate::fleet::fleet().import(runtimes)
 }

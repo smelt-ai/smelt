@@ -38,9 +38,6 @@ abstract interface class Backend {
   /// 网络变了：让传输层重新找路径，并确认每台机器的链路。
   Future<void> networkChanged();
 
-  /// 一次性迁移旧版钥匙串里的机器列表。
-  Future<List<RuntimeRecord>> importRuntimes(List<RuntimeImport> runtimes);
-
   /// 推送登记同步到每台机器；`null` 是关掉。见 `push.dart`。
   void setPushRegistration(PushRegistration? registration);
 
@@ -316,10 +313,6 @@ class FrbBackend implements Backend {
 
   @override
   Future<void> networkChanged() => fleet.networkChanged();
-
-  @override
-  Future<List<RuntimeRecord>> importRuntimes(List<RuntimeImport> runtimes) =>
-      fleet.importRuntimes(runtimes: runtimes);
 
   @override
   void setPushRegistration(PushRegistration? registration) =>
