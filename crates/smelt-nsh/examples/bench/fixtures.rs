@@ -386,7 +386,16 @@ pub fn setup_real_conv(
         });
     }
 
-    let app = cx.new(|cx| AppView::new(AppOptions::default(), window, cx));
+    let app = cx.new(|cx| {
+        AppView::new(
+            AppOptions {
+                inline_root: true,
+                ..AppOptions::default()
+            },
+            window,
+            cx,
+        )
+    });
     {
         let err_host = host.clone();
         let err_counter = errors.clone();

@@ -472,7 +472,6 @@ mod tests {
         for name in [
             "faint",
             "link",
-            "run",
             "need",
             "ok",
             "bad",

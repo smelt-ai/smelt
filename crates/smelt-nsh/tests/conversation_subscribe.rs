@@ -179,8 +179,16 @@ fn conversation_subscribe_wire_contract(cx: &mut TestAppContext) {
         });
     }
 
-    let (view, cx) =
-        cx.add_window_view(|window, cx| AppView::new(AppOptions::default(), window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        AppView::new(
+            AppOptions {
+                inline_root: true,
+                ..AppOptions::default()
+            },
+            window,
+            cx,
+        )
+    });
     {
         let app_errors = Arc::clone(&app_errors);
         let err_host = host.clone();

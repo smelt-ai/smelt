@@ -1224,6 +1224,7 @@ fn nsh(window: &mut Window, cx: &mut Context<Bench>, name: &str) -> Entity<AppVi
     let dir = PathBuf::from(env!("OUT_DIR")).join(name);
     let options = AppOptions {
         asset_base: Some(AssetBase::Directory(dir.join("assets"))),
+        inline_root: true,
         ..AppOptions::default()
     };
     let app = cx.new(|cx| AppView::new(options, window, cx));

@@ -14,7 +14,7 @@ workspace = true
 
 [dependencies]
 smelt-plugin-api = { path = "../smelt-plugin-api" }
-gpui = { package = "gpui-fast", version = "=0.1.17" }
+gpui = { package = "gpui-fast", version = "=0.1.19" }
 # 终端网格的状态机；PTY 子进程在 smeltd 里。
 alacritty_terminal = { version = "0.26", default-features = false }
 # kitty 图形：守护转发来的 PNG 就地解码。
@@ -27,7 +27,7 @@ serde_json = "1"
 smol = "2"
 
 [dev-dependencies]
-gpui = { package = "gpui-fast", version = "=0.1.17", features = ["test-support"] }
+gpui = { package = "gpui-fast", version = "=0.1.19", features = ["test-support"] }
 # 连真实守护的用例拉起 smeltd 时把就绪管道的写端递给它（清 CLOEXEC）。
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"

@@ -180,6 +180,7 @@ impl MainShell {
 
         let options = AppOptions {
             transparent: true,
+            inline_root: true,
             ..AppOptions::default()
         };
         let app = cx.new(|cx| AppView::new(options, window, cx));

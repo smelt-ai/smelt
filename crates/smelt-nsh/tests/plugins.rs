@@ -200,8 +200,16 @@ fn a_plugin_only_affects_itself(cx: &mut TestAppContext) {
         });
     }
 
-    let (view, cx) =
-        cx.add_window_view(|window, cx| AppView::new(AppOptions::default(), window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        AppView::new(
+            AppOptions {
+                inline_root: true,
+                ..AppOptions::default()
+            },
+            window,
+            cx,
+        )
+    });
     view.update(cx, |view, _| {
         for name in ["test.heavy", "test.probe"] {
             let log = log.clone();

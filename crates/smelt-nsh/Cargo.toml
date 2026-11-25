@@ -11,24 +11,24 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-gpui = { package = "gpui-fast", version = "=0.1.17" }
+gpui = { package = "gpui-fast", version = "=0.1.19" }
 smelt-ui = { path = "../smelt-ui" }
 smelt-desktop = { path = "../smelt-desktop" }
 smelt-terminal = { path = "../smelt-terminal" }
 smelt-acp = { path = "../smelt-acp" }
 smelt-plugin-api = { path = "../smelt-plugin-api" }
 # 跑 JS + SVG + 一等文本/代码/差异视图（`Editor`、`DiffView`、`TextView` + `syntect` 语法高亮）。
-nsh-platform-gpui = { version = "=0.6.1", default-features = false, features = ["js", "svg", "editor", "highlight"] }
-nsh-core = { version = "=0.6.1", features = ["svg", "declarations"] }
+nsh-platform-gpui = { version = "=0.7.0", default-features = false, features = ["js", "svg", "editor", "highlight"] }
+nsh-core = { version = "=0.7.0", features = ["svg", "declarations"] }
 # 离线插件类型声明与 QuickJS 字节码编译校验（关掉 zlib/crypto，和引擎特性一致）。
-nsh-js = { version = "=0.6.1", default-features = false }
+nsh-js = { version = "=0.7.0", default-features = false }
 # `Policy`：平台 crate 没有再导出。
-nsh-engine = { version = "=0.6.1", default-features = false, features = ["js-core"] }
-nsh-base = { version = "=0.6.1", default-features = false, features = ["editor", "highlight"] }
+nsh-engine = { version = "=0.7.0", default-features = false, features = ["js-core"] }
+nsh-base = { version = "=0.7.0", default-features = false, features = ["editor", "highlight"] }
 # NSH 带进 gpui-fast-platform；和 smelt 一样开 runtime_shaders，单独编这个 crate 时也不用装完整 Xcode。
-gpui_platform = { package = "gpui-fast-platform", version = "=0.1.17", default-features = false, features = ["runtime_shaders"] }
+gpui_platform = { package = "gpui-fast-platform", version = "=0.1.19", default-features = false, features = ["runtime_shaders"] }
 # 运行时打包插件（`src/plugins.rs`）：用户装、改插件不用重编 App。
-nsh-bundler = { version = "=0.6.1", features = ["bundle"] }
+nsh-bundler = { version = "=0.7.0", features = ["bundle"] }
 # 只读校验打包产物里剩下的外部 import 与未声明自由标识符（`src/plugins.rs`），不做改写；和 nsh-bundler 用同一版解析器。
 oxc = { version = "=0.153.0", features = ["semantic"] }
 serde = { version = "1", features = ["derive"] }
@@ -52,14 +52,14 @@ objc = "0.2"
 
 [build-dependencies]
 # `bench/` 入口照 `nsh build` 打包、编成字节码给 `examples/bench/`，见 build.rs。
-nsh-bundler = { version = "=0.6.1", features = ["bundle"] }
-nsh-core = "=0.6.1"
-nsh-js = "=0.6.1"
-nsh-base = { version = "=0.6.1", default-features = false }
+nsh-bundler = { version = "=0.7.0", features = ["bundle"] }
+nsh-core = "=0.7.0"
+nsh-js = "=0.7.0"
+nsh-base = { version = "=0.7.0", default-features = false }
 
 [dev-dependencies]
 # tests/*.rs：在测试平台的窗口里跑真引擎；`profiler` 给 `examples/bench/` 采集逐帧与分阶段耗时。
-gpui = { package = "gpui-fast", version = "=0.1.17", features = ["test-support", "profiler"] }
+gpui = { package = "gpui-fast", version = "=0.1.19", features = ["test-support", "profiler"] }
 # examples/bench/：量 CPU 时间、接 NSH 的帧统计日志。
 libc = "0.2"
 log = "0.4"

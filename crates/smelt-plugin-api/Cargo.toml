@@ -25,9 +25,9 @@ smelt-version = { path = "../smelt-version" }
 smelt-ui = { path = "../smelt-ui" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-gpui = { package = "gpui-fast", version = "=0.1.17" }
+gpui = { package = "gpui-fast", version = "=0.1.19" }
 # 布局的格式（`DockAreaState`）。
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "4373234ff46df3a3227972788a41dc6603d352ce", features = ["gpui-fast"] }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "82f1c1dc1f2970d93f1adfe10cbd772516c21ce7", features = ["gpui-fast"] }
 futures-channel = "0.3"
 # 界面语言：当前语言是 rust-i18n 的全局值，各 crate 的文案共用它（见 src/locale.rs）。
 rust-i18n.workspace = true
@@ -35,7 +35,7 @@ rust-i18n.workspace = true
 sys-locale = "0.3"
 
 [dev-dependencies]
-gpui = { package = "gpui-fast", version = "=0.1.17", features = ["test-support"] }
+gpui = { package = "gpui-fast", version = "=0.1.19", features = ["test-support"] }
 smol = "2"
 # 查各 crate 的文案（tests/catalogs.rs），用 rust-i18n 构建时同一个加载函数。
 rust-i18n-support = { version = "4.2", features = ["codegen"] }
