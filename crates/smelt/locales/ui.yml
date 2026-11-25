@@ -802,9 +802,6 @@ maintenance:
       action:
         en: "Delete"
         zh-CN: "删除"
-      cancel:
-        en: "Cancel"
-        zh-CN: "取消"
   cli:
     title:
       en: "Command Line"

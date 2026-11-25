@@ -223,7 +223,7 @@ async fn download_verified(
     url: &str,
     to: &Path,
     expected: &str,
-    on_progress: &dyn Fn(DownloadProgress),
+    on_progress: &impl Fn(DownloadProgress),
 ) -> anyhow::Result<()> {
     let mut resp = open_package_download(url, "installer").await?;
     let total = resp.content_length();

@@ -41,6 +41,8 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    # xxhash-rust（rolldown 带进来，经 nsh-bundler）。
+    "BSL-1.0",
     "CC0-1.0",
     # webpki-roots / webpki-root-certs 的根证书数据。
     "CDLA-Permissive-2.0",

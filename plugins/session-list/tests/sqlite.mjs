@@ -1,9 +1,13 @@
 // 测试用的库：用 Bun 自带的 SQLite 照宿主 store_* 的语义做一份（write 一个事务，migrate 按
 // user_version 一步一个事务，库比步骤新报错）。
-import { Database } from "bun:sqlite";
+import { constants, Database } from "bun:sqlite";
+
+// 宿主（rusqlite `Connection::open`）默认带 SQLITE_OPEN_URI，`ATTACH 'file:…?mode=ro'` 才认 URI。
+// Linux 上 Bun 自带的 SQLite 编译时没开 USE_URI，不显式带上就把 URI 当普通文件名、挂上一个空库。
+const OPEN_FLAGS = constants.SQLITE_OPEN_READWRITE | constants.SQLITE_OPEN_CREATE | constants.SQLITE_OPEN_URI;
 
 export function open_db(path) {
-  const db = new Database(path);
+  const db = new Database(path, OPEN_FLAGS);
   const bind = (params = []) => params.map((value) => (typeof value === "boolean" ? Number(value) : value));
   const run = (sql, params) => db.prepare(sql).run(...bind(params)).changes;
   return {
