@@ -276,7 +276,7 @@ pub fn apply_daemon_baseline(
 }
 
 /// 将一次 daemon 更新完整应用到 store：可通知 phase 发布事件；结构化会话离开
-/// 等待/失败状态时解决旧行动项。调用者只负责保存最新 phase，不再复制生命周期判断。
+/// 等待/失败状态（或纯 OSC 7501 撤回回到空闲/结束态）时解决旧行动项。
 pub fn apply_daemon_transition(
     store: &mut AttentionStore,
     previous: Option<&DaemonSessionState>,
@@ -287,7 +287,11 @@ pub fn apply_daemon_transition(
         store.resolve(&state.id);
         return None;
     }
-    if !state.phase_is_authoritative() {
+    let prev_auth = previous.is_some_and(|p| p.structured_events && p.phase_is_authoritative());
+    if !state.structured_events || !state.phase_is_authoritative() {
+        if prev_auth && matches!(state.phase, DaemonPhase::Idle | DaemonPhase::Dead) {
+            store.resolve(&state.id);
+        }
         return None;
     }
     if let Some(item) = item_for_daemon_transition(previous, state) {
@@ -431,6 +435,25 @@ mod tests {
         );
         assert!(apply_daemon_transition(&mut store, Some(&previous), &current, now).is_none());
         assert!(store.has_unresolved_action(&current.id));
+    }
+
+    #[test]
+    fn losing_authority_to_idle_resolves_action() {
+        let now = Instant::now();
+        for structured_after in [false, true] {
+            let mut store = AttentionStore::default();
+            let waiting = state(DaemonPhase::AwaitingApproval);
+            let executing = state(DaemonPhase::ExecutingTool);
+            apply_daemon_transition(&mut store, Some(&executing), &waiting, now);
+            assert_eq!(store.unresolved_action_count(), 1);
+
+            let mut cleared = state(DaemonPhase::Idle);
+            cleared.structured_events = structured_after;
+            cleared.turn_events = false;
+            assert!(apply_daemon_transition(&mut store, Some(&waiting), &cleared, now).is_none());
+            assert_eq!(store.unresolved_action_count(), 0);
+            assert!(store.unread(&cleared.id).is_none());
+        }
     }
 
     #[test]

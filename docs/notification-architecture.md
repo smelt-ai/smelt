@@ -95,19 +95,23 @@ keyframe 不经过这里，历史通知不会被当成新的再弹。这样通�
 `attention.changed` 的桌面留的。
 
 OSC 7501（[Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status)）
-在同一处扫。smeltd 回应 `OSC 7501 ; ?` 探测（在把这批输出交给客户端之前写回 PTY，保证
-先于客户端回应的 DA），Claude Code、Pi、Grok 据此开始上报；Codex 不探测、直接发。只认根
-记录，它直接改 phase：`working` → 思考中，`blocked` → 等批准（`kind=permission`）或等输入，
-`done` → 已完成，`error` → 失败，`idle` → 空闲。程序把后台子智能体、自动重试都算进了自己
-的状态：实测 Claude Code 派出后台子智能体后主回合马上 Stop，根记录却一直 `working`，等
-子智能体结束、主回合汇总完才 `done`。
+在 `feed_output` 里随普通字节片段单遍扫出（跳过 Kitty 图形 APC 载荷），`RIS`（`ESC c`）和
+`OSC 133 ; A`（shell 提示符起点）在同一条有序流里发出。smeltd 回应 `OSC 7501 ; ?` 探测（在
+把这批输出交给客户端之前写回 PTY，保证先于网格随后写入的 DA），Claude Code、Pi、Grok 据此开始
+上报；Codex 不探测、直接发。只认根记录，它直接改 phase：`working` → 思考中，`blocked` → 等批准
+（`kind=permission`）或等输入，`done` → 已完成，`error` → 失败，`idle` → 空闲；`working` /
+`blocked` 附带的 `progress` 交给 `ProgressTracker` 走 `terminal.progress`，并抑制同期的
+OSC 9;4 进度。程序把后台子智能体、自动重试都算进了自己的状态：实测 Claude Code 派出后台子智能
+体后主回合马上 Stop，根记录却一直 `working`，等子智能体结束、主回合汇总完才 `done`。
 
-会话报过一次 7501 根记录，相位就以它为准（`SessionState::program_status`），同一会话不让
+会话持有活跃的 7501 根记录时，相位以它为准（`SessionState::program_status`），同一会话不让
 hook 和 7501 两边各改一份：hook 的回合开始、等待、完成都不再改相位，只在 7501 报 `working`
 时把它细分成思考 / 执行工具（7501 不带工具名），以及在进程退出（`SessionEnded`）时置
-`Dead`。会话名、对话 id 照旧来自 hook，7501 不带对话 id。根记录被 `clear`（程序退出前会
-撤掉全部记录）或进程退出时，相位交还给 hook，`working` / `blocked` 作废。规范还要求新的
-shell 提示符（OSC 133 `A`）出现时作废，smelt 目前没有 shell 集成，靠 SessionEnd 兜底。
+`Dead`。会话名、对话 id 照旧来自 hook，7501 不带对话 id。根记录被 `clear`、终端 `RIS` 或进程
+退出清掉时，立即交还控制权并按 hook 基线还原 `structured_events` / `turn_events`（纯 7501
+CLI 退出后不永久屏蔽后续普通程序的终端通知，提醒台账同步清理已有待办并撤推送）。若用户的 shell
+发出 `OSC 133 ; A` 新提示符，`working` / `blocked` / `idle` 立即清理交还控制权；`done` /
+`error` 按规范跨提示符保留展示，同时解除对新起 hook 会话的拦截，等下一轮新提示符或 `RIS` 再清除。
 
 7501 是 PTY 里任何程序都能写的低可信来源，规范要求不能据此授权。它只决定显示的状态；
 `blocked` 会打开远程审批快捷操作（`action` 只在等待相位下写入），这个门闩只防在 agent

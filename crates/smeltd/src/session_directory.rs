@@ -133,7 +133,10 @@ impl SessionRecord {
             turn_events: self.turn_events,
             agent_event_version: self.agent_event_version,
             active_blocker: None,
-            program_status: false,
+            program_status: None,
+            hook_structured: self.structured_events,
+            hook_turn: self.turn_events,
+            hook_tool: None,
             runtime: false,
         };
         // 留下的终端也顶着用户给那段对话起的名字。
@@ -622,7 +625,10 @@ mod tests {
                 agent_id: None,
                 tool_name: None,
             }),
-            program_status: false,
+            program_status: None,
+            hook_structured: true,
+            hook_turn: true,
+            hook_tool: None,
             runtime: true,
         }
     }
