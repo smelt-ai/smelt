@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { CANVAS, EYE_R, hash, mouthSvg, shapeOf } from "../avatar_shape.js";
+import { CANVAS, EYE_R, hash, shapeOf } from "../avatar_shape.js";
 
 /** 路径里所有坐标点（每对数是一个点）。 */
 function points(path) {
@@ -56,24 +56,4 @@ test("一排看下来大小差不多：外接框长边都在 23 到 26.5 之间"
     expect(long).toBeGreaterThan(23);
     expect(long).toBeLessThan(26.5);
   }
-});
-
-test("嘴在两眼中间正下方，四种嘴都不出身子", () => {
-  for (const seed of seeds) {
-    const { path, eyes, mouth } = shapeOf(seed);
-    const [left, right, eyeY] = eyes;
-    const [x, y] = mouth;
-    expect(x).toBeCloseTo((left + right) / 2, 6);
-    expect(y).toBeGreaterThan(eyeY + EYE_R);
-    // 最低的是张嘴笑，到 y + 2.2；离轮廓底至少留 1.5。
-    const bottom = Math.max(...points(path).map(([, py]) => py));
-    expect(y + 2.2).toBeLessThan(bottom - 1.5);
-  }
-  for (const kind of ["smile", "flat", "o", "grin"]) {
-    const svg = mouthSvg([18, 22], kind, "#fff");
-    expect(svg).toContain('viewBox="0 0 36 36"');
-    expect(svg).not.toContain("NaN");
-  }
-  // 认不得的一律当微笑。
-  expect(mouthSvg([18, 22], "?", "#fff")).toBe(mouthSvg([18, 22], "smile", "#fff"));
 });

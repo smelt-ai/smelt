@@ -1,5 +1,4 @@
-// 会话头像：外形按会话 id 算（../avatar_shape.js），深色身子、按会话变色的描边、白色圆点眼睛，嘴随状态
-// 换：平时微笑、干活抿成一横、喊你张成 o、欢呼那一下张嘴笑。纯 JS。
+// 会话头像：外形按会话 id 算（../avatar_shape.js），深色身子、按会话变色的描边、白色圆点眼睛。纯 JS。
 //
 // 演哪一出、从什么时候起照用会话列表的 avatar_stage.js（act/since），这里只管怎么演。
 // 身子是一张静态 SVG，只在第一次显示时算；动的是叠在上面的眼睛和整个身子，全用关键帧交给 NSH
@@ -7,10 +6,10 @@
 // 每个头像有按种子定的性格（节奏快慢、幅度、第一拍晚多久起）。站着不动不要帧；App 不在前台
 // 或系统要求减弱动态效果时也不动。
 
-import { cleanup, createMotion, Easing, effect, lifecycle, reduceMotion, signal, View } from "nsh";
+import { cleanup, createMotion, Easing, effect, lifecycle, reduceMotion, View } from "nsh";
 import { SmeltVector } from "smelt/sdk";
 
-import { bodySvg, CANVAS, EYE_R, hash, mouthSvg, shapeOf } from "../avatar_shape.js";
+import { bodySvg, CANVAS, EYE_R, hash, shapeOf } from "../avatar_shape.js";
 import { ONE_SHOT_MS } from "../avatar_stage.js";
 /** 动作的帧率上限：每动一帧整窗重画，眼睛小、动得慢，20 帧看不出顿。 */
 const FPS = 20;
@@ -112,8 +111,6 @@ export function Avatar(props: AvatarProps) {
   const beat = 700 + dice(seed, 0) * 600;
   const reach = 0.75 + dice(seed, 1) * 0.5;
   const offset = dice(seed, 2) * 1200;
-  // 欢呼那一下正在演：演的时候张嘴笑，演完收回微笑。
-  const grinning = signal(false);
   // 换一出就加一，旧的那一串拍子看到对不上就停。
   let run = 0;
   cleanup(() => {
@@ -151,7 +148,6 @@ export function Avatar(props: AvatarProps) {
     const mine = ++run;
     body.reset();
     eyes.reset();
-    grinning.set(false);
     if (still) return;
     const length = (ONE_SHOT_MS as Record<string, number>)[act];
     if (length != null && Date.now() - since >= length) return;
@@ -163,10 +159,7 @@ export function Avatar(props: AvatarProps) {
         loop(mine, CALL, Math.floor(Date.now() / beat), offset / 3);
         break;
       case "cheer":
-        grinning.set(true);
-        play(CHEER[Math.floor(dice(seed, 3) * CHEER.length)], 0).then(() => {
-          if (mine === run) grinning.set(false);
-        });
+        play(CHEER[Math.floor(dice(seed, 3) * CHEER.length)], 0);
         break;
       case "greet":
         play(GREET[Math.floor(dice(seed, 4) * GREET.length)], 0);
@@ -177,10 +170,6 @@ export function Avatar(props: AvatarProps) {
   const unit = () => props.size / CANVAS;
   const [left, right, eyeY] = shape.eyes;
   const eyeColor = () => (props.act === "call" ? EYE_CALL : EYE);
-  const mouth = () => {
-    const kind = grinning() ? "grin" : props.act === "work" ? "flat" : props.act === "call" ? "o" : "smile";
-    return mouthSvg(shape.mouth, kind, eyeColor());
-  };
   const eye = () => (
     <View
       style={{ width: EYE_R * 2 * unit(), height: EYE_R * 2 * unit(), borderRadius: EYE_R * unit(), backgroundColor: eyeColor() }}
@@ -191,9 +180,6 @@ export function Avatar(props: AvatarProps) {
     <View style={{ width: props.size, height: props.size, opacity: props.opacity ?? 1, pointerEvents: "none" }}>
       <View style={{ position: "absolute", left: 0, top: 0, width: props.size, height: props.size, ...body.style }}>
         <SmeltVector markup={markup} width={props.size} height={props.size} />
-        <View style={{ position: "absolute", left: 0, top: 0 }}>
-          <SmeltVector markup={mouth()} width={props.size} height={props.size} />
-        </View>
         <View
           style={{
             position: "absolute",
