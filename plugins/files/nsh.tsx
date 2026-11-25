@@ -1411,20 +1411,20 @@ function MenuRow(props: {
       closeOnSelect={true}
       disabled={props.disabled}
       class={MENU_ITEM_CLASS}
-      style={{ height: 26, gap: 6 }}
+      style={{ height: 28, gap: 8 }}
       onSelect={props.onSelect}
     >
       <If when={Boolean(props.iconPath)}>
         <SmeltIcon
           path={props.iconPath}
-          size={13}
+          size={14}
           color={props.danger ? look().palette.bad : look().palette.muted}
         />
       </If>
       <Text
         style={{
-          fontSize: look().type.small.size,
-          lineHeight: look().type.small.line_height,
+          fontSize: look().type.ui_compact.size,
+          lineHeight: look().type.ui_compact.line_height,
           color: props.danger ? look().palette.bad : look().palette.text,
         }}
       >
@@ -2106,8 +2106,8 @@ export function Main() {
                                                   style={{
                                                     flex: 1,
                                                     minWidth: 0,
-                                                    fontSize: look().type.small.size,
-                                                    lineHeight: look().type.small.line_height,
+                                                    fontSize: look().type.ui.size,
+                                                    lineHeight: look().type.ui.line_height,
                                                     color: row().isDir
                                                       ? look().palette.text
                                                       : look().palette.muted,
@@ -2200,8 +2200,8 @@ export function Main() {
                                                 style={{
                                                   flex: 1,
                                                   minWidth: 0,
-                                                  fontSize: look().type.small_medium.size,
-                                                  fontWeight: look().type.small_medium.weight,
+                                                  fontSize: look().type.ui_medium.size,
+                                                  fontWeight: look().type.ui_medium.weight,
                                                   color: look().palette.text,
                                                   numberOfLines: 1,
                                                 }}
@@ -2250,8 +2250,8 @@ export function Main() {
                                                   style={{
                                                     flex: 1,
                                                     minWidth: 0,
-                                                    fontSize: look().type.small_medium.size,
-                                                    fontWeight: look().type.small_medium.weight,
+                                                    fontSize: look().type.ui_medium.size,
+                                                    fontWeight: look().type.ui_medium.weight,
                                                     color: look().palette.text,
                                                     numberOfLines: 1,
                                                   }}
@@ -2346,8 +2346,8 @@ export function Main() {
                                     style={{
                                       flex: 1,
                                       minWidth: 0,
-                                      fontSize: look().type.small.size,
-                                      lineHeight: look().type.small.line_height,
+                                      fontSize: look().type.ui.size,
+                                      lineHeight: look().type.ui.line_height,
                                       color: look().palette.text,
                                       numberOfLines: 1,
                                     }}
@@ -2398,7 +2398,7 @@ export function Main() {
                                 style={{
                                   flex: 1,
                                   minWidth: 0,
-                                  fontSize: look().type.small.size,
+                                  fontSize: look().type.ui.size,
                                   color: look().palette.muted,
                                   numberOfLines: 1,
                                 }}
