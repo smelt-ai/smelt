@@ -69,7 +69,7 @@ pub async fn fetch_latest(channel: UpdateChannel) -> anyhow::Result<UpdateCandid
 /// 没有能覆盖的安装，不检查、不下载。
 pub fn installed_by_setup() -> bool {
     smelt_version::RELEASE.is_some()
-        && std::env::current_exe().is_ok_and(|exe| exe.with_file_name(UNINSTALLER).is_file())
+        && smelt_paths::current_exe().is_ok_and(|exe| exe.with_file_name(UNINSTALLER).is_file())
 }
 
 /// 装着的就是编进程序的那次发版。
@@ -282,7 +282,7 @@ pub fn launch_installer(update: &StagedUpdate, relaunch: bool) -> anyhow::Result
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     if relaunch {
-        let exe = std::env::current_exe().context("couldn't find the current exe")?;
+        let exe = smelt_paths::current_exe().context("couldn't find the current exe")?;
         command.arg(format!("/RELAUNCH={}", exe.display()));
     }
     let child = smelt_sys::process::spawn_detached(&mut command)

@@ -601,7 +601,7 @@ pub(crate) fn authenticate_first_party_peer(
 pub(crate) fn authenticate_first_party_desktop(
     peer: &PeerIdentity,
 ) -> Result<FirstPartyClientKind, String> {
-    let daemon_executable = std::env::current_exe()
+    let daemon_executable = smelt_paths::current_exe()
         .map_err(|error| format!("cannot resolve daemon executable: {error}"))?;
     let daemon_pid = std::process::id();
     #[cfg(target_os = "macos")]

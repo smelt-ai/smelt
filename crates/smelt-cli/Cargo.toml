@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 smelt-model = { path = "../smelt-model" }
+smelt-paths = { path = "../smelt-paths" }
 smelt-runtime-client = { path = "../smelt-runtime-client" }
 smelt-client = { path = "../smelt-client" }
 smelt-version = { path = "../smelt-version" }

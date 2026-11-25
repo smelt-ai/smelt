@@ -14,7 +14,7 @@ fn smelt_notify_path() -> std::path::PathBuf {
 /// managed 副本，避免“hook JSON 已升级、helper 仍是旧版”的半升级状态。rename 替换
 /// 不影响已经启动的旧 helper：它仍持有旧 inode，下一次 hook 自动使用新文件。
 pub(crate) fn sync_bundled_smelt_notify() -> std::io::Result<()> {
-    let bundled = std::env::current_exe()?.with_file_name(if cfg!(windows) {
+    let bundled = smelt_paths::current_exe()?.with_file_name(if cfg!(windows) {
         "smelt-notify.exe"
     } else {
         "smelt-notify"

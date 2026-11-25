@@ -50,7 +50,7 @@ fn run_local(args: &[String]) -> anyhow::Result<()> {
     // 提交时要停守护，守护会杀掉它名下终端和 ACP 的进程组。这个进程可能就在那样的终端
     // 里，所以提交放进新会话：不在那些进程组里，也没有会在终端关掉时收到 SIGHUP 的控制终端。
     // 它看不到终端，进度和错误写 app.log；这边只等它结束、报结果，这边被杀了它也照样做完。
-    let mut command = std::process::Command::new(std::env::current_exe()?);
+    let mut command = std::process::Command::new(smelt_paths::current_exe()?);
     command
         .args(["--commit-local-app", &id, "--target", &target])
         .stdin(std::process::Stdio::null())
