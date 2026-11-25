@@ -135,6 +135,32 @@ fn resolve(
     explicit.or(real)
 }
 
+/// 当前可执行文件的真实路径（已沿软链接解析到底）。
+///
+/// macOS 的 `std::env::current_exe()`（`_NSGetExecutablePath`）和 Windows 的
+/// `GetModuleFileNameW` 都不会解开启动时经过的软链接，经 `/usr/local/bin/smelt`
+/// 或 `mklink` 入口启动时会留在软链接目录，导致找不到随包工具或反推出错误目录。
+/// Windows 上使用 `dunce::canonicalize` 去掉 `\\?\` 扩展前缀，避免破坏外部启动参数。
+/// 若运行中二进制已被删除或替换导致规范化失败，会回落到原始路径；需要写软链接的场景
+/// 必须自行严格 `canonicalize` 并在失败时报错，不得回落原值。
+pub fn current_exe() -> std::io::Result<PathBuf> {
+    Ok(resolve_exe_path(std::env::current_exe()?))
+}
+
+fn resolve_exe_path(exe: PathBuf) -> PathBuf {
+    canonicalize_path(&exe).unwrap_or(exe)
+}
+
+#[cfg(windows)]
+fn canonicalize_path(path: &Path) -> std::io::Result<PathBuf> {
+    dunce::canonicalize(path)
+}
+
+#[cfg(not(windows))]
+fn canonicalize_path(path: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(path)
+}
+
 /// 当前进程是不是 cargo 构建出来的测试二进制。
 ///
 /// 判据是 `argv[0]` 落在 `target/<profile>/deps/` 下：cargo 的 test/bench 可执行文件
@@ -142,7 +168,7 @@ fn resolve(
 pub fn running_under_test() -> bool {
     static UNDER_TEST: OnceLock<bool> = OnceLock::new();
     *UNDER_TEST.get_or_init(|| {
-        std::env::current_exe().is_ok_and(|exe| {
+        current_exe().is_ok_and(|exe| {
             exe.parent().is_some_and(|parent| {
                 parent.file_name().is_some_and(|name| name == "deps")
                     && parent
@@ -408,5 +434,40 @@ mod tests {
         let pid = child.id();
         child.wait().unwrap();
         assert!(!pid_is_alive(pid));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_exe_path_follows_chained_symlinks() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("smelt-paths-exe-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let real = root.join("real-smelt");
+        let managed = root.join("managed-smelt");
+        let system = root.join("system-smelt");
+        std::fs::write(&real, "").unwrap();
+        std::os::unix::fs::symlink(&real, &managed).unwrap();
+        std::os::unix::fs::symlink(&managed, &system).unwrap();
+
+        assert_eq!(
+            resolve_exe_path(system),
+            std::fs::canonicalize(&real).unwrap()
+        );
+
+        let missing = root.join("missing-smelt");
+        assert_eq!(resolve_exe_path(missing.clone()), missing);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn current_exe_resolves_to_real_file() {
+        let exe = current_exe().unwrap();
+        let meta = std::fs::symlink_metadata(&exe).unwrap();
+        assert!(meta.is_file());
+        assert!(!meta.file_type().is_symlink());
     }
 }

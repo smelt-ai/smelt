@@ -18,7 +18,7 @@ pub(super) fn dir() -> Option<&'static Path> {
 }
 
 fn locate() -> Option<PathBuf> {
-    if let Some(dir) = std::env::current_exe()
+    if let Some(dir) = smelt_paths::current_exe()
         .ok()
         .and_then(|exe| packaged_dir(&exe))
     {
@@ -27,7 +27,7 @@ fn locate() -> Option<PathBuf> {
     if cfg!(debug_assertions) {
         return Some(repo_dir());
     }
-    if let Ok(exe) = std::env::current_exe() {
+    if let Ok(exe) = smelt_paths::current_exe() {
         eprintln!(
             "[plugins] {} 旁边没有安装包里的自带插件目录，自带插件不加载",
             exe.display()

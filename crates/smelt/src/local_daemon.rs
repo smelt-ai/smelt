@@ -77,7 +77,7 @@ fn daemon_ready_timeout() -> Duration {
 /// 目录。不抹掉 `deps` 这一层，用例就只能去捞开发者真实安装的 `~/.smelt`，既污染
 /// 个人数据，在 CI 上也必然抓瞎。
 fn distribution_exe() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
+    let exe = smelt_paths::current_exe().ok()?;
     if smelt_paths::running_under_test()
         && let Some(profile_dir) = exe.parent().and_then(std::path::Path::parent)
     {
@@ -294,7 +294,7 @@ pub(crate) fn connect_daemon() -> std::io::Result<RuntimeStream> {
     let daemon = match ensure_managed_daemon_current() {
         Ok(p) => p,
         Err(e) => {
-            let exe = std::env::current_exe()?;
+            let exe = smelt_paths::current_exe()?;
             let fallback = exe.with_file_name(bundled_daemon_file_name());
             if fallback.is_file() {
                 eprintln!(
@@ -327,7 +327,7 @@ fn spawn_managed_daemon_and_connect(daemon: std::path::PathBuf) -> std::io::Resu
     let mut ready = None;
     let spawn_err: Option<String> = {
         use std::process::Stdio;
-        let exe = std::env::current_exe().ok();
+        let exe = smelt_paths::current_exe().ok();
         let in_app_bundle = exe.as_ref().is_some_and(|e| path_inside_app_bundle(e));
         let spawn_at = &daemon;
         let mut cmd = std::process::Command::new(spawn_at);
