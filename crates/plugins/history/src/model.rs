@@ -208,6 +208,29 @@ pub(crate) fn tabs_with_sessions(
         .collect()
 }
 
+/// 当前选中的来源已经读完且是空的时，挑第一个有会话的来源顶上，避免打开历史页一直
+/// 停在空的默认标签上。当前来源还没读完时不切，防止别的来源先回来抢走焦点。
+pub(crate) fn fallback_source(
+    tabs: &[SourceTab],
+    current: (HistorySourceKind, Option<&str>),
+    current_loaded: bool,
+    has_sessions: impl Fn(&SourceTab) -> bool,
+) -> Option<(HistorySourceKind, Option<String>)> {
+    if !current_loaded {
+        return None;
+    }
+    let current_has_sessions = tabs
+        .iter()
+        .find(|tab| (tab.kind, tab.profile_id.as_deref()) == current)
+        .is_some_and(|tab| has_sessions(tab));
+    if current_has_sessions {
+        return None;
+    }
+    tabs.iter()
+        .find(|&tab| has_sessions(tab))
+        .map(|tab| (tab.kind, tab.profile_id.clone()))
+}
+
 /// 项目是某个智能体的 space 时，那个智能体的引擎：历史只看这一家。
 /// space 在哪按那台运行时推来的配置认；配置还没到时不算。
 pub(crate) fn space_engine(
@@ -452,6 +475,42 @@ mod tests {
         .map(|tab| tab.kind)
         .collect();
         assert_eq!(shown, [claude, codex]);
+    }
+
+    #[test]
+    fn fallback_source_picks_first_non_empty_tab_only_after_current_finishes() {
+        let claude: HistorySourceKind = ConversationAgentKind::Claude.into();
+        let antigravity: HistorySourceKind = ConversationAgentKind::Antigravity.into();
+        let tabs = source_tabs(None, []);
+
+        assert_eq!(
+            fallback_source(&tabs, (claude, None), false, |tab| {
+                tab.kind == antigravity
+            }),
+            None
+        );
+        assert_eq!(
+            fallback_source(&tabs, (claude, None), true, |tab| {
+                tab.kind == claude || tab.kind == antigravity
+            }),
+            None
+        );
+        assert_eq!(
+            fallback_source(&tabs, (claude, None), true, |tab| {
+                tab.kind == antigravity
+            }),
+            Some((antigravity, None))
+        );
+        assert_eq!(
+            fallback_source(&tabs, (claude, None), true, |_| false),
+            None
+        );
+        assert_eq!(
+            fallback_source(&tabs, (claude, Some("gone")), true, |tab| {
+                tab.kind == antigravity
+            }),
+            Some((antigravity, None))
+        );
     }
 
     fn settings_with_writer() -> AgentHostSettings {

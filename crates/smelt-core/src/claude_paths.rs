@@ -6,11 +6,51 @@
 
 use std::path::PathBuf;
 
-/// 项目目录编码规则：Claude Code 把项目路径里的 `/` 和 `.` 都换成 `-`
-/// （已经拿 codux 的实现 `project_path.replace('/', '-').replace('.', '-')` 印证过，
-/// 跟本机实测的编码目录名完全对得上）。
+/// 项目目录编码规则：Claude Code 把绝对路径里非 ASCII 字母/数字的字符都换成 `-`
+/// （如 `/workspace/alice.smith/dev/project` → `-workspace-alice-smith-dev-project`，
+/// Windows `E:\AI\smelt` → `E--AI-smelt`、`C:\Users\a\my_app` → `C--Users-a-my-app`）。
+/// 先剥掉 Windows `\\?\` 逐字前缀与非根目录末尾的分隔符，保证带/不带尾斜杠和 `\\?\`
+/// 前缀的工作区落到同一个编码目录。
 pub fn project_dir(cwd: &str) -> String {
-    cwd.replace(['/', '.'], "-")
+    normalize_project_cwd(cwd)
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect()
+}
+
+fn normalize_project_cwd(cwd: &str) -> String {
+    let mut path = strip_verbatim_prefix(cwd);
+    while path.ends_with(['/', '\\']) {
+        let is_posix_root = path.len() == 1;
+        let bytes = path.as_bytes();
+        let is_drive_root = bytes.len() == 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+        if is_posix_root || is_drive_root {
+            break;
+        }
+        path.pop();
+    }
+    path
+}
+
+fn strip_verbatim_prefix(cwd: &str) -> String {
+    let Some(rest) = cwd
+        .strip_prefix(r"\\?\")
+        .or_else(|| cwd.strip_prefix("//?/"))
+    else {
+        return cwd.to_string();
+    };
+    if rest.get(..4).is_some_and(|prefix| {
+        prefix.eq_ignore_ascii_case(r"UNC\") || prefix.eq_ignore_ascii_case("UNC/")
+    }) {
+        format!(r"\\{}", &rest[4..])
+    } else if rest.len() >= 2
+        && rest.as_bytes()[0].is_ascii_alphabetic()
+        && rest.as_bytes()[1] == b':'
+    {
+        rest.to_string()
+    } else {
+        cwd.to_string()
+    }
 }
 
 /// `override_dir`：多 workspace 场景下某个 profile 显式指定的 `CLAUDE_CONFIG_DIR`
@@ -36,7 +76,7 @@ fn claude_home(override_dir: Option<&str>) -> PathBuf {
         return PathBuf::from(dir);
     }
     dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .unwrap_or_else(std::env::temp_dir)
         .join(".claude")
 }
 
@@ -50,5 +90,24 @@ mod tests {
             project_dir("/workspace/alice.smith/dev/project"),
             "-workspace-alice-smith-dev-project"
         );
+    }
+
+    #[test]
+    fn project_dir_encodes_windows_paths_consistently() {
+        assert_eq!(project_dir(r"E:\AI\smelt"), "E--AI-smelt");
+        assert_eq!(project_dir("E:/AI/smelt"), "E--AI-smelt");
+        assert_eq!(project_dir(r"E:\AI\smelt\"), "E--AI-smelt");
+        assert_eq!(project_dir(r"\\?\E:\AI\smelt"), "E--AI-smelt");
+        assert_eq!(project_dir(r"E:\"), "E--");
+        assert_eq!(project_dir("E:/"), "E--");
+        assert_eq!(
+            project_dir(r"C:\Users\alice.smith\my_project"),
+            "C--Users-alice-smith-my-project"
+        );
+        assert_eq!(
+            project_dir(r"C:\Users\alice\my project"),
+            "C--Users-alice-my-project"
+        );
+        assert_eq!(project_dir("/"), "-");
     }
 }

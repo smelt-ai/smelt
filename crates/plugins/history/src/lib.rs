@@ -284,6 +284,59 @@ impl HistoryPage {
             }
         }
         self.ensure_list(&project, current.0, current.1, CURRENT_MAX_AGE, cx);
+        self.fallback_source_if_empty(cx);
+    }
+
+    /// 默认/当前选中的来源读完确认是空的时，自动切到第一个有历史的来源（比如没装 Claude、
+    /// 只用 Antigravity 的项目）。
+    fn fallback_source_if_empty(&mut self, cx: &mut Context<Self>) {
+        if self.engine.is_some() {
+            return;
+        }
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let current_key = list_key(
+            &project.machine,
+            self.picked.0,
+            self.picked.1.as_deref(),
+            &project.root,
+        );
+        let current_loaded = !self.inflight.contains(&current_key)
+            && self
+                .lists
+                .get(&current_key)
+                .is_some_and(|list| list.fetched.is_some());
+        let tabs = {
+            let settings = agents::settings_on(&project.machine, cx);
+            source_tabs(
+                None,
+                settings.into_iter().flat_map(|settings| &settings.profiles),
+            )
+        };
+        let next = fallback_source(
+            &tabs,
+            (self.picked.0, self.picked.1.as_deref()),
+            current_loaded,
+            |tab| {
+                let key = list_key(
+                    &project.machine,
+                    tab.kind,
+                    tab.profile_id.as_deref(),
+                    &project.root,
+                );
+                self.lists
+                    .get(&key)
+                    .is_some_and(|list| !list.snapshot.sessions.is_empty())
+            },
+        );
+        if let Some(next) = next
+            && next != self.picked
+        {
+            self.picked = next.clone();
+            self.close_detail();
+            self.ensure_list(&project, next.0, next.1, CURRENT_MAX_AGE, cx);
+        }
     }
 
     fn ensure_list(
@@ -348,6 +401,7 @@ impl HistoryPage {
                 if stale {
                     this.refresh(cx);
                 }
+                this.fallback_source_if_empty(cx);
                 cx.notify();
             })
             .ok();
