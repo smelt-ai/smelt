@@ -225,6 +225,19 @@ class TerminalStream {
     }
   }
 
+  void sendInputSegments(List<String> segments) {
+    final nonEmpty = segments.where((s) => s.isNotEmpty).toList();
+    if (nonEmpty.isEmpty || !_attached) return;
+    try {
+      backend.terminalInputSegments(runtimeId, sessionId, nonEmpty);
+    } catch (error) {
+      _emit(TerminalErrorEvent(describeError(error)));
+    }
+  }
+
+  Future<String> stageImage(ImageInput image) =>
+      backend.terminalStageImage(runtimeId, sessionId, image);
+
   void suspend() {
     if (_disposed || _suspended) return;
     _suspended = true;

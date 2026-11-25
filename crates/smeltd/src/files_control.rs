@@ -17,7 +17,7 @@ pub(crate) fn dispatch(
         }
         ControlMethod::FileOpen => call::<FileOpenCall>(params, |p| {
             Ok(FileOpenResult {
-                content: project_files::open(&p.path)?,
+                content: project_files::open_if_changed(&p.path, p.if_none_match.as_deref())?,
             })
         }),
         ControlMethod::FileSave => call::<FileSaveCall>(params, |p| {

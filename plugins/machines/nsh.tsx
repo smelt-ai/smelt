@@ -35,7 +35,9 @@ import {
 
 import {
   ADD_MACHINE_NAME,
+  AGENT_ACCESS_NAME,
   EDIT_RELAY_NAME,
+  INBOUND_NAME,
   MACHINE_MENU,
   RECONNECT_NAME,
   REMOVE_NAME,
@@ -512,6 +514,23 @@ onCommand(async ({ name, args }) => {
       openRemoveDialog(conn.machine, conn.name);
       return null;
     }
+    // 两项都是翻转：允许 ↔ 不允许。还没迁到本机运行时的机器（这两项是 null）改不了。
+    case AGENT_ACCESS_NAME:
+    case INBOUND_NAME: {
+      const conn = findRemote(args?.machine);
+      const field = name === AGENT_ACCESS_NAME ? "agent_access" : "inbound";
+      const allowed = conn?.[field];
+      if (typeof allowed !== "boolean") throw new Error(t("error.machine_removed"));
+      const change =
+        name === AGENT_ACCESS_NAME ? { agents: !allowed } : { inbound: !allowed };
+      try {
+        await run("smelt.app/set-machine-access", { machine: conn.machine, ...change });
+      } catch (error) {
+        notifyFailure(t("access_change.failed"), error);
+        throw error;
+      }
+      return null;
+    }
     default:
       throw new Error(`Unknown command: ${name}`);
   }
@@ -589,6 +608,20 @@ bootTask(async () => {
       {
         name: REMOVE_NAME,
         title: text("command.remove"),
+        palette: false,
+        requires_args: true,
+        args: ["machine"],
+      },
+      {
+        name: AGENT_ACCESS_NAME,
+        title: text("command.agent_access"),
+        palette: false,
+        requires_args: true,
+        args: ["machine"],
+      },
+      {
+        name: INBOUND_NAME,
+        title: text("command.inbound"),
         palette: false,
         requires_args: true,
         args: ["machine"],

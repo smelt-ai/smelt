@@ -163,7 +163,10 @@ export function mergeSnapshotEntries(state, incomingOffset, incomingTotalRaw, in
   if (incomingOffset < loadedOffset && incomingEnd >= loadedOffset) {
     const overlap = incomingEnd - loadedOffset;
     const suffixStart = Math.min(overlap, prevEntries.length);
-    const next = incomingList.concat(prevEntries.slice(suffixStart));
+    // 总数变少（重放后旧尾巴已不存在）时，别把本地多出来的尾巴接回去。
+    const next = incomingList
+      .concat(prevEntries.slice(suffixStart))
+      .slice(0, Math.max(0, incomingTotal - incomingOffset));
     return {
       entries: next,
       loadedOffset: incomingOffset,

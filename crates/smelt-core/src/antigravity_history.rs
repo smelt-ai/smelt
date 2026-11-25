@@ -22,6 +22,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use smelt_model::runtime_path::PathStyle;
+
 /// Antigravity CLI 的数据根目录。
 ///
 /// `AGY_HOME` 在实测中并不存在，这里只支持 `GEMINI_HOME` 覆盖（与 agy 自身读取
@@ -33,13 +35,13 @@ pub fn antigravity_root(override_dir: Option<&str>) -> PathBuf {
     if let Ok(home) = std::env::var("GEMINI_HOME")
         && !home.trim().is_empty()
     {
-        return PathBuf::from(home).join("antigravity-cli");
+        return PathBuf::from(crate::workspace_override::expand_tilde(&home))
+            .join("antigravity-cli");
     }
-    dirs_home().join(".gemini").join("antigravity-cli")
-}
-
-fn dirs_home() -> PathBuf {
-    std::env::var("HOME").map(PathBuf::from).unwrap_or_default()
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".gemini")
+        .join("antigravity-cli")
 }
 
 /// 总索引库路径。
@@ -76,7 +78,7 @@ fn open_readonly(path: &Path) -> Option<rusqlite::Connection> {
     }
     rusqlite::Connection::open_with_flags(
         path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .ok()
 }
@@ -152,27 +154,71 @@ pub fn list_conversations(_override_dir: Option<&str>, _want_cwd: &str) -> Vec<C
 
 /// `workspace_uris` 是否覆盖了目标项目目录。
 ///
-/// 只认「完全相等」，不做前缀匹配：`/a/proj` 与 `/a/proj-old` 互不相干，用前缀
-/// 匹配会把隔壁项目的会话混进来。
+/// 只认规范化后指向同一目录，不做前缀匹配：`/a/proj` 与 `/a/proj-old` 互不相干，
+/// 用前缀匹配会把隔壁项目的会话混进来。
 pub fn workspace_matches(workspace_uris: &str, want_cwd: &str) -> bool {
-    workspace_uris_paths(workspace_uris)
-        .iter()
-        .any(|path| path == want_cwd)
+    workspace_matches_in(PathStyle::LOCAL, workspace_uris, want_cwd)
 }
 
-/// 从 `["file:///a/b", ...]` 这段 JSON 数组文本里取出本机路径。
+pub(crate) fn workspace_matches_in(
+    style: PathStyle,
+    workspace_uris: &str,
+    want_cwd: &str,
+) -> bool {
+    if want_cwd.trim().is_empty() {
+        return false;
+    }
+    workspace_uris_paths_in(style, workspace_uris)
+        .iter()
+        .any(|path| style.same_path(path, want_cwd))
+}
+
+/// 从 `["file:///a/b", ...]` 这段 JSON 数组文本里取出路径。
 ///
-/// 经 `serde_json` + `url::Url::to_file_path` 规范解码，正确处理路径中的逗号、方括号、
-/// 百分号编码与 Windows 盘符 `file:///C:/...`（含 `c%3A`）。
+/// 解 JSON 数组（路径里的逗号、方括号、引号转义都由 JSON 管），每个 `file://` URI 交给 `url`
+/// 解析、再按 `style` 还原成那台机器的路径：Windows 盘符 `file:///E:/...`（含 `e%3A`）、
+/// `file://server/share` 的 UNC 路径都按 Windows 习惯写回反斜杠，本机是 macOS 也能测。
 pub fn workspace_uris_paths(workspace_uris: &str) -> Vec<String> {
+    workspace_uris_paths_in(PathStyle::LOCAL, workspace_uris)
+}
+
+pub(crate) fn workspace_uris_paths_in(style: PathStyle, workspace_uris: &str) -> Vec<String> {
     let Ok(uris) = serde_json::from_str::<Vec<String>>(workspace_uris) else {
         return Vec::new();
     };
     uris.iter()
-        .filter_map(|uri| url::Url::parse(uri.trim()).ok())
-        .filter_map(|url| url.to_file_path().ok())
-        .filter_map(|path| path.into_os_string().into_string().ok())
+        .filter_map(|uri| file_uri_to_path_in(style, uri.trim()))
         .collect()
+}
+
+fn file_uri_to_path_in(style: PathStyle, uri: &str) -> Option<String> {
+    let url = url::Url::parse(uri).ok()?;
+    if url.scheme() != "file" {
+        return None;
+    }
+    let path = percent_encoding::percent_decode_str(url.path())
+        .decode_utf8()
+        .ok()?
+        .into_owned();
+    // `url` 按 WHATWG 规则把 `localhost` 主机归成空。
+    let host = url.host_str().filter(|host| !host.is_empty());
+    match (style, host) {
+        (PathStyle::Windows, None) if is_uri_windows_drive(&path) => {
+            Some(path[1..].replace('/', "\\"))
+        }
+        (PathStyle::Windows, Some(host)) => Some(format!(r"\\{host}{}", path.replace('/', "\\"))),
+        (_, None) => Some(path),
+        (PathStyle::Posix, Some(_)) => None,
+    }
+}
+
+fn is_uri_windows_drive(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+        && (bytes.len() == 3 || bytes[3] == b'/')
 }
 
 // ===================== steps 正文 =====================
@@ -331,11 +377,16 @@ fn read_varint(buf: &[u8], mut i: usize) -> Option<(u64, usize)> {
     }
 }
 
+fn is_leaf_string_path(path: &str) -> bool {
+    matches!(path, "19.2" | "19.3.1" | "20.1" | "20.8" | "20.7.2" | "20.7.3")
+}
+
 /// 递归遍历。返回 `None` = 这段字节不是合法 protobuf。
 ///
 /// 长度分隔字段有歧义：既可能是嵌套消息，也可能是字符串/任意字节。策略是**先试
 /// 着当嵌套消息解**，解得通就下钻；解不通再看它是不是可打印 UTF-8，是就收下当
-/// 字符串；都不是就当不透明字节丢掉（例如 zstd 压缩过的工具输出）。
+/// 字符串；都不是就当不透明字节丢掉（例如 zstd 压缩过的工具输出）。已知正文与工具
+/// 叶子路径不再下钻，避免像 `"hi"` 这类短文本碰巧被当成合法 varint 消息误吞。
 fn walk(buf: &[u8], prefix: &str, out: &mut BTreeMap<String, String>) -> Option<()> {
     let mut i = 0usize;
     while i < buf.len() {
@@ -366,7 +417,10 @@ fn walk(buf: &[u8], prefix: &str, out: &mut BTreeMap<String, String>) -> Option<
                     format!("{prefix}.{field}")
                 };
                 let mut nested = BTreeMap::new();
-                if !data.is_empty() && walk(data, &path, &mut nested).is_some() {
+                if !data.is_empty()
+                    && !is_leaf_string_path(&path)
+                    && walk(data, &path, &mut nested).is_some()
+                {
                     for (k, v) in nested {
                         out.entry(k).or_insert(v);
                     }
@@ -427,6 +481,16 @@ mod tests {
         let turn = decode_step(STEP_TYPE_USER, &payload).expect("应解析出用户轮次");
         assert!(turn.is_user);
         assert_eq!(turn.text, "你好");
+    }
+
+    #[test]
+    fn 短_ascii_用户消息_hi_不会被误解析成嵌套_protobuf() {
+        // "hi" (0x68 0x69) 恰好也是合法 protobuf varint；已知叶子文本路径必须直收成字符串。
+        let inner = len_delimited(2, b"hi");
+        let payload = len_delimited(19, &inner);
+        let turn = decode_step(STEP_TYPE_USER, &payload).expect("短文本 hi 应解析成用户轮次");
+        assert!(turn.is_user);
+        assert_eq!(turn.text, "hi");
     }
 
     #[test]
@@ -508,6 +572,67 @@ mod tests {
         assert!(workspace_matches(uris, "/Users/a/proj,v2"));
         assert!(workspace_matches(uris, "/Users/a/[draft]"));
         assert!(workspace_matches(uris, "/Users/a/sub/dir"));
+    }
+
+    #[test]
+    fn windows_uri_与_windows_cwd_正确匹配() {
+        let uris = r#"["file:///E:/AI/smelt"]"#;
+        assert!(workspace_matches_in(
+            PathStyle::Windows,
+            uris,
+            r"E:\AI\smelt"
+        ));
+        assert!(workspace_matches_in(
+            PathStyle::Windows,
+            uris,
+            "E:/AI/smelt"
+        ));
+        assert!(workspace_matches_in(
+            PathStyle::Windows,
+            uris,
+            r"\\?\E:\AI\smelt"
+        ));
+        assert!(workspace_matches_in(
+            PathStyle::Windows,
+            r#"["file:///e%3A/ai/my%20proj/"]"#,
+            r"E:\AI\my proj"
+        ));
+        assert!(workspace_matches_in(
+            PathStyle::Windows,
+            r#"["file://localhost/E:/AI/smelt"]"#,
+            r"E:\AI\smelt"
+        ));
+        assert!(workspace_matches_in(
+            PathStyle::Windows,
+            r#"["file://server/share/smelt"]"#,
+            r"\\server\share\smelt"
+        ));
+        assert!(!workspace_matches_in(
+            PathStyle::Windows,
+            uris,
+            r"E:\AI\smelt-old"
+        ));
+        assert!(!workspace_matches_in(PathStyle::Windows, uris, r"E:\AI"));
+        assert!(!workspace_matches_in(
+            PathStyle::Windows,
+            uris,
+            r"D:\AI\smelt"
+        ));
+        assert!(!workspace_matches_in(PathStyle::Windows, uris, ""));
+    }
+
+    #[test]
+    fn posix_保留大小写敏感并支持含逗号的_json_uri() {
+        assert!(workspace_matches_in(
+            PathStyle::Posix,
+            r#"["file:///Users/a/x,y"]"#,
+            "/Users/a/x,y"
+        ));
+        assert!(!workspace_matches_in(
+            PathStyle::Posix,
+            r#"["file:///Users/a/Proj"]"#,
+            "/Users/a/proj"
+        ));
     }
 
     #[cfg(not(any(target_os = "ios", target_os = "android")))]

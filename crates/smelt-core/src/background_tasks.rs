@@ -24,8 +24,11 @@ use crate::acp_session::{BackgroundTaskStatus, BackgroundTaskView, PeerDelivery}
 use smelt_sys::process::TreeSignal;
 
 mod ask;
+mod peer_socket;
 mod peers;
 mod subagents;
+
+pub use peer_socket::{PeerSocket, SMELT_PEER_SOCK_ENV, call_peer_socket};
 
 /// Pi 扩展连上来的那条流。Unix 是文件系统上的 `AF_UNIX`，Windows 是命名管道。
 #[cfg(unix)]
@@ -166,6 +169,7 @@ struct Pokes {
 
 struct Inner {
     stop: AtomicBool,
+    session_id: String,
     root: PathBuf,
     socket_path: PathBuf,
     mu: Mutex<State>,
@@ -216,6 +220,7 @@ impl BackgroundSupervisor {
 
         let inner = Arc::new(Inner {
             stop: AtomicBool::new(false),
+            session_id: session_id.to_string(),
             root,
             socket_path,
             mu: Mutex::new(State {
@@ -749,7 +754,7 @@ fn start_task(
     #[cfg(unix)]
     let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
     let pgid = child.id() as i32;
-    record_task_group(&inner.root, pgid);
+    record_task_group(&inner.root, pgid, &inner.session_id);
     state.tasks.push(LiveTask {
         id: id.clone(),
         owner: owner.to_string(),
@@ -1887,12 +1892,44 @@ pub(crate) fn connect_task_stream(path: &Path) -> std::io::Result<TaskStream> {
     }
 }
 
+/// 这个进程里各会话宿主正在跑的命令的进程组（组长 pid → 所属会话 id）。宿主只给智能体会话起命令：
+/// Pi 的 bash 工具交给宿主跑，命令挂在守护下面，不在智能体进程的子孙里。守护认调用方
+/// 是不是智能体、或归属哪个会话时，把这些组长也算作智能体（见 [`agent_task_groups`] /
+/// [`agent_task_group_sessions`]）。
+static AGENT_TASK_GROUPS: Mutex<std::collections::BTreeMap<u32, String>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+/// 各会话宿主正在跑的命令的组长 pid。它们和它们的子孙都是替智能体会话跑的。
+pub fn agent_task_groups() -> Vec<u32> {
+    AGENT_TASK_GROUPS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .keys()
+        .copied()
+        .collect()
+}
+
+/// 各会话宿主正在跑的命令组长 pid 及其所属 Smelt 会话 id。
+pub fn agent_task_group_sessions() -> Vec<(u32, String)> {
+    AGENT_TASK_GROUPS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .filter(|(_, sid)| !sid.is_empty())
+        .map(|(pid, sid)| (*pid, sid.clone()))
+        .collect()
+}
+
 /// 宿主活着时记下进程组，宿主被硬杀掉后来不及 `Drop`，父进程靠这份记录收尸。
 /// 启动时间用来确认这个号没有被别人复用。读不到启动时间就不记，宁可不杀。
-fn record_task_group(root: &Path, pgid: i32) {
+fn record_task_group(root: &Path, pgid: i32, session_id: &str) {
     if pgid <= 1 {
         return;
     }
+    AGENT_TASK_GROUPS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(pgid as u32, session_id.to_string());
     let Some(birth) = crate::acp_conn::process_birth(pgid) else {
         return;
     };
@@ -1901,6 +1938,10 @@ fn record_task_group(root: &Path, pgid: i32) {
 
 fn forget_task_group(root: &Path, pgid: i32) {
     if pgid > 1 {
+        AGENT_TASK_GROUPS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&(pgid as u32));
         let _ = fs::remove_file(root.join(format!("group-{pgid}")));
     }
 }
@@ -2672,6 +2713,33 @@ mod tests {
         assert_eq!(finished["tasks"][0]["status"], "stopped", "{finished}");
     }
 
+    /// 宿主替会话跑的命令登记为智能体的进程组，守护据此认出它和它的子孙是智能体；
+    /// 跑完就去掉，号被别的进程复用时不会误认。
+    #[test]
+    fn running_commands_are_known_as_agent_process_groups() {
+        let (supervisor, _events) = supervisor();
+        let started = call(
+            supervisor.socket_path(),
+            serde_json::json!({"op": "start", "command": sleep_for(30), "title": "等待"}),
+        );
+        let id = started["id"].as_str().unwrap_or_default().to_string();
+        let pgid = supervisor.inner.mu.lock().unwrap().tasks[0]
+            .pgid
+            .expect("pgid") as u32;
+        assert!(agent_task_groups().contains(&pgid));
+        call(
+            supervisor.socket_path(),
+            serde_json::json!({"op": "stop", "id": id}),
+        );
+        until_settled(supervisor.socket_path(), &id);
+        // 结算之后监督线程才摘掉进程组，等它一会。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while agent_task_groups().contains(&pgid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!agent_task_groups().contains(&pgid));
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_dead_process_ends_the_wait_without_timing_out() {
@@ -2759,7 +2827,7 @@ mod tests {
             root: root.clone(),
             pgid,
         };
-        record_task_group(&root, pgid);
+        record_task_group(&root, pgid, "test-session");
         assert!(
             root.join(format!("group-{pgid}")).is_file(),
             "应记下这个进程组的启动时间"

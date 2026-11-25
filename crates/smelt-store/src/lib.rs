@@ -32,6 +32,8 @@ mod memory;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod migrate_v18;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod peers;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod push;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod schema;
@@ -44,12 +46,12 @@ pub use snapshots::{
     AgentProfileEnvRecord, AgentProfileRecord, AgentUiSnapshot, HistoryTitleRecord,
     HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot, MemoryMetaSnapshot,
     MemoryProvenanceRecord, MemorySettingsRecord, MemoryTrust, MemoryTrustedRecord,
-    MemoryUsageRecord, PairedDevice, PublishedSessionRecord, PublishedSessionSnapshot,
-    PushRegistration, QuotaCacheQuota, QuotaCacheStatusRecord, QuotaCacheWindowRecord,
-    QuotaProviderPref, RemoteConfigSnapshot, TerminalThemeSnapshot, WorkspaceAcpRecord,
-    WorkspaceCatalogVersion, WorkspaceDirectoryCommit, WorkspaceProjectRepositoryRecord,
-    WorkspaceSessionRecord, WorkspaceSnapshot, WorkspaceTerminalRecord, WorkspaceWorksetRecord,
-    WorkspaceWorksetRepositoryRecord,
+    MemoryUsageRecord, PairedDevice, PeerNodeRecord, PublishedSessionRecord,
+    PublishedSessionSnapshot, PushRegistration, QuotaCacheQuota, QuotaCacheStatusRecord,
+    QuotaCacheWindowRecord, QuotaProviderPref, RemoteConfigSnapshot, TerminalThemeSnapshot,
+    WorkspaceAcpRecord, WorkspaceCatalogVersion, WorkspaceDirectoryCommit,
+    WorkspaceProjectRepositoryRecord, WorkspaceSessionRecord, WorkspaceSnapshot,
+    WorkspaceTerminalRecord, WorkspaceWorksetRecord, WorkspaceWorksetRepositoryRecord,
 };
 
 pub const DATABASE_FILE_NAME: &str = "smelt.sqlite3";
@@ -61,7 +63,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 41;
+pub const STORE_SCHEMA_VERSION: u32 = 42;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -703,6 +705,32 @@ impl Store {
 
     pub fn touch_paired_device(&self, endpoint_id: &str, now_ms: i64) -> Result<(), StoreError> {
         imp::touch_paired_device(&self.backend, endpoint_id, now_ms)
+    }
+
+    /// 对端节点，按配对先后排。
+    pub fn list_peer_nodes(&self) -> Result<Vec<PeerNodeRecord>, StoreError> {
+        imp::list_peer_nodes(&self.backend)
+    }
+
+    pub fn peer_node(&self, runtime_id: &str) -> Result<Option<PeerNodeRecord>, StoreError> {
+        imp::peer_node(&self.backend, runtime_id)
+    }
+
+    pub fn peer_node_by_endpoint(
+        &self,
+        endpoint_id: &str,
+    ) -> Result<Option<PeerNodeRecord>, StoreError> {
+        imp::peer_node_by_endpoint(&self.backend, endpoint_id)
+    }
+
+    /// 记下或覆盖一个对端。同一个运行时、或同一把密钥的旧记录先删掉（对方重装换了身份）。
+    pub fn put_peer_node(&self, peer: &PeerNodeRecord) -> Result<(), StoreError> {
+        imp::put_peer_node(&self.backend, peer)
+    }
+
+    /// 返回是否真有这个对端。
+    pub fn delete_peer_node(&self, runtime_id: &str) -> Result<bool, StoreError> {
+        imp::delete_peer_node(&self.backend, runtime_id)
     }
 
     /// 登记或更新一台已配对设备的推送。设备不在白名单里时什么都不写，返回 false。
@@ -1652,6 +1680,45 @@ mod imp {
         })
     }
 
+    pub(super) fn list_peer_nodes(
+        backend: &Backend,
+    ) -> Result<Vec<super::PeerNodeRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::peers::list(&connection)
+    }
+
+    pub(super) fn peer_node(
+        backend: &Backend,
+        runtime_id: &str,
+    ) -> Result<Option<super::PeerNodeRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::peers::get(&connection, "runtime_id", runtime_id)
+    }
+
+    pub(super) fn peer_node_by_endpoint(
+        backend: &Backend,
+        endpoint_id: &str,
+    ) -> Result<Option<super::PeerNodeRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::peers::get(&connection, "endpoint_id", endpoint_id)
+    }
+
+    pub(super) fn put_peer_node(
+        backend: &Backend,
+        peer: &super::PeerNodeRecord,
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| crate::peers::put(transaction, peer))
+    }
+
+    pub(super) fn delete_peer_node(
+        backend: &Backend,
+        runtime_id: &str,
+    ) -> Result<bool, StoreError> {
+        write(backend, |transaction| {
+            crate::peers::delete(transaction, runtime_id)
+        })
+    }
+
     pub(super) fn touch_paired_device(
         backend: &Backend,
         endpoint_id: &str,
@@ -2114,6 +2181,15 @@ mod imp {
                 }
             }
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 41 {
+            apply_v42(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
             transaction.commit()?;
             return Ok(());
         }
@@ -2902,6 +2978,19 @@ mod imp {
                     "ALTER TABLE {table} ADD COLUMN {column} {declaration};"
                 ))?;
             }
+        }
+        apply_v42(transaction)
+    }
+
+    /// v42 合流 main 的 v40（对端节点表）和 js-plugins 的 v40/v41（见 `schema::MIGRATE_V41_TO_V42`）：
+    /// 再删一遍额度表头（`IF EXISTS`），没有对端节点表才建。
+    fn apply_v42(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        transaction.execute_batch(crate::schema::MIGRATE_V39_TO_V40)?;
+        if !table_names(transaction)?
+            .iter()
+            .any(|table| table == "peer_node")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V41_TO_V42)?;
         }
         Ok(())
     }
@@ -4439,6 +4528,35 @@ mod imp {
     pub(super) fn delete_paired_device(
         _backend: &Backend,
         _endpoint_id: &str,
+    ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn list_peer_nodes(
+        _backend: &Backend,
+    ) -> Result<Vec<super::PeerNodeRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn peer_node(
+        _backend: &Backend,
+        _runtime_id: &str,
+    ) -> Result<Option<super::PeerNodeRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn peer_node_by_endpoint(
+        _backend: &Backend,
+        _endpoint_id: &str,
+    ) -> Result<Option<super::PeerNodeRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn put_peer_node(
+        _backend: &Backend,
+        _peer: &super::PeerNodeRecord,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn delete_peer_node(
+        _backend: &Backend,
+        _runtime_id: &str,
     ) -> Result<bool, StoreError> {
         unsupported()
     }
@@ -8428,6 +8546,89 @@ CREATE TABLE published_session (
             normalized_schema(&path),
             normalized_schema(&fresh),
             "从 v40 升上来的库要和新建的库一个形状"
+        );
+    }
+
+    /// js-plugins 的 v41 库：没有对端节点表，v42 建上。
+    #[test]
+    fn migrates_v41_adding_peer_node() {
+        let dir = temp_dir("migrate-v41-peer-node");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "{}
+                 {}
+                 DROP TABLE peer_node;
+                 PRAGMA user_version = 41;",
+                crate::schema::CREATE_SCHEMA,
+                crate::schema::ENSURE_WORKSPACE_EPOCH
+            ))
+            .unwrap();
+        drop(connection);
+
+        let store = Store::open(&path).unwrap();
+        assert!(store.list_peer_nodes().unwrap().is_empty());
+        drop(store);
+
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        assert_eq!(
+            normalized_schema(&path),
+            normalized_schema(&fresh),
+            "从 v41 升上来的库要和新建的库一个形状"
+        );
+    }
+
+    /// main 发出去的 v40 库：已经有对端节点表（行要留着），额度表头还在、窗口没有 `scope`。
+    #[test]
+    fn migrates_main_v40_with_peer_node() {
+        let dir = temp_dir("migrate-main-v40-peer-node");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "{}
+                 {}
+                 CREATE TABLE quota_cache (
+                   id INTEGER PRIMARY KEY CHECK (id = 1),
+                   saved_at_ms INTEGER NOT NULL,
+                   schema_version INTEGER NOT NULL CHECK (schema_version >= 0)
+                 );
+                 CREATE TABLE quota_cache_provider (
+                   provider_id TEXT PRIMARY KEY
+                 ) WITHOUT ROWID;
+                 DROP TABLE quota_cache_window;
+                 CREATE TABLE quota_cache_window (
+                   provider_id TEXT NOT NULL REFERENCES quota_cache_status(provider_id) ON DELETE CASCADE,
+                   position INTEGER NOT NULL CHECK (position >= 0),
+                   label TEXT NOT NULL,
+                   used_percent REAL NOT NULL,
+                   resets_at_ms INTEGER,
+                   reset_after_seconds INTEGER,
+                   PRIMARY KEY (provider_id, position)
+                 ) WITHOUT ROWID;
+                 INSERT INTO peer_node(runtime_id, endpoint_id, name, added_at_ms)
+                 VALUES ('rt-1', 'ep-1', 'cc', 5);
+                 PRAGMA user_version = 40;",
+                crate::schema::CREATE_SCHEMA,
+                crate::schema::ENSURE_WORKSPACE_EPOCH
+            ))
+            .unwrap();
+        drop(connection);
+
+        let store = Store::open(&path).unwrap();
+        let peers = store.list_peer_nodes().unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].runtime_id, "rt-1");
+        drop(store);
+
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        assert_eq!(
+            normalized_schema(&path),
+            normalized_schema(&fresh),
+            "从 main 的 v40 升上来的库要和新建的库一个形状"
         );
     }
 

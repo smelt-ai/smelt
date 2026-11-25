@@ -1,13 +1,19 @@
 ---
 name: smelt
-description: 用 smelt CLI 操作本机 Smelt：产品智能体及其记忆、侧栏对话（含给别的对话发消息、取回复）、项目和任务工作树、各家 agent 的历史会话、自动化及其运行记录、MCP 服务器、默认模型、用量、agent 命令行工具和提醒钩子、外观设置、开着的 App 里插件开放的命令（开视图、开页面）；也讲怎么写 Smelt 插件（基于 NSH 的 App 界面 TSX/JS 插件）。用户说新建/修改智能体、开对话、让另一个对话去做事、整理对话、开项目、开/收工作树、翻历史会话、建定时任务、看自动化跑得怎样、加 MCP、换模型、看用量、装 agent 命令行、改主题字体、在 App 里打开某个视图或页面、写 Smelt 插件时使用。
+description: 用 smelt CLI 操作本机和配对过的其它机器上的 Smelt：产品智能体及其记忆、侧栏对话（含给别的对话发消息、取回复）、项目和任务工作树、各家 agent 的历史会话、自动化及其运行记录、MCP 服务器、默认模型、用量、agent 命令行工具和提醒钩子、外观设置、开着的 App 里插件开放的命令（开视图、开页面）；也讲怎么写 Smelt 插件（基于 NSH 的 App 界面 TSX/JS 插件）。用户说新建/修改智能体、开对话、让另一个对话去做事、整理对话、开项目、开/收工作树、翻历史会话、建定时任务、看自动化跑得怎样、加 MCP、换模型、看用量、装 agent 命令行、改主题字体、在 App 里打开某个视图或页面、写 Smelt 插件时使用。
 ---
 
 # Smelt 控制面
 
-通过 `smelt` CLI 操作本机 Smelt。stdout 是 JSON，失败时原因在 stderr、退出码非 0。控制面命令都要 `smeltd` 在跑；不要直接改 `~/.smelt/` 下的库和配置文件。`smelt --help` 有完整用法。
+通过 `smelt` CLI 操作本机 Smelt（加 `--machine` 就是操作配对过的其它机器）。stdout 是 JSON，失败时原因在 stderr、退出码非 0。控制面命令都要 `smeltd` 在跑；不要直接改 `~/.smelt/` 下的库和配置文件。`smelt --help` 有完整用法。
 
 先 list 再 update，id 从 list 的结果里取，不要猜。
+
+## 其它机器
+
+用户在 Smelt 的机器设置里配对过的其它机器，用 `smelt machine list` 查看。在全局参数 `--machine <名字|runtime_id>` 后面接任何子命令，就在那台机器上执行，例如 `smelt --machine cc automation list`。路径、项目、智能体 id 都是那台机器上的。
+
+智能体只能用用户允许过的机器（`agent_access` 为 true）。没开就会收到权限错误，告诉用户去机器设置里打开，不要想别的办法绕过去。改那台机器的东西和改本机一样，按下面的规矩先问。
 
 ## 要先问用户的
 
@@ -57,7 +63,7 @@ smelt conversation delete <id>
 - `<id>` 写 list 里的 `id` 或 `session_id` 都行。默认不列已归档的。终端（`terminal: true`）发不了消息。
 - `send` 把话排进那段对话（它正在跑就排在这一轮后面，挂起的先唤醒），立刻返回 `delivery_id`，不等它做完。之后用 `result` 取：`pending` 是还没轮到或还在做；`finished` 带 `outcome` 和这一轮最后一段回复 `text`；`unknown` 是运行时不认识这次投递（重启过）。还在 `pending` 就先做别的，过一阵再查，不要连着刷。
 - 发进去的话在桌面上看得到，用户也能插话。要一段新对话去做事，先 `agent chat` 开一场再 `send`。
-- 在 Pi 对话里也可以用 Pi 自带的 `session_list` / `session_read` / `session_send` / `session_spawn` 工具。
+- 对话之间双向协作优先用 `session_list` / `session_read` / `session_send` / `session_spawn`（Pi 扩展与第三方 ACP 注入的 `smelt-peers` MCP 工具均支持，且 `session_spawn` 可指定任意 `agent` 如 `codex`、`claude`、`antigravity`、`agent:<id>`、`profile:<id>`）。未接入 MCP 的第三方对话可用 `smelt peer list|read|send|spawn` 兜底（来源由运行时按进程树认定）。
 
 ## 项目和工作树
 

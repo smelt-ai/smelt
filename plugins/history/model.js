@@ -158,6 +158,27 @@ export function tabsWithSessions(tabs, current, hasSessions) {
 }
 
 /**
+ * 当前选中的来源已经读完且是空的时，挑第一个有会话的来源顶上，免得打开历史页一直停在空的
+ * 默认标签上（比如没装 Claude、只用 Antigravity 的项目）。当前来源还没读完时不切，防止别的
+ * 来源先回来抢走选中。
+ * @param {Array<{ kind: string, profile_id: string | null, label: string }>} tabs
+ * @param {{ kind: string, profile_id: string | null }} current
+ * @param {boolean} currentLoaded
+ * @param {(tab: { kind: string, profile_id: string | null, label: string }) => boolean} hasSessions
+ * @returns {{ kind: string, profile_id: string | null } | null}
+ */
+export function fallbackSource(tabs, current, currentLoaded, hasSessions) {
+  if (!currentLoaded) return null;
+  const currentTab = tabs.find(
+    (tab) =>
+      tab.kind === current.kind && (tab.profile_id ?? null) === (current.profile_id ?? null),
+  );
+  if (currentTab && hasSessions(currentTab)) return null;
+  const next = tabs.find((tab) => hasSessions(tab));
+  return next ? { kind: next.kind, profile_id: next.profile_id ?? null } : null;
+}
+
+/**
  * 智能体 space 里的历史，或项目里绑过智能体定义的那几条，都按智能体续接。
  * @param {boolean} inAgentSpace
  * @param {string | null | undefined} boundDefinition

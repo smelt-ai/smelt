@@ -348,6 +348,24 @@ pub struct PairedDevice {
     pub last_seen_at_ms: Option<i64>,
 }
 
+/// 和本节点双向配对过的对端节点。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerNodeRecord {
+    /// 对方运行时永久不变的身份。
+    pub runtime_id: String,
+    /// 对方的 iroh endpoint id（公钥），连入时按它认。
+    pub endpoint_id: String,
+    /// 这边给它起的显示名。
+    pub name: String,
+    pub relay_url: Option<String>,
+    pub os: Option<String>,
+    /// 本机智能体会话能不能经本节点转发到它。
+    pub agent_access: bool,
+    /// 它能不能连进来操作本节点。不能时只收它回给本节点对话的消息。
+    pub inbound: bool,
+    pub added_at_ms: i64,
+}
+
 /// 一台已配对手机的推送登记。推给它的时候，带着句柄发到它登记的中继。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PushRegistration {

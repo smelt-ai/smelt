@@ -26,43 +26,171 @@ impl FileLink {
     }
 }
 
-/// `target` 是 Markdown 链接的目标。网址、锚点、`~` 开头的路径不是文件链接；相对路径按
-/// `cwd` 补全，没有 `cwd` 就不猜。
+/// `target` 是 Markdown 链接的目标。`file://` URI、绝对路径、相对路径（按 `cwd` 补全）
+/// 都认作文件链接；网址、锚点、`~` 开头的路径和无法补全的相对路径返回 `None`。
 pub fn parse_file_link(target: &str, cwd: Option<&str>, style: PathStyle) -> Option<FileLink> {
     let target = target.trim();
     if target.is_empty()
         || target.starts_with('#')
         || target.starts_with('~')
-        || target.contains("://")
         || target.starts_with("mailto:")
         || target.starts_with("data:")
     {
         return None;
     }
-    let (path, fragment) = target.split_once('#').unwrap_or((target, ""));
+    // 先按原始字符串拆 `#fragment`，再解码路径里的 `%23`，免得文件名里的 `#` 被误拆。
+    let (raw_path, fragment) = target.split_once('#').unwrap_or((target, ""));
+    let path_str = if raw_path
+        .as_bytes()
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"file://"))
+    {
+        parse_file_uri(&raw_path[7..], style)?
+    } else if raw_path.contains("://") {
+        return None;
+    } else if raw_path.is_empty() {
+        return None;
+    } else {
+        raw_path.to_string()
+    };
+
     // Agent 引用文件常写成 grep / 编译器诊断那种 `path:行号` 或 `path:行号:列号`
     // （不是 `#L行号` 片段）。没有 `#` 片段时才从冒号后缀里抠行号，不然 `:2765`
     // 会被当成文件名的一部分拼进路径。
-    let (path, fragment) = if fragment.is_empty() {
-        match extract_trailing_line_number(path) {
+    let (base_path, fragment) = if fragment.is_empty() {
+        match extract_trailing_line_number(&path_str) {
             Some((base, line)) => (base, format!("L{line}")),
-            None => (path, String::new()),
+            None => (path_str.as_str(), String::new()),
         }
     } else {
-        (path, fragment.to_string())
+        (path_str.as_str(), fragment.to_string())
     };
-    if path.is_empty() {
+    if base_path.is_empty() {
         return None;
     }
-    let absolute = if style.is_absolute(path) {
-        path.to_string()
+    let absolute = if style.is_absolute(base_path) {
+        base_path.to_string()
     } else {
-        style.join(cwd?, path)
+        style.join(cwd?, base_path)
     };
     Some(FileLink {
         path: style.clean(&absolute),
         fragment,
     })
+}
+
+/// 解析 `file://` 之后的部分，按目标机器的 [`PathStyle`] 还原成本地路径或 UNC 路径。
+fn parse_file_uri(rest: &str, style: PathStyle) -> Option<String> {
+    if rest.is_empty() {
+        return None;
+    }
+    if rest.starts_with('/') {
+        let decoded = percent_decode(rest)?;
+        return normalize_uri_path(&decoded, style);
+    }
+    // 兼容部分模型少打一条斜杠的 Windows 写法：`file://E:/AI/a.md` 或 `file://E%3A/AI/a.md`。
+    if style == PathStyle::Windows {
+        let decoded = percent_decode(rest)?;
+        if is_windows_drive_with_slash(&decoded) {
+            return Some(decoded);
+        }
+    }
+    let sep = match style {
+        PathStyle::Posix => rest.find('/'),
+        PathStyle::Windows => rest.find(['/', '\\']),
+    }?;
+    let (authority, tail) = rest.split_at(sep);
+    if authority.is_empty() || tail.is_empty() {
+        return None;
+    }
+    if authority.eq_ignore_ascii_case("localhost") {
+        let decoded = percent_decode(tail)?;
+        return normalize_uri_path(&decoded, style);
+    }
+    match style {
+        PathStyle::Windows => {
+            let decoded_tail = percent_decode(tail)?;
+            let has_share = decoded_tail
+                .trim_start_matches(['/', '\\'])
+                .split(['/', '\\'])
+                .next()
+                .is_some_and(|seg| !seg.is_empty());
+            if !has_share {
+                return None;
+            }
+            let decoded_auth = percent_decode(authority)?;
+            Some(format!("//{decoded_auth}{decoded_tail}"))
+        }
+        // POSIX 上非 localhost 的 authority 指向另一台主机，不误当本机路径。
+        PathStyle::Posix => None,
+    }
+}
+
+fn normalize_uri_path(decoded: &str, style: PathStyle) -> Option<String> {
+    match style {
+        PathStyle::Posix => (!decoded.is_empty()).then(|| decoded.to_string()),
+        PathStyle::Windows => {
+            // 四斜杠 UNC：`file:////server/share/a.md` 解码后是 `//server/share/a.md`。
+            if decoded.starts_with("//") || decoded.starts_with("\\\\") {
+                let mut parts = decoded
+                    .trim_start_matches(['/', '\\'])
+                    .split(['/', '\\'])
+                    .filter(|seg| !seg.is_empty());
+                let _server = parts.next()?;
+                let _share = parts.next()?;
+                return Some(decoded.to_string());
+            }
+            let without_leading = decoded.strip_prefix(['/', '\\']).unwrap_or(decoded);
+            if is_windows_drive_path(without_leading) {
+                return Some(without_leading.to_string());
+            }
+            if without_leading.is_empty() {
+                return None;
+            }
+            Some(decoded.to_string())
+        }
+    }
+}
+
+fn is_windows_drive_path(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b.len() == 2 || b[2] == b'/' || b[2] == b'\\')
+}
+
+fn is_windows_drive_with_slash(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
+}
+
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// 从 `path:行号` / `path:行号:列号` 里拆出末尾的行号：从右往左，只要是纯数字的一段就
@@ -167,6 +295,104 @@ mod tests {
         assert_eq!(
             parse_file_link(r"D:\notes.md", Some(r"C:\code"), PathStyle::Windows),
             link(r"D:\notes.md", "")
+        );
+    }
+
+    #[test]
+    fn file_uris_resolve_across_windows_and_posix() {
+        assert_eq!(
+            parse_file_link(
+                "file:///E:/AI/minigame-studio/AGENTS.md",
+                None,
+                PathStyle::Windows
+            ),
+            link(r"E:\AI\minigame-studio\AGENTS.md", "")
+        );
+        assert_eq!(
+            parse_file_link(
+                "file:///E:/AI/minigame-studio/AGENTS.md#L10-L20",
+                None,
+                PathStyle::Windows
+            ),
+            link(r"E:\AI\minigame-studio\AGENTS.md", "L10-L20")
+        );
+        assert_eq!(
+            parse_file_link(
+                "file:///C:/Users/Administrator/.gemini/config/skills/a/b.md",
+                None,
+                PathStyle::Windows
+            ),
+            link(r"C:\Users\Administrator\.gemini\config\skills\a\b.md", "")
+        );
+        assert_eq!(
+            parse_file_link(
+                "file:///E%3A/AI/my%20project/%E4%B8%AD%E6%96%87.md",
+                None,
+                PathStyle::Windows
+            ),
+            link(r"E:\AI\my project\中文.md", "")
+        );
+        assert_eq!(
+            parse_file_link("file://localhost/E:/AI/a.md", None, PathStyle::Windows),
+            link(r"E:\AI\a.md", "")
+        );
+        assert_eq!(
+            parse_file_link("file://E:/AI/a.md", None, PathStyle::Windows),
+            link(r"E:\AI\a.md", "")
+        );
+        assert_eq!(
+            parse_file_link("file://server/share/a.md", None, PathStyle::Windows),
+            link(r"\\server\share\a.md", "")
+        );
+        assert_eq!(
+            parse_file_link("file:////server/share/a.md", None, PathStyle::Windows),
+            link(r"\\server\share\a.md", "")
+        );
+        assert_eq!(
+            parse_file_link("FILE:///Users/a/b.md", None, PathStyle::Posix),
+            link("/Users/a/b.md", "")
+        );
+        assert_eq!(
+            parse_file_link("file:///Users/a/a%23b.rs#L5", None, PathStyle::Posix),
+            link("/Users/a/a#b.rs", "L5")
+        );
+        assert_eq!(
+            parse_file_link("file://localhost/etc/hosts:12", None, PathStyle::Posix),
+            link("/etc/hosts", "L12")
+        );
+        assert_eq!(
+            parse_file_link("file://other-host/etc/hosts", None, PathStyle::Posix),
+            None
+        );
+        assert_eq!(parse_file_link("file://", None, PathStyle::Windows), None);
+        assert_eq!(parse_file_link("file:///", None, PathStyle::Windows), None);
+        assert_eq!(
+            parse_file_link("file:///E:/100%_ok.md", None, PathStyle::Windows),
+            link(r"E:\100%_ok.md", "")
+        );
+        assert_eq!(
+            parse_file_link("https://example.com#L10", None, PathStyle::Windows),
+            None
+        );
+    }
+
+    #[test]
+    fn multibyte_utf8_paths_do_not_panic() {
+        assert_eq!(
+            parse_file_link("中文文档.md", Some("/tmp/project"), PathStyle::Posix),
+            link("/tmp/project/中文文档.md", "")
+        );
+        assert_eq!(
+            parse_file_link(r"中文\笔记.md", Some(r"E:\AI"), PathStyle::Windows),
+            link(r"E:\AI\中文\笔记.md", "")
+        );
+        assert_eq!(
+            parse_file_link(
+                "notes/中文文档.md#L3",
+                Some("/tmp/project"),
+                PathStyle::Posix
+            ),
+            link("/tmp/project/notes/中文文档.md", "L3")
         );
     }
 }

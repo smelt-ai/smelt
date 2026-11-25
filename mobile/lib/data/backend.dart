@@ -251,6 +251,16 @@ abstract interface class Backend {
     TerminalGeometry geometry,
   );
   void terminalInput(String runtimeId, String sessionId, String data);
+  void terminalInputSegments(
+    String runtimeId,
+    String sessionId,
+    List<String> segments,
+  );
+  Future<String> terminalStageImage(
+    String runtimeId,
+    String sessionId,
+    ImageInput image,
+  );
   void terminalDetach(String runtimeId, String sessionId);
 
   // 草稿 ---------------------------------------------------------------------
@@ -723,6 +733,28 @@ class FrbBackend implements Backend {
         sessionId: sessionId,
         data: data,
       );
+
+  @override
+  void terminalInputSegments(
+    String runtimeId,
+    String sessionId,
+    List<String> segments,
+  ) => terminal.terminalInputSegments(
+    runtimeId: runtimeId,
+    sessionId: sessionId,
+    segments: segments,
+  );
+
+  @override
+  Future<String> terminalStageImage(
+    String runtimeId,
+    String sessionId,
+    ImageInput image,
+  ) => terminal.terminalStageImage(
+    runtimeId: runtimeId,
+    sessionId: sessionId,
+    image: image,
+  );
 
   @override
   void terminalDetach(String runtimeId, String sessionId) =>

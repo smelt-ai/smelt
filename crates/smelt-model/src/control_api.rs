@@ -999,6 +999,37 @@ pi_calls! {
     PushRegister => PushRegister(crate::remote_config::PushRegisterParams) -> EmptyParams;
     /// 取消调用方这台设备的推送登记。没有登记也算成功。
     PushUnregister => PushUnregister(EmptyParams) -> EmptyParams;
+    /// 另一个节点用本节点发的配对码双向配对，交回本节点的身份。未配对的连接可调。
+    NodePair => NodePair(crate::peer_node::NodePairParams) -> crate::peer_node::NodeInfo;
+    /// 对端请本节点删掉它。只收对端节点。
+    NodeUnpair => NodeUnpair(EmptyParams) -> EmptyParams;
+    /// 对端节点交来一条对话消息，投给本节点上的对话。只收对端节点。
+    NodePeerDeliver => NodePeerDeliver(crate::peer_node::NodePeerDeliverParams) -> EmptyParams;
+    /// 本节点上能收消息的对话。只收对端节点。
+    NodePeerList => NodePeerList(crate::peer_node::NodePeerListParams) -> serde_json::Value;
+    /// 本节点上一个对话最近的回复。只收对端节点。
+    NodePeerRead => NodePeerRead(crate::peer_node::NodePeerReadParams) -> serde_json::Value;
+    /// 活跃 ACP 会话经本机 CLI（`smelt peer`）兜底列可互发消息的对话和可用智能体。
+    /// 来源由守护按调用进程树认定，只收本机。
+    PeerSessionList => PeerSessionList(serde_json::Value) -> serde_json::Value;
+    /// 活跃 ACP 会话经本机 CLI 读另一个对话最近的回复。只收本机。
+    PeerSessionRead => PeerSessionRead(serde_json::Value) -> serde_json::Value;
+    /// 活跃 ACP 会话经本机 CLI 给另一个对话发消息。只收本机。
+    PeerSessionSend => PeerSessionSend(serde_json::Value) -> serde_json::Value;
+    /// 活跃 ACP 会话经本机 CLI 新建另一个对话并交代任务。只收本机。
+    PeerSessionSpawn => PeerSessionSpawn(serde_json::Value) -> serde_json::Value;
+    /// 本节点的对端。只收本机。
+    PeerList => PeerList(EmptyParams) -> crate::peer_node::PeerList;
+    /// 用对方的配对串双向配对。只收本机签过名的桌面。
+    PeerPair => PeerPair(crate::peer_node::PeerPairParams) -> crate::peer_node::PeerNode;
+    /// 改对端的显示名、中继、系统、智能体权限。只收本机签过名的桌面。
+    PeerUpdate => PeerUpdate(crate::peer_node::PeerUpdateParams) -> crate::peer_node::PeerNode;
+    /// 删掉一个对端，对方在线时请它也删掉本节点。只收本机签过名的桌面。
+    PeerRemove => PeerRemove(crate::peer_node::PeerIdParams) -> EmptyParams;
+    /// 到对端的当前路径和延迟，不为此拨号。只收本机。
+    PeerLink => PeerLink(crate::peer_node::PeerIdParams) -> crate::peer_node::PeerLinkResult;
+    /// 丢掉往外拨的连接重新拨（系统睡醒后）。只收本机。
+    PeerReset => PeerReset(EmptyParams) -> EmptyParams;
     /// 新建菜单里用户标为「常用」的动作。桌面和手机共用这一份。
     NewSessionPinsGet => NewSessionPinsGet(EmptyParams) -> crate::new_session::NewSessionPreferences;
     NewSessionPinsToggle => NewSessionPinsToggle(crate::new_session::PinParams)

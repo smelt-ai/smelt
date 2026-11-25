@@ -87,9 +87,13 @@ pub struct LiveElicitation {
 }
 
 fn last_user_index(entries: &[AcpEntry]) -> Option<usize> {
-    entries
-        .iter()
-        .rposition(|entry| matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. }))
+    entries.iter().rposition(|entry| {
+        matches!(entry, AcpEntry::User(_) | AcpEntry::UserWithImages { .. })
+            || matches!(
+                entry,
+                AcpEntry::TaskNote(note) if note.kind == crate::acp_chat::TaskNoteKind::PeerMessage
+            )
+    })
 }
 
 /// 一次宿主快照合并的结果。调试正文只活到父进程把这一帧写给已经打开的窗口。
@@ -683,6 +687,13 @@ impl AcpSessionState {
         if committing_scratch {
             self.entries_base = 0;
         }
+        for entry in &mut self.entries {
+            if let AcpEntry::User(text) = entry
+                && let Some(note) = crate::acp_chat::parse_peer_message_envelope(text)
+            {
+                *entry = AcpEntry::TaskNote(note);
+            }
+        }
         self.replaying_history = false;
         // 从历史里恢复出来的问题卡片在等用户回答，重启后照样能答，这一轮没有中断。
         let awaiting_recovered_answer = self
@@ -1174,6 +1185,29 @@ pub fn note_prompt_sent_with_delivery(
     images: Vec<crate::acp_chat::AcpImage>,
     delivery_id: Option<String>,
 ) {
+    let entry = if images.is_empty() {
+        AcpEntry::User(text)
+    } else {
+        AcpEntry::UserWithImages { text, images }
+    };
+    begin_turn_with_entry(state, entry, delivery_id);
+}
+
+/// 非 Pi ACP 收到一条跨对话来信并开始新回合：写入 `TaskNote(PeerMessage)` 事件行（而不是
+/// 普通用户气泡），其余回合状态、历史身份升级与计时与 [`note_prompt_sent_with_delivery`] 对齐。
+pub fn note_peer_message_sent(state: &mut AcpSessionState, delivery: &PeerDelivery) {
+    begin_turn_with_entry(
+        state,
+        AcpEntry::TaskNote(crate::acp_chat::task_note_from_peer_delivery(delivery)),
+        Some(delivery.id.clone()),
+    );
+}
+
+fn begin_turn_with_entry(
+    state: &mut AcpSessionState,
+    entry: AcpEntry,
+    delivery_id: Option<String>,
+) {
     // 空白会话在 Ready 时不会登记 history_session_id；首条 prompt 真正发出
     // 后，运行时 id 才升级为可跨进程恢复的历史身份。若 prompt 早于 Ready
     // 排队，则由 Ready 分支在看到本地回显后补上。
@@ -1195,13 +1229,7 @@ pub fn note_prompt_sent_with_delivery(
     // 之后到达的 ToolFinished 仍可按 tool id 改写（未取消的条目）。
     let _ = finalize_dangling_tool_calls(state);
     state.turn_seq = state.turn_seq.saturating_add(1);
-    if images.is_empty() {
-        state.entries.push(AcpEntry::User(text));
-    } else {
-        state
-            .entries
-            .push(AcpEntry::UserWithImages { text, images });
-    }
+    state.entries.push(entry);
     state.awaiting_user_echo = true;
     state.phase = DaemonPhase::Thinking;
     state.end_reason.clear();
@@ -1216,7 +1244,7 @@ pub fn note_prompt_sent_with_delivery(
     let started_at_ms = unix_time_ms();
     state.turn_started_at_ms = Some(started_at_ms);
     state.turn_timings.push(TurnTiming {
-        user_index: state.entries.len().saturating_sub(1),
+        user_index: state.entries_base + state.entries.len().saturating_sub(1),
         started_at_ms,
         ended_at_ms: None,
     });
@@ -1234,7 +1262,7 @@ pub fn note_prompt_sent_with_delivery(
 pub fn undo_prompt_sent(
     state: &mut AcpSessionState,
 ) -> Option<(String, Vec<crate::acp_chat::AcpImage>)> {
-    let last_index = state.entries.len().checked_sub(1)?;
+    let last_index = state.entries_base + state.entries.len().checked_sub(1)?;
     if !matches!(
         state.entries.last(),
         Some(AcpEntry::User(_) | AcpEntry::UserWithImages { .. })

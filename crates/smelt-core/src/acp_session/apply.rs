@@ -177,6 +177,16 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
                 skip_persist = false;
             }
         }
+        ConversationEvent::QueuedInputSettled {
+            lane,
+            text,
+            images,
+            outcome: settled,
+        } => {
+            if apply_queued_input_settled(state, &mut outcome, lane, text, images, settled) {
+                skip_persist = false;
+            }
+        }
         ConversationEvent::ComposerRestore {
             revision,
             texts,
@@ -398,6 +408,54 @@ fn apply_prompt_queue(
     true
 }
 
+/// 一条插话 / 排队没进 provider 的队列。宿主发出时把它挂在输入框上方，这里撤掉：
+/// 开了新一轮就按新回合写气泡，拒收的还回输入框，被扩展接走的就此结束。
+fn apply_queued_input_settled(
+    state: &mut AcpSessionState,
+    outcome: &mut ApplyOutcome,
+    lane: crate::acp_conn::InputLane,
+    text: String,
+    images: Vec<crate::acp_chat::AcpImage>,
+    settled: crate::acp_conn::QueuedInputOutcome,
+) -> bool {
+    match lane {
+        crate::acp_conn::InputLane::Steering => {
+            if let Some(ix) = state
+                .queued_steering
+                .iter()
+                .position(|queued| *queued == text)
+            {
+                state.queued_steering.remove(ix);
+                if ix < state.queued_steering_images.len() {
+                    state.queued_steering_images.remove(ix);
+                }
+            }
+        }
+        crate::acp_conn::InputLane::FollowUp => {
+            if let Some(ix) = state
+                .queued_follow_up
+                .iter()
+                .position(|queued| *queued == text)
+            {
+                state.queued_follow_up.remove(ix);
+            }
+        }
+    }
+    match settled {
+        crate::acp_conn::QueuedInputOutcome::StartedTurn => {
+            let first_new = state.entries.len();
+            super::note_prompt_sent(state, text, images);
+            outcome.entries_offset = Some(first_new);
+            true
+        }
+        crate::acp_conn::QueuedInputOutcome::Rejected(_) => {
+            queue_composer_restore(state, vec![text], images);
+            false
+        }
+        crate::acp_conn::QueuedInputOutcome::Handled => false,
+    }
+}
+
 fn consumed_steering_count(old: &[String], new: &[String]) -> usize {
     if new.len() <= old.len() && old.ends_with(new) {
         old.len() - new.len()
@@ -467,6 +525,7 @@ fn clears_user_echo(ev: &ConversationEvent) -> bool {
             | ConversationEvent::SessionControls { .. }
             | ConversationEvent::Compaction { .. }
             | ConversationEvent::ProviderRetry(_)
+            | ConversationEvent::QueuedInputSettled { .. }
             | ConversationEvent::PromptQueue { .. }
             | ConversationEvent::ComposerRestore { .. }
             | ConversationEvent::Plan(_)
@@ -534,6 +593,13 @@ fn apply_user_chunk(state: &mut AcpSessionState, outcome: &mut ApplyOutcome, tex
             outcome.entries_offset = Some(state.entries.len());
             state.entries.push(AcpEntry::User(text));
         }
+    }
+    if let Some(AcpEntry::User(existing)) = state.entries.last()
+        && existing.trim_end().ends_with("</peer-message>")
+        && let Some(note) = crate::acp_chat::parse_peer_message_envelope(existing)
+        && let Some(last) = state.entries.last_mut()
+    {
+        *last = AcpEntry::TaskNote(note);
     }
 }
 
@@ -765,7 +831,8 @@ fn apply_tool_call(state: &mut AcpSessionState, outcome: &mut ApplyOutcome, tc: 
     } else {
         tc.title
     };
-    let entry = AcpEntry::tool_call(tool_call_id.clone(), title, tool_kind, tool_status, output);
+    let mut entry = AcpEntry::tool_call(tool_call_id.clone(), title, tool_kind, tool_status, output);
+    maybe_attach_acp_peer_send(&mut entry, tc.raw_input.as_ref(), tc.raw_output.as_ref());
     outcome.entries_offset = push_tool_entry(state, entry, parent_id.as_deref(), &tool_call_id);
     if let Some(elicitation) = replayed_elicitation {
         state.elicitation = Some(elicitation);
@@ -821,38 +888,52 @@ fn apply_tool_call_update(
         });
     let parent_id = crate::acp_conn::parent_tool_id_from_meta(update.meta.as_ref());
     outcome.entries_offset = crate::acp_chat::find_tool_top_level_index(&state.entries, &update_id);
-    if let Some(entry) = crate::acp_chat::find_tool_call_mut(&mut state.entries, &update_id)
-        && let AcpEntry::ToolCall {
+    let raw_input_for_peer = state
+        .tool_debug
+        .get(&update_id)
+        .and_then(|debug| debug.raw_input.clone())
+        .or_else(|| update.fields.raw_input.clone());
+    let raw_output_for_peer = update.fields.raw_output.clone();
+    if let Some(entry) = crate::acp_chat::find_tool_call_mut(&mut state.entries, &update_id) {
+        if let AcpEntry::ToolCall {
             title,
             kind,
             status,
             output,
             ..
         } = entry
-    {
-        if let Some(k) = update_kind {
-            *kind = k;
-        }
-        if *kind == crate::acp_chat::ToolKind::Collaborate {
-            if let Some(t) = update.fields.title {
-                *title =
-                    crate::acp_chat::subagent_display_title(&t, update.fields.raw_input.as_ref());
-            } else if let Some(args) = update.fields.raw_input.as_ref() {
-                let next = crate::acp_chat::subagent_display_title(title.as_str(), Some(args));
-                *title = next;
+        {
+            if let Some(k) = update_kind {
+                *kind = k;
             }
-        } else if let Some(t) = update.fields.title {
-            *title = t;
-        }
-        if accepts_update {
-            if let Some(s) = update_status {
-                *status = s;
+            if *kind == crate::acp_chat::ToolKind::Collaborate {
+                if let Some(t) = update.fields.title {
+                    *title = crate::acp_chat::subagent_display_title(
+                        &t,
+                        update.fields.raw_input.as_ref(),
+                    );
+                } else if let Some(args) = update.fields.raw_input.as_ref() {
+                    let next = crate::acp_chat::subagent_display_title(title.as_str(), Some(args));
+                    *title = next;
+                }
+            } else if let Some(t) = update.fields.title {
+                *title = t;
             }
-            if let Some(c) = update.fields.content {
-                *output = crate::acp_conn::tool_content_parts(&c);
-                hydrate_terminal_output(&state.terminal_buffers, output);
+            if accepts_update {
+                if let Some(s) = update_status {
+                    *status = s;
+                }
+                if let Some(c) = update.fields.content {
+                    *output = crate::acp_conn::tool_content_parts(&c);
+                    hydrate_terminal_output(&state.terminal_buffers, output);
+                }
             }
         }
+        maybe_attach_acp_peer_send(
+            entry,
+            raw_input_for_peer.as_ref(),
+            raw_output_for_peer.as_ref(),
+        );
     } else if accepts_update {
         let mut output = update
             .fields
@@ -868,12 +949,17 @@ fn apply_tool_call_update(
         } else {
             raw_title
         };
-        let entry = AcpEntry::tool_call(
+        let mut entry = AcpEntry::tool_call(
             update_id.clone(),
             title,
             kind,
             update_status.unwrap_or(crate::acp_chat::ToolCallStatus::InProgress),
             output,
+        );
+        maybe_attach_acp_peer_send(
+            &mut entry,
+            raw_input_for_peer.as_ref(),
+            raw_output_for_peer.as_ref(),
         );
         outcome.entries_offset = push_tool_entry(state, entry, parent_id.as_deref(), &update_id);
     }
@@ -887,6 +973,80 @@ fn apply_tool_call_update(
         )
     }) {
         clear_recovered_elicitation(state, &update_id);
+    }
+}
+
+/// 第三方 ACP 经 MCP 调用 `session_send` / `session_spawn` 时，根据工具名、参数和结果
+/// 补上 `peer: Some(PeerSend)`，与 Pi 扩展发出的事件行保持统一展示。
+fn maybe_attach_acp_peer_send(
+    entry: &mut AcpEntry,
+    raw_input: Option<&serde_json::Value>,
+    raw_output: Option<&serde_json::Value>,
+) {
+    let AcpEntry::ToolCall {
+        title,
+        status,
+        output,
+        peer,
+        ..
+    } = entry
+    else {
+        return;
+    };
+    if crate::acp_chat::peer_tool_base_name(title).is_none() {
+        return;
+    }
+    let output_text = || {
+        output.iter().find_map(|part| match part {
+            crate::acp_chat::ToolOutputPart::Text(text) if !text.trim().is_empty() => {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+    };
+    let details = raw_output
+        .and_then(|value| {
+            if let Some(structured) = value.get("structuredContent") {
+                return Some(structured.clone());
+            }
+            if let Some(items) = value.get("content").and_then(serde_json::Value::as_array) {
+                for item in items {
+                    if let Some(text) = item.get("text").and_then(serde_json::Value::as_str)
+                        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text)
+                    {
+                        return Some(parsed);
+                    }
+                }
+            }
+            if value.get("ok").is_some() || value.get("to").is_some() {
+                return Some(value.clone());
+            }
+            None
+        })
+        .or_else(|| {
+            output_text().and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        });
+    let details_error = details
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let failure = if *status == crate::acp_chat::ToolCallStatus::Failed {
+        details_error.or_else(|| output_text().map(str::to_string))
+    } else if details
+        .as_ref()
+        .and_then(|value| value.get("ok"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(false)
+    {
+        details_error.or_else(|| output_text().map(str::to_string))
+    } else {
+        None
+    };
+    if let Some(send) =
+        crate::acp_chat::peer_send_from_tool(title, raw_input, details.as_ref(), failure.as_deref())
+    {
+        *peer = Some(send);
     }
 }
 

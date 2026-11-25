@@ -64,6 +64,15 @@ describe("mergeSnapshotEntries", () => {
     expect(s2.entries[4].Assistant.text).toBe("a2");
   });
 
+  test("overlapping snapshot truncates stale tail when total shrinks", () => {
+    const s0 = { entries: [{ User: "2" }, { User: "3" }, { User: "4" }], loadedOffset: 2, entriesTotal: 5 };
+    const s1 = mergeSnapshotEntries(s0, 0, 3, [{ User: "0" }, { User: "1" }, { User: "2" }], false);
+    expect(s1.dirtyFrom).toBe(0);
+    expect(s1.loadedOffset).toBe(0);
+    expect(s1.entriesTotal).toBe(3);
+    expect(s1.entries.map((entry) => entry.User)).toEqual(["0", "1", "2"]);
+  });
+
   test("ignores empty mismatched frame instead of wiping loaded entries", () => {
     const s0 = { entries: [{ User: "keep" }], loadedOffset: 5, entriesTotal: 6 };
     const s1 = mergeSnapshotEntries(s0, 0, 2, [], false);

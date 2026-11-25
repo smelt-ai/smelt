@@ -4245,6 +4245,36 @@ fn undo_prompt_sent_refuses_a_finished_turn() {
     assert_eq!(state.entries().len(), 1);
 }
 
+/// 挂起裁掉已提交前缀后（`entries_base > 0`），新回合计时必须记绝对下标，撤回也按绝对下标对齐。
+#[test]
+fn turn_timing_uses_global_index_when_entries_base_is_nonzero() {
+    let mut state = AcpSessionState::default();
+    state.phase = DaemonPhase::Idle;
+    state.entries_mut().extend([
+        AcpEntry::User("第一问".into()),
+        AcpEntry::Assistant {
+            text: "第一答".into(),
+            thought: false,
+        },
+        AcpEntry::User("第二问".into()),
+        AcpEntry::Assistant {
+            text: "第二答".into(),
+            thought: false,
+        },
+    ]);
+    state.trim_to_current_turn();
+    assert_eq!(state.entries_base(), 2);
+    assert_eq!(state.entries().len(), 2);
+
+    crate::acp_session::note_prompt_sent(&mut state, "第三问".into(), Vec::new());
+    assert_eq!(state.turn_timings.last().map(|t| t.user_index), Some(4));
+
+    let (text, _) =
+        crate::acp_session::undo_prompt_sent(&mut state).expect("刚写下的第三问必须可撤回");
+    assert_eq!(text, "第三问");
+    assert!(state.turn_timings.is_empty());
+}
+
 fn memory_change(
     layer: crate::control_api::AgentMemoryLayer,
     file: &str,
@@ -4393,4 +4423,150 @@ fn a_new_prompt_clears_the_memory_card() {
     note_memory_write(&mut state, "a1", memory_change(Agent, "x.md", true, None));
     note_prompt_sent(&mut state, "下一轮".into(), Vec::new());
     assert_eq!(state.memory_changes, None);
+}
+
+#[test]
+fn note_peer_message_sent_records_task_note_instead_of_user_bubble() {
+    let mut state = fresh_state();
+    let delivery = crate::acp_session::PeerDelivery {
+        id: "pm-112233445566".into(),
+        source_session_id: "acp-from".into(),
+        source_title: "主控".into(),
+        kind: crate::acp_session::PeerMessageKind::Task,
+        hops: 7,
+        reply_to: None,
+        text: "实现刷新逻辑".into(),
+    };
+    crate::acp_session::note_peer_message_sent(&mut state, &delivery);
+    assert_eq!(state.entries().len(), 1);
+    match &state.entries()[0] {
+        AcpEntry::TaskNote(note) => {
+            assert_eq!(note.kind, crate::acp_chat::TaskNoteKind::PeerMessage);
+            assert_eq!(note.id, "pm-112233445566");
+            assert_eq!(note.output_tail, "实现刷新逻辑");
+            assert_eq!(note.peer.as_ref().unwrap().source_session_id, "acp-from");
+        }
+        other => panic!("expected TaskNote, got {other:?}"),
+    }
+    assert_eq!(state.active_delivery_id.as_deref(), Some("pm-112233445566"));
+    assert_eq!(state.phase, DaemonPhase::Thinking);
+}
+
+#[test]
+fn history_replay_converts_peer_message_user_chunks_into_task_note() {
+    let mut state = fresh_state();
+    let delivery = crate::acp_session::PeerDelivery {
+        id: "pm-aabbccddeeff".into(),
+        source_session_id: "acp-claude".into(),
+        source_title: "Claude".into(),
+        kind: crate::acp_session::PeerMessageKind::Task,
+        hops: 6,
+        reply_to: None,
+        text: "跑一下测试".into(),
+    };
+    let text = crate::acp_chat::format_peer_message_text(
+        &delivery,
+        Some("Claude Code"),
+        crate::acp_chat::PeerReplyChannel::Tool,
+    );
+    let mid = text
+        .char_indices()
+        .nth(text.chars().count() / 2)
+        .expect("non-empty envelope")
+        .0;
+    let (head, tail) = text.split_at(mid);
+    apply_event(&mut state, ConversationEvent::HistoryReplayStarted);
+    apply_event(&mut state, ConversationEvent::UserChunk(head.to_string()));
+    apply_event(&mut state, ConversationEvent::UserChunk(tail.to_string()));
+    apply_event(&mut state, ConversationEvent::HistoryReplayFinished);
+    assert_eq!(state.entries().len(), 1);
+    match &state.entries()[0] {
+        AcpEntry::TaskNote(note) => {
+            assert_eq!(note.kind, crate::acp_chat::TaskNoteKind::PeerMessage);
+            assert_eq!(note.id, "pm-aabbccddeeff");
+            assert_eq!(note.output_tail, "跑一下测试");
+            assert_eq!(note.peer.as_ref().unwrap().source_session_id, "acp-claude");
+        }
+        other => panic!("expected TaskNote after replay, got {other:?}"),
+    }
+}
+
+#[test]
+fn mcp_session_send_tool_call_attaches_peer_send_projection() {
+    use agent_client_protocol::v1::schema::{ToolCall, ToolCallId, ToolCallStatus};
+    let mut state = fresh_state();
+    let mut tc = ToolCall::new(ToolCallId::new("call-1"), "mcp__smelt-peers__session_send");
+    tc.status = ToolCallStatus::InProgress;
+    tc.raw_input = Some(serde_json::json!({
+        "to": "acp-codex",
+        "text": "请帮我实现这个接口",
+        "kind": "task"
+    }));
+    apply_event(&mut state, ConversationEvent::ToolCall(tc));
+    match &state.entries()[0] {
+        AcpEntry::ToolCall { peer, .. } => {
+            let send = peer.as_ref().expect("MCP session_send should populate peer");
+            assert_eq!(send.to_id, "acp-codex");
+            assert_eq!(send.kind, crate::acp_session::PeerMessageKind::Task);
+            assert_eq!(send.text, "请帮我实现这个接口");
+        }
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+}
+
+/// 回合刚结束时回车：宿主以为还在跑，挂成插话；Pi 其实空了，直接开了新一轮。
+/// 输入框上方那条要撤掉，按新回合只写一个气泡，之后的队列快照也不能再补一个。
+#[test]
+fn a_steer_pi_started_as_a_new_turn_moves_from_the_queue_to_one_bubble() {
+    let mut state = fresh_state();
+    state.phase = DaemonPhase::Thinking;
+    queue_mid_turn_input(&mut state, "补一句".into(), Vec::new());
+    let turn_seq = state.turn_seq;
+
+    apply_event(
+        &mut state,
+        ConversationEvent::QueuedInputSettled {
+            lane: crate::acp_conn::InputLane::Steering,
+            text: "补一句".into(),
+            images: Vec::new(),
+            outcome: crate::acp_conn::QueuedInputOutcome::StartedTurn,
+        },
+    );
+    apply_event(
+        &mut state,
+        ConversationEvent::PromptQueue {
+            steering: Vec::new(),
+            follow_up: Vec::new(),
+        },
+    );
+
+    assert!(state.queued_steering.is_empty());
+    assert!(state.queued_steering_images.is_empty());
+    assert_eq!(state.turn_seq, turn_seq + 1);
+    let bubbles = state
+        .entries()
+        .iter()
+        .filter(|entry| matches!(entry, AcpEntry::User(text) if text == "补一句"))
+        .count();
+    assert_eq!(bubbles, 1);
+}
+
+#[test]
+fn a_rejected_steer_returns_to_the_composer_without_a_bubble() {
+    let mut state = fresh_state();
+    queue_mid_turn_input(&mut state, "没登录".into(), Vec::new());
+
+    apply_event(
+        &mut state,
+        ConversationEvent::QueuedInputSettled {
+            lane: crate::acp_conn::InputLane::Steering,
+            text: "没登录".into(),
+            images: Vec::new(),
+            outcome: crate::acp_conn::QueuedInputOutcome::Rejected("No API key".into()),
+        },
+    );
+
+    assert!(state.queued_steering.is_empty());
+    assert_eq!(state.composer_restore_texts, ["没登录"]);
+    assert!(state.entries().is_empty());
 }

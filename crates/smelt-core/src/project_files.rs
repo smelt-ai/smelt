@@ -40,7 +40,18 @@ fn content_version(bytes: &[u8]) -> String {
 
 /// 打开文件查看或编辑。可预览的图片按扩展名认，给原始字节。
 pub fn open(path: &str) -> Result<FileContent, ProjectFileError> {
+    open_if_changed(path, None)
+}
+
+/// 按可选 `if_none_match`（sha256）打开文件：内容未变时只返回 `NotModified`，免去整份重传。
+pub fn open_if_changed(
+    path: &str,
+    if_none_match: Option<&str>,
+) -> Result<FileContent, ProjectFileError> {
     let meta = std::fs::metadata(path).map_err(|e| ProjectFileError::Io(e.to_string()))?;
+    if meta.is_dir() {
+        return Err(ProjectFileError::Io(format!("{path} is a directory")));
+    }
     let image = is_previewable_image(path);
     let limit = if image {
         IMAGE_OPEN_LIMIT
@@ -54,12 +65,16 @@ pub fn open(path: &str) -> Result<FileContent, ProjectFileError> {
         });
     }
     let bytes = std::fs::read(path).map_err(|e| ProjectFileError::Io(e.to_string()))?;
+    let version = content_version(&bytes);
+    if if_none_match.is_some_and(|expected| expected == version) {
+        return Ok(FileContent::NotModified { version });
+    }
     if image {
         return Ok(FileContent::Image {
             data: Base64Bytes(bytes),
+            version: Some(version),
         });
     }
-    let version = content_version(&bytes);
     Ok(match String::from_utf8(bytes) {
         Ok(text) => FileContent::Text { text, version },
         Err(_) => FileContent::Binary,
@@ -435,12 +450,13 @@ mod tests {
         std::fs::write(&binary, [0xff, 0xfe, 0x00]).unwrap();
         let picture = root.join("shot.png");
         std::fs::write(&picture, [0x89, b'P', b'N', b'G']).unwrap();
-        assert_eq!(
+        assert!(matches!(
             open(picture.to_str().unwrap()).unwrap(),
             FileContent::Image {
-                data: Base64Bytes(vec![0x89, b'P', b'N', b'G'])
-            }
-        );
+                data: Base64Bytes(ref bytes),
+                version: Some(_),
+            } if bytes == &[0x89, b'P', b'N', b'G']
+        ));
 
         let FileContent::Text { text: body, .. } = open(text.to_str().unwrap()).unwrap() else {
             panic!("UTF-8 文件应作为文本打开");
@@ -455,6 +471,47 @@ mod tests {
             open(big.to_str().unwrap()).unwrap(),
             FileContent::TooLarge { .. }
         ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn open_if_changed_skips_unchanged_content_and_rejects_directories() {
+        let root = temp_dir("open-if-changed");
+        let text = root.join("doc.md");
+        std::fs::write(&text, "v1").unwrap();
+        let text_path = text.to_str().unwrap();
+        let FileContent::Text { version, .. } = open(text_path).unwrap() else {
+            panic!("expected text");
+        };
+        assert_eq!(
+            open_if_changed(text_path, Some(&version)).unwrap(),
+            FileContent::NotModified {
+                version: version.clone()
+            }
+        );
+        std::fs::write(&text, "v2").unwrap();
+        assert!(matches!(
+            open_if_changed(text_path, Some(&version)).unwrap(),
+            FileContent::Text { text, .. } if text == "v2"
+        ));
+
+        let img = root.join("pic.png");
+        std::fs::write(&img, [0x89, b'P', b'N', b'G']).unwrap();
+        let img_path = img.to_str().unwrap();
+        let FileContent::Image {
+            version: Some(img_ver),
+            ..
+        } = open(img_path).unwrap()
+        else {
+            panic!("expected image with version");
+        };
+        assert_eq!(
+            open_if_changed(img_path, Some(&img_ver)).unwrap(),
+            FileContent::NotModified { version: img_ver }
+        );
+
+        let dir_err = open(root.to_str().unwrap()).unwrap_err();
+        assert!(dir_err.to_string().contains("directory"), "{dir_err}");
         let _ = std::fs::remove_dir_all(root);
     }
 

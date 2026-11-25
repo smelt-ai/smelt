@@ -72,6 +72,18 @@ pub struct ProjectSearchResult {
 pub struct FilePathParams {
     /// 运行时那台机器上的绝对路径。
     pub path: String,
+    /// 可选内容版本（sha256）；命中磁盘当前版本时服务端只回 [`FileContent::NotModified`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_none_match: Option<String>,
+}
+
+impl FilePathParams {
+    pub fn new(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            if_none_match: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -83,7 +95,13 @@ pub enum FileContent {
         version: String,
     },
     /// 查看器能预览的图片（见 [`is_previewable_image`]），原始字节。
-    Image { data: Base64Bytes },
+    Image {
+        data: Base64Bytes,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+    },
+    /// 带 `if_none_match` 时磁盘内容未变化，不重复传正文。
+    NotModified { version: String },
     /// 不是 UTF-8 文本。
     Binary,
     /// 超过查看器的大小上限。
@@ -130,12 +148,12 @@ pub const PREVIEWABLE_IMAGE_EXTENSIONS: &[&str] = &[
 ];
 
 pub fn is_previewable_image(path: &str) -> bool {
-    // 扩展名按运行时路径取，不用 `std::path`（Windows 上 `\` 会切错 POSIX 路径）。
-    let name = path
-        .trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .unwrap_or(path);
+    // 扩展名按运行时路径取，不用 `std::path`（同时认 POSIX `/` 与 Windows `\` 分隔符）。
+    // 末尾带分隔符的是目录路径，不认作图片文件。
+    if path.ends_with(['/', '\\']) {
+        return false;
+    }
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
     let Some((stem, ext)) = name.rsplit_once('.') else {
         return false;
     };
@@ -192,6 +210,7 @@ mod tests {
     fn image_bytes_travel_as_base64_text() {
         let content = FileContent::Image {
             data: Base64Bytes(vec![0x89, b'P', b'N', b'G']),
+            version: None,
         };
         let wire = serde_json::to_value(&content).unwrap();
         assert_eq!(
@@ -202,12 +221,70 @@ mod tests {
             serde_json::from_value::<FileContent>(wire).unwrap(),
             content
         );
+
+        let with_version = FileContent::Image {
+            data: Base64Bytes(vec![0x89, b'P', b'N', b'G']),
+            version: Some("abc".into()),
+        };
+        let wire = serde_json::to_value(&with_version).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({ "kind": "image", "data": "iVBORw==", "version": "abc" })
+        );
+        assert_eq!(
+            serde_json::from_value::<FileContent>(wire).unwrap(),
+            with_version
+        );
+    }
+
+    #[test]
+    fn conditional_file_open_wire_round_trips() {
+        let bare = FilePathParams::new("/a/b.md");
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            serde_json::json!({ "path": "/a/b.md" })
+        );
+        assert_eq!(
+            serde_json::from_value::<FilePathParams>(serde_json::json!({ "path": "/a/b.md" }))
+                .unwrap(),
+            bare
+        );
+
+        let cond = FilePathParams {
+            path: "/a/b.md".into(),
+            if_none_match: Some("deadbeef".into()),
+        };
+        let wire = serde_json::to_value(&cond).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({ "path": "/a/b.md", "if_none_match": "deadbeef" })
+        );
+        assert_eq!(
+            serde_json::from_value::<FilePathParams>(wire).unwrap(),
+            cond
+        );
+
+        let not_modified = FileContent::NotModified {
+            version: "deadbeef".into(),
+        };
+        let wire = serde_json::to_value(&not_modified).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({ "kind": "not_modified", "version": "deadbeef" })
+        );
+        assert_eq!(
+            serde_json::from_value::<FileContent>(wire).unwrap(),
+            not_modified
+        );
     }
 
     #[test]
     fn previewable_images_are_recognised_case_insensitively() {
         assert!(is_previewable_image("/a/shot.PNG"));
         assert!(is_previewable_image("/a/logo.svg"));
+        assert!(is_previewable_image(r"E:\AI\shot.png"));
+        assert!(!is_previewable_image(r"E:\AI\.png"));
+        assert!(!is_previewable_image(r"E:\dir.png\"));
         assert!(!is_previewable_image("/a/app.icns"));
         assert!(!is_previewable_image("/a/README"));
     }

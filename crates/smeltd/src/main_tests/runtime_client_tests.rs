@@ -301,15 +301,28 @@ fn file_save_with_a_stale_version_is_a_conflict() {
     let runtime = in_process_runtime();
 
     let opened = runtime
-        .call::<FileOpenCall>(
-            &FilePathParams { path: path.clone() },
-            DEFAULT_REQUEST_TIMEOUT,
-        )
+        .call::<FileOpenCall>(&FilePathParams::new(path.clone()), DEFAULT_REQUEST_TIMEOUT)
         .unwrap();
     let FileContent::Text { text, version } = opened.content else {
         panic!("应作为文本打开");
     };
     assert_eq!(text, "v1");
+
+    let not_modified = runtime
+        .call::<FileOpenCall>(
+            &FilePathParams {
+                path: path.clone(),
+                if_none_match: Some(version.clone()),
+            },
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+        .unwrap();
+    assert_eq!(
+        not_modified.content,
+        FileContent::NotModified {
+            version: version.clone()
+        }
+    );
 
     std::fs::write(&file, "changed elsewhere").unwrap();
     let error = runtime
@@ -336,9 +349,7 @@ fn fs_read_dir_reports_a_missing_directory_instead_of_listing_it_empty() {
     use smelt_runtime_client::protocol::fs::FsReadDirCall;
     let error = in_process_runtime()
         .call::<FsReadDirCall>(
-            &FilePathParams {
-                path: "/no/such/dir".to_string(),
-            },
+            &FilePathParams::new("/no/such/dir"),
             DEFAULT_REQUEST_TIMEOUT,
         )
         .unwrap_err();
@@ -365,10 +376,7 @@ fn fs_usage_scan_rolls_up_sizes_and_is_released() {
     let runtime = in_process_runtime();
 
     let scan = runtime
-        .call::<FsUsageScanCall>(
-            &FilePathParams { path: root.clone() },
-            DEFAULT_REQUEST_TIMEOUT,
-        )
+        .call::<FsUsageScanCall>(&FilePathParams::new(root.clone()), DEFAULT_REQUEST_TIMEOUT)
         .unwrap()
         .scan;
     let children = |path: &str| {

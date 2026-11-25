@@ -89,6 +89,21 @@ pub fn stored_catalog_on(
     (agents, sections)
 }
 
+/// 无 GUI 进程时的对话入口清单（产品智能体在前，裸引擎与 profile 在后），和新建菜单同序。
+/// 只要选项、不要分段时用；要两样时用 [`stored_catalog`]，两者出自同一份快照。
+pub fn stored_conversation_options() -> Vec<AcpAgentOption> {
+    let snapshot = crate::sqlite_state::default_sqlite_store()
+        .ok()
+        .and_then(|store| match store.get_agent_ui_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                eprintln!("[new-session] 读取智能体快照失败，使用默认值: {error}");
+                None
+            }
+        });
+    conversation_options_with(snapshot.as_ref())
+}
+
 /// 同 [`stored_catalog_on`]，使用当前进程默认 SQLite 库；测试未启用 SQLite 时退回出厂默认。
 pub fn stored_catalog(
     diagnostics: Option<&AcpRuntimeDiagnostics>,

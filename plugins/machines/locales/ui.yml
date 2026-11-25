@@ -32,6 +32,12 @@ command:
   remove:
     en: Remove Machine
     zh-CN: 移除机器
+  agent_access:
+    en: Toggle Agent Access to Machine
+    zh-CN: 切换智能体能否使用机器
+  inbound:
+    en: Toggle Whether Machine Can Connect In
+    zh-CN: 切换机器能否连入本机
 menu:
   reconnect:
     en: Reconnect
@@ -48,6 +54,22 @@ menu:
   remove:
     en: Remove…
     zh-CN: 移除…
+  allow_agents:
+    en: Allow Agents Here to Use It
+    zh-CN: 允许本机智能体使用
+  disallow_agents:
+    en: Stop Agents Here from Using It
+    zh-CN: 不再允许本机智能体使用
+  allow_inbound:
+    en: Allow It to Connect to This Computer
+    zh-CN: 允许它连入本机
+  disallow_inbound:
+    en: Stop It from Connecting to This Computer
+    zh-CN: 不再允许它连入本机
+access_change:
+  failed:
+    en: Couldn't change the machine's access
+    zh-CN: 没改成机器权限
 error:
   machine_removed:
     en: That machine has been removed

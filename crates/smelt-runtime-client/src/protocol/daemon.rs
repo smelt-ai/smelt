@@ -44,6 +44,11 @@ pub enum DaemonOperation {
     DesktopAttach,
     /// 升到指定版本：运行时自己下载、安装、交接，见 [`super::runtime_upgrade`]。
     RuntimeUpgrade,
+    /// 经本机运行时转发到它的一个对端节点，见 [`super::forward`]。
+    Forward,
+    /// 盯着本机运行时到一个对端的连接路径：`{"runtime_id"}`，先回一行眼下的，之后换了
+    /// 路径再回一行，连接断了回一行没有路径的再关掉。每行是 `peer.link` 的结果。
+    PeerLinkWatch,
 }
 
 /// 首帧只先解析操作名，其余字段原样留给对应 handler。

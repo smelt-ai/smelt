@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   continueLabel,
+  fallbackSource,
   filterSessions,
   formatCount,
   handoffTargets,
@@ -171,5 +172,29 @@ describe("smelt.history model", () => {
     ];
     expect(filterSessions(list, "original").length).toBe(1);
     expect(filterSessions(list, "  ").length).toBe(2);
+  });
+});
+
+describe("fallbackSource", () => {
+  const tabs = [
+    { kind: "claude", profile_id: null, label: "Claude" },
+    { kind: "antigravity", profile_id: null, label: "Antigravity" },
+  ];
+  const claude = { kind: "claude", profile_id: null };
+
+  test("当前来源读完才换，换到第一个有会话的", () => {
+    expect(fallbackSource(tabs, claude, false, (tab) => tab.kind === "antigravity")).toBeNull();
+    expect(fallbackSource(tabs, claude, true, () => true)).toBeNull();
+    expect(fallbackSource(tabs, claude, true, (tab) => tab.kind === "antigravity")).toEqual({
+      kind: "antigravity",
+      profile_id: null,
+    });
+    expect(fallbackSource(tabs, claude, true, () => false)).toBeNull();
+  });
+
+  test("选中的来源已经不在标签里也换", () => {
+    expect(
+      fallbackSource(tabs, { kind: "claude", profile_id: "gone" }, true, (tab) => tab.kind === "antigravity"),
+    ).toEqual({ kind: "antigravity", profile_id: null });
   });
 });

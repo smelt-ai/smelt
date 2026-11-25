@@ -747,6 +747,26 @@ pub(crate) fn spawn_subscription(
                         } else {
                             None
                         };
+                        // 本机运行时的对端节点（远程机器列表）变了就重读；刚连上也读一次：
+                        // 启动时它可能还没起来、或是还不认对端节点的旧版本。
+                        let peers = if runtime.is_local() {
+                            crate::runtimes::peers_changed();
+                            SeparateSubscription::open(
+                                &runtime,
+                                smelt_event_protocol::CORE_TOPIC_PEERS_CHANGED.to_string(),
+                                |message| {
+                                    if matches!(
+                                        message,
+                                        TopicMessage::Event { .. } | TopicMessage::Lagged
+                                    ) {
+                                        crate::runtimes::peers_changed();
+                                    }
+                                    true
+                                },
+                            )
+                        } else {
+                            None
+                        };
                         subscribe_daemon_states_blocking(
                             runtime.client(),
                             runtime.is_local(),
@@ -766,6 +786,9 @@ pub(crate) fn spawn_subscription(
                         }
                         if let Some(commands) = commands {
                             commands.close();
+                        }
+                        if let Some(peers) = peers {
+                            peers.close();
                         }
                         if stop.load(Ordering::Acquire) {
                             return;

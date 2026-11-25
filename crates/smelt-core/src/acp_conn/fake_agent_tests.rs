@@ -13,11 +13,20 @@ use serde_json::{Value, json};
 use super::*;
 
 const FAKE_AGENT_ENV: &str = "SMELT_TEST_FAKE_ACP_AGENT";
+const FAKE_IMAGE_ENV: &str = "SMELT_TEST_FAKE_ACP_IMAGE";
 
 /// `session/load` 时先重放两条历史再回响应。
 const SCRIPT_REPLAY: &str = "replay";
+/// `session/load` 响应后仍异步续推剩余重放（模拟 `agy acp` 1.5.14 行为）。
+const SCRIPT_ASYNC_REPLAY: &str = "async-replay";
+/// `session/set_config_option` 响应前线序上有正文更新（验证配置确认不会超车）。
+const SCRIPT_CONFIG_ORDER: &str = "config-order";
 /// `session/prompt` 时连吐几段正文增量，紧接着回收尾响应。
 const SCRIPT_STREAM: &str = "stream";
+/// 实时 `read_file` 读图但不带 `content`（模拟 `agy acp` 行为）。
+const SCRIPT_READ_IMAGE_LIVE: &str = "read-image-live";
+/// `session/load` 重放已完成 `read_file` 读图但不带 `content`（模拟 `agy acp` 重放）。
+const SCRIPT_READ_IMAGE_REPLAY: &str = "read-image-replay";
 
 /// 一轮回复拆成多段：一次性吐完整段就测不出「正文必须排在回合结束之前」。
 const STREAM_CHUNKS: [&str; 3] = ["你", "好", "，世界"];
@@ -66,11 +75,86 @@ fn serve(script: &str) {
                 );
                 json!({})
             }
+            "session/load" if script == SCRIPT_ASYNC_REPLAY => {
+                send(
+                    &mut out,
+                    update(session_id, "user_message_chunk", "早先的问题"),
+                );
+                send(&mut out, json!({"jsonrpc": "2.0", "id": id, "result": {}}));
+                // 模拟 agent 返回 LoadSessionResponse 后继续在后台流式推送剩余历史。
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                send(
+                    &mut out,
+                    update(session_id, "agent_message_chunk", "早先的回答前半"),
+                );
+                std::thread::sleep(std::time::Duration::from_millis(15));
+                send(
+                    &mut out,
+                    update(session_id, "agent_message_chunk", "早先的回答后半"),
+                );
+                continue;
+            }
+            "session/set_config_option" if script == SCRIPT_CONFIG_ORDER => {
+                send(
+                    &mut out,
+                    update(session_id, "agent_message_chunk", "配置确认前的正文"),
+                );
+                json!({
+                    "configOptions": [{
+                        "id": "mode",
+                        "name": "Mode",
+                        "type": "select",
+                        "currentValue": "auto",
+                        "options": [
+                            {"value": "default", "name": "Default"},
+                            {"value": "auto", "name": "Auto"}
+                        ]
+                    }]
+                })
+            }
+            "session/load" if script == SCRIPT_READ_IMAGE_REPLAY => {
+                let path = std::env::var(FAKE_IMAGE_ENV).unwrap_or_default();
+                send(
+                    &mut out,
+                    read_tool_update(
+                        session_id,
+                        "tool_call",
+                        "call-replay-img",
+                        "completed",
+                        &path,
+                    ),
+                );
+                json!({})
+            }
             "session/prompt" if script == SCRIPT_STREAM => {
                 // 增量和收尾响应背靠背写出，两条路的先后竞争压到最紧。
                 for chunk in STREAM_CHUNKS {
                     send(&mut out, update(session_id, "agent_message_chunk", chunk));
                 }
+                json!({"stopReason": "end_turn"})
+            }
+            "session/prompt" if script == SCRIPT_READ_IMAGE_LIVE => {
+                let path = std::env::var(FAKE_IMAGE_ENV).unwrap_or_default();
+                send(
+                    &mut out,
+                    read_tool_update(
+                        session_id,
+                        "tool_call",
+                        "call-live-img",
+                        "in_progress",
+                        &path,
+                    ),
+                );
+                send(
+                    &mut out,
+                    read_tool_update(
+                        session_id,
+                        "tool_call_update",
+                        "call-live-img",
+                        "completed",
+                        &path,
+                    ),
+                );
                 json!({"stopReason": "end_turn"})
             }
             _ => json!({}),
@@ -98,14 +182,46 @@ fn update(session_id: &Value, kind: &str, text: &str) -> Value {
     })
 }
 
-fn launch_fake_agent(script: &str, resume_session_id: Option<&str>) -> ConversationHandle {
+fn read_tool_update(
+    session_id: &Value,
+    session_update: &str,
+    tool_call_id: &str,
+    status: &str,
+    path: &str,
+) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": session_update,
+                "toolCallId": tool_call_id,
+                "name": "read_file",
+                "status": status,
+                "kind": "read",
+                "title": format!("File {path}"),
+                "locations": [{"path": path}],
+                "rawInput": {"Path": path},
+            },
+        },
+    })
+}
+
+fn launch_fake_agent_with_env(
+    script: &str,
+    resume_session_id: Option<&str>,
+    extra_env: BTreeMap<String, String>,
+) -> ConversationHandle {
     let exe = std::env::current_exe().expect("拿不到测试程序路径");
+    let mut env = extra_env;
+    env.insert(FAKE_AGENT_ENV.to_string(), script.to_string());
     spawn_acp(
         ConversationLaunch {
             launch: ConversationLaunchSpec {
                 // 启动命令按空白分词：测试程序路径里不能有空格。
                 command: exe.to_string_lossy().into_owned(),
-                env: BTreeMap::from([(FAKE_AGENT_ENV.to_string(), script.to_string())]),
+                env,
             },
             ephemeral_env: Default::default(),
             cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
@@ -115,10 +231,16 @@ fn launch_fake_agent(script: &str, resume_session_id: Option<&str>) -> Conversat
             fork_session_id: None,
             fork_cut: None,
             peer_handler: None,
+            peer_mcp_command: None,
+            peer_mcp_connected: None,
             disallowed_tools: Vec::new(),
         },
         None,
     )
+}
+
+fn launch_fake_agent(script: &str, resume_session_id: Option<&str>) -> ConversationHandle {
+    launch_fake_agent_with_env(script, resume_session_id, BTreeMap::new())
 }
 
 fn event_name(event: &ConversationEvent) -> &'static str {
@@ -229,5 +351,225 @@ fn streamed_text_arrives_before_the_turn_ends() {
         agent_text,
         STREAM_CHUNKS.concat(),
         "正文必须全部排在回合结束之前：{seen:?}"
+    );
+}
+
+fn collect_events_until(
+    handle: &ConversationHandle,
+    mut done: impl FnMut(&ConversationEvent) -> bool,
+) -> Vec<ConversationEvent> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut events = Vec::new();
+    while std::time::Instant::now() < deadline {
+        let next = smol::block_on(async {
+            smol::future::race(async { handle.event_rx.recv().await.ok() }, async {
+                smol::Timer::after(std::time::Duration::from_millis(200)).await;
+                None
+            })
+            .await
+        });
+        let Some(event) = next else { continue };
+        let finished = done(&event);
+        events.push(event);
+        if finished {
+            break;
+        }
+    }
+    events
+}
+
+const TINY_PNG: &[u8] = &[
+    0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, b'I', b'H', b'D', b'R',
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+    0x89, 0x00, 0x00, 0x00, 0x0A, b'I', b'D', b'A', b'T', 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0xAE,
+    0x42, 0x60, 0x82,
+];
+
+#[test]
+fn live_image_read_without_content_is_hydrated_from_disk() {
+    use base64::Engine as _;
+
+    let dir = tempfile::tempdir().expect("创建临时目录");
+    let img_path = dir.path().join("sim_play_check3.png");
+    std::fs::write(&img_path, TINY_PNG).expect("写入测试图片");
+
+    let handle = launch_fake_agent_with_env(
+        SCRIPT_READ_IMAGE_LIVE,
+        None,
+        BTreeMap::from([(
+            FAKE_IMAGE_ENV.to_string(),
+            img_path.to_string_lossy().into_owned(),
+        )]),
+    );
+    let mut state = crate::acp_session::AcpSessionState::default();
+    for event in collect_events_until(&handle, connection_settled) {
+        let _ = crate::acp_session::apply_event(&mut state, event);
+    }
+    handle
+        .cmd_tx
+        .send_blocking(ConversationCommand::Prompt {
+            text: "看图".to_string(),
+            images: Vec::new(),
+        })
+        .expect("发 prompt");
+    for event in collect_events_until(&handle, |event| {
+        event.ends_turn() || matches!(event, ConversationEvent::Fatal(_))
+    }) {
+        let _ = crate::acp_session::apply_event(&mut state, event);
+    }
+    let _ = handle.cmd_tx.send_blocking(ConversationCommand::Shutdown);
+
+    let expected_b64 = base64::engine::general_purpose::STANDARD.encode(TINY_PNG);
+    let has_image = state.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            crate::acp_chat::AcpEntry::ToolCall {
+                kind: crate::acp_chat::ToolKind::Read,
+                status: crate::acp_chat::ToolCallStatus::Completed,
+                output,
+                ..
+            } if output.iter().any(|part| matches!(
+                part,
+                crate::acp_chat::ToolOutputPart::Image(img)
+                    if img.mime == "image/png" && img.data_b64 == expected_b64
+            ))
+        )
+    });
+    assert!(
+        has_image,
+        "无 content 的实时图片 read 应按磁盘路径回填 ToolOutputPart::Image：{:?}",
+        state.entries()
+    );
+}
+
+#[test]
+fn replayed_image_read_without_content_is_hydrated_from_disk() {
+    use base64::Engine as _;
+
+    let dir = tempfile::tempdir().expect("创建临时目录");
+    let img_path = dir.path().join("sim_play_live.png");
+    std::fs::write(&img_path, TINY_PNG).expect("写入测试图片");
+
+    let handle = launch_fake_agent_with_env(
+        SCRIPT_READ_IMAGE_REPLAY,
+        Some("session-from-disk"),
+        BTreeMap::from([(
+            FAKE_IMAGE_ENV.to_string(),
+            img_path.to_string_lossy().into_owned(),
+        )]),
+    );
+    let mut state = crate::acp_session::AcpSessionState::default();
+    for event in collect_events_until(&handle, connection_settled) {
+        let _ = crate::acp_session::apply_event(&mut state, event);
+    }
+    let _ = handle.cmd_tx.send_blocking(ConversationCommand::Shutdown);
+
+    let expected_b64 = base64::engine::general_purpose::STANDARD.encode(TINY_PNG);
+    let has_image = state.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            crate::acp_chat::AcpEntry::ToolCall {
+                kind: crate::acp_chat::ToolKind::Read,
+                status: crate::acp_chat::ToolCallStatus::Completed,
+                output,
+                ..
+            } if output.iter().any(|part| matches!(
+                part,
+                crate::acp_chat::ToolOutputPart::Image(img)
+                    if img.mime == "image/png" && img.data_b64 == expected_b64
+            ))
+        )
+    });
+    assert!(
+        has_image,
+        "无 content 的历史重放图片 read 应按磁盘路径回填 ToolOutputPart::Image：{:?}",
+        state.entries()
+    );
+}
+
+/// `agy acp` 1.5.14 等 agent 会在 `LoadSessionResponse` 返回后继续推送剩余历史更新。
+/// 连接层必须等这批异步重放流安静后再发 `HistoryReplayFinished` 和 `Ready`，
+/// 否则守护会提前开启动闸并把新用户消息插到旧回合中间。
+#[test]
+fn post_load_async_replay_finishes_before_history_replay_finished() {
+    let handle = launch_fake_agent(SCRIPT_ASYNC_REPLAY, Some("session-from-disk"));
+    let events = collect_events_until(&handle, connection_settled);
+    let _ = handle.cmd_tx.send_blocking(ConversationCommand::Shutdown);
+
+    let mut state = crate::acp_session::AcpSessionState::default();
+    let mut seen = Vec::new();
+    for event in events {
+        let name = event_name(&event);
+        if name != "other" {
+            seen.push(name);
+        }
+        let _ = crate::acp_session::apply_event(&mut state, event);
+    }
+
+    let position = |name: &str| seen.iter().position(|entry| *entry == name);
+    let finished = position("Finished").unwrap_or_else(|| panic!("没有收尾信号：{seen:?}"));
+    let ready = position("Ready").unwrap_or_else(|| panic!("没有 Ready：{seen:?}"));
+    let last_agent = seen
+        .iter()
+        .rposition(|entry| *entry == "Agent")
+        .unwrap_or_else(|| panic!("响应后的重放正文没送达：{seen:?}"));
+    assert!(
+        last_agent < finished && finished < ready,
+        "响应后异步到达的重放正文也必须全部先于 HistoryReplayFinished 和 Ready：{seen:?}"
+    );
+    assert_eq!(
+        state.entries().len(),
+        2,
+        "重放完成后应完整包含旧问旧答：{:?}",
+        state.entries()
+    );
+    assert!(
+        matches!(
+            &state.entries()[1],
+            crate::acp_chat::AcpEntry::Assistant { text, thought: false }
+                if text == "早先的回答前半早先的回答后半"
+        ),
+        "响应后的两段历史正文应完整合进旧回答：{:?}",
+        state.entries()
+    );
+}
+
+/// `session/set_config_option` 响应回来时，线序上更早到达的 `session/update` 必须先于
+/// `ConfigOptions` 进事件通道，否则守护看到配置确认后开闸发新消息，会把迟到正文挤到新消息后面。
+#[test]
+fn updates_arriving_before_set_config_response_precede_config_options() {
+    let handle = launch_fake_agent(SCRIPT_CONFIG_ORDER, None);
+    let (seen, _) = collect_until(&handle, connection_settled);
+    assert!(seen.contains(&"Ready"), "握手没成功：{seen:?}");
+
+    handle
+        .cmd_tx
+        .send_blocking(ConversationCommand::SetConfigOption {
+            config_id: "mode".to_string(),
+            value: ConfigValue::Select("auto".to_string()),
+        })
+        .expect("发 SetConfigOption");
+    let events = collect_events_until(&handle, |event| {
+        matches!(
+            event,
+            ConversationEvent::ConfigOptions(_) | ConversationEvent::Fatal(_)
+        )
+    });
+    let _ = handle.cmd_tx.send_blocking(ConversationCommand::Shutdown);
+
+    let agent_pos = events.iter().position(|event| {
+        matches!(
+            event,
+            ConversationEvent::AgentChunk { text, thought: false, .. }
+                if text == "配置确认前的正文"
+        )
+    });
+    let config_pos = events
+        .iter()
+        .position(|event| matches!(event, ConversationEvent::ConfigOptions(_)));
+    assert!(
+        matches!((agent_pos, config_pos), (Some(a), Some(c)) if a < c),
+        "配置响应前到达的更新必须先于 ConfigOptions 送达：agent={agent_pos:?} config={config_pos:?}"
     );
 }

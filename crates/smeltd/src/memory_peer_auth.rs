@@ -93,8 +93,14 @@ pub(crate) fn require_session_process(
     }
 }
 
+/// 智能体会话的进程：各会话的 agent 进程、ACP 终端进程，加会话宿主替 Pi 跑命令的组长。
 fn agent_ancestor_pids(acp_sessions: &AcpSessions) -> HashSet<u32> {
-    let mut agent_pids = HashSet::new();
+    let mut agent_pids: HashSet<u32> = smelt_core::background_tasks::agent_task_groups()
+        .into_iter()
+        .collect();
+    for (pid, _) in smelt_core::acp_terminal::terminal_owner_sessions() {
+        agent_pids.insert(pid);
+    }
     for (id, slot) in acp_sessions.snapshot() {
         let Some(Some(roots)) = acp_sessions.with_current(&id, &slot, |session| {
             acp_runtime_alive(session).then(|| session_roots(session))
@@ -106,6 +112,51 @@ fn agent_ancestor_pids(acp_sessions: &AcpSessions) -> HashSet<u32> {
         }
     }
     agent_pids
+}
+
+/// 沿进程树向上查调用方属于哪个活跃 ACP 会话（供 `smelt peer` CLI 兜底鉴权）。
+/// 来源永远由内核 `peer_pid` 进程树决定，不信命令行参数。
+pub(crate) fn caller_session_id(acp_sessions: &AcpSessions, peer_pid: u32) -> Option<String> {
+    let mut owners = std::collections::HashMap::new();
+    for (pid, sid) in smelt_core::background_tasks::agent_task_group_sessions() {
+        owners.insert(pid, sid);
+    }
+    for (pid, sid) in smelt_core::acp_terminal::terminal_owner_sessions() {
+        owners.insert(pid, sid);
+    }
+    for (id, slot) in acp_sessions.snapshot() {
+        let Some(Some(roots)) = acp_sessions.with_current(&id, &slot, |session| {
+            acp_runtime_alive(session).then(|| session_roots(session))
+        }) else {
+            continue;
+        };
+        if let Some(pid) = roots.agent_pid {
+            owners.insert(pid, id);
+        }
+    }
+    resolve_owner_session_with(peer_pid, &owners, parent_pid)
+}
+
+fn resolve_owner_session_with(
+    peer_pid: u32,
+    owners: &std::collections::HashMap<u32, String>,
+    parent_of: impl Fn(u32) -> Option<u32>,
+) -> Option<String> {
+    if owners.is_empty() {
+        return None;
+    }
+    let mut pid = peer_pid;
+    for _ in 0..64 {
+        if let Some(session_id) = owners.get(&pid) {
+            return Some(session_id.clone());
+        }
+        let parent = parent_of(pid)?;
+        if parent == 0 || parent == pid {
+            return None;
+        }
+        pid = parent;
+    }
+    None
 }
 
 /// `agent.memory.approve` / `delete`：对端不能是任何活跃智能体会话进程或其子孙。
@@ -138,7 +189,7 @@ pub(crate) fn authorize_memory_mutation(
 ) -> Result<(), ControlError> {
     use crate::devices::Principal;
     match principal {
-        Principal::Device(_) => Ok(()),
+        Principal::Device(_) | Principal::Peer { .. } => Ok(()),
         Principal::Unpaired(_) => Err(denied("unpaired devices cannot adopt or delete memory")),
         Principal::Local => {
             if allow_missing_peer && peer_pid.is_none() {
@@ -516,5 +567,30 @@ mod tests {
         assert!(authorize_memory_mutation(&sessions, &local, Some(7), true, false).is_ok());
         assert!(authorize_memory_mutation(&sessions, &paired, None, false, false).is_ok());
         assert!(authorize_memory_mutation(&sessions, &unpaired, None, true, false).is_err());
+    }
+
+    #[test]
+    fn resolve_owner_session_walks_process_ancestry_and_rejects_outsiders() {
+        let mut owners = std::collections::HashMap::new();
+        owners.insert(100, "acp-codex".to_string());
+        owners.insert(200, "acp-claude".to_string());
+        let parent_of = |pid: u32| match pid {
+            102 => Some(101),
+            101 => Some(100),
+            100 => Some(1),
+            201 => Some(200),
+            200 => Some(1),
+            300 => Some(1),
+            _ => None,
+        };
+        assert_eq!(
+            resolve_owner_session_with(102, &owners, parent_of).as_deref(),
+            Some("acp-codex")
+        );
+        assert_eq!(
+            resolve_owner_session_with(201, &owners, parent_of).as_deref(),
+            Some("acp-claude")
+        );
+        assert_eq!(resolve_owner_session_with(300, &owners, parent_of), None);
     }
 }

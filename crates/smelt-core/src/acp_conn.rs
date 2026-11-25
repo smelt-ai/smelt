@@ -14,6 +14,8 @@
 
 pub use smelt_model::acp_conn::*;
 
+mod read_image;
+
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -28,9 +30,10 @@ use agent_client_protocol::v1::schema::{
     ClientSessionCapabilities, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
     CreateTerminalRequest, CreateTerminalResponse, ElicitationAcceptAction, ElicitationAction,
     ElicitationCapabilities, ElicitationContentValue, ElicitationFormCapabilities, ElicitationMode,
-    ElicitationPropertySchema, ElicitationSchema, ElicitationUrlCapabilities,
+    ElicitationPropertySchema, ElicitationSchema, ElicitationUrlCapabilities, EnvVariable,
     FileSystemCapabilities, ImageContent, Implementation, InitializeRequest, KillTerminalRequest,
-    KillTerminalResponse, LoadSessionRequest, MultiSelectItems, NewSessionRequest, Plan,
+    KillTerminalResponse, LoadSessionRequest, McpServer, McpServerStdio, MultiSelectItems,
+    NewSessionRequest, Plan,
     PlanCapabilities, PlanEntry, PlanEntryPriority, PlanEntryStatus, PlanUpdate, PlanUpdateContent,
     PromptRequest, PromptResponse, ReadTextFileRequest, ReadTextFileResponse,
     ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
@@ -86,8 +89,12 @@ pub struct ConversationLaunch {
     /// `occurrence` 与 `ConversationCommand::Rewind` 同语义：在 agent 的可分叉
     /// 列表里按文本配对，`occurrence` 是同文本消息中的第几条（从 0 数起）。
     pub fork_cut: Option<AcpForkCut>,
-    /// 这个 Pi 会话的跨对话请求。来源会话绑在闭包里。非 Pi 会话是 `None`。
+    /// 这个会话的跨对话请求。来源会话绑在闭包里。自动化会话是 `None`。
     pub peer_handler: Option<crate::background_tasks::PeerRequestHandler>,
+    /// 供非 Pi ACP 经 `mcpServers` 启动内置 stdio MCP Server（`smeltd --peer-mcp`）的可执行路径。
+    pub peer_mcp_command: Option<std::path::PathBuf>,
+    /// 收到该会话 MCP 进程握手时置为 true（决定 `<peer-message>` 引导用工具还是 CLI）。
+    pub peer_mcp_connected: Option<Arc<AtomicBool>>,
     /// 这次拉起的 agent 不许用的工具，Claude 权限规则的写法（`Edit`、`Bash(git push:*)`）。
     /// 由 agent 自己的权限引擎执行，任何权限模式下都生效。只有 Claude 适配器认；非空时
     /// 别的 agent 起不来，不悄悄放开跑（见 [`supports_disallowed_tools`]）。
@@ -111,21 +118,42 @@ pub enum AfterRewind {
 ///
 /// 协议要的就是 base64 + mime，所以在进这条通道前就编码好——连接线程不碰
 /// GPUI 的图片类型，`acp.rs 不许引 gpui` 那条底线在这里同样成立。
+/// 回车插进当前回合，还是 ⌥Enter 排到本轮之后。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputLane {
+    Steering,
+    FollowUp,
+}
+
+/// 插话 / 排队的那条最后去了哪。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QueuedInputOutcome {
+    /// provider 空着，这条直接开了新一轮。
+    StartedTurn,
+    /// 被扩展命令或输入处理器接走，没有模型回合。
+    Handled,
+    /// provider 拒收（没模型、没登录等），原文要回输入框。
+    Rejected(String),
+}
+
 /// UI → 连接线程的指令。
 pub enum ConversationCommand {
-    /// 发一轮 prompt。调用方负责确保同一 session 不并发发送多个 turn。
+    /// 发一轮 prompt，必须自成一轮。调用方负责确保同一 session 不并发发送多个 turn；
+    /// 驱动发现回合还在跑就按拒收报回（`PromptNotAccepted`），不改写成插话。
     /// `images` 空 = 纯文本那条老路径。
     Prompt {
         text: String,
         images: Vec<PromptImage>,
     },
-    /// 把一条消息插进**正在跑**的 turn。只有 `ConversationHandle::supports_mid_turn_input`
-    /// 为真的驱动才会收到它；调用方不得用它开新回合。
+    /// 回车：插进正在跑的回合；provider 已经空了就开新一轮。由驱动交给 provider
+    /// 原子地判断，结果用 `QueuedInputSettled` 报回。只有
+    /// `ConversationHandle::supports_mid_turn_input` 为真的驱动才会收到它。
     Steer {
         text: String,
         images: Vec<PromptImage>,
     },
-    /// 等当前回合完全结束后再送。只有 `supports_native_queue` 的驱动会处理。
+    /// ⌥Enter：排到当前回合之后；provider 已经空了就开新一轮，同 `Steer`。
+    /// 只有 `supports_native_queue` 的驱动会处理。
     FollowUp {
         text: String,
         images: Vec<PromptImage>,
@@ -219,6 +247,12 @@ impl std::fmt::Display for ConversationRestoreFailure {
 }
 
 const ACP_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+/// `session/load` 响应后等待异步重放流安静的窗口。
+/// ACP 规范要求重放先于响应，但部分 agent（如 `agy acp` 1.5.14）会在返回
+/// `LoadSessionResponse` 后继续由后台协程推送剩余历史 `session/update`，且没有
+/// 显式重放结束标记。
+const POST_LOAD_REPLAY_QUIET_WINDOW: Duration = Duration::from_millis(250);
+const POST_LOAD_REPLAY_MAX_WAIT: Duration = Duration::from_secs(15);
 
 async fn wait_for_acp_request<T, F>(
     request: F,
@@ -408,6 +442,14 @@ pub enum ConversationEvent {
     PromptQueue {
         steering: Vec<String>,
         follow_up: Vec<String>,
+    },
+    /// 一条 `Steer` / `FollowUp` 没进 provider 的队列，宿主要把输入框上方那条撤掉，
+    /// 按 `outcome` 落到别处。
+    QueuedInputSettled {
+        lane: InputLane,
+        text: String,
+        images: Vec<PromptImage>,
+        outcome: QueuedInputOutcome,
     },
     /// `clear_queue` 之后要把原文还回输入框。`revision` 单调增加；客户端处理后
     /// 发送 `AcknowledgeComposerRestore`，服务端清掉文本和图片，但保留 revision 水位。
@@ -1669,6 +1711,11 @@ enum SessionStart {
     UnsupportedLoad,
 }
 
+fn rejects_mcp_servers(error: &agent_client_protocol::Error) -> bool {
+    error.code == agent_client_protocol::ErrorCode::INVALID_PARAMS
+        || error.message.to_ascii_lowercase().contains("mcp")
+}
+
 fn select_session_start(has_session_id: bool, load_supported: bool) -> SessionStart {
     match (has_session_id, load_supported) {
         (false, _) => SessionStart::New,
@@ -1795,7 +1842,9 @@ async fn run_connection(
     let perm_last_line = Arc::clone(&last_stdout_line);
     let elicit_last_line = Arc::clone(&last_stdout_line);
     let handshake_complete = Arc::clone(&handshake_watchdog.completed);
-    let terminals = Arc::new(crate::acp_terminal::AcpTerminals::new());
+    let terminals = Arc::new(crate::acp_terminal::AcpTerminals::for_session(
+        launch.sid.clone(),
+    ));
     let term_tx = spawn_terminal_event_forwarder(channels.event_tx.clone());
     let session_cwd = Some(std::path::PathBuf::from(&cwd));
     let result =
@@ -2039,6 +2088,41 @@ async fn run_connection(
             // 收图能力：三条恢复路径共用（bool 是 Copy，多次读没问题）。
             let supports_image = init.agent_capabilities.prompt_capabilities.image;
 
+            // 非 Pi ACP 会话：若带了 `peer_handler` 和 `smeltd` 可执行路径，起会话专属
+            // `PeerSocket` 并经标准 ACP `mcpServers` 注入 `smeltd --peer-mcp`。
+            let (mut peer_socket, peer_mcp_servers) =
+                match (&launch.peer_handler, &launch.peer_mcp_command) {
+                    (Some(handler), Some(command)) => {
+                        let connected = launch
+                            .peer_mcp_connected
+                            .clone()
+                            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+                        match crate::background_tasks::PeerSocket::start(
+                            Arc::clone(handler),
+                            connected,
+                        ) {
+                            Ok(socket) => {
+                                let server = McpServer::Stdio(
+                                    McpServerStdio::new("smelt-peers", command.clone())
+                                        .args(vec!["--peer-mcp".to_string()])
+                                        .env(vec![EnvVariable::new(
+                                            crate::background_tasks::SMELT_PEER_SOCK_ENV,
+                                            socket.socket_path().to_string_lossy().into_owned(),
+                                        )]),
+                                );
+                                (Some(socket), vec![server])
+                            }
+                            Err(error) => {
+                                eprintln!("[acp] 启动会话 peer 套接字失败，降级为无 MCP：{error}");
+                                (None, Vec::new())
+                            }
+                        }
+                    }
+                    _ => (None, Vec::new()),
+                };
+
+            let mut read_images =
+                read_image::ReadImageHydrator::new(std::path::PathBuf::from(&cwd));
             // 冷恢复只有一条路径：`session/load`。agent 的 session store 是历史
             // 唯一持久化来源，load 重放的更新负责重建 smeltd 的 entries 投影。
             // `session/resume` 不重放历史，不能拿来冷恢复；smeltd 仍持有完整活体
@@ -2067,16 +2151,41 @@ async fn run_connection(
                     // session 路由，Claude 在响应前同步重放的历史不会被丢掉。
                     // 清空事件必须排在请求之前，不能等到 Ready 再清。
                     let _ = channels.event_tx.try_send(ConversationEvent::HistoryReplayStarted);
-                    let mut load_request = LoadSessionRequest::new(sid.clone(), cwd.clone());
-                    if let Some(meta) = claude_session_meta(launch, true) {
-                        load_request = load_request.meta(meta);
-                    }
-                    match connection
-                        .load_session_from(load_request)
+                    let build_load_request = |with_mcp: bool| {
+                        let mut req = LoadSessionRequest::new(sid.clone(), cwd.clone());
+                        if with_mcp && !peer_mcp_servers.is_empty() {
+                            req = req.mcp_servers(peer_mcp_servers.clone());
+                        }
+                        if let Some(meta) = claude_session_meta(launch, true) {
+                            req = req.meta(meta);
+                        }
+                        req
+                    };
+                    let loaded_res = match connection
+                        .load_session_from(build_load_request(true))
                         .block_task()
                         .start_session()
                         .await
                     {
+                        Err(error)
+                            if !peer_mcp_servers.is_empty() && rejects_mcp_servers(&error) =>
+                        {
+                            eprintln!(
+                                "[acp] session/load 拒收 mcpServers（{error}），去掉 mcpServers 重试"
+                            );
+                            drop(peer_socket.take());
+                            let _ = channels
+                                .event_tx
+                                .try_send(ConversationEvent::HistoryReplayStarted);
+                            connection
+                                .load_session_from(build_load_request(false))
+                                .block_task()
+                                .start_session()
+                                .await
+                        }
+                        other => other,
+                    };
+                    match loaded_res {
                         Ok(SessionSetup {
                             mut session,
                             response: loaded,
@@ -2087,25 +2196,30 @@ async fn run_connection(
                                 loaded.modes.as_ref(),
                                 &channels.event_tx,
                             );
-                            // 响应前的重放在会话自己的队列里，还没进事件通道。先排空，
-                            // 再收尾：草稿要等正文全部到齐才一次性换上；先发收尾会让
-                            // 草稿以空正文提交，随后的历史被当成实时消息。
+                            // `session/load` RPC 已返回，握手阶段完成；后面的重放排空自带
+                            // 静默窗口与总时长上限，不能让大历史重放撞上握手看门狗。
+                            signal_acp_handshake_complete(&handshake_complete);
+                            // 响应前的重放在会话自己的队列里，还没进事件通道；部分 agent
+                            // 也会在响应后继续异步推送剩余历史。先排空并等重放流安静，
+                            // 再收尾：草稿要等正文全部到齐才一次性换上；提前发收尾会让
+                            // 守护过早开闸，把新消息插进旧回合中间。
                             drain_loaded_replay(
                                 &mut session,
                                 &channels.event_tx,
                                 &mut ReplayCursor::default(),
+                                &mut read_images,
                             )
                             .await?;
                             let _ = channels
                                 .event_tx
                                 .try_send(ConversationEvent::HistoryReplayFinished);
-                            signal_acp_handshake_complete(&handshake_complete);
                             return drive_session(
                                 session,
                                 channels,
                                 ReadyKind::ResumedWithReplay,
                                 supports_image,
                                 in_flight_rpc,
+                                read_images,
                             )
                             .await;
                         }
@@ -2122,17 +2236,38 @@ async fn run_connection(
 
             // 走官方 builder 就能同时拿到 session/new 的响应（模型档位、模式）
             // 和 session 路由。
-            let mut new_request = NewSessionRequest::new(std::path::Path::new(&cwd));
-            if let Some(meta) = claude_session_meta(launch, false) {
-                new_request = new_request.meta(meta);
-            }
+            let build_new_request = |with_mcp: bool| {
+                let mut req = NewSessionRequest::new(std::path::Path::new(&cwd));
+                if with_mcp && !peer_mcp_servers.is_empty() {
+                    req = req.mcp_servers(peer_mcp_servers.clone());
+                }
+                if let Some(meta) = claude_session_meta(launch, false) {
+                    req = req.meta(meta);
+                }
+                req
+            };
             let SessionSetup {
                 session, response, ..
-            } = connection
-                .build_session_from(new_request)
+            } = match connection
+                .build_session_from(build_new_request(true))
                 .block_task()
                 .start_session()
-                .await?;
+                .await
+            {
+                Err(error) if !peer_mcp_servers.is_empty() && rejects_mcp_servers(&error) => {
+                    eprintln!(
+                        "[acp] session/new 拒收 mcpServers（{error}），去掉 mcpServers 重试"
+                    );
+                    drop(peer_socket.take());
+                    connection
+                        .build_session_from(build_new_request(false))
+                        .block_task()
+                        .start_session()
+                        .await?
+                }
+                other => other?,
+            };
+            let _keep_peer_socket = peer_socket;
             publish_session_surface(
                 response.config_options.as_deref(),
                 response.modes.as_ref(),
@@ -2145,6 +2280,7 @@ async fn run_connection(
                 ReadyKind::Fresh,
                 supports_image,
                 in_flight_rpc,
+                read_images,
             )
             .await
         })
@@ -2159,13 +2295,13 @@ async fn run_connection(
     result
 }
 
-/// 把 `session/load` 响应前已经入队的重放翻译进投影，并记下当前这一轮的形状。
-///
-/// 只取已经就绪的更新。`poll_once` 拿不到就停，不会把还没到的消息从队列里丢掉。
+/// 把 `session/load` 响应前已经入队的重放翻译进投影，并等待响应后可能仍在异步推送的
+/// 历史更新安静下来。
 async fn drain_loaded_replay<S: SessionDrive>(
     session: &mut S,
     event_tx: &smol::channel::Sender<ConversationEvent>,
     replay: &mut ReplayCursor,
+    read_images: &mut read_image::ReadImageHydrator,
 ) -> Result<(), agent_client_protocol::Error> {
     loop {
         let ready = {
@@ -2177,11 +2313,38 @@ async fn drain_loaded_replay<S: SessionDrive>(
             Some(update) => {
                 let update = update?;
                 observe_replay(&update, replay);
-                translate_update(update, event_tx).await?;
+                translate_update(update, event_tx, read_images).await?;
             }
-            None => return Ok(()),
+            None => break,
         }
     }
+
+    let deadline = Instant::now() + POST_LOAD_REPLAY_MAX_WAIT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let quiet = remaining.min(POST_LOAD_REPLAY_QUIET_WINDOW);
+        let next = {
+            let read = session.read_update();
+            smol::future::race(async move { Some(read.await) }, async move {
+                // 轮询例外：ACP 在 session/load 响应后没有异步重放结束事件，只能以静默窗口作为读取上限；周期 250ms，上限 15s。
+                smol::Timer::after(quiet).await;
+                None
+            })
+            .await
+        };
+        match next {
+            Some(update) => {
+                let update = update?;
+                observe_replay(&update, replay);
+                translate_update(update, event_tx, read_images).await?;
+            }
+            None => break,
+        }
+    }
+    Ok(())
 }
 
 /// `session/load` 重放里，最后一条用户消息之后的内容。用来判断交接里的
@@ -2323,6 +2486,7 @@ async fn drive_session<S: SessionDrive>(
     // 握手时 agent 声明的收图能力（promptCapabilities.image），随 Ready 转给 UI。
     supports_image: bool,
     in_flight_rpc: Arc<AtomicUsize>,
+    mut read_images: read_image::ReadImageHydrator,
 ) -> Result<(), agent_client_protocol::Error> {
     let _ = channels.event_tx.try_send(ConversationEvent::Ready {
         session_id: session.session_id().clone(),
@@ -2367,7 +2531,7 @@ async fn drive_session<S: SessionDrive>(
                 // 实测（假 LLM 端点跑真回合）抖 5 次都没能触发乱序——窗口很
                 // 窄，但正文落到「已结束」回合之后是用户可见且极难查的故障，
                 // 不值得用「测不出来」当作不存在。
-                drain_ready_updates(&mut session, &channels.event_tx).await?;
+                drain_ready_updates(&mut session, &channels.event_tx, &mut read_images).await?;
                 let event = match settled {
                     Ok(stop_reason) => ConversationEvent::TurnEnded(stop_reason),
                     Err(msg) => ConversationEvent::TurnFailed(msg),
@@ -2376,14 +2540,16 @@ async fn drive_session<S: SessionDrive>(
                 turn_active = false;
                 flush_pending_config_options(
                     &mut pending_config_options,
-                    session.connection().clone(),
-                    session.session_id().clone(),
+                    &mut session,
                     &channels.event_tx,
                     &in_flight_rpc,
+                    &mut read_images,
                 )
-                .await;
+                .await?;
             }
             Next::Cmd(Some(ConversationCommand::Prompt { text, images })) => {
+                // 发起新一轮 prompt 前先排空队列里已经到达的更新，避免迟到通知落进新回合。
+                drain_ready_updates(&mut session, &channels.event_tx, &mut read_images).await?;
                 // 文本和带图走同一条自己拼请求的路径。曾经纯文本走 SDK 的
                 // `send_prompt`，但它的回调对错误响应做 `?`：agent 回一个
                 // JSON-RPC error（比如「没配 API key」）会让回调任务失败，
@@ -2467,31 +2633,31 @@ async fn drive_session<S: SessionDrive>(
                     );
                 } else {
                     send_config_option(
-                        session.connection().clone(),
-                        session.session_id().clone(),
+                        &mut session,
                         config_id,
                         value,
                         &channels.event_tx,
                         Arc::clone(&in_flight_rpc),
+                        &mut read_images,
                     )
-                    .await;
+                    .await?;
                 }
             }
             Next::Update(update) => {
                 let update = (*update)?;
                 let completes_prompt = matches!(&update, SessionMessage::PromptResponse(_));
-                translate_update(update, &channels.event_tx).await?;
+                translate_update(update, &channels.event_tx, &mut read_images).await?;
                 if completes_prompt {
                     turn_active = false;
                     finish_rpc(&in_flight_rpc);
                     flush_pending_config_options(
                         &mut pending_config_options,
-                        session.connection().clone(),
-                        session.session_id().clone(),
+                        &mut session,
                         &channels.event_tx,
                         &in_flight_rpc,
+                        &mut read_images,
                     )
-                    .await;
+                    .await?;
                 }
             }
         }
@@ -2504,6 +2670,7 @@ async fn drive_session<S: SessionDrive>(
 async fn drain_ready_updates<S: SessionDrive>(
     session: &mut S,
     event_tx: &smol::channel::Sender<ConversationEvent>,
+    read_images: &mut read_image::ReadImageHydrator,
 ) -> Result<(), agent_client_protocol::Error> {
     loop {
         let ready = {
@@ -2512,7 +2679,7 @@ async fn drain_ready_updates<S: SessionDrive>(
             smol::future::poll_once(read).await
         };
         match ready {
-            Some(update) => translate_update(update?, event_tx).await?,
+            Some(update) => translate_update(update?, event_tx, read_images).await?,
             None => return Ok(()),
         }
     }
@@ -2627,21 +2794,26 @@ fn config_option_wire_value(value: ConfigValue) -> SessionConfigOptionValue {
 
 /// 发送一个已经到安全边界的配置变更。响应里的全量 config options 是唯一可信
 /// 的确认，不能在客户端收到点击时直接把 current value 当成已生效。
-async fn send_config_option(
-    connection: ConnectionTo<Agent>,
-    session_id: SessionId,
+async fn send_config_option<S: SessionDrive>(
+    session: &mut S,
     config_id: String,
     value: ConfigValue,
     event_tx: &smol::channel::Sender<ConversationEvent>,
     in_flight_rpc: Arc<AtomicUsize>,
-) {
+    read_images: &mut read_image::ReadImageHydrator,
+) -> Result<(), agent_client_protocol::Error> {
     let _guard = RpcCompletionGuard(in_flight_rpc);
+    let connection = session.connection().clone();
     let req = SetSessionConfigOptionRequest::new(
-        session_id,
+        session.session_id().clone(),
         SessionConfigId::new(config_id),
         config_option_wire_value(value),
     );
-    match connection.send_request(req).block_task().await {
+    let response = connection.send_request(req).block_task().await;
+    // 配置请求阻塞等待响应期间，agent 线序上更早发出的 session/update 会留在
+    // update 队列里；先排空再发配置确认，避免确认事件超车唤醒守护开闸。
+    drain_ready_updates(session, event_tx, read_images).await?;
+    match response {
         Ok(resp) => {
             publish_config_options(Some(&resp.config_options), event_tx);
         }
@@ -2653,27 +2825,29 @@ async fn send_config_option(
             ));
         }
     }
+    Ok(())
 }
 
-async fn flush_pending_config_options(
+async fn flush_pending_config_options<S: SessionDrive>(
     pending: &mut Vec<(String, ConfigValue)>,
-    connection: ConnectionTo<Agent>,
-    session_id: SessionId,
+    session: &mut S,
     event_tx: &smol::channel::Sender<ConversationEvent>,
     in_flight_rpc: &Arc<AtomicUsize>,
-) {
+    read_images: &mut read_image::ReadImageHydrator,
+) -> Result<(), agent_client_protocol::Error> {
     let pending = std::mem::take(pending);
     for (config_id, value) in pending {
         send_config_option(
-            connection.clone(),
-            session_id.clone(),
+            session,
             config_id,
             value,
             event_tx,
             Arc::clone(in_flight_rpc),
+            read_images,
         )
-        .await;
+        .await?;
     }
+    Ok(())
 }
 
 /// 握手时声明的 client 能力。声明了就必须实现对应方法，否则 agent 一调用就会挂起。
@@ -2855,6 +3029,7 @@ fn session_title_update(title: MaybeUndefined<String>) -> Option<Option<String>>
 async fn translate_update(
     message: SessionMessage,
     event_tx: &smol::channel::Sender<ConversationEvent>,
+    read_images: &mut read_image::ReadImageHydrator,
 ) -> Result<(), agent_client_protocol::Error> {
     match message {
         SessionMessage::Message(dispatch) => {
@@ -2878,8 +3053,12 @@ async fn translate_update(
                                     .or(notif_parent),
                             })
                         }
-                        SessionUpdate::ToolCall(tc) => Some(ConversationEvent::ToolCall(tc)),
-                        SessionUpdate::ToolCallUpdate(u) => {
+                        SessionUpdate::ToolCall(mut tc) => {
+                            read_images.hydrate_tool_call(&mut tc);
+                            Some(ConversationEvent::ToolCall(tc))
+                        }
+                        SessionUpdate::ToolCallUpdate(mut u) => {
+                            read_images.hydrate_tool_call_update(&mut u);
                             Some(ConversationEvent::ToolCallUpdate(u))
                         }
                         SessionUpdate::UserMessageChunk(chunk) => match chunk.content {
@@ -4292,7 +4471,8 @@ fn run_acp_cli_install(plan: &AcpCliInstallPlan, search_path: &str) -> Result<()
 /// 注释）。顺序：login PATH 在前（用户显式配的优先），标准安装位在后兜底；
 /// 重复目录无所谓，resolve 取第一个命中即止。
 pub(crate) fn extended_search_path() -> String {
-    extend_search_path(crate::login_env::login_path(), dirs::home_dir().as_deref())
+    let path = crate::login_env::login_path();
+    extend_search_path(&path, dirs::home_dir().as_deref())
 }
 
 fn extend_search_path(login: &str, home: Option<&std::path::Path>) -> String {
@@ -4794,6 +4974,8 @@ mod tool_restriction_tests {
             fork_session_id: None,
             fork_cut: None,
             peer_handler: None,
+            peer_mcp_command: None,
+            peer_mcp_connected: None,
             disallowed_tools: disallowed_tools
                 .iter()
                 .map(|rule| rule.to_string())

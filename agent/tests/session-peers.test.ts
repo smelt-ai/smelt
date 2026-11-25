@@ -111,7 +111,35 @@ describe("Pi session peers", () => {
 		expect(text).toContain("pm-2（message）：已交给对方");
 		expect(text).toContain("pm-3（message）：没送到：Smelt 桌面没开");
 		expect(text).toContain("acp-c 〈部署〉 还没打开");
-		expect(sessionListText([])).toContain("没有别的 Pi 对话");
+		expect(sessionListText([])).toContain("没有别的对话");
+		const withAgents = sessionListText(
+			[{ id: "acp-codex", title: "重构", agent: "codex", agentLabel: "Codex", state: "idle" }],
+			[],
+			[{ id: "codex", kind: "codex", label: "Codex", category: "engine" }],
+		);
+		expect(withAgents).toContain("acp-codex 〈重构〉 [Codex] 空闲");
+		expect(withAgents).toContain("可用于 session_spawn 的智能体");
+		expect(withAgents).toContain("- codex（Codex）");
+	});
+
+	test("conversations on other machines name the machine, and unreachable machines are listed last", () => {
+		const text = sessionListText(
+			[
+				{
+					id: "rt-cc/acp-x",
+					title: "巡检",
+					state: "idle",
+					machine: "cc",
+					sent: [{ id: "pm-4", kind: "task", status: "forwarded" }],
+				},
+			],
+			[{ name: "cc" }, { name: "gpu", error: "timed out" }],
+		);
+		expect(text).toContain("rt-cc/acp-x 〈巡检〉 @ cc 空闲");
+		expect(text).toContain("pm-4（task）：已交给那台机器");
+		expect(text).toContain("机器「gpu」没问到：timed out");
+		expect(text).not.toContain("机器「cc」");
+		expect(sessionListText([], [{ name: "gpu", error: "offline" }])).toContain("机器「gpu」没问到");
 	});
 
 	test("a send or spawn is only accepted: it names the target, does not wait, and mentions the bounce", () => {

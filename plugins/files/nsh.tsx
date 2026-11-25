@@ -29,6 +29,7 @@ import {
   openUrl,
   pathFileName,
   pathJoin,
+  pathParent,
   pathStartsWith,
   pathStripPrefix,
   pathStyle,
@@ -75,6 +76,7 @@ import {
   treeEntries,
   treeRoots,
 } from "./model.js";
+import { FileContentCache } from "./cache.js";
 import { clampTreeWidth, createFilesStore } from "./store.js";
 
 const VIEW_ID = "smelt.files/main";
@@ -85,6 +87,8 @@ const NOTIFY_CMD = "smelt.app/notify";
 const SEND_TEXT_CMD = "smelt.sessions/send-text";
 
 const SEARCH_DEBOUNCE_MS = 180;
+/** 远程拉大文件、大图（经中继最大 20 MB）比一般调用慢，和手机端一样给两分钟。 */
+const FILE_OPEN_TIMEOUT_MS = 120_000;
 const PREVIEW_DEBOUNCE_MS = 80;
 
 interface ProjectRef {
@@ -107,10 +111,20 @@ interface GitCacheEntry {
   stale: boolean;
 }
 
+/** 读文件到哪一步：读完前、读不出来都画在内容区，不让预览或编辑器显示成一片空白。 */
+type OpenFileStatus =
+  | { kind: "loading" }
+  | { kind: "ready" }
+  | { kind: "unreadable"; message: string; canRetry: boolean };
+
 interface OpenFileState {
   id: number;
   machine: string | null;
   path: string;
+  status: OpenFileStatus;
+  /** 项目外的文件经链接打开时默认只读防误改，点「解锁编辑」才能改。 */
+  readOnly: boolean;
+  outsideProject: boolean;
   content: string;
   savedContent: string;
   savedVersion: string | null;
@@ -191,6 +205,9 @@ const gitGeneration = new Map<string, number>();
 
 const watches = new Set<string>();
 const parked = new Map<string, ParkedProjectUi>();
+let focusEditorOnMount = false;
+/** 打开过的文本 / 图片内容，跨项目、跨切换复用。 */
+const fileCache = new FileContentCache();
 
 let nextFileId = 1;
 let pendingReveal: string | null = null;
@@ -228,8 +245,16 @@ function currentRoots(): string[] {
 }
 
 function isDirty(of: OpenFileState | null): boolean {
-  if (!of || !of.readable || isPreviewableImage(of.path)) return false;
+  if (!of || of.readOnly || !of.readable || of.status.kind !== "ready") return false;
+  if (isPreviewableImage(of.path)) return false;
   return of.content !== of.savedContent;
+}
+
+/** 文件在不在当前项目（含钉住的目录）里：只有树那台机器上的、落在某个根下的才算。 */
+function isInsideProject(machine: string | null, path: string): boolean {
+  if (machine !== treeMachine()) return false;
+  const ops = styleOpsFor(machine);
+  return currentRoots().some((root) => ops.startsWith(path, root));
 }
 
 function getDirMap(machine: string | null): Map<string, DirListing> {
@@ -660,11 +685,16 @@ function viewFileOn(machine: string | null, path: string, line: number | null = 
   openFileNow(machine, path, line);
 }
 
+/**
+ * 真正打开。项目外的文件默认只读。缓存里有就先秒开，再带版本问运行时变没变；没有就显示加载中。
+ * `gotoLine` 从 1 数：带行号（`#L10`、搜索命中）直接落到源码行，不进预览。
+ */
 function openFileNow(machine: string | null, path: string, gotoLine: number | null = null) {
   if (machine === treeMachine()) {
     revealInTree(path);
   }
   const id = nextFileId++;
+  const outsideProject = !isInsideProject(machine, path);
   const defaultPreview = isMarkdownPath(path) && gotoLine == null;
   if (previewTimer) {
     clearTimeout(previewTimer);
@@ -673,114 +703,160 @@ function openFileNow(machine: string | null, path: string, gotoLine: number | nu
   pendingSwitchAfterSave = null;
   unsavedDialog.set(null);
 
+  const cached = fileCache.get(machine, path);
+  const hadCached = cached != null;
   openFile.set({
     id,
     machine,
     path,
-    content: "",
-    savedContent: "",
-    savedVersion: null,
-    imageDataUri: null,
+    status: hadCached ? { kind: "ready" } : { kind: "loading" },
+    readOnly: outsideProject,
+    outsideProject,
+    content: cached?.kind === "text" ? cached.text : "",
+    savedContent: cached?.kind === "text" ? cached.text : "",
+    savedVersion: cached?.version ?? null,
+    imageDataUri: cached?.kind === "image" ? cached.dataUri : null,
     saveError: null,
-    readable: false,
+    readable: cached?.kind === "text",
     conflictPending: false,
     reloadInflight: false,
     reloadAgain: false,
     preview: defaultPreview,
-    previewSource: "",
+    previewSource: cached?.kind === "text" ? cached.text : "",
     pendingGotoLine: gotoLine,
   });
   persistCurrentProject();
 
-  void call(machine, "file.open", { path })
-    .then((result: any) => {
-      const content = result?.content;
-      if (!content || typeof content !== "object") {
+  const unreadable = (message: string, canRetry = false) => {
+    fileCache.remove(machine, path);
+    patchOpenFileById(id, (of) => ({
+      ...of,
+      status: { kind: "unreadable", message, canRetry },
+      imageDataUri: null,
+      readable: false,
+    }));
+  };
+
+  void callDetail(
+    machine,
+    "file.open",
+    { path, if_none_match: cached?.version ?? undefined },
+    FILE_OPEN_TIMEOUT_MS,
+  ).then((outcome) => {
+    if (!findOpenFileById(id)) return;
+    if (!outcome.ok) {
+      const message = t("unreadable.error", { error: outcome.message });
+      // 运行时说读不了（没有这个文件、没权限）：缓存作废。连不上：有缓存就接着看缓存。
+      if (outcome.code != null) {
+        unreadable(message, true);
+      } else if (!hadCached) {
         patchOpenFileById(id, (of) => ({
           ...of,
-          content: t("unreadable.error", { error: "invalid response" }),
+          status: { kind: "unreadable", message, canRetry: true },
           readable: false,
         }));
+      }
+      return;
+    }
+    const content = outcome.value?.content;
+    if (!content || typeof content !== "object") {
+      unreadable(t("unreadable.error", { error: "invalid response" }), true);
+      return;
+    }
+    if (content.kind === "not_modified") return;
+    if (content.kind === "text") {
+      const body = String(content.text ?? "");
+      const version = typeof content.version === "string" ? content.version : null;
+      if (version != null) fileCache.put(machine, path, { kind: "text", text: body, version });
+      const found = findOpenFileById(id);
+      if (!found) return;
+      if (hadCached && isDirty(found.file)) {
+        patchOpenFileById(id, (of) => ({ ...of, saveError: t("save.changed_elsewhere") }));
         return;
       }
-      if (content.kind === "text") {
-        const body = String(content.text ?? "");
-        const version = typeof content.version === "string" ? content.version : null;
-        patchOpenFileById(id, (of) => ({
-          ...of,
-          content: body,
-          savedContent: body,
-          savedVersion: version,
-          previewSource: body,
-          readable: true,
-          saveError: null,
-        }));
-        const cur = openFile();
-        if (cur && cur.id === id && gotoLine != null) {
-          queueMicrotask(() => {
-            if (activeEditorFileId === id) {
-              jumpEditorToLine(gotoLine);
-              patchOpenFileById(id, (of) => ({ ...of, pendingGotoLine: null }));
-            }
-          });
-        }
-        return;
-      }
-      if (content.kind === "image") {
-        const mime = imageMimeForPath(path);
-        const b64 = typeof content.data === "string" ? content.data : "";
-        if (mime && b64) {
-          patchOpenFileById(id, (of) => ({
-            ...of,
-            imageDataUri: `data:${mime};base64,${b64}`,
-            readable: false,
-          }));
-        } else {
-          patchOpenFileById(id, (of) => ({
-            ...of,
-            content: t("unreadable.image"),
-            readable: false,
-          }));
-        }
-        return;
-      }
-      if (content.kind === "binary") {
-        patchOpenFileById(id, (of) => ({
-          ...of,
-          content: t("unreadable.binary"),
-          readable: false,
-        }));
-        return;
-      }
-      if (content.kind === "too_large") {
-        const sizeMb = (Number(content.size ?? 0) / (1024 * 1024)).toFixed(1);
-        const limitMb = Math.floor(Number(content.limit ?? 0) / (1024 * 1024));
-        patchOpenFileById(id, (of) => ({
-          ...of,
-          content: t("unreadable.too_large", { size: sizeMb, limit: limitMb }),
-          readable: false,
-        }));
-        return;
-      }
+      if (hadCached && found.file.savedVersion === version && found.file.readable) return;
       patchOpenFileById(id, (of) => ({
         ...of,
-        content: t("unreadable.binary"),
-        readable: false,
+        status: { kind: "ready" },
+        content: body,
+        savedContent: body,
+        savedVersion: version,
+        previewSource: body,
+        imageDataUri: null,
+        readable: true,
+        saveError: null,
       }));
-    })
-    .catch((error: any) => {
+      const cur = openFile();
+      if (!hadCached && cur && cur.id === id && gotoLine != null) {
+        queueMicrotask(() => {
+          if (activeEditorFileId === id) {
+            jumpEditorToLine(gotoLine);
+            patchOpenFileById(id, (of) => ({ ...of, pendingGotoLine: null }));
+          }
+        });
+      }
+      return;
+    }
+    if (content.kind === "image") {
+      const mime = imageMimeForPath(path);
+      const b64 = typeof content.data === "string" ? content.data : "";
+      if (!mime || !b64) {
+        unreadable(t("unreadable.image"));
+        return;
+      }
+      const dataUri = `data:${mime};base64,${b64}`;
+      const version = typeof content.version === "string" ? content.version : null;
+      fileCache.put(machine, path, { kind: "image", dataUri, version });
       patchOpenFileById(id, (of) => ({
         ...of,
-        content: t("unreadable.error", { error: error?.message ?? String(error) }),
+        status: { kind: "ready" },
+        imageDataUri: dataUri,
+        savedVersion: version,
         readable: false,
       }));
-    });
+      return;
+    }
+    if (content.kind === "too_large") {
+      const sizeMb = (Number(content.size ?? 0) / (1024 * 1024)).toFixed(1);
+      const limitMb = Math.floor(Number(content.limit ?? 0) / (1024 * 1024));
+      unreadable(t("unreadable.too_large", { size: sizeMb, limit: limitMb }));
+      return;
+    }
+    unreadable(t("unreadable.binary"));
+  });
+}
+
+/** 项目外的文件点「解锁编辑」：能改能存，切回源码并把焦点给编辑器。 */
+function unlockOpenFile() {
+  const cur = openFile();
+  if (!cur || !cur.readOnly) return;
+  const wasPreview = cur.preview;
+  openFile.set({ ...cur, readOnly: false, saveError: null, preview: false });
+  // 从预览切回时编辑器要等下一次挂上，在 editorRef 里再给焦点。
+  if (wasPreview || !activeEditorApi) {
+    focusEditorOnMount = true;
+  } else {
+    activeEditorApi.focus?.();
+  }
+}
+
+/** 读失败点重试：不看缓存，重新向运行时拉。 */
+function retryOpenFile() {
+  const cur = openFile();
+  if (!cur) return;
+  fileCache.remove(cur.machine, cur.path);
+  openFileNow(cur.machine, cur.path, null);
 }
 
 async function saveOpenFile() {
   const cur = openFile();
   if (!cur) return;
   if (isPreviewableImage(cur.path)) return;
+  if (cur.readOnly) {
+    openFile.set({ ...cur, saveError: t("save.read_only") });
+    pendingSwitchAfterSave = null;
+    return;
+  }
   if (!cur.readable) {
     openFile.set({ ...cur, saveError: t("save.unreadable") });
     pendingSwitchAfterSave = null;
@@ -807,6 +883,9 @@ async function saveOpenFile() {
   if (outcome.ok) {
     const version =
       typeof outcome.value?.version === "string" ? outcome.value.version : cur.savedVersion;
+    if (version != null) {
+      fileCache.put(cur.machine, cur.path, { kind: "text", text: content, version });
+    }
     patchOpenFileById(id, (of) => ({
       ...of,
       savedContent: content,
@@ -845,18 +924,30 @@ function onOpenFileProjectChanged(machine: string | null, root: string) {
 
 function reloadOpenFile() {
   const cur = openFile();
-  if (!cur || !cur.readable) return;
+  if (!cur || !cur.readable || cur.status.kind !== "ready") return;
   const id = cur.id;
   const machine = cur.machine;
   const path = cur.path;
   openFile.set({ ...cur, reloadInflight: true, reloadAgain: false });
 
-  void call(machine, "file.open", { path })
+  void call(
+    machine,
+    "file.open",
+    { path, if_none_match: cur.savedVersion ?? undefined },
+    FILE_OPEN_TIMEOUT_MS,
+  )
     .then((result: any) => {
       const found = findOpenFileById(id);
       if (!found) return;
       const again = found.file.reloadAgain;
       const content = result?.content;
+      if (content?.kind === "text" && typeof content.version === "string") {
+        fileCache.put(machine, path, {
+          kind: "text",
+          text: String(content.text ?? ""),
+          version: content.version,
+        });
+      }
       patchOpenFileById(id, (of) => {
         const next: OpenFileState = { ...of, reloadInflight: false, reloadAgain: false };
         if (
@@ -947,6 +1038,7 @@ async function confirmDelete() {
   const ops = styleOpsFor(machine);
   try {
     await call(machine, "fs.delete", { path: dlg.path, trash: true });
+    fileCache.removeUnder(machine, dlg.path, (path, base) => ops.startsWith(path, base));
     // 清掉已删除路径对应的打开文件、选中和展开缓存。
     const cur = openFile();
     if (cur && cur.machine === machine && ops.startsWith(cur.path, dlg.path)) {
@@ -1379,6 +1471,47 @@ function Placeholder(props: { text: string }) {
   );
 }
 
+/** 读不出来：居中说明，传输或运行时出错时给重试。 */
+function UnreadableBody() {
+  const look = currentTheme;
+  const status = computed(() => {
+    const st = openFile()?.status;
+    return st?.kind === "unreadable" ? st : null;
+  });
+  return (
+    <View
+      style={{
+        flex: 1,
+        minWidth: 0,
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 12,
+        paddingLeft: 16,
+        paddingRight: 16,
+      }}
+    >
+      <Text
+        style={{
+          maxWidth: 420,
+          fontSize: look().type.ui_medium.size,
+          lineHeight: look().type.ui_medium.line_height,
+          fontWeight: look().type.ui_medium.weight,
+          color: look().palette.muted,
+          textAlign: "center",
+        }}
+      >
+        {status()?.message ?? ""}
+      </Text>
+      <If when={Boolean(status()?.canRetry)}>
+        <SmeltButton small={true} label={t("retry")} onPress={retryOpenFile} />
+      </If>
+    </View>
+  );
+}
+
 // ---- 主视图 ----
 
 export function Main() {
@@ -1420,14 +1553,33 @@ export function Main() {
     return segs.map((seg, ix) => ({ ...seg, isLast: ix === lastIx }));
   });
 
+  // 项目外的文件、或者只剩一段（看不出在哪）时，最后一段悬停给出完整路径。
+  const showFullPathTip = computed(() => {
+    const of = openFile();
+    return of != null && (of.outsideProject || breadcrumbs().length === 1);
+  });
+
+  const openFileReady = computed(() => openFile()?.status.kind === "ready");
+
   const canPreviewMarkdown = computed(() => {
     const of = openFile();
-    return of != null && isMarkdownPath(of.path);
+    return of != null && openFileReady() && isMarkdownPath(of.path);
   });
 
   const canOpenInBrowser = computed(() => {
     const of = openFile();
-    return of != null && of.machine == null && isHtmlPath(of.path);
+    return of != null && openFileReady() && of.machine == null && isHtmlPath(of.path);
+  });
+
+  const canUnlock = computed(() => {
+    const of = openFile();
+    return of != null && openFileReady() && of.readOnly && of.imageDataUri == null && !isPreviewableImage(of.path);
+  });
+
+  // 预览里的相对链接按文件所在目录、在文件那台机器上解析。
+  const previewCwd = computed(() => {
+    const of = openFile();
+    return of ? pathParent(pathStyle(of.machine), of.path) : null;
   });
 
   const showingMarkdownPreview = computed(() => {
@@ -1448,7 +1600,7 @@ export function Main() {
     const api = activeEditorApi;
     const hasSelection = Boolean(api && String(api.selectedText?.() ?? "").trim().length > 0);
     const cur = openFile();
-    const readOnly = !cur || !cur.readable;
+    const readOnly = !cur || !cur.readable || cur.readOnly;
     void Menu.popup(
       [
         {
@@ -1544,6 +1696,20 @@ export function Main() {
                         if (!onTreeMachine()) return;
                         revealFromBreadcrumb(seg().path, !isLast());
                       }}
+                      tooltip={
+                        isLast() && showFullPathTip() ? (
+                          <SmeltTooltip>
+                            <Text
+                              style={{
+                                fontSize: look().type.text_xsmall.size,
+                                color: look().palette.text,
+                              }}
+                            >
+                              {openFile()?.path ?? ""}
+                            </Text>
+                          </SmeltTooltip>
+                        ) : undefined
+                      }
                       style={{
                         paddingLeft: 6,
                         paddingRight: 6,
@@ -1620,6 +1786,16 @@ export function Main() {
                 onPress={openFileInBrowser}
               />
             </If>
+            <If when={canUnlock()}>
+              <SmeltButton
+                quiet={true}
+                small={true}
+                icon="icons/pencil.svg"
+                label={t("readonly.edit")}
+                tooltip={t("readonly.tooltip")}
+                onPress={unlockOpenFile}
+              />
+            </If>
             <If when={canPreviewMarkdown()}>
               <SmeltButton
                 quiet={true}
@@ -1664,68 +1840,76 @@ export function Main() {
               }}
             >
               <If when={openFile() != null} else={<Placeholder text={t("title")} />}>
-                <If
-                  when={Boolean(openFile()?.imageDataUri)}
-                  else={
+                <If when={openFile()?.status.kind !== "loading"} else={<Placeholder text={t("loading")} />}>
+                  <If when={openFile()?.status.kind !== "unreadable"} else={<UnreadableBody />}>
                     <If
-                      when={showingMarkdownPreview()}
+                      when={Boolean(openFile()?.imageDataUri)}
                       else={
-                        <SmeltEditor
-                          editorRef={(api: any) => {
-                            activeEditorApi = api;
-                            const cur = openFile();
-                            activeEditorFileId = cur?.id ?? 0;
-                            if (api && cur?.pendingGotoLine != null) {
-                              jumpEditorToLine(cur.pendingGotoLine);
-                              patchOpenFileById(cur.id, (of) => ({ ...of, pendingGotoLine: null }));
-                            }
-                          }}
-                          value={openFile()?.content ?? ""}
-                          language={openFile() ? editorLanguageForPath(openFile()!.path) : "text"}
-                          readOnly={!openFile()?.readable}
-                          lineNumbers={true}
-                          softWrap={false}
-                          accessibilityLabel={openFile()?.path ?? ""}
-                          onChange={({ value }: { value: string }) => {
-                            const cur = openFile();
-                            if (!cur || !cur.readable) return;
-                            if (cur.content === value) return;
-                            openFile.set({ ...cur, content: value });
-                            schedulePreviewRefresh();
-                          }}
-                          onContextMenu={handleEditorContextMenu}
-                        />
+                        <If
+                          when={showingMarkdownPreview()}
+                          else={
+                            <SmeltEditor
+                              editorRef={(api: any) => {
+                                activeEditorApi = api;
+                                const cur = openFile();
+                                activeEditorFileId = cur?.id ?? 0;
+                                if (api && focusEditorOnMount) {
+                                  focusEditorOnMount = false;
+                                  api.focus?.();
+                                }
+                                if (api && cur?.pendingGotoLine != null) {
+                                  jumpEditorToLine(cur.pendingGotoLine);
+                                  patchOpenFileById(cur.id, (of) => ({ ...of, pendingGotoLine: null }));
+                                }
+                              }}
+                              value={openFile()?.content ?? ""}
+                              language={openFile() ? editorLanguageForPath(openFile()!.path) : "text"}
+                              readOnly={!openFile()?.readable || Boolean(openFile()?.readOnly)}
+                              lineNumbers={true}
+                              softWrap={false}
+                              accessibilityLabel={openFile()?.path ?? ""}
+                              onChange={({ value }: { value: string }) => {
+                                const cur = openFile();
+                                if (!cur || !cur.readable || cur.readOnly) return;
+                                if (cur.content === value) return;
+                                openFile.set({ ...cur, content: value });
+                                schedulePreviewRefresh();
+                              }}
+                              onContextMenu={handleEditorContextMenu}
+                            />
+                          }
+                        >
+                          <Scroll style={{ flex: 1, width: "100%", height: "100%" }}>
+                            <View style={{ padding: 14, width: "100%", minWidth: 0 }}>
+                              <SmeltMarkdown
+                                markdown={openFile()?.previewSource ?? ""}
+                                cwd={previewCwd()}
+                                machine={openFile()?.machine ?? null}
+                              />
+                            </View>
+                          </Scroll>
+                        </If>
                       }
                     >
-                      <Scroll style={{ flex: 1, width: "100%", height: "100%" }}>
-                        <View style={{ padding: 14, width: "100%", minWidth: 0 }}>
-                          <SmeltMarkdown
-                            markdown={openFile()?.previewSource ?? ""}
-                            cwd={currentProject()?.root ?? null}
-                            machine={openFile()?.machine ?? null}
-                          />
-                        </View>
-                      </Scroll>
+                      <View
+                        style={{
+                          flex: 1,
+                          width: "100%",
+                          height: "100%",
+                          padding: 16,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          overflow: "hidden",
+                        }}
+                      >
+                        <Image
+                          src={openFile()?.imageDataUri ?? ""}
+                          style={{ width: "100%", height: "100%", objectFit: "contain" }}
+                        />
+                      </View>
                     </If>
-                  }
-                >
-                  <View
-                    style={{
-                      flex: 1,
-                      width: "100%",
-                      height: "100%",
-                      padding: 16,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      overflow: "hidden",
-                    }}
-                  >
-                    <Image
-                      src={openFile()?.imageDataUri ?? ""}
-                      style={{ width: "100%", height: "100%", objectFit: "contain" }}
-                    />
-                  </View>
+                  </If>
                 </If>
               </If>
             </View>

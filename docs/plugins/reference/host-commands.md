@@ -62,6 +62,7 @@ await run("smelt.app/notify", { subtitle: "Build finished", body: "All tests pas
 | `smelt.app/reconnect-machine` | `{ machine }` | | 马上重连，不等退避 |
 | `smelt.app/upgrade-machine` | `{ machine }` | | 请那台机器把运行时升到这个桌面的版本。进度看 `connections()` |
 | `smelt.app/set-machine-relay` | `{ machine, relay }` | | 改连它用的中继。`relay` 空串是公共中继 |
+| `smelt.app/set-machine-access` | `{ machine, agents?, inbound? }` | | 改它的权限，只改给了的。`agents`：这台电脑上的智能体能不能经本机运行时用它；`inbound`：它能不能连进来操作这台电脑（不能时只能回这边发过去的消息）。`connections()` 里这两项是 `null` 的机器还没迁到本机运行时，改不了 |
 | `smelt.app/refresh-connections` | 无 | | 重读各台机器的连接情况。看连接状态的界面露出来时调一次，**不要定时调** |
 
 机器的状态从 `machineMeta()`、`connections()` 读，见[宿主状态：机器](../host-state.md#机器)。

@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn local_provider_runs_with_login_path() {
         let sp = LocalSubprocess;
-        assert_eq!(child_path(&sp, &[]), crate::login_env::login_path());
+        assert_eq!(child_path(&sp, &[]), &*crate::login_env::login_path());
     }
 
     /// 显式传入的 env 是调用方的明确意图（如 GIT_OPTIONAL_LOCKS），

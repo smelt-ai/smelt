@@ -29,14 +29,14 @@ pub fn split_env_assignment(token: &str) -> Option<(&str, &str)> {
     Some((name, &token[eq_pos + 1..]))
 }
 
-/// 展开值开头的 `~`（`~` 或 `~/...`）成 home 目录——环境变量的值不会像 shell
+/// 展开值开头的 `~`（`~`、`~/...` 或 `~\...`）成 home 目录——环境变量的值不会像 shell
 /// 命令行那样被自动展开，子进程 `getenv()` 拿到的就是字面量 `~/.claude-quant`；
 /// 用户在设置里手填 `CLAUDE_CONFIG_DIR=~/.claude-quant` 是期望它跟 shell 里
 /// `export` 出来的效果一样，所以这里替用户展开一次，不能指望每家 agent 自己
 /// 都做了防御性展开。
 pub fn expand_tilde(value: &str) -> String {
     if let Some(rest) = value.strip_prefix('~')
-        && (rest.is_empty() || rest.starts_with('/'))
+        && (rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\'))
         && let Some(home) = dirs::home_dir()
     {
         return format!("{}{}", home.display(), rest);
@@ -126,6 +126,10 @@ mod tests {
         assert_eq!(
             expand_tilde("~/.claude-quant"),
             format!("{}/.claude-quant", home.display())
+        );
+        assert_eq!(
+            expand_tilde(r"~\.claude-quant"),
+            format!(r"{}\.claude-quant", home.display())
         );
         assert_eq!(expand_tilde("~"), home.display().to_string());
         assert_eq!(expand_tilde("~foo/bar"), "~foo/bar");

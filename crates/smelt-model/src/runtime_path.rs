@@ -100,6 +100,15 @@ impl PathStyle {
             Self::Windows => clean_windows(path),
         }
     }
+
+    /// 两条路径是否指同一个位置。规范化多余分隔符、`.`、`..` 和末尾分隔符后再比；
+    /// Windows 不区分 ASCII 大小写，且抹平 `/`、`\` 与 `\\?\` 逐字前缀。
+    pub fn same_path(self, a: &str, b: &str) -> bool {
+        match self {
+            Self::Posix => same_path_posix(a, b),
+            Self::Windows => same_path_windows(a, b),
+        }
+    }
 }
 
 fn join_posix(base: &str, child: &str) -> String {
@@ -354,6 +363,49 @@ fn clean_windows(path: &str) -> String {
     render_windows_parts(parsed.prefix, parsed.has_root, &stack)
 }
 
+fn same_path_posix(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return a == b;
+    }
+    clean_posix(a) == clean_posix(b)
+}
+
+fn strip_windows_verbatim(path: &str) -> String {
+    let normalized = path.replace('/', "\\");
+    let Some(rest) = normalized.strip_prefix(r"\\?\") else {
+        return normalized;
+    };
+    if rest
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"UNC\"))
+    {
+        format!(r"\\{}", &rest[4..])
+    } else if rest.len() >= 2
+        && rest.as_bytes()[0].is_ascii_alphabetic()
+        && rest.as_bytes()[1] == b':'
+    {
+        rest.to_string()
+    } else {
+        normalized
+    }
+}
+
+fn is_windows_root_relative(normalized: &str) -> bool {
+    normalized.starts_with('\\') && !normalized.starts_with(r"\\")
+}
+
+fn same_path_windows(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return a == b;
+    }
+    let a = strip_windows_verbatim(a);
+    let b = strip_windows_verbatim(b);
+    if is_windows_root_relative(&a) != is_windows_root_relative(&b) {
+        return false;
+    }
+    clean_windows(&a).eq_ignore_ascii_case(&clean_windows(&b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::PathStyle::{Posix, Windows};
@@ -544,5 +596,33 @@ mod tests {
                 .as_deref(),
             Some(r"sub\file.rs")
         );
+    }
+
+    #[test]
+    fn posix_same_path_normalizes_separators_dots_and_keeps_case() {
+        assert!(Posix.same_path("/a/b/", "/a/b"));
+        assert!(Posix.same_path("/a/./c/../b", "/a/b"));
+        assert!(Posix.same_path("/", "///"));
+        assert!(Posix.same_path("", ""));
+        assert!(!Posix.same_path("/a/B", "/a/b"));
+        assert!(!Posix.same_path("/a/b", "a/b"));
+        assert!(!Posix.same_path("/a/b", "/a/b-old"));
+        assert!(!Posix.same_path(".", ""));
+    }
+
+    #[test]
+    fn windows_same_path_handles_slashes_case_verbatim_unc_and_roots() {
+        assert!(Windows.same_path(r"E:\AI\smelt", "E:/AI/smelt/"));
+        assert!(Windows.same_path(r"e:\ai\SMELT", r"E:\AI\smelt"));
+        assert!(Windows.same_path(r"\\?\E:\AI\smelt", r"E:\AI\smelt"));
+        assert!(Windows.same_path("//?/e:/ai/sub/../smelt", r"E:\AI\smelt"));
+        assert!(Windows.same_path(r"\\?\UNC\srv\share\dir\", r"\\srv\share\dir"));
+        assert!(Windows.same_path(r"\\srv\share\dir", "//SRV/Share/Dir/"));
+        assert!(Windows.same_path(r"E:\", "e:/"));
+        assert!(Windows.same_path("", ""));
+        assert!(!Windows.same_path(r"\a\b", r"a\b"));
+        assert!(!Windows.same_path(r"E:\AI\smelt", r"D:\AI\smelt"));
+        assert!(!Windows.same_path(r"E:\AI\smelt", r"E:\AI\smelt-old"));
+        assert!(!Windows.same_path(r"\", ""));
     }
 }

@@ -12393,6 +12393,7 @@ dependencies = [
  "iana-time-zone",
  "ignore",
  "libc",
+ "percent-encoding",
  "rayon",
  "reqwest",
  "rusqlite",

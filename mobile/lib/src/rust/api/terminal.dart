@@ -4,6 +4,7 @@
 // ignore_for_file: invalid_use_of_internal_member, unused_import, unnecessary_import
 
 import '../frb_generated.dart';
+import 'conversation.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
@@ -51,6 +52,31 @@ void terminalInput({
   runtimeId: runtimeId,
   sessionId: sessionId,
   data: data,
+);
+
+/// 按顺序发送一组不与邻居合并的离散输入段（例如逐张粘贴图片路径、正文、回车）。
+/// 全空忽略，没有附着这个会话时报错。
+void terminalInputSegments({
+  required String runtimeId,
+  required String sessionId,
+  required List<String> segments,
+}) => RustLib.instance.api.crateApiTerminalTerminalInputSegments(
+  runtimeId: runtimeId,
+  sessionId: sessionId,
+  segments: segments,
+);
+
+/// 把一张图片上传暂存到运行时临时目录，返回那台机器上的绝对路径。
+///
+/// 会阻塞网络 IO，放到 FRB 工作线程池执行（不能标 `#[frb(sync)]`）。
+Future<String> terminalStageImage({
+  required String runtimeId,
+  required String sessionId,
+  required ImageInput image,
+}) => RustLib.instance.api.crateApiTerminalTerminalStageImage(
+  runtimeId: runtimeId,
+  sessionId: sessionId,
+  image: image,
 );
 
 /// 断开附着：关掉连接（运行时据此进入几何租约的宽限期），不再重连，流随之结束。

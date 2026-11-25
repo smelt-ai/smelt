@@ -21,9 +21,15 @@ export const UPGRADE_NAME = "upgrade";
 export const RENAME_NAME = "rename";
 export const EDIT_RELAY_NAME = "edit-relay";
 export const REMOVE_NAME = "remove";
+/** 翻转本机智能体能不能经本机运行时使用这台机器（`smelt --machine`）。 */
+export const AGENT_ACCESS_NAME = "agent-access";
+/** 翻转这台机器能不能连进来操作这台电脑。 */
+export const INBOUND_NAME = "inbound";
 
 export const RECONNECT = `${OWNER}/${RECONNECT_NAME}`;
 export const UPGRADE = `${OWNER}/${UPGRADE_NAME}`;
 export const RENAME = `${OWNER}/${RENAME_NAME}`;
 export const EDIT_RELAY = `${OWNER}/${EDIT_RELAY_NAME}`;
 export const REMOVE = `${OWNER}/${REMOVE_NAME}`;
+export const AGENT_ACCESS = `${OWNER}/${AGENT_ACCESS_NAME}`;
+export const INBOUND = `${OWNER}/${INBOUND_NAME}`;

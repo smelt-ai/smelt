@@ -1,6 +1,14 @@
 // 状态写成字、要不要提醒、右键菜单项构造：只看数据，不碰界面，好测。
 
-import { EDIT_RELAY, RECONNECT, REMOVE, RENAME, UPGRADE } from "./contract.js";
+import {
+  AGENT_ACCESS,
+  EDIT_RELAY,
+  INBOUND,
+  RECONNECT,
+  REMOVE,
+  RENAME,
+  UPGRADE,
+} from "./contract.js";
 
 /**
  * 走哪条路、多慢。
@@ -137,6 +145,17 @@ export function machine_menu_items(connections, textFn) {
     }
     if (conn.can_upgrade) {
       items.push(make("menu.upgrade", "icons/arrow-up.svg", UPGRADE));
+    }
+    // 本机智能体经 `smelt --machine` 用它，默认不许；文字说的是点了会怎样。null 是还没迁到
+    // 本机运行时的旧直连，没有这项。
+    if (typeof conn.agent_access === "boolean") {
+      const key = conn.agent_access ? "menu.disallow_agents" : "menu.allow_agents";
+      items.push(make(key, "icons/bot.svg", AGENT_ACCESS));
+    }
+    // 它能不能连进来操作这台电脑，默认不许；不许时它只能回这边发过去的消息。
+    if (typeof conn.inbound === "boolean") {
+      const key = conn.inbound ? "menu.disallow_inbound" : "menu.allow_inbound";
+      items.push(make(key, "icons/arrow-down.svg", INBOUND));
     }
     items.push(make("menu.rename", "icons/square-pen.svg", RENAME));
     items.push(make("menu.relay", "icons/globe.svg", EDIT_RELAY));

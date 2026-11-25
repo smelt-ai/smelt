@@ -46,6 +46,7 @@ import {
   rowKey,
   rowLabels,
   sessionWhen,
+  fallbackSource,
   sourceTabs,
   submittedTitle,
   summaryFromWire,
@@ -315,6 +316,28 @@ function refresh(forceShown = false) {
     }
   }
   ensureList(project, current.kind, current.profile_id, CURRENT_MAX_AGE_MS);
+  fallbackSourceIfEmpty();
+}
+
+/** 选中的来源读完是空的，换到第一个有历史的来源。智能体 space 只有一家，不换。 */
+function fallbackSourceIfEmpty() {
+  if (spaceEngineId() != null) return;
+  const project = currentProject();
+  if (!project) return;
+  const current = pickedSource();
+  const lists = listsMap();
+  const keyOf = (kind: string, profileId: string | null) =>
+    listKey(project.machine, kind, profileId, project.root);
+  const currentKey = keyOf(current.kind, current.profile_id);
+  const currentLoaded = !inflight.has(currentKey) && lists[currentKey]?.fetchedAt != null;
+  const tabs = sourceTabs(null, profilesFor(project.machine), agentCatalog().history_sources);
+  const next = fallbackSource(
+    tabs,
+    current,
+    currentLoaded,
+    (tab) => (lists[keyOf(tab.kind, tab.profile_id)]?.sessions.length ?? 0) > 0,
+  );
+  if (next) selectSource(next.kind, next.profile_id);
 }
 
 function ensureList(
@@ -360,6 +383,7 @@ function ensureList(
         },
       });
       if (stale) refresh();
+      else fallbackSourceIfEmpty();
     },
     (error: unknown) => {
       inflight.delete(key);

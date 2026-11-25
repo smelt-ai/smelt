@@ -127,7 +127,9 @@ mod memory_peer_auth;
 mod memory_watch;
 #[cfg(target_os = "macos")]
 mod menubar;
+mod peer_mcp;
 mod peer_messages;
+mod peer_nodes;
 mod pi_control;
 mod presence;
 mod push;
@@ -155,6 +157,7 @@ mod terminal_registry;
 mod terminal_resume;
 mod terminal_shell;
 mod terminal_snapshot;
+mod terminal_stage_image;
 mod webhook;
 mod workset_control;
 mod workspace_directory;
@@ -2412,6 +2415,10 @@ fn shutdown_handlers_leave_child_signals_unblocked_and_wake_listener() {
 }
 
 fn main() {
+    // 第三方 ACP 会话经 `mcpServers` 注入的内置 stdio MCP 桥：极速启动、不碰库和守护状态。
+    if std::env::args().nth(1).as_deref() == Some("--peer-mcp") {
+        std::process::exit(peer_mcp::run());
+    }
     // GUI 从 libdispatch 工作线程 posix_spawn 本进程时，会把那套「屏蔽 SIGCHLD」
     // 的线程掩码遗传进来。async-process 靠 SIGCHLD 回收子进程；掩码不清掉，
     // Pi 退出后 status() 永远等不到通知，会话就停在「正在启动」。
@@ -2698,6 +2705,7 @@ fn run_serve_loop(
     thread::spawn(|| {
         smelt_core::managed_runtime::retire_managed_bun();
         smelt_core::pi_mcp::upgrade_preset_pins();
+        terminal_stage_image::cleanup_expired_images();
     });
     thread::spawn(smelt_core::control_skill::remove_legacy_copy);
     #[cfg(target_os = "linux")]
@@ -2900,6 +2908,18 @@ fn apply_interactive_pty_env(cmd: &mut CommandBuilder) {
     }
 }
 
+/// Windows 的终端壳（pwsh / powershell / cmd）不像 Unix login shell 那样启动时
+/// 重读 rc，只会继承父进程快照；启动前先铺入注册表里的最新环境，避免改完环境变量后
+/// 内置终端还要重启 smeltd 才能看到新装的 CLI。
+#[cfg(windows)]
+fn apply_windows_pty_login_env(cmd: &mut CommandBuilder) {
+    let login = smelt_core::login_env::login_environment();
+    for (name, value) in login.iter() {
+        cmd.env(name, value);
+    }
+    cmd.env("PATH", &*smelt_core::login_env::login_path());
+}
+
 /// 内置终端也跟随系统代理（见 `smelt_core::system_proxy_env`），和 agent 起的子进程一致。
 /// shell 起来后会再读 rc，所以「用户配过没有」除了看守护自己的环境，还要看 login shell
 /// 快照：rc 里只配了 `ALL_PROXY` 时补上 `HTTPS_PROXY` 会把它盖掉。
@@ -3054,6 +3074,8 @@ fn spawn_session(
     if let Some(dir) = cwd {
         cmd.cwd(dir);
     }
+    #[cfg(windows)]
+    apply_windows_pty_login_env(&mut cmd);
     apply_interactive_pty_env(&mut cmd);
     apply_system_proxy_pty_env(&mut cmd);
     // 整条 hook 链路的地基：没有它，smelt-notify 没法知道自己在哪个会话里，

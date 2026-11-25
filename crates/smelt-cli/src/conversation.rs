@@ -175,7 +175,7 @@ fn rename(id: &str, title: &str) -> Result<serde_json::Value, String> {
         return Err(t!("conversation.terminal_rename").into_owned());
     };
     let renamed = smelt_client::session_ops::rename_agent_conversation(
-        &smelt_runtime_client::local::local_runtime(),
+        &crate::runtime(),
         &acp.sid,
         title,
     )?;

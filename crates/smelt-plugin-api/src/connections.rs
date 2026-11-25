@@ -41,6 +41,14 @@ pub struct Connection {
     pub can_upgrade: bool,
     /// 能请宿主马上重连（[`RECONNECT_MACHINE`]）：离线或版本对不上。
     pub can_reconnect: bool,
+    /// 这台电脑上的智能体能不能经本机运行时使用它（[`SET_MACHINE_ACCESS`]）。`None` 是
+    /// 还没迁到本机运行时的旧直连机器，没有这个设置。
+    #[serde(default)]
+    pub agent_access: Option<bool>,
+    /// 它能不能连进来操作这台电脑（[`SET_MACHINE_ACCESS`]）。不能时它只能回这边发过去的
+    /// 消息。`None` 同上。
+    #[serde(default)]
+    pub inbound: Option<bool>,
 }
 
 /// 最近一次探测的结果。
@@ -143,6 +151,21 @@ pub struct SetMachineRelay {
     pub machine: RuntimeKey,
     /// 自建 iroh relay 的域名、IP 或 URL；空的是 n0 的公共 relay。
     pub relay: String,
+}
+
+/// 改一台远程机器的权限，只改给了的：`agents` 是这台电脑上的智能体（经 `smelt --machine`、
+/// 会话消息）能不能用它，`inbound` 是它能不能连进来操作这台电脑。都默认不允许。
+pub const SET_MACHINE_ACCESS: Command<SetMachineAccess, ()> =
+    Command::new("smelt.app/set-machine-access");
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetMachineAccess {
+    #[serde(with = "machine_json")]
+    pub machine: RuntimeKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbound: Option<bool>,
 }
 
 /// 有人在看连接状态了：现在重读各台连着的机器走哪条路、多慢（不拨号），离线的叫宿主现在

@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import {
   ADD_MACHINE,
   ADD_MACHINE_NAME,
+  AGENT_ACCESS,
   EDIT_RELAY,
+  INBOUND,
   OWNER,
   RECONNECT,
   REMOVE,
@@ -198,6 +200,29 @@ describe("smelt.machines contract & status", () => {
     ]);
     expect(items.filter((i) => i.machine === "m2").map((i) => i.command)).toEqual([
       RECONNECT,
+      RENAME,
+      EDIT_RELAY,
+      REMOVE,
+    ]);
+  });
+
+  test("迁到本机运行时的机器有两项权限开关，文字说点了会怎样", () => {
+    const items = machine_menu_items(
+      {
+        remotes: [
+          machine(online(), null, { agent_access: false, inbound: true }),
+          machine(online(), null, { machine: "legacy", agent_access: null, inbound: null }),
+        ],
+      },
+      (key) => ({ en: key }),
+    );
+    const far = items.filter((i) => i.machine === "far");
+    expect(far.map((i) => i.command)).toEqual([AGENT_ACCESS, INBOUND, RENAME, EDIT_RELAY, REMOVE]);
+    expect(far.slice(0, 2).map((i) => i.label.en)).toEqual([
+      "menu.allow_agents",
+      "menu.disallow_inbound",
+    ]);
+    expect(items.filter((i) => i.machine === "legacy").map((i) => i.command)).toEqual([
       RENAME,
       EDIT_RELAY,
       REMOVE,

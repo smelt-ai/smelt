@@ -39,6 +39,7 @@ Each design states its status at the top.
 - [`agent-memory.md`](agent-memory.md) — Agent memory. Phase 1 is implemented; Phase 2 and hardening backlog are listed in §12.
 - [`subagents.md`](subagents.md) — Pi subagents as independent entities with persisted child sessions. Implemented; mobile UI pending.
 - [`pi-session-messaging-design.html`](pi-session-messaging-design.html) — Pi↔Pi session messaging (transcript as inbox). P0 is implemented (#55); P1 and P2 are open.
+- [`cross-agent-messaging.md`](cross-agent-messaging.md) — Bidirectional peer messaging across all ACP agents (Pi, Codex, Claude Code, Antigravity, custom profiles) via smeltd bus + ACP `mcpServers` + CLI fallback. Implemented.
 - [`collaboration.md`](collaboration.md) — Multiplayer around a live session. Not started.
 
 ## Product / planning

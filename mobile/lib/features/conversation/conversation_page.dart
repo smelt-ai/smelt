@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
@@ -19,7 +18,7 @@ import '../agents/agent_memory_page.dart';
 import '../agents/automation_run_page.dart';
 import '../files/file_links.dart';
 import '../files/project_files_page.dart';
-import '../../utils/image_processing.dart';
+import '../../utils/pick_images.dart';
 import 'composer.dart';
 import 'conversation_logic.dart';
 import 'conversation_sheets.dart';
@@ -30,10 +29,6 @@ import 'tool_views.dart';
 
 /// 离列表顶端（最早的消息）还剩这么多像素时翻更早的一页。
 const _loadOlderThreshold = 240.0;
-
-/// 一条消息最多带几张图、每张多大。和桌面输入栏一致。
-const _maxImages = 4;
-const _maxImageBytes = 5 * 1024 * 1024;
 
 /// 草稿落盘的防抖。不是动效，只是别每敲一个字就写一次库；离开页面时会立刻补写。
 const _draftDebounce = Duration(seconds: 1);
@@ -621,45 +616,18 @@ class _ConversationPageState extends State<ConversationPage> {
   Future<void> _pickImages() async {
     final l10n = L10n.of(context);
     final messenger = ScaffoldMessenger.maybeOf(context);
-    final remaining = _maxImages - _images.length;
+    final remaining = kMaxComposerImages - _images.length;
     if (remaining <= 0) return;
     try {
-      final files = await _picker.pickMultiImage(
-        limit: remaining,
-        maxWidth: 2048,
-        maxHeight: 2048,
-        imageQuality: 85,
-        requestFullMetadata: false,
-      );
-      var skipped = 0;
-      final picked = <ImageInput>[];
-      for (final file in files.take(remaining)) {
-        var bytes = await file.readAsBytes();
-        var mime = file.mimeType ?? _mimeFromName(file.name);
-        // 相机照片带 EXIF 方向，运行时那边不一定认：在手机上摆正并去掉 EXIF。
-        if (mime == 'image/jpeg' || mime == 'image/heic') {
-          final normalized = await compute(normalizeJpegOrientation, bytes);
-          if (normalized == null) {
-            skipped++;
-            continue;
-          }
-          bytes = normalized;
-          mime = 'image/jpeg';
-        }
-        if (bytes.length > _maxImageBytes) {
-          skipped++;
-          continue;
-        }
-        picked.add(ImageInput(mime: mime, bytes: bytes));
-      }
+      final result = await pickComposerImages(_picker, remaining: remaining);
       if (!mounted) return;
-      if (picked.isNotEmpty) {
-        setState(() => _images.addAll(picked));
+      if (result.images.isNotEmpty) {
+        setState(() => _images.addAll(result.images));
         _markEdited();
       }
-      if (skipped > 0) {
+      if (result.skipped > 0) {
         messenger?.showSnackBar(
-          SnackBar(content: Text(l10n.conversationImagesSkipped(skipped))),
+          SnackBar(content: Text(l10n.conversationImagesSkipped(result.skipped))),
         );
       }
     } catch (error) {
@@ -669,15 +637,6 @@ class _ConversationPageState extends State<ConversationPage> {
         ),
       );
     }
-  }
-
-  static String _mimeFromName(String name) {
-    final lower = name.toLowerCase();
-    if (lower.endsWith('.png')) return 'image/png';
-    if (lower.endsWith('.gif')) return 'image/gif';
-    if (lower.endsWith('.webp')) return 'image/webp';
-    if (lower.endsWith('.heic') || lower.endsWith('.heif')) return 'image/heic';
-    return 'image/jpeg';
   }
 
   void _removeImage(int index) {

@@ -8,7 +8,38 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
+
+/// ACP `terminal/create` 拉起的子进程 PID → 所属 Smelt 会话 id。
+/// 供守护进程在 `smelt peer` CLI 兜底和记忆权限鉴权时把终端子孙归属回对应 ACP 会话。
+static TERMINAL_SESSIONS: LazyLock<Mutex<HashMap<u32, String>>> = LazyLock::new(Default::default);
+
+fn register_terminal_session(pid: u32, session_id: &str) {
+    if pid <= 1 || session_id.is_empty() {
+        return;
+    }
+    TERMINAL_SESSIONS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(pid, session_id.to_string());
+}
+
+fn unregister_terminal_session(pid: u32) {
+    TERMINAL_SESSIONS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(&pid);
+}
+
+/// 当前活着的所有 ACP client 侧终端进程及其所属 Smelt 会话 id。
+pub fn terminal_owner_sessions() -> Vec<(u32, String)> {
+    TERMINAL_SESSIONS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .iter()
+        .map(|(pid, sid)| (*pid, sid.clone()))
+        .collect()
+}
 
 use crate::fs::FileSystem;
 
@@ -67,12 +98,14 @@ struct LiveTerminal {
 
 /// 一个 ACP 连接上的全部 client 侧终端。连接结束时 drop，杀掉还活着的进程。
 pub struct AcpTerminals {
+    session_id: String,
     inner: Mutex<HashMap<String, LiveTerminal>>,
 }
 
 impl Default for AcpTerminals {
     fn default() -> Self {
         Self {
+            session_id: String::new(),
             inner: Mutex::new(HashMap::new()),
         }
     }
@@ -88,6 +121,7 @@ impl Drop for AcpTerminals {
             .map(|term| term.pid)
             .collect();
         for pid in pids {
+            unregister_terminal_session(pid);
             kill_pid(pid);
         }
     }
@@ -96,6 +130,13 @@ impl Drop for AcpTerminals {
 impl AcpTerminals {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn for_session(session_id: String) -> Self {
+        Self {
+            session_id,
+            inner: Mutex::new(HashMap::new()),
+        }
     }
 
     pub fn create(
@@ -143,6 +184,7 @@ impl AcpTerminals {
             ));
         }
         let pid = child.id();
+        register_terminal_session(pid, &self.session_id);
         let stdout = child
             .stdout
             .take()
@@ -192,6 +234,7 @@ impl AcpTerminals {
             .name(format!("smelt-acp-term-wait-{}", &id[..id.len().min(8)]))
             .spawn(move || {
                 let status = child.wait();
+                unregister_terminal_session(pid);
                 smelt_sys::process::release_tree(pid);
                 // 退出码先到，管道里可能还有没读完的输出。等读线程读到 EOF 再定稿，
                 // 否则 `wait_for_exit` 和退出事件会丢掉最后一段。

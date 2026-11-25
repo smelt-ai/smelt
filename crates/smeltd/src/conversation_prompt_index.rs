@@ -77,7 +77,7 @@ fn cut_at(entries: &[AcpEntry], entry_index: usize, side: ForkSide) -> Option<Ac
 }
 
 /// 在会话的条目上跑 `read`（条目和它前面裁掉的条数）。`needs_prefix` 时挂起裁过前缀的会话
-/// 先唤醒。
+/// 先唤醒，正在唤醒重放的等它放完。
 fn with_entries<T>(
     session_id: &str,
     needs_prefix: bool,
@@ -88,15 +88,43 @@ fn with_entries<T>(
     let gone =
         || ControlError::because(ControlErrorCode::NotFound, ControlReason::ConversationGone);
     let slot = acp_sessions.get(session_id).ok_or_else(gone)?;
-    let needs_wake = acp_sessions
+    enum PrefixPrep {
+        None,
+        Wake,
+        WaitReady,
+    }
+    let prep = acp_sessions
         .with_current(session_id, &slot, |session| {
             let reduced = session.reduced.lock();
-            needs_prefix && reduced.entries_base() > 0 && session.idle.is_suspended()
+            if reduced.entries_base() == 0 || !needs_prefix {
+                PrefixPrep::None
+            } else if session.idle.is_suspended() {
+                PrefixPrep::Wake
+            } else if crate::acp_idle::acp_ready_outcome(&reduced).is_none() {
+                PrefixPrep::WaitReady
+            } else {
+                PrefixPrep::None
+            }
         })
         .ok_or_else(gone)?;
-    if needs_wake {
-        crate::acp_idle::wake_suspended_acp_session(session_id, &slot, acp_sessions, subscribers)
+    match prep {
+        PrefixPrep::None => {}
+        PrefixPrep::Wake => {
+            crate::acp_idle::wake_suspended_acp_session(
+                session_id,
+                &slot,
+                acp_sessions,
+                subscribers,
+            )
             .map_err(|error| ControlError::new(ControlErrorCode::OperationFailed, error))?;
+        }
+        PrefixPrep::WaitReady => {
+            crate::acp_idle::wait_for_acp_ready(
+                &slot.value,
+                crate::acp_idle::ACP_WAKE_READY_TIMEOUT,
+            )
+            .map_err(|error| ControlError::new(ControlErrorCode::OperationFailed, error))?;
+        }
     }
     acp_sessions
         .with_current(session_id, &slot, |session| {
