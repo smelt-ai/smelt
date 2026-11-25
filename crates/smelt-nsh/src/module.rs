@@ -13,17 +13,20 @@ use smelt_plugin_api::{
     self as api,
     model::{
         acp_chat::{diff_line_stats, is_interrupt_marker},
-        agent_definition::agent_engine_kinds,
+        agent_definition::{AgentDefinition, agent_engine_kinds},
         agent_host::AgentHostSettings,
         agent_kind::{
             ConversationAgentKind, ConversationLaunchSpec, HistorySourceKind, TerminalAgentKind,
             agent_id_from_launch,
         },
         agent_status::AgentStatus,
-        automation::is_managed_workspace,
+        automation::{
+            AutomationProblem, AutomationSchedule, AutomationTrigger, is_managed_workspace,
+        },
         chrono::DateTime,
         copilot_quota::format_amount,
         daemon_state::DaemonSessionState,
+        entry_window::{self, EntryWindow},
         file_link::parse_file_link,
         new_session::{LaunchEntry, NewSessionAction, default_launch_entries},
         pi_mcp::PI_MCP_PRESETS,
@@ -227,6 +230,19 @@ impl Smelt {
         )
     }
 
+    /// 对话快照条目窗口合并（`smelt_model::entry_window::merge`）：两个窗口进，拼法出。
+    pub fn merge_entry_window(current_json: String, next_json: String) -> Result<String, String> {
+        let parse = |json: &str, what: &str| {
+            serde_json::from_str::<EntryWindow>(json)
+                .map_err(|error| format!("merge_entry_window：{what} 不对：{error}"))
+        };
+        let plan = entry_window::merge(
+            &parse(&current_json, "current")?,
+            &parse(&next_json, "next")?,
+        );
+        serde_json::to_string(&plan).map_err(|error| error.to_string())
+    }
+
     pub fn quota_facts(data_json: String) -> Result<String, String> {
         let data: ProviderQuotaData = serde_json::from_str(&data_json)
             .map_err(|error| format!("quota_facts：data 不对：{error}"))?;
@@ -308,6 +324,29 @@ impl Smelt {
             .filter(|url| url.scheme() == "file")
             .and_then(|url| url.to_file_path().ok())
             .map_or(uri, |path| path.to_string_lossy().into_owned())
+    }
+
+    /// 一条日程哪里不对（`AutomationSchedule::validate`，和运行时保存时同一条规则）：
+    /// `AutomationProblem` 的 JSON（`{"kind": ...}`），没问题是 `None`。文案由插件按种类写。
+    pub fn automation_schedule_problem(schedule_json: String) -> Result<Option<String>, String> {
+        let schedule: AutomationSchedule = serde_json::from_str(&schedule_json)
+            .map_err(|error| format!("automation_schedule_problem：schedule 不对：{error}"))?;
+        problem_json(schedule.validate())
+    }
+
+    /// 一组触发条件哪里不对（`AutomationTrigger::validate`）：同 [`Self::automation_schedule_problem`]。
+    pub fn automation_trigger_problem(trigger_json: String) -> Result<Option<String>, String> {
+        let trigger: AutomationTrigger = serde_json::from_str(&trigger_json)
+            .map_err(|error| format!("automation_trigger_problem：trigger 不对：{error}"))?;
+        problem_json(trigger.validate())
+    }
+
+    /// 智能体定义能不能用来开对话（`AgentDefinition::is_conversation_ready`）：新建菜单、
+    /// 手机、自动化都以这一条为准。
+    pub fn agent_conversation_ready(agent_json: String) -> Result<bool, String> {
+        let agent: AgentDefinition = serde_json::from_str(&agent_json)
+            .map_err(|error| format!("agent_conversation_ready：agent 不对：{error}"))?;
+        Ok(agent.is_conversation_ready())
     }
 
     /// 工作目录是不是运行时按 id 给这条自动化分配的托管目录。`style` 是自动化所在机器的路径风格。
@@ -715,6 +754,13 @@ impl Smelt {
     }
 }
 
+fn problem_json(checked: Result<(), AutomationProblem>) -> Result<Option<String>, String> {
+    checked
+        .err()
+        .map(|problem| serde_json::to_string(&problem).map_err(|error| error.to_string()))
+        .transpose()
+}
+
 fn resolve_err(code: &str, params: serde_json::Value) -> serde_json::Value {
     serde_json::json!({ "ok": false, "code": code, "params": params })
 }
@@ -897,6 +943,52 @@ mod tests {
     use gpui::AssetSource as _;
 
     use super::Smelt;
+
+    /// 插件按草稿拼的线格式（空数组、脱敏令牌、没有 filter 的事件）要读得进来，问题按 `kind` 出去。
+    #[test]
+    fn automation_rules_read_plugin_drafts() {
+        let trigger = |json: &str| Smelt::automation_trigger_problem(json.into()).unwrap();
+        assert_eq!(
+            trigger(r#"{"schedules":[],"webhooks":[],"events":[]}"#).as_deref(),
+            Some(r#"{"kind":"no_trigger"}"#)
+        );
+        assert_eq!(
+            trigger(
+                r#"{"schedules":[],"webhooks":[{"endpoint":"<redacted>"}],"events":[{"topic":"build.failed"}]}"#
+            ),
+            None
+        );
+        assert_eq!(
+            Smelt::automation_schedule_problem(
+                r#"{"type":"during","minutes":15,"days":31,"start_hour":11,"start_minute":30,"end_hour":9,"end_minute":30}"#.into()
+            )
+            .unwrap()
+            .as_deref(),
+            Some(r#"{"kind":"end_before_start"}"#)
+        );
+        let agent = |engine: &str| {
+            Smelt::agent_conversation_ready(format!(
+                r#"{{"id":"a1","name":"A","engine_kind":"{engine}","prompt":""}}"#
+            ))
+            .unwrap()
+        };
+        assert!(agent("pi"));
+        assert!(!agent("custom"));
+    }
+
+    #[test]
+    fn entry_window_merge_round_trips_json() {
+        let plan = Smelt::merge_entry_window(
+            r#"{"offset":10,"len":3,"total":13,"revision":1,"history_session_id":"h","acp_session_id":null}"#.into(),
+            r#"{"offset":12,"len":2,"total":14,"revision":2,"history_session_id":"h","acp_session_id":null}"#.into(),
+        )
+        .unwrap();
+        let plan: serde_json::Value = serde_json::from_str(&plan).unwrap();
+        assert_eq!(plan["window"]["len"], 4);
+        assert_eq!(plan["keep"], 2);
+        assert_eq!(plan["changed_from"], 2);
+        assert_eq!(plan["conversation_changed"], false);
+    }
 
     /// 插件手里的条目是 hub 压过图片的线格式（多了 `ref_id`、`preview_uri`，`data_b64` 置空），
     #[test]

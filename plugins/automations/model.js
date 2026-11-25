@@ -1,5 +1,6 @@
-// 自动化插件纯领域模型、投影缓存、通知判定、排程校验、模板与运行详情解析。
-// 不依赖 NSH 或宿主运行时，可直接由 `bun test` 验证。
+// 自动化插件纯领域模型、投影缓存、通知判定、日程换算、模板与运行详情解析。
+// 不依赖 NSH 或宿主运行时，可直接由 `bun test` 验证。和运行时同一份的规则（日程、触发器校验）
+// 不在这里写：由调用方经 `rules`（SDK `automationScheduleProblem` / `automationTriggerProblem`）传进来。
 
 import { PLUGIN_ID } from "./contract.js";
 
@@ -9,7 +10,6 @@ export const AUTOMATION_FILE_SCHEMA_VERSION = 2;
 export const DEFAULT_WEBHOOK_BASE_URL = "http://127.0.0.1:17827";
 export const REDACTED_WEBHOOK_ENDPOINT = "<redacted>";
 export const TOOL_OUTPUT_MAX_LINES = 400;
-export const MAX_EVENT_TOPIC_BYTES = 255;
 export const ACP_ENTRY_VERSION = 2;
 
 /** 周一到周日位掩码（bit0 = 周一）。 */
@@ -42,15 +42,6 @@ export const BUILTIN_AUTOMATION_TRIGGER_PRESETS = [
 export const NOTIFY_CHOICES = ["never", "failures_only", "always"];
 
 export const TEMPLATE_CATEGORIES = ["work", "engineering", "research"];
-
-/** 已知非 custom 对话引擎 ID 的默认回退集合（NSH 运行时优先传入 `agentCatalog()` 实时表）。 */
-export const DEFAULT_CONVERSATION_ENGINE_IDS = [
-  "claude",
-  "codex",
-  "copilot",
-  "antigravity",
-  "pi",
-];
 
 /** 运行状态分类。 */
 const ACTIVE_RUN_STATUSES = new Set([
@@ -740,23 +731,12 @@ export function agentEngineId(agent) {
   return "";
 }
 
-/**
- * 与 Rust `AgentDefinition::is_ready` 一致：
- * 有非空 id，且引擎属于已知 `ConversationAgentKind` 且不是 `"custom"`。
- */
-export function isAgentReady(agent, validEngineIds = DEFAULT_CONVERSATION_ENGINE_IDS) {
-  if (!agent || typeof agent.id !== "string" || agent.id.trim().length === 0) return false;
-  const eng = agentEngineId(agent);
-  if (!eng || eng === "custom") return false;
-  return validEngineIds.includes(eng);
-}
-
 export function agentDisplayName(name, t) {
   const trimmed = typeof name === "string" ? name.trim() : "";
   return trimmed.length > 0 ? trimmed : t("agent.unnamed");
 }
 
-// ---- 触发器预设、排程校验与换算 ----
+// ---- 触发器预设与日程换算 ----
 
 export function actionKindLabel(kind, t) {
   return kind === "agent" ? t("action.agent") : t("action.shell");
@@ -867,10 +847,6 @@ export function parseClock(value) {
   return [hour, minute];
 }
 
-function clockMinutes(hour, minute) {
-  return hour * 60 + minute;
-}
-
 function parseStrictPositiveInt(value) {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -880,197 +856,10 @@ function parseStrictPositiveInt(value) {
   return num;
 }
 
-export function validateSchedule(schedule) {
-  if (!schedule || typeof schedule !== "object") return { ok: false, problem: { kind: "no_trigger" } };
-  switch (schedule.type) {
-    case "daily": {
-      if (
-        Number.isInteger(schedule.hour) &&
-        schedule.hour >= 0 &&
-        schedule.hour < 24 &&
-        Number.isInteger(schedule.minute) &&
-        schedule.minute >= 0 &&
-        schedule.minute < 60
-      ) {
-        return { ok: true };
-      }
-      return { ok: false, problem: { kind: "time_out_of_range" } };
-    }
-    case "weekly": {
-      if (
-        !(
-          Number.isInteger(schedule.hour) &&
-          schedule.hour >= 0 &&
-          schedule.hour < 24 &&
-          Number.isInteger(schedule.minute) &&
-          schedule.minute >= 0 &&
-          schedule.minute < 60
-        )
-      ) {
-        return { ok: false, problem: { kind: "time_out_of_range" } };
-      }
-      if (((schedule.days ?? 0) & SCHEDULE_ALL_DAYS_MASK) === 0) {
-        return { ok: false, problem: { kind: "no_days" } };
-      }
-      return { ok: true };
-    }
-    case "every_minutes": {
-      if (
-        Number.isInteger(schedule.minutes) &&
-        schedule.minutes >= 1 &&
-        schedule.minutes <= 24 * 60
-      ) {
-        return { ok: true };
-      }
-      return { ok: false, problem: { kind: "minutes_out_of_range" } };
-    }
-    case "every_hours": {
-      if (
-        Number.isInteger(schedule.hours) &&
-        schedule.hours >= 1 &&
-        schedule.hours <= 24 * 7
-      ) {
-        return { ok: true };
-      }
-      return { ok: false, problem: { kind: "hours_out_of_range" } };
-    }
-    case "during": {
-      if (
-        !(
-          Number.isInteger(schedule.minutes) &&
-          schedule.minutes >= 1 &&
-          schedule.minutes <= 24 * 60
-        )
-      ) {
-        return { ok: false, problem: { kind: "minutes_out_of_range" } };
-      }
-      if (
-        schedule.start_hour < 0 ||
-        schedule.start_hour > 23 ||
-        schedule.end_hour < 0 ||
-        schedule.end_hour > 23 ||
-        schedule.start_minute < 0 ||
-        schedule.start_minute > 59 ||
-        schedule.end_minute < 0 ||
-        schedule.end_minute > 59
-      ) {
-        return { ok: false, problem: { kind: "time_out_of_range" } };
-      }
-      if (
-        clockMinutes(schedule.start_hour, schedule.start_minute) >=
-        clockMinutes(schedule.end_hour, schedule.end_minute)
-      ) {
-        return { ok: false, problem: { kind: "end_before_start" } };
-      }
-      if (schedule.days !== 0 && (schedule.days & SCHEDULE_ALL_DAYS_MASK) === 0) {
-        return { ok: false, problem: { kind: "no_days" } };
-      }
-      return { ok: true };
-    }
-    default:
-      return { ok: false, problem: { kind: "no_trigger" } };
-  }
-}
-
-export function validateEventTopic(topic) {
-  const normalized = String(topic ?? "").trim().toLowerCase();
-  if (!normalized) return { ok: false, problem: { kind: "event_topic_missing" } };
-  if (new TextEncoder().encode(normalized).length > MAX_EVENT_TOPIC_BYTES) {
-    return { ok: false, problem: { kind: "event_topic_too_long" } };
-  }
-  const segments = normalized.split(".");
-  if (segments.length < 2 || segments.some((s) => s.length === 0 || !/^[a-z0-9_-]+$/.test(s))) {
-    return { ok: false, problem: { kind: "event_topic_malformed" } };
-  }
-  return { ok: true, value: normalized };
-}
-
-export function validateEventFilter(filter) {
-  const raw = typeof filter === "string" ? filter.trim() : "";
-  if (!raw) return { ok: true, value: null };
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return { ok: true, value: raw };
-    }
-  } catch {
-    // fall through
-  }
-  return { ok: false, problem: { kind: "event_filter_not_object" } };
-}
-
-export function validateTrigger(trigger) {
-  if (!trigger || typeof trigger !== "object") {
-    return { ok: false, problem: { kind: "no_trigger" } };
-  }
-  const schedules = Array.isArray(trigger.schedules) ? trigger.schedules : [];
-  const webhooks = Array.isArray(trigger.webhooks) ? trigger.webhooks : [];
-  const events = Array.isArray(trigger.events) ? trigger.events : [];
-  let any = false;
-  if (schedules.length > 0) {
-    any = true;
-    for (const schedule of schedules) {
-      const res = validateSchedule(schedule);
-      if (!res.ok) return res;
-    }
-  }
-  if (webhooks.length > 0) {
-    any = true;
-    if (webhooks.some((w) => webhookToken(w) === null)) {
-      return { ok: false, problem: { kind: "no_webhook_token" } };
-    }
-  }
-  if (events.length > 0) {
-    any = true;
-    for (const ev of events) {
-      const tr = validateEventTopic(ev?.topic);
-      if (!tr.ok) return tr;
-      const fr = validateEventFilter(ev?.filter);
-      if (!fr.ok) return fr;
-    }
-  }
-  if (!any) return { ok: false, problem: { kind: "no_trigger" } };
-  return { ok: true };
-}
-
-export function validateAction(action) {
-  if (!action || typeof action !== "object") {
-    return { ok: false, problem: { kind: "no_agent" } };
-  }
-  if (action.type === "agent") {
-    const id = actionAgentDefinitionId(action) ?? "";
-    if (id.trim().length === 0) return { ok: false, problem: { kind: "no_agent" } };
-    return { ok: true };
-  }
-  if (action.type === "shell") {
-    if (String(action.command ?? "").trim().length === 0) {
-      return { ok: false, problem: { kind: "no_shell_command" } };
-    }
-    return { ok: true };
-  }
-  return { ok: false, problem: { kind: "no_agent" } };
-}
-
-export function validateAutomation(automation) {
-  if (!automation || typeof automation !== "object") {
-    return { ok: false, problem: { kind: "no_id" } };
-  }
-  if (String(automation.id ?? "").trim().length === 0) {
-    return { ok: false, problem: { kind: "no_id" } };
-  }
-  if (String(automation.name ?? "").trim().length === 0) {
-    return { ok: false, problem: { kind: "no_name" } };
-  }
-  const ar = validateAction(automation.action);
-  if (!ar.ok) return ar;
-  return validateTrigger(automation.trigger);
-}
-
-export function isAutomationReady(automation) {
-  return validateAutomation(automation).ok;
-}
-
-/** 与 Rust `schedule_from_values` 完全一致。 */
+/**
+ * 编辑器里一条日程规则的取值 → 线格式日程。表单层的检查（时刻、间隔、星期）在这里，日程本身的
+ * 规则交给 `rules.scheduleProblem`（SDK `automationScheduleProblem`，和运行时同一条）。
+ */
 export function scheduleFromValues(
   kind,
   time,
@@ -1080,6 +869,7 @@ export function scheduleFromValues(
   windowStart,
   windowEnd,
   t,
+  rules,
 ) {
   let schedule;
   if (kind === "daily") {
@@ -1168,14 +958,12 @@ export function scheduleFromValues(
     return { ok: false, error: t("automation.no_trigger") };
   }
 
-  const checked = validateSchedule(schedule);
-  if (!checked.ok) {
-    return { ok: false, error: describeAutomationProblem(checked.problem, t) };
-  }
+  const problem = rules.scheduleProblem(schedule);
+  if (problem) return { ok: false, error: describeAutomationProblem(problem, t) };
   return { ok: true, schedule };
 }
 
-export function scheduleFromRule(rule, t) {
+export function scheduleFromRule(rule, t, rules) {
   let weekdayMask = rule.weekdayMask;
   if (rule.kind === "interval") {
     if (rule.intervalDayScope === "everyday") {
@@ -1197,6 +985,7 @@ export function scheduleFromRule(rule, t) {
     rule.windowStart,
     rule.windowEnd,
     t,
+    rules,
   );
 }
 
@@ -1297,7 +1086,8 @@ export function createTriggerEntryDraft(uid, triggerKind, schedule, webhookSecre
   };
 }
 
-export function triggerFromDraft(entries, retainedEvents, t, uuidFn) {
+/** 编辑器的触发条目 → 线格式触发器；整组的规则交给 `rules.triggerProblem`（SDK `automationTriggerProblem`）。 */
+export function triggerFromDraft(entries, retainedEvents, t, uuidFn, rules) {
   const trigger = {
     schedules: [],
     webhooks: [],
@@ -1313,15 +1103,13 @@ export function triggerFromDraft(entries, retainedEvents, t, uuidFn) {
         trigger.webhooks.push({ endpoint: secret, secret });
       }
     } else {
-      const res = scheduleFromRule(entry.schedule, t);
+      const res = scheduleFromRule(entry.schedule, t, rules);
       if (!res.ok) return res;
       trigger.schedules.push(res.schedule);
     }
   }
-  const checked = validateTrigger(trigger);
-  if (!checked.ok) {
-    return { ok: false, error: describeAutomationProblem(checked.problem, t) };
-  }
+  const problem = rules.triggerProblem(trigger);
+  if (problem) return { ok: false, error: describeAutomationProblem(problem, t) };
   const wire = {};
   if (trigger.schedules.length > 0) wire.schedules = trigger.schedules;
   if (trigger.webhooks.length > 0) wire.webhooks = trigger.webhooks;
@@ -1406,9 +1194,9 @@ export function automationSaveHint(missing, isNew, t) {
   return isNew ? t("missing.hint_new", { fields }) : t("missing.hint", { fields });
 }
 
-export function computeDraftMissingFields(draft, agentExists, t, uuidFn) {
+export function computeDraftMissingFields(draft, agentExists, t, uuidFn, rules) {
   const hasSchedule = (draft.entries ?? []).some((e) => e.triggerKind !== "webhook");
-  const triggerRes = triggerFromDraft(draft.entries, draft.retainedEvents, t, uuidFn);
+  const triggerRes = triggerFromDraft(draft.entries, draft.retainedEvents, t, uuidFn, rules);
   const action = actionFromDraft(draft);
   const unfilled =
     action.type === "agent" && action.prompt
@@ -1472,8 +1260,8 @@ export function buildDraftFromAutomation(automation, machine, isNew, nextUid, uu
 }
 
 /** 从编辑器草稿组装发往 smeltd 的 `Automation` 线格式对象。 */
-export function buildAutomationWireFromDraft(draft, enabled, t, uuidFn) {
-  const triggerRes = triggerFromDraft(draft.entries, draft.retainedEvents, t, uuidFn);
+export function buildAutomationWireFromDraft(draft, enabled, t, uuidFn, rules) {
+  const triggerRes = triggerFromDraft(draft.entries, draft.retainedEvents, t, uuidFn, rules);
   if (!triggerRes.ok) return triggerRes;
   const automation = {
     id: draft.id,

@@ -25,6 +25,7 @@ pub mod control_api;
 pub mod conversation;
 pub mod copilot_quota;
 pub mod daemon_state;
+pub mod entry_window;
 pub mod file_link;
 pub mod font_config;
 pub mod kitty_graphics;

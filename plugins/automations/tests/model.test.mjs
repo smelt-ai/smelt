@@ -55,7 +55,6 @@ import {
   formatRelativeSince,
   formatRelativeUntil,
   intervalTitle,
-  isAgentReady,
   missingFieldLabel,
   newSessionLabel,
   newWebhookSecret,
@@ -86,9 +85,6 @@ import {
   triggerPresetSchedule,
   triggerSummary,
   turnFailedText,
-  validateAutomation,
-  validateSchedule,
-  validateTrigger,
   webhookCurlExample,
   webhookUrl,
 } from "../model.js";
@@ -130,6 +126,9 @@ function makeT(lang = "en") {
 
 const tEn = makeT("en");
 const tZh = makeT("zh-CN");
+
+// 运行时规则（SDK）在 Rust 那边测；这里只测表单换算和文案，规则一律放行。
+const NO_PROBLEM = { scheduleProblem: () => null, triggerProblem: () => null };
 
 function makeTestSqliteDb() {
   const db = new Database(":memory:");
@@ -637,7 +636,7 @@ describe("schedules, validation, copy & formatting", () => {
 
   test("scheduleFromValues rejects invalid clocks/intervals and maps weekday windows to during", () => {
     const parse = (kind, time, interval, unit, days) =>
-      scheduleFromValues(kind, time, interval, unit, days, "", "", tEn);
+      scheduleFromValues(kind, time, interval, unit, days, "", "", tEn, NO_PROBLEM);
 
     expect(parse("daily", "23:59", "", "minutes", 0)).toEqual({
       ok: true,
@@ -667,7 +666,7 @@ describe("schedules, validation, copy & formatting", () => {
     expect(parse("weekly", "09:35", "", "minutes", 0).ok).toBe(false);
 
     const win = (s, e) =>
-      scheduleFromValues("interval", "", "15", "minutes", SCHEDULE_WEEKDAYS_MASK, s, e, tEn);
+      scheduleFromValues("interval", "", "15", "minutes", SCHEDULE_WEEKDAYS_MASK, s, e, tEn, NO_PROBLEM);
     expect(win("09:30", "11:30")).toEqual({
       ok: true,
       schedule: {
@@ -681,31 +680,33 @@ describe("schedules, validation, copy & formatting", () => {
       },
     });
     expect(win("09:30", "").ok).toBe(false);
-    const rev = win("11:30", "09:30");
-    expect(rev.ok).toBe(false);
-    expect(rev.error).toBe("The end time must be later than the start time");
   });
 
-  test("validateSchedule/Trigger/Automation and REDACTED_WEBHOOK_ENDPOINT round-trip", () => {
-    expect(validateSchedule({ type: "daily", hour: 24, minute: 0 }).ok).toBe(false);
-    expect(validateTrigger({ schedules: [], webhooks: [], events: [] }).ok).toBe(false);
-    expect(validateTrigger({ events: [{ topic: "task.completed" }] }).ok).toBe(true);
-    expect(validateTrigger({ events: [{ topic: "invalid" }] }).ok).toBe(false);
-    expect(
-      validateAutomation({
-        id: "a1",
-        name: "Daily check",
-        action: { type: "shell", command: "echo hi", args: [] },
-        trigger: { schedules: [{ type: "daily", hour: 9, minute: 0 }] },
-      }).ok,
-    ).toBe(true);
+  test("日程、触发器的规则问题交给注入的 rules，按种类出文案", () => {
+    const seen = [];
+    const rules = {
+      scheduleProblem: (schedule) => {
+        seen.push(schedule);
+        return { kind: "end_before_start" };
+      },
+      triggerProblem: () => ({ kind: "no_trigger" }),
+    };
+    const rev = scheduleFromValues("interval", "", "15", "minutes", 0, "11:30", "09:30", tEn, rules);
+    expect(rev).toEqual({ ok: false, error: "The end time must be later than the start time" });
+    expect(seen[0]).toMatchObject({ type: "during", start_hour: 11, end_hour: 9 });
 
+    const triggerRules = { ...NO_PROBLEM, triggerProblem: (trigger) => (trigger.webhooks.length ? null : { kind: "no_trigger" }) };
+    expect(triggerFromDraft([], [], tEn, randomUUID, triggerRules).ok).toBe(false);
+  });
+
+  test("REDACTED_WEBHOOK_ENDPOINT and draft round-trip", () => {
     // 脱敏令牌往返保持 `<redacted>` 不被覆盖
     const hookRes = triggerFromDraft(
       [{ uid: "t-1", triggerKind: "webhook", webhookSecret: REDACTED_WEBHOOK_ENDPOINT }],
       [],
       tEn,
       randomUUID,
+      NO_PROBLEM,
     );
     expect(hookRes).toEqual({
       ok: true,
@@ -728,7 +729,7 @@ describe("schedules, validation, copy & formatting", () => {
       sinks: notifyToSinks("failures_only"),
     };
     const draft = buildDraftFromAutomation(auto, null, false, () => `t-${++uid}`, randomUUID);
-    const wire = buildAutomationWireFromDraft(draft, true, tEn, randomUUID);
+    const wire = buildAutomationWireFromDraft(draft, true, tEn, randomUUID, NO_PROBLEM);
     expect(wire.ok).toBe(true);
     expect(wire.automation).toEqual(auto);
   });
@@ -1022,12 +1023,5 @@ describe("tools, run detail, failure descriptions & bug fix regressions", () => 
     expect(agentSummary.actor).toBe("Researcher");
     const agentRows = runMetadataRows(agentRun, tEn);
     expect(agentRows.some((r) => r.label === "Agent" && r.value === "Researcher · claude")).toBe(true);
-  });
-
-  test("isAgentReady matches AgentDefinition::is_ready", () => {
-    expect(isAgentReady({ id: "a1", engine_kind: "claude" })).toBe(true);
-    expect(isAgentReady({ id: "a1", engine_kind: "custom" })).toBe(false);
-    expect(isAgentReady({ id: "", engine_kind: "claude" })).toBe(false);
-    expect(isAgentReady({ id: "a1", engine_kind: "nonexistent" })).toBe(false);
   });
 });

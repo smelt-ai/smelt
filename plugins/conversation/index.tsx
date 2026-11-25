@@ -11,7 +11,9 @@ import {
   agentCatalog,
   call,
   DIALOG_SURFACE_CLASS,
+  type EntryWindow,
   isInterruptMarker,
+  mergeEntryWindow,
   newSessionId,
   onAcpEvent,
   pathFileName,
@@ -35,17 +37,19 @@ import {
   buildDisplayRows,
   confirmedConfigValue,
   consumeComposerRestore,
+  EMPTY_ENTRY_WINDOW,
   entryUserText,
+  entryWindowOf,
   isStreamingMetaUnchanged,
   isTurnActive,
   isUserEntry,
   launchBringsContent,
   mergeEnvelope,
-  mergeSnapshotEntries,
   overlayModelState,
   overlaySessionConfigs,
   reconcilePendingConfigValues,
   showsEmptyWelcome,
+  spliceEntries,
   turnTimingsEqual,
 } from "./model.js";
 import { diffPartStats, MessageList } from "./message_list.tsx";
@@ -162,11 +166,11 @@ export function SmeltConversation(props: SmeltConversationProps) {
   const snapshot = signal<any | null>(null);
   const turnTimings = signal<any[]>([]);
   let latestSnapshot: any | null = null;
-  const entriesState = signal<{
-    entries: any[];
-    loadedOffset: number;
-    entriesTotal: number;
-  }>({ entries: [], loadedOffset: 0, entriesTotal: 0 });
+  /** 手里连续的一段条目和它的窗口（`window.offset` 是第一条的全局下标）。 */
+  const entriesState = signal<{ entries: any[]; window: EntryWindow }>({
+    entries: [],
+    window: EMPTY_ENTRY_WINDOW,
+  });
   const streamingGlobalIndex = signal<number | null>(null);
   const streamingText = signal("");
 
@@ -206,7 +210,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
 
   let lastRefreshModelsSeq = props.refreshModelsSeq ?? 0;
   let lastNotifiedAtLatest = true;
-  let historyBackfillDone = false;
+  let backfilledAt: number | null = null;
   let lastRejectedNoticeId: number | null = null;
   let lastInitialPromptText: string | null = null;
 
@@ -243,7 +247,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
     return buildConversationLayout(
       es.entries,
       turnActive(),
-      es.loadedOffset,
+      es.window.offset,
       turnTimings(),
     );
   });
@@ -253,7 +257,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
     return buildDisplayRows(
       es.entries,
       layout(),
-      es.loadedOffset,
+      es.window.offset,
       expandedTurnFolds(),
       expandedProcessGroups(),
       diffPartStats,
@@ -286,7 +290,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
         break;
       }
     }
-    return local != null ? es.loadedOffset + local : null;
+    return local != null ? es.window.offset + local : null;
   });
 
   const canFork = computed(() =>
@@ -299,15 +303,14 @@ export function SmeltConversation(props: SmeltConversationProps) {
     latestSnapshot = merged;
     if (permissionSubmitting()) permissionSubmitting.set(false);
 
-    // 合并条目窗口
+    // 合并条目窗口（规则和手机端同一份，见 SDK `mergeEntryWindow`）
     const prevEs = entriesState();
-    const nextEs = mergeSnapshotEntries(
-      prevEs,
-      merged.entries_offset ?? 0,
-      merged.entries_total ?? 0,
-      merged.entries ?? [],
-      initial,
-    );
+    const plan = mergeEntryWindow(prevEs.window, entryWindowOf(merged));
+    const nextEs = {
+      entries: spliceEntries(prevEs.entries, plan, merged.entries ?? []),
+      window: plan.window,
+      dirtyFrom: plan.changed_from,
+    };
 
     // 热路径优化：若仅最后一条活跃 Assistant 正文增长，只写细粒度 `streamingText` 信号，
     // 跳过无变化的 `snapshot.set(merged)`，不触发 `layout` / `displayRows` 重建。
@@ -317,7 +320,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
     const sameShapeTailOnly =
       !initial &&
       active &&
-      nextEs.loadedOffset === prevEs.loadedOffset &&
+      nextEs.window.offset === prevEs.window.offset &&
       nextEs.entries.length === prevEs.entries.length &&
       nextEs.entries.length > 0 &&
       nextEs.dirtyFrom === nextEs.entries.length - 1 &&
@@ -326,8 +329,9 @@ export function SmeltConversation(props: SmeltConversationProps) {
       Boolean(prevLast.Assistant.thought) === Boolean(nextLast.Assistant.thought);
 
     if (sameShapeTailOnly) {
-      const globalIx = nextEs.loadedOffset + nextEs.entries.length - 1;
+      const globalIx = nextEs.window.offset + nextEs.entries.length - 1;
       prevEs.entries[prevEs.entries.length - 1] = nextLast;
+      prevEs.window = nextEs.window;
       streamingGlobalIndex.set(globalIx);
       streamingText.set(String(nextLast.Assistant.text ?? ""));
       if (!(rawSnap?.envelope_omitted && isStreamingMetaUnchanged(prevSnap, merged))) {
@@ -340,29 +344,28 @@ export function SmeltConversation(props: SmeltConversationProps) {
         turnTimings.set(nextTimings);
       }
       if (nextEs.dirtyFrom !== null || initial) {
-        entriesState.set({
-          entries: nextEs.entries,
-          loadedOffset: nextEs.loadedOffset,
-          entriesTotal: nextEs.entriesTotal,
-        });
+        entriesState.set({ entries: nextEs.entries, window: nextEs.window });
         if (active && nextLast?.Assistant) {
-          streamingGlobalIndex.set(nextEs.loadedOffset + nextEs.entries.length - 1);
+          streamingGlobalIndex.set(nextEs.window.offset + nextEs.entries.length - 1);
           streamingText.set(String(nextLast.Assistant.text ?? ""));
         } else {
           streamingGlobalIndex.set(null);
         }
+      } else {
+        // 条目没变：总数、修订号照样要记，下一帧和翻页按它合并；不触发重画。
+        prevEs.window = nextEs.window;
       }
     }
 
-    // `acp_open` 默认 `omit_history: true`：空闲/恢复会话首帧只有 `entries_offset == entries_total > 0`
-    // 而 `entries` 为空，自动向守护拉一页历史，避免打开后空白。
+    // 窗口停在末尾却是空的（`acp_open` 默认 `omit_history: true` 的首帧、对面回退到窗口之前），
+    // 自动向守护拉一页历史，避免空白。每个起点只补一次，拉不到也不反复拉。
     if (
-      !historyBackfillDone &&
       !merged.replaying_history &&
-      nextEs.loadedOffset > 0 &&
-      nextEs.entries.length === 0
+      nextEs.window.offset > 0 &&
+      nextEs.entries.length === 0 &&
+      backfilledAt !== nextEs.window.offset
     ) {
-      historyBackfillDone = true;
+      backfilledAt = nextEs.window.offset;
       void handleLoadOlder();
     }
 
@@ -462,7 +465,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
       latestSnapshot = null;
       snapshot.set(null);
       turnTimings.set([]);
-      entriesState.set({ entries: [], loadedOffset: 0, entriesTotal: 0 });
+      entriesState.set({ entries: [], window: EMPTY_ENTRY_WINDOW });
       streamingGlobalIndex.set(null);
       streamingText.set("");
       pendingConfigs.set([]);
@@ -479,7 +482,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
       atLatest.set(true);
       loadingOlder.set(false);
       lastRestoreRev = 0;
-      historyBackfillDone = false;
+      backfilledAt = null;
       lastRejectedNoticeId = null;
       lastInitialPromptText = null;
     }
@@ -604,23 +607,22 @@ export function SmeltConversation(props: SmeltConversationProps) {
 
   const handleLoadOlder = async () => {
     const es = entriesState();
-    if (loadingOlder() || es.loadedOffset <= 0) return;
+    if (loadingOlder() || es.window.offset <= 0) return;
     loadingOlder.set(true);
     try {
-      const older = await acpHistory(props.machine ?? null, props.sessionId, es.loadedOffset, 100);
+      const older = await acpHistory(props.machine ?? null, props.sessionId, es.window.offset, 100);
       if (older && Array.isArray(older.entries)) {
-        const merged = mergeSnapshotEntries(
-          entriesState(),
-          older.entries_offset ?? 0,
-          older.entries_total ?? es.entriesTotal,
-          older.entries,
-          false,
-        );
-        entriesState.set({
-          entries: merged.entries,
-          loadedOffset: merged.loadedOffset,
-          entriesTotal: merged.entriesTotal,
-        });
+        const current = entriesState();
+        const plan = mergeEntryWindow(current.window, entryWindowOf(older));
+        // 拉页期间对话重新开始了（`conversation_changed`）：这页属于旧对话，丢掉。
+        if (plan.changed_from !== null && !plan.conversation_changed) {
+          entriesState.set({
+            entries: spliceEntries(current.entries, plan, older.entries),
+            window: plan.window,
+          });
+        } else if (!plan.conversation_changed) {
+          current.window = plan.window;
+        }
       }
     } catch (err) {
       console.error("[SmeltConversation] loadOlder failed:", err);
@@ -738,7 +740,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
       connectFailed: connectError() != null,
       loadingOlder: loadingOlder(),
       entryCount: entriesState().entries.length,
-      loadedOffset: entriesState().loadedOffset,
+      loadedOffset: entriesState().window.offset,
     }),
   );
   // 居中和消息流之间切换（发出第一条、续接回来是空的、连接失败）不跳：输入框滑到新位置、
@@ -754,7 +756,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
     }
   });
   const showEndedEmpty = computed(
-    () => dead() && entriesState().entries.length === 0 && entriesState().loadedOffset === 0,
+    () => dead() && entriesState().entries.length === 0 && entriesState().window.offset === 0,
   );
 
   return (
@@ -955,7 +957,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
                 machine={() => props.machine ?? null}
                 sessionId={() => props.sessionId}
                 cwd={cwd}
-                hasOlderHistory={() => entriesState().loadedOffset > 0}
+                hasOlderHistory={() => entriesState().window.offset > 0}
                 loadingOlder={loadingOlder}
                 atLatest={atLatest}
                 turnActive={turnActive}

@@ -1,6 +1,4 @@
 // Smelt 对话纯逻辑模块（不 import NSH，直接用 `bun test` 覆盖）。
-// 严格对齐原 `crates/plugins/conversation/src/view.rs`、`model_popover.rs`、`prompt_rail.rs`、`edit_diff.rs`
-// 与 `smelt-ui/src/acp_completion.rs` 的全部核心归约与排序规则。
 
 export const MAX_COMPLETION_ITEMS = 12;
 export const PROMPT_RAIL_MAX_TICKS = 11;
@@ -108,86 +106,39 @@ export function entryUserText(entry) {
   return "";
 }
 
-/**
- * 合并服务端快照条目窗口（严格对齐 `view.rs:merge_snapshot_entries`）。
- * 返回 `{ entries, loadedOffset, entriesTotal, dirtyFrom }`，其中 `dirtyFrom == null` 表示无变更。
- */
-export function mergeSnapshotEntries(state, incomingOffset, incomingTotalRaw, incoming, initial) {
-  const incomingList = Array.isArray(incoming) ? incoming : [];
-  const incomingEnd = incomingOffset + incomingList.length;
-  const incomingTotal = Math.max(incomingTotalRaw ?? 0, incomingEnd);
+/** 还没收到帧的空窗口。 */
+export const EMPTY_ENTRY_WINDOW = Object.freeze({
+  offset: 0,
+  len: 0,
+  total: 0,
+  revision: 0,
+  history_session_id: null,
+  acp_session_id: null,
+});
 
-  if (initial) {
-    return {
-      entries: incomingList.slice(),
-      loadedOffset: incomingOffset,
-      entriesTotal: incomingTotal,
-      dirtyFrom: 0,
-    };
+/** 快照的条目窗口（SDK `mergeEntryWindow` 的入参）：只取位置和归属，不带条目。 */
+export function entryWindowOf(snap) {
+  return {
+    offset: snap?.entries_offset ?? 0,
+    len: Array.isArray(snap?.entries) ? snap.entries.length : 0,
+    total: snap?.entries_total ?? 0,
+    revision: snap?.snapshot_revision ?? 0,
+    history_session_id: snap?.history_session_id ?? null,
+    acp_session_id: snap?.acp_session_id ?? null,
+  };
+}
+
+/** 按 SDK `mergeEntryWindow` 给的拼法拼条目：手里前 `keep` 条 + 新来的 + 手里从 `resume` 起的，截到 `window.len`。 */
+export function spliceEntries(current, plan, incoming) {
+  const merged = current.slice(0, plan.keep);
+  if (plan.take_next) {
+    for (const entry of incoming) merged.push(entry);
   }
-
-  const prevEntries = state.entries;
-  const loadedOffset = state.loadedOffset;
-  const loadedEnd = loadedOffset + prevEntries.length;
-
-  if (incomingTotal < loadedOffset) {
-    if (incomingList.length === 0 && incomingTotal > 0 && prevEntries.length > 0) {
-      return { ...state, dirtyFrom: null };
-    }
-    return {
-      entries: incomingList.slice(),
-      loadedOffset: incomingOffset,
-      entriesTotal: incomingTotal,
-      dirtyFrom: 0,
-    };
+  for (let ix = Math.max(plan.resume, plan.keep); ix < current.length; ix += 1) {
+    merged.push(current[ix]);
   }
-
-  if (incomingOffset === loadedEnd && incomingList.length === 0) {
-    if (state.entriesTotal === incomingTotal) {
-      return { ...state, dirtyFrom: null };
-    }
-    return { ...state, entriesTotal: incomingTotal, dirtyFrom: null };
-  }
-
-  if (incomingOffset >= loadedOffset && incomingOffset <= loadedEnd) {
-    const localOffset = incomingOffset - loadedOffset;
-    const next = prevEntries.slice(0, localOffset).concat(incomingList);
-    return {
-      entries: next,
-      loadedOffset,
-      entriesTotal: incomingTotal,
-      dirtyFrom: localOffset,
-    };
-  }
-
-  if (incomingOffset < loadedOffset && incomingEnd >= loadedOffset) {
-    const overlap = incomingEnd - loadedOffset;
-    const suffixStart = Math.min(overlap, prevEntries.length);
-    // 总数变少（重放后旧尾巴已不存在）时，别把本地多出来的尾巴接回去。
-    const next = incomingList
-      .concat(prevEntries.slice(suffixStart))
-      .slice(0, Math.max(0, incomingTotal - incomingOffset));
-    return {
-      entries: next,
-      loadedOffset: incomingOffset,
-      entriesTotal: incomingTotal,
-      dirtyFrom: 0,
-    };
-  }
-
-  if (incomingOffset > loadedEnd) {
-    if (incomingList.length === 0) {
-      return { ...state, entriesTotal: incomingTotal, dirtyFrom: null };
-    }
-    return {
-      entries: incomingList.slice(),
-      loadedOffset: incomingOffset,
-      entriesTotal: incomingTotal,
-      dirtyFrom: 0,
-    };
-  }
-
-  return { ...state, entriesTotal: incomingTotal, dirtyFrom: null };
+  merged.length = Math.min(merged.length, plan.window.len);
+  return merged;
 }
 
 export function tallyTools(entries, indices) {

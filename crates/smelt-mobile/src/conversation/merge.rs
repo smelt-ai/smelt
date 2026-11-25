@@ -1,24 +1,19 @@
-//! 快照窗口的合并：实时尾部、翻出来的更早页、断线重连后的整段帧都并进同一个连续窗口。
+//! 快照窗口的合并：拼条目的规则在 `smelt_model::entry_window`（桌面对话插件共用），这里按它的结果
+//! 拼条目、挑快照头。
 //!
-//! 规则搬自旧 Dart 的 `AcpSnapshot.merge`：
-//! - 恢复身份（`history_session_id`，没有时 `acp_session_id`）两边都有且不同：换了一段
-//!   对话，整个换成新的。
-//! - 快照头（相位、审批、模型……）取修订号较新的那份。
-//! - 两个窗口相交或相接就按下标拼接；不相接时，新的一份若到末尾就以它为准（实时尾部），
-//!   否则丢掉它的条目（孤立的旧页拼上去会留下空洞），只更新快照头。
-//! - 拼好后按快照头的 `entries_total` 截掉多出来的尾巴（对面删了条目）。
-//! - `envelope_omitted` 的帧：信封字段（`ConversationSnapshot::ENVELOPE_KEYS`）沿用手里的那份。旧 Dart 只在拼接
-//!   路径上沿用，不相接的两条路径会把审批、模型等清空，这里统一沿用。
+//! `envelope_omitted` 的帧：快照头取它时，信封字段（`ConversationSnapshot::ENVELOPE_KEYS`）沿用手里的那份。
 
-use smelt_model::acp_session::ConversationSnapshot;
+use smelt_model::{
+    acp_session::ConversationSnapshot,
+    entry_window::{self, EntryWindow},
+};
 
 /// 跨重启稳定的对话身份。空串当没有。
 pub(crate) fn stable_history_id(snapshot: &ConversationSnapshot) -> Option<&str> {
-    snapshot
-        .history_session_id
-        .as_deref()
-        .or(snapshot.acp_session_id.as_deref())
-        .filter(|id| !id.trim().is_empty())
+    entry_window::conversation_id(
+        snapshot.history_session_id.as_deref(),
+        snapshot.acp_session_id.as_deref(),
+    )
 }
 
 pub(crate) fn entries_end(snapshot: &ConversationSnapshot) -> usize {
@@ -35,58 +30,23 @@ pub(crate) fn merge(
     mut current: ConversationSnapshot,
     mut next: ConversationSnapshot,
 ) -> ConversationSnapshot {
-    if let (Some(current_id), Some(next_id)) =
-        (stable_history_id(&current), stable_history_id(&next))
-        && current_id != next_id
-    {
-        return next;
-    }
+    let plan = entry_window::merge(&EntryWindow::of(&current), &EntryWindow::of(&next));
+    let entries = plan.splice(
+        std::mem::take(&mut current.entries),
+        std::mem::take(&mut next.entries),
+    );
     let envelope_omitted = next.envelope_omitted;
-    let (current_start, current_end) = (current.entries_offset, entries_end(&current));
-    let (next_start, next_end) = (next.entries_offset, entries_end(&next));
-    let current_entries = std::mem::take(&mut current.entries);
-    let next_entries = std::mem::take(&mut next.entries);
-
-    let (start, entries) = if next_end < current_start || next_start > current_end {
-        if next_end == next.entries_total {
-            // 不相接但到了末尾：实时尾部为准，丢掉手里的旧窗口。
-            next.entries = next_entries;
-            if envelope_omitted {
-                next.keep_envelope(current);
-            }
-            return next;
-        }
-        (current_start, current_entries)
-    } else if next_start <= current_start {
-        let old_suffix = (next_end - current_start).min(current_entries.len());
-        let mut merged = next_entries;
-        merged.extend(current_entries.into_iter().skip(old_suffix));
-        (next_start, merged)
-    } else {
-        let prefix = (next_start - current_start).min(current_entries.len());
-        let suffix = (next_end - current_start).min(current_entries.len());
-        let mut merged = Vec::with_capacity(prefix + next_entries.len());
-        let mut old = current_entries.into_iter();
-        merged.extend(old.by_ref().take(prefix));
-        merged.extend(next_entries);
-        merged.extend(old.skip(suffix - prefix));
-        (current_start, merged)
-    };
-
-    let next_is_newer = next.snapshot_revision >= current.snapshot_revision;
-    let (mut merged, other) = if next_is_newer {
+    let (mut merged, other) = if plan.next_is_newer {
         (next, current)
     } else {
         (current, next)
     };
-    let allowed = merged.entries_total.saturating_sub(start);
-    let mut entries = entries;
-    entries.truncate(allowed);
-    merged.entries_offset = start;
-    merged.entries = entries;
-    if envelope_omitted && next_is_newer {
+    if envelope_omitted && plan.next_is_newer {
         merged.keep_envelope(other);
     }
+    merged.entries_offset = plan.window.offset;
+    merged.entries_total = plan.window.total;
+    merged.entries = entries;
     merged.envelope_omitted = false;
     merged
 }

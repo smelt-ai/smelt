@@ -16,71 +16,43 @@ import {
   computePromptRailWindow,
   consumeComposerRestore,
   detectCompletionTrigger,
+  entryWindowOf,
   isStreamingMetaUnchanged,
   isThinkingConfig,
   mergeEnvelope,
-  mergeSnapshotEntries,
   overlayModelState,
   reconcilePendingConfigValues,
   selectedConfigIndex,
+  spliceEntries,
   subsequenceScore,
   turnTimingsEqual,
   usagePercent,
 } from "../model.js";
 
-describe("mergeSnapshotEntries", () => {
-  test("merges initial, incremental tail, and prepended history pages", () => {
-    const s0 = mergeSnapshotEntries(
-      { entries: [], loadedOffset: 0, entriesTotal: 0 },
-      10,
-      12,
-      [{ User: "u1" }, { Assistant: { text: "a1", thought: false } }],
-      true,
-    );
-    expect(s0.loadedOffset).toBe(10);
-    expect(s0.entries.length).toBe(2);
-
-    const s1 = mergeSnapshotEntries(
-      s0,
-      11,
-      13,
-      [
-        { Assistant: { text: "a1 updated", thought: false } },
-        { Assistant: { text: "a2", thought: false } },
-      ],
-      false,
-    );
-    expect(s1.loadedOffset).toBe(10);
-    expect(s1.entries.length).toBe(3);
-    expect(s1.entries[1].Assistant.text).toBe("a1 updated");
-
-    const s2 = mergeSnapshotEntries(
-      s1,
-      8,
-      13,
-      [{ User: "old1" }, { Assistant: { text: "oldA", thought: false } }],
-      false,
-    );
-    expect(s2.loadedOffset).toBe(8);
-    expect(s2.entries.length).toBe(5);
-    expect(s2.entries[0].User).toBe("old1");
-    expect(s2.entries[4].Assistant.text).toBe("a2");
+describe("entryWindowOf / spliceEntries", () => {
+  test("快照只取位置和归属，缺的字段给默认值", () => {
+    expect(entryWindowOf({ entries_offset: 3, entries_total: 5, entries: [1, 2], snapshot_revision: 7 })).toEqual({
+      offset: 3,
+      len: 2,
+      total: 5,
+      revision: 7,
+      history_session_id: null,
+      acp_session_id: null,
+    });
   });
 
-  test("overlapping snapshot truncates stale tail when total shrinks", () => {
-    const s0 = { entries: [{ User: "2" }, { User: "3" }, { User: "4" }], loadedOffset: 2, entriesTotal: 5 };
-    const s1 = mergeSnapshotEntries(s0, 0, 3, [{ User: "0" }, { User: "1" }, { User: "2" }], false);
-    expect(s1.dirtyFrom).toBe(0);
-    expect(s1.loadedOffset).toBe(0);
-    expect(s1.entriesTotal).toBe(3);
-    expect(s1.entries.map((entry) => entry.User)).toEqual(["0", "1", "2"]);
+  test("手里前 keep 条 + 新来的 + 手里从 resume 起的，截到窗口条数", () => {
+    const plan = (keep, take_next, resume, len) => ({ keep, take_next, resume, window: { len } });
+    expect(spliceEntries(["a", "b", "c"], plan(2, true, 3, 4), ["C", "D"])).toEqual(["a", "b", "C", "D"]);
+    expect(spliceEntries(["c", "d"], plan(0, true, 0, 4), ["a", "b"])).toEqual(["a", "b", "c", "d"]);
+    expect(spliceEntries(["a", "b", "c", "d"], plan(1, true, 2, 4), ["B"])).toEqual(["a", "B", "c", "d"]);
+    expect(spliceEntries(["a", "b", "c"], plan(3, false, 3, 2), ["x"])).toEqual(["a", "b"]);
   });
 
-  test("ignores empty mismatched frame instead of wiping loaded entries", () => {
-    const s0 = { entries: [{ User: "keep" }], loadedOffset: 5, entriesTotal: 6 };
-    const s1 = mergeSnapshotEntries(s0, 0, 2, [], false);
-    expect(s1.dirtyFrom).toBeNull();
-    expect(s1.entries.length).toBe(1);
+  test("不改手里的数组", () => {
+    const current = ["a", "b"];
+    spliceEntries(current, { keep: 1, take_next: true, resume: 2, window: { len: 2 } }, ["B"]);
+    expect(current).toEqual(["a", "b"]);
   });
 });
 

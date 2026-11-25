@@ -159,6 +159,36 @@ export function quotaTarget(id: string): { id: string; service: string; name: st
   return raw ? JSON.parse(raw) : null;
 }
 
+/** 对话快照条目窗口：全局下标 `[offset, offset + len)`，带所在快照的总数、修订号和对话身份。 */
+export interface EntryWindow {
+  offset: number;
+  len: number;
+  total: number;
+  revision: number;
+  history_session_id: string | null;
+  acp_session_id: string | null;
+}
+
+/**
+ * 合并后的条目 = 手里窗口前 `keep` 条 + 新来的全部（`take_next`）+ 手里从 `resume` 起的，截到 `window.len` 条。
+ * `changed_from` 是第一条变了的条目在窗口里的下标，没变是 null。
+ */
+export interface EntryWindowMerge {
+  window: EntryWindow;
+  keep: number;
+  take_next: boolean;
+  resume: number;
+  next_is_newer: boolean;
+  /** 两边是不同的对话。翻页拿回来的页是这样时属于旧对话（拉页期间重新开始了），应丢掉。 */
+  conversation_changed: boolean;
+  changed_from: number | null;
+}
+
+/** 对话快照条目窗口合并，规则和手机端同一份（`smelt_model::entry_window`）。 */
+export function mergeEntryWindow(current: EntryWindow, next: EntryWindow): EntryWindowMerge {
+  return JSON.parse(Smelt.mergeEntryWindow(JSON.stringify(current), JSON.stringify(next)));
+}
+
 export function quotaFacts(data: unknown): any {
   return JSON.parse(Smelt.quotaFacts(JSON.stringify(data)));
 }
@@ -191,6 +221,26 @@ export function isManagedAutomationWorkspace(
   automationId: string,
 ): boolean {
   return Boolean(Smelt.isManagedAutomationWorkspace(style, path, automationId));
+}
+
+/** 自动化配置哪里不对：运行时 `AutomationProblem` 的线格式，`kind` 是种类，其余是带的参数。 */
+export type AutomationProblem = { kind: string; [param: string]: unknown };
+
+/** 一条日程哪里不对（和运行时保存时同一条规则），没问题是 null。文案由插件按 `kind` 写。 */
+export function automationScheduleProblem(schedule: unknown): AutomationProblem | null {
+  const problem = Smelt.automationScheduleProblem(JSON.stringify(schedule));
+  return problem == null ? null : JSON.parse(problem);
+}
+
+/** 一组触发条件（日程、外部触发、事件）哪里不对，没问题是 null。 */
+export function automationTriggerProblem(trigger: unknown): AutomationProblem | null {
+  const problem = Smelt.automationTriggerProblem(JSON.stringify(trigger));
+  return problem == null ? null : JSON.parse(problem);
+}
+
+/** 智能体定义能不能用来开对话（引擎认得出且已开放）：新建菜单、手机、自动化都以这一条为准。 */
+export function agentConversationReady(agent: unknown): boolean {
+  return Boolean(Smelt.agentConversationReady(JSON.stringify(agent)));
 }
 
 export type ProviderInputProblem = "id_required" | "id_invalid" | "base_url_invalid";

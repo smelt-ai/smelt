@@ -44,6 +44,7 @@ import { AGENTS_VIEW } from "../contract.js";
 import {
   addEditorTriggerPreset,
   agentsVersion,
+  AUTOMATION_RULES,
   closeEditor,
   copyWithFlash,
   createAutomationFromEditor,
@@ -415,7 +416,7 @@ function ScheduleRuleBody(props: { uid: string; rule: ScheduleRuleDraft }) {
   const r = () => props.rule;
 
   const validationError = computed(() => {
-    const res = scheduleFromRule(r(), t);
+    const res = scheduleFromRule(r(), t, AUTOMATION_RULES);
     return res.ok ? null : res.error;
   });
 

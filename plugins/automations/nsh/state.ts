@@ -2,6 +2,9 @@
 import { signal } from "nsh";
 import {
   agentCatalog,
+  agentConversationReady,
+  automationScheduleProblem,
+  automationTriggerProblem,
   bootTask,
   call,
   clipboardWrite,
@@ -55,7 +58,6 @@ import {
   DeliveredStore,
   findAutomation,
   intervalDayScopeFromDays,
-  isAgentReady,
   isMachineReady,
   machineKey,
   makeRunDetailKey,
@@ -229,17 +231,11 @@ function clearFlashTimer() {
 
 // ---- 只读查询辅助（render 里安全可读） ----
 
-export function validConversationEngineIds(): string[] {
-  try {
-    const list = agentCatalog().conversation_agents;
-    if (Array.isArray(list) && list.length > 0) {
-      return list.map((item) => item.id).filter((id) => id !== "custom");
-    }
-  } catch {
-    // fallback in tests / early boot
-  }
-  return ["claude", "codex", "copilot", "antigravity", "pi"];
-}
+/** 日程、触发器的校验规则：运行时那一份（经 SDK），文案在 model.js 按种类写。 */
+export const AUTOMATION_RULES = {
+  scheduleProblem: automationScheduleProblem,
+  triggerProblem: automationTriggerProblem,
+};
 
 export function allConversationAgentIds(): Set<string> {
   try {
@@ -274,8 +270,7 @@ export function agentDefinitionOn(machine: string | null | undefined, agentId: s
 }
 
 export function readyAgentsOn(machine: string | null | undefined): any[] {
-  const engines = validConversationEngineIds();
-  return agentsOn(machine).filter((a) => isAgentReady(a, engines));
+  return agentsOn(machine).filter((a) => agentConversationReady(a));
 }
 
 export function readyAgentIdOn(machine: string | null | undefined): string {
@@ -386,7 +381,7 @@ export function liveRunStatusFor(machine: string | null, runObj: any): LiveRunSt
 export function editorMissingFields(ed: EditorState) {
   const agentExists =
     ed.agentId.length > 0 && agentDefinitionOn(ed.machine, ed.agentId) != null;
-  return computeDraftMissingFields(ed, agentExists, t, newSessionId);
+  return computeDraftMissingFields(ed, agentExists, t, newSessionId, AUTOMATION_RULES);
 }
 
 // ---- 徽标与通知管理 ----
@@ -1231,7 +1226,7 @@ export async function persistEditor(opts: PersistOptions): Promise<boolean> {
   const stored = findAutomation(proj, target.id);
   const enabled = stored ? stored.enabled !== false : true;
 
-  const built = buildAutomationWireFromDraft(ed, enabled, t, newSessionId);
+  const built = buildAutomationWireFromDraft(ed, enabled, t, newSessionId, AUTOMATION_RULES);
   if (!built.ok) return false;
 
   const createdName = ed.isNew ? built.automation.name : null;

@@ -13,7 +13,6 @@ import {
   formatNextRunCell,
   formatShellCommand,
   formatUnixLocal,
-  isAutomationReady,
   isRunStatusActive,
   isShellAction,
   latestRunForAutomation,
@@ -242,7 +241,7 @@ function AutomationTableRow(props: { machine: string | null; automation: any }) 
     const activeRun = activeRunForAutomation(proj, auto.id);
     const isShell = isShellAction(auto.action);
     const actionReady = isShell ? true : agent != null;
-    const canRun = isAutomationReady(auto) && actionReady && activeRun == null;
+    const canRun = actionReady && activeRun == null;
     const cancelRunId = activeRun && isRunStatusActive(activeRun.status) ? activeRun.id : null;
     const running = cancelRunId != null;
     const agentMissing = !isShell && agent == null;
