@@ -29,7 +29,7 @@ const TABLE: Record<string, { en: string; zh: string }> = {
   "action.open_in_file": { en: "Open in Editor", zh: "在文件里打开" },
   "action.close": { en: "Close", zh: "关闭" },
   "action.jump_latest": { en: "Jump to latest", zh: "回到最新" },
-  "composer.placeholder": { en: "Ask anything… (@ files, / commands)", zh: "输入消息…（@ 引用文件，/ 斜杠命令）" },
+  "composer.placeholder": { en: "Ask anything, @ for files, / for commands", zh: "输入消息，@ 引用文件，/ 用命令" },
   "composer.placeholder_running": { en: "Type to steer or queue next turn…", zh: "输入可插话或排队下一轮…" },
   "composer.placeholder_readonly": { en: "This conversation is read-only", zh: "这段对话当前只读" },
   "composer.attach_hint": { en: "Paste image or drop path", zh: "支持粘贴图片" },

@@ -5,6 +5,7 @@ import { SmeltButton, SmeltIcon, SmeltPopover, SmeltSwitch, theme } from "smelt/
 import { ct } from "./i18n.ts";
 import {
   buildVisibleModels,
+  colorWithAlpha,
   compactTokenCount,
   composerModelLabel,
   isThinkingConfig,
@@ -591,6 +592,10 @@ export function CapabilitiesPopover(props: {
   );
 }
 
+/** 上下文用到这么多就提醒（`need` 色并写出百分比），到第二档换 `bad`。 */
+const USAGE_WARN_PCT = 65;
+const USAGE_BAD_PCT = 85;
+
 export function UsagePopover(props: {
   usage: () => [number, number] | null;
   breakdown: () => any | null;
@@ -630,10 +635,11 @@ export function UsagePopover(props: {
 
   const meterColor = computed(() => {
     const p = pct();
-    if (p >= 85) return look().palette.bad;
-    if (p >= 65) return look().palette.need;
+    if (p >= USAGE_BAD_PCT) return look().palette.bad;
+    if (p >= USAGE_WARN_PCT) return look().palette.need;
     return look().palette.muted;
   });
+  const meterTrack = computed(() => colorWithAlpha(look().palette.muted, 0.28));
 
   return (
     <If when={props.compacting() || props.usage() != null}>
@@ -650,34 +656,38 @@ export function UsagePopover(props: {
             quiet
             small
             selected={open()}
-            tooltip={ct("usage.title")}
-            accessibilityLabel={ct("usage.title")}
-            style={{ borderRadius: 999, paddingLeft: 8, paddingRight: 8 }}
+            tooltip={`${ct("usage.title")} ${pct()}%`}
+            accessibilityLabel={`${ct("usage.title")} ${pct()}%`}
+            style={{ borderRadius: 999, paddingLeft: 7, paddingRight: 7 }}
           >
             <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
               <If
                 when={props.compacting()}
                 else={
+                  // 用量饼：灰底圆上按比例填一块扇形，平时只画它，具体数字在悬停提示里
                   <View
                     style={{
-                      width: 6,
-                      height: 6,
-                      borderRadius: 3,
-                      backgroundColor: meterColor(),
+                      width: 13,
+                      height: 13,
+                      borderRadius: 999,
+                      backgroundImage: `conic-gradient(${meterColor()} 0%, ${meterColor()} ${pct()}%, ${meterTrack()} ${pct()}%, ${meterTrack()} 100%)`,
                     }}
                   />
                 }
               >
-                <SmeltIcon spin size={11} color={look().palette.muted} />
+                <SmeltIcon spin size={12} color={look().palette.muted} />
               </If>
-              <Text
-                style={{
-                  fontSize: look().type.text_xsmall.size,
-                  color: pct() >= 85 ? look().palette.bad : look().palette.muted,
-                }}
-              >
-                {props.compacting() ? ct("usage.compacting") : `${pct()}%`}
-              </Text>
+              {/* 快满了才把百分比写出来；压缩中写「压缩中」 */}
+              <If when={props.compacting() || pct() >= USAGE_WARN_PCT}>
+                <Text
+                  style={{
+                    fontSize: look().type.text_xsmall.size,
+                    color: props.compacting() ? look().palette.muted : meterColor(),
+                  }}
+                >
+                  {props.compacting() ? ct("usage.compacting") : `${pct()}%`}
+                </Text>
+              </If>
             </View>
           </SmeltButton>
         }

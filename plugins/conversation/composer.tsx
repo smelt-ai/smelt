@@ -852,18 +852,28 @@ export function Composer(props: {
             />
           </View>
 
-          {/* 7. 底部工具栏：左侧模型与能力胶囊，右侧用量、+ 附件与唯一圆形主操作钮 */}
+          {/* 7. 底部工具栏：左边往这条消息里加东西（附件、模型、能力），右边是状态（用量）和唯一的主操作 */}
           <View
             style={{
               flexDirection: "row",
               alignItems: "center",
-              gap: 4,
-              paddingLeft: 12,
-              paddingRight: 12,
+              gap: 2,
+              paddingLeft: 10,
+              paddingRight: 10,
               paddingTop: 2,
               paddingBottom: 10,
             }}
           >
+            <If when={!props.readOnly() && !props.dead()}>
+              <SmeltButton
+                quiet
+                circle
+                icon="icons/plus.svg"
+                tooltip={ct("action.attach")}
+                onPress={() => void handlePickFiles()}
+              />
+            </If>
+
             <ModelConfigPopover
               model={props.model}
               configs={props.configs}
@@ -906,16 +916,6 @@ export function Composer(props: {
                 supportsCompaction={props.supportsCompaction}
                 onCompact={props.onCompact}
               />
-
-              <If when={!props.readOnly() && !props.dead()}>
-                <SmeltButton
-                  quiet
-                  circle
-                  icon="icons/plus.svg"
-                  tooltip={ct("action.attach")}
-                  onPress={() => void handlePickFiles()}
-                />
-              </If>
 
               {/* 主操作始终唯一：运行中是停止，空闲是发送 */}
               <If
