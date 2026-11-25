@@ -4466,7 +4466,8 @@ fn run_acp_cli_install(plan: &AcpCliInstallPlan, search_path: &str) -> Result<()
 /// 注释）。顺序：login PATH 在前（用户显式配的优先），标准安装位在后兜底；
 /// 重复目录无所谓，resolve 取第一个命中即止。
 pub(crate) fn extended_search_path() -> String {
-    extend_search_path(crate::login_env::login_path(), dirs::home_dir().as_deref())
+    let path = crate::login_env::login_path();
+    extend_search_path(&path, dirs::home_dir().as_deref())
 }
 
 fn extend_search_path(login: &str, home: Option<&std::path::Path>) -> String {
