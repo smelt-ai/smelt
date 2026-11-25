@@ -344,7 +344,7 @@ impl ConversationView {
         };
         smelt_plugin_api::ui::markdown_mermaid::chat_markdown_view(
             &state,
-            file_links(&self.runtime, self.cwd.as_deref()),
+            file_links(&self.runtime, self.cwd.as_deref(), self.path_style),
         )
     }
 
@@ -2694,6 +2694,12 @@ impl ConversationView {
         let border: gpui::Hsla = ui_theme::hair().into();
         let edit_chips: std::rc::Rc<[EditChip]> =
             tool_edit_chips(&self.entries, &self.rendered_diffs, entry_ix).into();
+        let link_cwd = self.cwd.clone();
+        let link_runtime = match self.runtime.key() {
+            smelt_plugin_api::RuntimeKey::Local => None,
+            smelt_plugin_api::RuntimeKey::Remote(id) => Some(id.clone()),
+        };
+        let link_style = self.path_style;
         let view = cx.weak_entity();
         // 卡片不留内边距：正文自己滚动，内边距在滚动的内容里。
         Popover::new(owner_id("acp-tool-output-pop", &tool_id))
@@ -2708,6 +2714,8 @@ impl ConversationView {
                 for image in images.iter().flatten().flatten() {
                     smelt_plugin_api::ui::image::ensure_preview(image, cx);
                 }
+                let links = FileLinks::new(link_cwd.as_deref(), link_runtime.as_deref())
+                    .with_style(link_style);
                 render_tool_output_popover_body(ToolOutputPopoverBody {
                     tool_id: tool_id.clone(),
                     kind,
@@ -2717,6 +2725,7 @@ impl ConversationView {
                     children: &children,
                     muted,
                     border,
+                    links,
                     on_open_edit: {
                         let chips = edit_chips.clone();
                         let view = view.clone();
@@ -3074,6 +3083,7 @@ struct ToolOutputPopoverBody<'a> {
     children: &'a [AcpEntry],
     muted: gpui::Hsla,
     border: gpui::Hsla,
+    links: FileLinks<'a>,
     /// 点改动标签弹窗看第几个文件。hover 卡片拿不到 `Context<ConversationView>`，经弱引用转发。
     on_open_edit: OpenEditHandler,
     /// 点缩略图看大图。同上，经弱引用转发事件。
@@ -3094,6 +3104,7 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
         children,
         muted,
         border,
+        links,
         on_open_edit,
         on_preview_image,
     } = body;
@@ -3122,7 +3133,9 @@ fn render_tool_output_popover_body(body: ToolOutputPopoverBody<'_>) -> gpui::Any
             }
             ToolOutputPart::Text(text) if !text.trim().is_empty() => {
                 let body = strip_code_fence(text);
-                col.child(popover_tool_text(&tool_id, part_ix, kind, body, muted))
+                col.child(popover_tool_text(
+                    &tool_id, part_ix, kind, body, muted, links,
+                ))
             }
             ToolOutputPart::Image(_) => {
                 match images
@@ -3185,9 +3198,10 @@ fn popover_tool_text(
     kind: ToolKind,
     body: &str,
     muted: gpui::Hsla,
+    links: FileLinks<'_>,
 ) -> gpui::AnyElement {
     if matches!(kind, ToolKind::Other) {
-        popover_markdown_log(tool_id, part_ix, body, muted)
+        popover_markdown_log(tool_id, part_ix, body, muted, links)
     } else {
         popover_plain_log(tool_id, part_ix, "text", body, muted)
     }
@@ -3265,11 +3279,13 @@ fn popover_markdown_log(
     part_ix: usize,
     body: &str,
     muted: gpui::Hsla,
+    links: FileLinks<'_>,
 ) -> gpui::AnyElement {
     let preview = tool_log_preview(body);
-    let view = smelt_plugin_api::ui::markdown_mermaid::markdown_view_clickable(
+    let view = smelt_plugin_api::ui::markdown_mermaid::markdown_view_with_links(
         owner_part("acp-tool-pop-md", tool_id, part_ix),
         body.to_string(),
+        links,
     )
     .type_style(TYPE.text_xsmall)
     .text_color(muted);

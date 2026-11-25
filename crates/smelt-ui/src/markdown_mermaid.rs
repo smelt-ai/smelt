@@ -1308,6 +1308,17 @@ pub fn markdown_view(id: impl Into<ElementId>, text: impl Into<SharedString>) ->
     markdown_view_with_selection(id, text, true)
 }
 
+/// 文件预览等场景的 Markdown：正文可复制，点击文件链接按 `links` 路由到对应机器。
+pub fn markdown_view_with_links(
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+    links: crate::markdown_links::FileLinks<'_>,
+) -> TextView {
+    markdown_view_with_selection(id, text, true)
+        .on_link_click(crate::markdown_links::link_opener(links))
+        .link_tooltip(crate::markdown_links::link_tooltip(links))
+}
+
 /// 原样显示的纯文本（工具输出、diff 原文等），可框选复制。不解析 Markdown，按 HTML
 /// 渲染成一段正文，样式和 Markdown 正文同一套色板。
 pub fn plain_text_view(id: impl Into<ElementId>, text: &str) -> TextView {

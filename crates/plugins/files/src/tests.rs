@@ -7,8 +7,9 @@ use smelt_plugin_api::model::runtime_path::PathStyle;
 
 use crate::ProjectRef;
 use crate::model::{
-    BreadcrumbSeg, DirCache, DirListing, FileTreeRow, SearchHit, TreeRoots, breadcrumb_segments,
-    build_search_tree, collect_file_tree_rows, file_tree_row_id,
+    BreadcrumbSeg, DirCache, DirListing, FileTreeRow, PreviewKind, SearchHit, TreeRoots,
+    breadcrumb_segments, build_search_tree, collect_file_tree_rows, editor_language_for_path,
+    file_tree_row_id,
 };
 use crate::store::{FilesStore, SavedProject, Settings};
 
@@ -369,4 +370,28 @@ fn store_keeps_projects_apart_by_machine_and_root() {
     };
     store.save_project(&local, &fewer);
     assert_eq!(store.project(&local), fewer);
+}
+
+#[test]
+fn preview_and_language_follow_remote_path_style() {
+    assert_eq!(
+        PreviewKind::for_path(PathStyle::Windows, r"E:\AI\minigame-studio\AGENTS.md"),
+        Some(PreviewKind::Markdown)
+    );
+    assert_eq!(
+        PreviewKind::for_path(PathStyle::Windows, r"E:\AI\index.HTM"),
+        Some(PreviewKind::Html)
+    );
+    assert_eq!(
+        editor_language_for_path(PathStyle::Windows, r"E:\AI\dir.v1\Makefile"),
+        "makefile"
+    );
+    assert_eq!(
+        editor_language_for_path(PathStyle::Windows, r"E:\AI\.gitignore"),
+        ".gitignore"
+    );
+    assert_eq!(
+        editor_language_for_path(PathStyle::Windows, r"E:\AI\src\main.RS"),
+        "rs"
+    );
 }

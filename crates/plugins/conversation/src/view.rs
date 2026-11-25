@@ -1468,6 +1468,8 @@ pub struct ConversationView {
     runtime: Runtime,
     sid: String,
     cwd: Option<String>,
+    /// 对话所在机器的路径风格：远程链接按它解析，不跟本机系统走。
+    path_style: smelt_plugin_api::model::runtime_path::PathStyle,
     entries: Vec<AcpEntry>,
     permissions: Vec<PendingPermission>,
     /// 已发出回执、等待 smeltd 快照确认的队首审批。期间按钮替换成处理中状态，
@@ -1958,6 +1960,7 @@ impl ConversationView {
             auto_resume_pending,
             sid: saved_sid.unwrap_or_else(|| format!("acp-{}", uuid::Uuid::new_v4())),
             cwd,
+            path_style: smelt_plugin_api::model::runtime_path::PathStyle::LOCAL,
             entries: Vec::new(),
             permissions: Vec::new(),
             permission_submitting: None,
@@ -2107,6 +2110,17 @@ impl ConversationView {
                 this.refresh_model_catalog()
             }));
         this
+    }
+
+    pub(crate) fn set_path_style(
+        &mut self,
+        style: smelt_plugin_api::model::runtime_path::PathStyle,
+        cx: &mut Context<Self>,
+    ) {
+        if self.path_style != style {
+            self.path_style = style;
+            cx.notify();
+        }
     }
 
     /// 本机凭据/模型配置变了，让 agent 重拉一次模型目录。
@@ -7709,13 +7723,17 @@ fn format_duration(milliseconds: u64) -> String {
     }
 }
 
-/// Markdown 文件链接的解析基准：相对路径按会话 `cwd` 补全，远程运行时把 id 写进 host。
-fn file_links<'a>(runtime: &'a Runtime, cwd: Option<&'a str>) -> FileLinks<'a> {
+/// Markdown 文件链接的解析基准：相对路径按会话 `cwd` 补全，远程运行时把 id 和路径规则带上。
+fn file_links<'a>(
+    runtime: &'a Runtime,
+    cwd: Option<&'a str>,
+    style: smelt_plugin_api::model::runtime_path::PathStyle,
+) -> FileLinks<'a> {
     let runtime = match runtime.key() {
         smelt_plugin_api::RuntimeKey::Local => None,
         smelt_plugin_api::RuntimeKey::Remote(id) => Some(id.as_str()),
     };
-    FileLinks::new(cwd, runtime)
+    FileLinks::new(cwd, runtime).with_style(style)
 }
 
 /// 一条消息交给 Markdown 渲染的正文，原文不改：原始 HTML 由

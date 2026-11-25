@@ -131,19 +131,14 @@ impl Files {
         let opened = self
             .runtime()?
             .client
-            .call::<FileOpenCall>(
-                &FilePathParams {
-                    path: path.to_string(),
-                },
-                self.timing.open_timeout,
-            )
+            .call::<FileOpenCall>(&FilePathParams::new(path), self.timing.open_timeout)
             .map_err(control_error)?;
         Ok(match opened.content {
             FileContent::Text { text, .. } => FilePreview::text(TextDocument::new(
                 crate::highlight::Document::new(path, text),
             )),
-            FileContent::Image { data } => FilePreview::image(data.0, is_svg(path)),
-            FileContent::Binary => FilePreview::binary(),
+            FileContent::Image { data, .. } => FilePreview::image(data.0, is_svg(path)),
+            FileContent::Binary | FileContent::NotModified { .. } => FilePreview::binary(),
             FileContent::TooLarge { size, limit } => FilePreview::too_large(size, limit),
         })
     }

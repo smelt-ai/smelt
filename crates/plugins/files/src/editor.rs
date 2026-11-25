@@ -11,6 +11,7 @@ use gpui::*;
 use gpui_base::input::{EditorState, InputEvent};
 use rust_i18n::t;
 use smelt_plugin_api::RuntimeKey;
+use smelt_plugin_api::client::CallCancel;
 use smelt_plugin_api::client::protocol::control::{ControlClientError, ControlErrorCode};
 use smelt_plugin_api::client::protocol::files::{
     FileContent, FileOpenCall, FileOpenResult, FilePathParams, FileSaveCall, FileSaveParams,
@@ -19,9 +20,12 @@ use smelt_plugin_api::client::protocol::files::{
 use smelt_plugin_api::ui::code_editor::reveal_line;
 use smelt_plugin_api::ui::dialog::Confirm;
 
+use crate::cache::CachedFileContent;
 use crate::html_preview::HtmlPreview;
-use crate::model::{FileRef, OpenFile, PreviewKind, editor_language_for_path};
-use crate::rt::{RUNTIME_CALL_TIMEOUT, call_on, error_text, target};
+use crate::model::{FileRef, OpenFile, OpenFileStatus, PreviewKind, editor_language_for_path};
+use crate::rt::{
+    FILE_OPEN_TIMEOUT, RUNTIME_CALL_TIMEOUT, call_on, call_on_cancellable, error_text, target,
+};
 use crate::{FilesPanel, ProjectRef};
 
 /// 编辑器停手多久后再更新预览。
@@ -31,6 +35,11 @@ enum SaveOutcome {
     Saved(String),
     Conflict,
     Error(String),
+}
+
+enum OpenFailure {
+    Protocol(String),
+    Transport(String),
 }
 
 impl FilesPanel {
@@ -45,6 +54,9 @@ impl FilesPanel {
     }
 
     pub(crate) fn close_open_file(&mut self) {
+        if let Some(cancel) = self.open_file.as_mut().and_then(|of| of.load_cancel.take()) {
+            cancel.cancel();
+        }
         self.open_file = None;
         self._editor_sub = None;
         self.preview_task = None;
@@ -70,10 +82,14 @@ impl FilesPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(runtime) = self.open_file.as_ref().map(|of| of.runtime.clone()) else {
+            return;
+        };
+        let style = self.path_style(&runtime, cx);
         if let Some(of) = self.open_file.as_mut() {
             of.preview = preview;
             of.html_preview = (preview
-                && PreviewKind::for_path(&of.path) == Some(PreviewKind::Html))
+                && PreviewKind::for_path(style, &of.path) == Some(PreviewKind::Html))
             .then(|| cx.new(|cx| HtmlPreview::new(window, cx)));
         }
         if preview {
@@ -144,14 +160,64 @@ impl FilesPanel {
             return;
         };
         if current.runtime == file.runtime && current.path == file.path {
-            // 就是这个文件：不重读（会丢掉改动），只跳行。
+            // 就是这个文件：不重读（会丢掉改动），只跳行；在预览态时切回源码好看到那一行。
             if let Some(line) = line {
                 let editor = current.editor.clone();
+                if let Some(of) = self.open_file.as_mut()
+                    && of.preview
+                {
+                    of.preview = false;
+                    of.html_preview = None;
+                }
                 editor.update(cx, |state, cx| reveal_line(state, line, window, cx));
+                cx.notify();
             }
             return;
         }
         self.confirm_unsaved_switch(current.id, file, line, window, cx);
+    }
+
+    fn is_inside_project(&self, runtime: &RuntimeKey, path: &str, cx: &App) -> bool {
+        if runtime != &self.tree_runtime() {
+            return false;
+        }
+        let style = self.path_style(runtime, cx);
+        self.tree_roots()
+            .iter()
+            .any(|root| style.starts_with(path, root))
+    }
+
+    /// 项目外文件默认只读防误改，用户点工具栏按钮后才解锁编辑。
+    pub(crate) fn unlock_open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(of) = self.open_file.as_mut() else {
+            return;
+        };
+        of.read_only = false;
+        of.save_error = None;
+        if of.preview {
+            of.preview = false;
+            of.html_preview = None;
+        }
+        let editor = of.editor.clone();
+        editor.update(cx, |state, cx| {
+            state.set_readonly(false, cx);
+            state.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// 打开失败时点重试：绕过缓存重新向运行时拉取。
+    pub(crate) fn retry_open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(of) = self.open_file.as_ref() else {
+            return;
+        };
+        let file = FileRef {
+            runtime: of.runtime.clone(),
+            path: of.path.clone(),
+        };
+        self.file_cache
+            .remove(&(file.runtime.clone(), file.path.clone()));
+        self.open_file_now(file, None, window, cx);
     }
 
     fn confirm_unsaved_switch(
@@ -204,8 +270,9 @@ impl FilesPanel {
         self.dialog_toggled(cx);
     }
 
-    /// 真正打开：建一个可编辑的代码编辑器（tree-sitter 高亮、行号、搜索），后台读文件，
-    /// 读完灌进去。`goto_line` 从 1 数，读完把光标放过去。
+    /// 真正打开：建一个可编辑（项目外默认只读）的代码编辑器（tree-sitter 高亮、行号、搜索），
+    /// 命中本地缓存先秒开并后台按 sha256 校验，未命中时显示加载态并在后台读文件。
+    /// `goto_line` 从 1 数，读完把光标放过去并切到源码视图。
     pub(crate) fn open_file_now(
         &mut self,
         file: FileRef,
@@ -213,6 +280,9 @@ impl FilesPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(cancel) = self.open_file.as_mut().and_then(|of| of.load_cancel.take()) {
+            cancel.cancel();
+        }
         let FileRef { runtime, path } = file;
         // 树只显示当前项目那台机器的目录，别的机器上的文件定位不到。
         if runtime == self.tree_runtime() {
@@ -220,38 +290,95 @@ impl FilesPanel {
         }
         self.next_file_id = self.next_file_id.wrapping_add(1);
         let id = self.next_file_id;
-        let preview_kind = PreviewKind::for_path(&path);
+        let style = self.path_style(&runtime, cx);
+        let outside_project = !self.is_inside_project(&runtime, &path, cx);
+        let read_only = outside_project;
+        let preview_kind = PreviewKind::for_path(style, &path);
+        // 带行号（如 `#L10-L20` 或搜索命中）直接落到源码行，不进只读预览。
+        let preview = preview_kind.is_some() && goto_line.is_none();
         let editor = cx.new(|cx| {
             let mut editor = EditorState::new(window, cx)
-                .language(editor_language_for_path(&path))
+                .language(editor_language_for_path(style, &path))
                 .line_number(true)
                 .searchable(true)
                 // 代码换行会破坏缩进对齐，超长行横向滚动。
                 .soft_wrap(false);
             editor.set_highlighter_factory(smelt_plugin_api::ui::syntax::highlighter_factory(), cx);
+            editor.set_readonly(read_only, cx);
             editor
         });
-        let style = self.path_style(&runtime, cx);
+
+        let cache_key = (runtime.clone(), path.clone());
+        let cached = self.file_cache.get(&cache_key);
+        let mut saved_content = Rc::new(String::new());
+        let mut saved_version = None;
+        let mut image = None;
+        let mut readable = false;
+        let mut preview_source = SharedString::default();
+        let mut status = OpenFileStatus::Loading;
+        let mut if_none_match = None;
+        let mut had_cached_content = false;
+
+        match cached {
+            Some(CachedFileContent::Text { text, version }) => {
+                editor.update(cx, |state, cx| {
+                    state.set_value((*text).clone(), window, cx);
+                    if let Some(line) = goto_line {
+                        reveal_line(state, line, window, cx);
+                    }
+                });
+                saved_content = text;
+                saved_version = Some(version.clone());
+                preview_source = (*saved_content).clone().into();
+                readable = true;
+                status = OpenFileStatus::Ready;
+                if_none_match = Some(version);
+                had_cached_content = true;
+            }
+            Some(CachedFileContent::Image { bytes, version }) => {
+                if let Some(format) = style
+                    .extension(&path)
+                    .and_then(smelt_plugin_api::ui::image::format_for_extension)
+                {
+                    image = Some(Arc::new(gpui::Image::from_bytes(format, (*bytes).clone())));
+                    saved_version = version.clone();
+                    status = OpenFileStatus::Ready;
+                    if_none_match = version;
+                    had_cached_content = true;
+                }
+            }
+            None => {}
+        }
+
+        let cancel = CallCancel::new();
         let client = target(&runtime, cx);
-        self.open_file = Some(OpenFile {
+        let of = OpenFile {
             id,
-            runtime,
+            runtime: runtime.clone(),
             path: path.clone(),
+            status,
+            read_only,
+            outside_project,
+            load_cancel: Some(cancel.clone()),
             editor: editor.clone(),
-            saved_content: Rc::new(String::new()),
-            saved_version: None,
-            image: None,
+            saved_content,
+            saved_version,
+            image,
             save_error: None,
             // 读完确认是文本才翻真，读完之前按保存不会把空内容写回去。
-            readable: false,
+            readable,
             conflict_pending: false,
             reload_inflight: false,
             reload_again: false,
-            preview: preview_kind.is_some(),
-            preview_source: SharedString::default(),
-            html_preview: (preview_kind == Some(PreviewKind::Html))
+            preview,
+            preview_source,
+            html_preview: (preview && preview_kind == Some(PreviewKind::Html))
                 .then(|| cx.new(|cx| HtmlPreview::new(window, cx))),
-        });
+        };
+        if had_cached_content {
+            of.sync_html_preview(cx);
+        }
+        self.open_file = Some(of);
         self.preview_task = None;
         self.pending_switch_after_save = None;
         // 编辑器自己会重画；预览停手后再更新。
@@ -263,66 +390,176 @@ impl FilesPanel {
         self.persist_project();
         cx.notify();
 
+        let bg_cancel = cancel.clone();
         cx.spawn_in(window, async move |this, cx| {
             let read = cx
                 .background_executor()
                 .spawn(async move {
-                    let client = client?;
-                    call_on::<FileOpenCall>(&client, FilePathParams { path }, RUNTIME_CALL_TIMEOUT)
-                        .map_err(error_text)
+                    let client = client.map_err(OpenFailure::Transport)?;
+                    call_on_cancellable::<FileOpenCall>(
+                        &client,
+                        FilePathParams {
+                            path,
+                            if_none_match,
+                        },
+                        FILE_OPEN_TIMEOUT,
+                        &bg_cancel,
+                    )
+                    .map_err(|error| match error {
+                        ControlClientError::Protocol(_) => OpenFailure::Protocol(error_text(error)),
+                        other => OpenFailure::Transport(error_text(other)),
+                    })
                 })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
-                let Some(of) = this.open_file_with_id(id) else {
+                if cancel.is_cancelled() {
+                    return;
+                }
+                let Some((of_runtime, of_path)) = this
+                    .open_file_with_id(id)
+                    .map(|of| (of.runtime.clone(), of.path.clone()))
+                else {
                     return;
                 };
-                let unreadable = match read {
+                if let Some(of) = this.open_file_with_id(id) {
+                    of.load_cancel = None;
+                }
+                match read {
+                    Ok(FileOpenResult {
+                        content: FileContent::NotModified { .. },
+                    }) => {}
                     Ok(FileOpenResult {
                         content: FileContent::Text { text, version },
                     }) => {
-                        editor.update(cx, |state, cx| {
-                            state.set_value(text.clone(), window, cx);
-                            if let Some(line) = goto_line {
-                                reveal_line(state, line, window, cx);
-                            }
-                        });
-                        of.saved_content = Rc::new(text.clone());
-                        of.saved_version = Some(version);
-                        of.preview_source = text.into();
-                        of.sync_html_preview(cx);
-                        of.readable = true;
-                        None
+                        let text_rc = Rc::new(text.clone());
+                        this.file_cache.put(
+                            (of_runtime, of_path),
+                            CachedFileContent::Text {
+                                text: Rc::clone(&text_rc),
+                                version: version.clone(),
+                            },
+                        );
+                        let dirty = this.open_file_with_id(id).is_some_and(|of| of.dirty(cx));
+                        let Some(of) = this.open_file_with_id(id) else {
+                            return;
+                        };
+                        if had_cached_content && dirty {
+                            of.save_error = Some(t!("save.changed_elsewhere").into_owned());
+                        } else if !had_cached_content
+                            || of.saved_version.as_deref() != Some(version.as_str())
+                        {
+                            editor.update(cx, |state, cx| {
+                                state.set_value(text.clone(), window, cx);
+                                if !had_cached_content && let Some(line) = goto_line {
+                                    reveal_line(state, line, window, cx);
+                                }
+                            });
+                            of.image = None;
+                            of.saved_content = text_rc;
+                            of.saved_version = Some(version);
+                            of.preview_source = text.into();
+                            of.sync_html_preview(cx);
+                            of.readable = true;
+                            of.status = OpenFileStatus::Ready;
+                        }
                     }
                     Ok(FileOpenResult {
-                        content: FileContent::Image { data },
-                    }) => match style
-                        .extension(&of.path)
-                        .and_then(smelt_plugin_api::ui::image::format_for_extension)
-                    {
-                        Some(format) => {
-                            of.image = Some(Arc::new(gpui::Image::from_bytes(format, data.0)));
-                            None
+                        content: FileContent::Image { data, version },
+                    }) => {
+                        match style
+                            .extension(&of_path)
+                            .and_then(smelt_plugin_api::ui::image::format_for_extension)
+                        {
+                            Some(format) => {
+                                let bytes = Arc::new(data.0);
+                                this.file_cache.put(
+                                    (of_runtime, of_path),
+                                    CachedFileContent::Image {
+                                        bytes: Arc::clone(&bytes),
+                                        version: version.clone(),
+                                    },
+                                );
+                                let Some(of) = this.open_file_with_id(id) else {
+                                    return;
+                                };
+                                if !had_cached_content
+                                    || of.saved_version != version
+                                    || version.is_none()
+                                {
+                                    of.image = Some(Arc::new(gpui::Image::from_bytes(
+                                        format,
+                                        (*bytes).clone(),
+                                    )));
+                                    of.saved_version = version;
+                                    of.readable = false;
+                                    of.status = OpenFileStatus::Ready;
+                                }
+                            }
+                            None => {
+                                this.file_cache.remove(&(of_runtime, of_path));
+                                if let Some(of) = this.open_file_with_id(id) {
+                                    of.image = None;
+                                    of.readable = false;
+                                    of.status = OpenFileStatus::Unreadable {
+                                        message: t!("unreadable.image").into_owned(),
+                                        can_retry: false,
+                                    };
+                                }
+                            }
                         }
-                        None => Some(t!("unreadable.image").into_owned()),
-                    },
+                    }
                     Ok(FileOpenResult {
                         content: FileContent::Binary,
-                    }) => Some(t!("unreadable.binary").into_owned()),
+                    }) => {
+                        this.file_cache.remove(&(of_runtime, of_path));
+                        if let Some(of) = this.open_file_with_id(id) {
+                            of.image = None;
+                            of.readable = false;
+                            of.status = OpenFileStatus::Unreadable {
+                                message: t!("unreadable.binary").into_owned(),
+                                can_retry: false,
+                            };
+                        }
+                    }
                     Ok(FileOpenResult {
                         content: FileContent::TooLarge { size, limit },
-                    }) => Some(
-                        t!(
-                            "unreadable.too_large",
-                            size = format!("{:.1}", size as f64 / (1024.0 * 1024.0)),
-                            limit = limit / (1024 * 1024)
-                        )
-                        .into_owned(),
-                    ),
-                    Err(error) => Some(t!("unreadable.error", error = error).into_owned()),
-                };
-                if let Some(placeholder) = unreadable {
-                    editor.update(cx, |state, cx| state.set_value(placeholder, window, cx));
-                    of.readable = false;
+                    }) => {
+                        this.file_cache.remove(&(of_runtime, of_path));
+                        if let Some(of) = this.open_file_with_id(id) {
+                            of.image = None;
+                            of.readable = false;
+                            of.status = OpenFileStatus::Unreadable {
+                                message: t!(
+                                    "unreadable.too_large",
+                                    size = format!("{:.1}", size as f64 / (1024.0 * 1024.0)),
+                                    limit = limit / (1024 * 1024)
+                                )
+                                .into_owned(),
+                                can_retry: false,
+                            };
+                        }
+                    }
+                    Err(OpenFailure::Transport(error)) => {
+                        if !had_cached_content && let Some(of) = this.open_file_with_id(id) {
+                            of.image = None;
+                            of.readable = false;
+                            of.status = OpenFileStatus::Unreadable {
+                                message: t!("unreadable.error", error = error).into_owned(),
+                                can_retry: true,
+                            };
+                        }
+                    }
+                    Err(OpenFailure::Protocol(error)) => {
+                        this.file_cache.remove(&(of_runtime, of_path));
+                        if let Some(of) = this.open_file_with_id(id) {
+                            of.image = None;
+                            of.readable = false;
+                            of.status = OpenFileStatus::Unreadable {
+                                message: t!("unreadable.error", error = error).into_owned(),
+                                can_retry: true,
+                            };
+                        }
+                    }
                 }
                 cx.notify();
             });
@@ -338,6 +575,12 @@ impl FilesPanel {
             return;
         };
         if is_previewable_image(&of.path) {
+            return;
+        }
+        if of.read_only {
+            of.save_error = Some(t!("save.read_only").into_owned());
+            self.pending_switch_after_save = None;
+            cx.notify();
             return;
         }
         if !of.readable {
@@ -393,10 +636,19 @@ impl FilesPanel {
                         };
                         match outcome {
                             SaveOutcome::Saved(version) => {
-                                of.saved_content = Rc::new(content);
-                                of.saved_version = Some(version);
+                                let saved_rc = Rc::new(content);
+                                let cache_key = (of.runtime.clone(), of.path.clone());
+                                of.saved_content = Rc::clone(&saved_rc);
+                                of.saved_version = Some(version.clone());
                                 of.save_error = None;
                                 of.conflict_pending = false;
+                                this.file_cache.put(
+                                    cache_key,
+                                    CachedFileContent::Text {
+                                        text: saved_rc,
+                                        version,
+                                    },
+                                );
                                 if let Some(target) = switch_target
                                     && this.open_file.as_ref().is_some_and(|of| of.id == id)
                                 {
@@ -456,38 +708,67 @@ impl FilesPanel {
         of.reload_again = false;
         let id = of.id;
         let path = of.path.clone();
+        let if_none_match = of.saved_version.clone();
         cx.spawn(async move |this, cx| {
             let read = cx
                 .background_executor()
                 .spawn(async move {
-                    call_on::<FileOpenCall>(&client, FilePathParams { path }, RUNTIME_CALL_TIMEOUT)
+                    call_on::<FileOpenCall>(
+                        &client,
+                        FilePathParams {
+                            path,
+                            if_none_match,
+                        },
+                        FILE_OPEN_TIMEOUT,
+                    )
                 })
                 .await;
             cx.update(|cx| {
                 cx.with_window(entity_id, |window, cx| {
                     let _ = this.update(cx, |this, cx| {
-                        let Some(of) = this.open_file_with_id(id) else {
+                        let Some((of_runtime, of_path)) = this
+                            .open_file_with_id(id)
+                            .map(|of| (of.runtime.clone(), of.path.clone()))
+                        else {
                             return;
                         };
-                        of.reload_inflight = false;
-                        let again = std::mem::take(&mut of.reload_again);
+                        if let Some(of) = this.open_file_with_id(id) {
+                            of.reload_inflight = false;
+                        }
+                        let again = this
+                            .open_file_with_id(id)
+                            .map(|of| std::mem::take(&mut of.reload_again))
+                            .unwrap_or(false);
                         if let Ok(FileOpenResult {
                             content: FileContent::Text { text, version },
                         }) = read
-                            && of.saved_version.as_deref() != Some(version.as_str())
+                            && this.open_file_with_id(id).is_some_and(|of| {
+                                of.saved_version.as_deref() != Some(version.as_str())
+                            })
                         {
-                            if of.dirty(cx) {
-                                of.save_error = Some(t!("save.changed_elsewhere").into_owned());
-                            } else {
-                                of.editor.update(cx, |state, cx| {
-                                    state.set_value(text.clone(), window, cx)
-                                });
-                                of.saved_content = Rc::new(text.clone());
-                                of.saved_version = Some(version);
-                                of.preview_source = text.into();
-                                of.sync_html_preview(cx);
+                            let text_rc = Rc::new(text.clone());
+                            this.file_cache.put(
+                                (of_runtime, of_path),
+                                CachedFileContent::Text {
+                                    text: Rc::clone(&text_rc),
+                                    version: version.clone(),
+                                },
+                            );
+                            let dirty = this.open_file_with_id(id).is_some_and(|of| of.dirty(cx));
+                            if let Some(of) = this.open_file_with_id(id) {
+                                if dirty {
+                                    of.save_error = Some(t!("save.changed_elsewhere").into_owned());
+                                } else {
+                                    of.editor.update(cx, |state, cx| {
+                                        state.set_value(text.clone(), window, cx)
+                                    });
+                                    of.saved_content = text_rc;
+                                    of.saved_version = Some(version);
+                                    of.preview_source = text.into();
+                                    of.sync_html_preview(cx);
+                                }
+                                cx.notify();
                             }
-                            cx.notify();
                         }
                         if again && this.open_file.as_ref().is_some_and(|of| of.id == id) {
                             this.reload_open_file(cx);

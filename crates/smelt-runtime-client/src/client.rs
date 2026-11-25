@@ -5,7 +5,8 @@
 
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Write};
-use std::sync::Arc;
+use std::net::Shutdown;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -17,6 +18,77 @@ use crate::protocol::control::{
     ControlMethod, EmptyParams, SystemDescribe, SystemDescribeResult, decode_method_response,
     decode_response_with_version, encode_method_request, encode_request_with_version,
 };
+
+/// 短请求的取消句柄：取消时关闭正在等待的流，让后台阻塞读立即返回。
+#[derive(Clone, Default)]
+pub struct CallCancel {
+    inner: Arc<Mutex<CallCancelState>>,
+}
+
+#[derive(Default)]
+struct CallCancelState {
+    cancelled: bool,
+    stream: Option<RuntimeStream>,
+}
+
+impl fmt::Debug for CallCancel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CallCancel")
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
+}
+
+impl CallCancel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        let stream = {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.cancelled = true;
+            guard.stream.take()
+        };
+        if let Some(stream) = stream {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .cancelled
+    }
+
+    fn attach(&self, stream: RuntimeStream) -> bool {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.cancelled {
+            drop(guard);
+            let _ = stream.shutdown(Shutdown::Both);
+            return false;
+        }
+        guard.stream = Some(stream);
+        true
+    }
+
+    fn clear(&self) {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).stream = None;
+    }
+}
+
+struct CancelStreamGuard<'a> {
+    cancel: Option<&'a CallCancel>,
+}
+
+impl Drop for CancelStreamGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel {
+            cancel.clear();
+        }
+    }
+}
 
 /// 短请求的默认读写时限。调用方都在后台线程，但运行时不回包时仍要及时放掉线程。
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -110,6 +182,19 @@ impl RuntimeClient {
         self.call_with_version::<C>(CONTROL_API_VERSION, params, timeout)
     }
 
+    /// 可被 [`CallCancel`] 中途打断的 [`Self::call`]。
+    pub fn call_cancellable<C: ControlCall>(
+        &self,
+        params: &C::Params,
+        timeout: Duration,
+        cancel: &CallCancel,
+    ) -> Result<C::Result, ControlClientError> {
+        let request_id = new_request_id();
+        let request = encode_request_with_version::<C>(CONTROL_API_VERSION, &request_id, params)?;
+        let response = self.exchange_control_with_cancel(&request, timeout, Some(cancel))?;
+        decode_response_with_version::<C>(CONTROL_API_VERSION, &request_id, response)
+    }
+
     pub fn call_with_version<C: ControlCall>(
         &self,
         control_version: u16,
@@ -142,9 +227,43 @@ impl RuntimeClient {
         request: &Value,
         timeout: Duration,
     ) -> Result<Value, ControlClientError> {
+        self.exchange_control_with_cancel(request, timeout, None)
+    }
+
+    fn exchange_control_with_cancel(
+        &self,
+        request: &Value,
+        timeout: Duration,
+        cancel: Option<&CallCancel>,
+    ) -> Result<Value, ControlClientError> {
         let transport = |error: io::Error| ControlClientError::Transport(error.to_string());
+        if cancel.is_some_and(CallCancel::is_cancelled) {
+            return Err(ControlClientError::Transport(
+                "control request cancelled".to_string(),
+            ));
+        }
         let stream = self.connect_with_timeout(timeout).map_err(transport)?;
-        let line = exchange_line(stream, &request.to_string()).map_err(transport)?;
+        let _guard = CancelStreamGuard { cancel };
+        if let Some(cancel) = cancel {
+            let handle = stream.try_clone().map_err(transport)?;
+            if !cancel.attach(handle) {
+                return Err(ControlClientError::Transport(
+                    "control request cancelled".to_string(),
+                ));
+            }
+        }
+        let line = exchange_line(stream, &request.to_string()).map_err(|error| {
+            if cancel.is_some_and(CallCancel::is_cancelled) {
+                ControlClientError::Transport("control request cancelled".to_string())
+            } else {
+                transport(error)
+            }
+        })?;
+        if cancel.is_some_and(CallCancel::is_cancelled) {
+            return Err(ControlClientError::Transport(
+                "control request cancelled".to_string(),
+            ));
+        }
         if line.trim().is_empty() {
             return Err(ControlClientError::Transport(
                 "smeltd closed the control request without a response".to_string(),
@@ -357,5 +476,49 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, RequestError::Closed), "{error}");
+    }
+
+    #[test]
+    fn call_cancellable_unblocks_immediately_when_cancelled() {
+        use std::sync::mpsc;
+        use std::time::Instant;
+
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (_release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let client = RuntimeClient::new(move || {
+            let (client, server) = RuntimeStream::pair()?;
+            let accepted_tx = accepted_tx.clone();
+            let release_rx = Arc::clone(&release_rx);
+            thread::spawn(move || {
+                let mut line = String::new();
+                let _ = BufReader::new(server.try_clone().unwrap()).read_line(&mut line);
+                let _ = accepted_tx.send(());
+                let _ = release_rx.lock().unwrap().recv();
+                drop(server);
+            });
+            Ok(client)
+        });
+
+        let cancel = CallCancel::new();
+        let call_cancel = cancel.clone();
+        let started = Instant::now();
+        let handle = thread::spawn(move || {
+            client.call_cancellable::<SystemDescribe>(
+                &EmptyParams::default(),
+                Duration::from_secs(30),
+                &call_cancel,
+            )
+        });
+        accepted_rx.recv().unwrap();
+        cancel.cancel();
+
+        let err = handle.join().unwrap().unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "cancel should unblock without waiting for 30s timeout"
+        );
+        assert!(matches!(err, ControlClientError::Transport(_)), "{err}");
+        assert!(cancel.is_cancelled());
     }
 }

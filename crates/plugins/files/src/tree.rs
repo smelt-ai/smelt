@@ -779,6 +779,7 @@ impl FilesPanel {
         } = entry;
         let style = self.path_style(&runtime, cx);
         let under = |base: &str, candidate: &str| style.starts_with(candidate, base);
+        self.file_cache.remove_under(&runtime, &path, style);
 
         if self
             .open_file
