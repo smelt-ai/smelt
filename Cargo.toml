@@ -90,16 +90,16 @@ gpui-fast-windows = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064
 
 # NSH 用我们的 fork：长期单分支 `smelt/release`，不强推、不打标签；同步上游发版直接 merge
 # 对应 tag，这里十个包一起换到同一个 rev。
-nsh-base = { git = "https://github.com/smelt-ai/nsh", rev = "b99bf167f3a60cfe1eca4147d7c2c589856f96ff" }
-nsh-bundler = { git = "https://github.com/smelt-ai/nsh", rev = "b99bf167f3a60cfe1eca4147d7c2c589856f96ff" }
-nsh-core = { git = "https://github.com/smelt-ai/nsh", rev = "b99bf167f3a60cfe1eca4147d7c2c589856f96ff" }
-nsh-engine = { git = "https://github.com/smelt-ai/nsh", rev = "b99bf167f3a60cfe1eca4147d7c2c589856f96ff" }
-nsh-i18n = { git = "https://github.com/smelt-ai/nsh", rev = "b99bf167f3a60cfe1eca4147d7c2c589856f96ff" }
-nsh-js = { git = "https://github.com/smelt-ai/nsh", rev = "b99bf167f3a60cfe1eca4147d7c2c589856f96ff" }
-nsh-macros = { git = "https://github.com/smelt-ai/nsh", rev = "b99bf167f3a60cfe1eca4147d7c2c589856f96ff" }
-nsh-package = { git = "https://github.com/smelt-ai/nsh", rev = "b99bf167f3a60cfe1eca4147d7c2c589856f96ff" }
-nsh-platform-gpui = { git = "https://github.com/smelt-ai/nsh", rev = "b99bf167f3a60cfe1eca4147d7c2c589856f96ff" }
-nsh-updater = { git = "https://github.com/smelt-ai/nsh", rev = "b99bf167f3a60cfe1eca4147d7c2c589856f96ff" }
+nsh-base = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
+nsh-bundler = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
+nsh-core = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
+nsh-engine = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
+nsh-i18n = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
+nsh-js = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
+nsh-macros = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
+nsh-package = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
+nsh-platform-gpui = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
+nsh-updater = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow" }
