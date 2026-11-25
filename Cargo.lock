@@ -12501,6 +12501,7 @@ dependencies = [
 name = "smelt-nsh"
 version = "0.0.0"
 dependencies = [
+ "dunce",
  "gpui-fast",
  "gpui-fast-platform",
  "libc",

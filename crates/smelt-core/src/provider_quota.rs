@@ -1488,7 +1488,10 @@ mod tests {
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     #[test]
     fn reads_cursor_token_from_db_even_with_query_char_in_path() {
-        let dir = std::env::temp_dir().join(format!("smelt-cursor-db-{}?v1", std::process::id()));
+        // Windows 文件名不许有 `?`，换成同样会被当成 URI 分隔的 `#`。
+        let special = if cfg!(windows) { '#' } else { '?' };
+        let dir =
+            std::env::temp_dir().join(format!("smelt-cursor-db-{}{special}v1", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let db = dir.join("state.vscdb");
@@ -1503,7 +1506,7 @@ mod tests {
         assert_eq!(
             read_cursor_token_from_db(&db).as_deref(),
             Some("tok-123"),
-            "含 ? 的路径也应通过 rusqlite 正常只读取出 token"
+            "含 URI 分隔符的路径也应通过 rusqlite 正常只读取出 token"
         );
         // 兼容 BLOB 形式存储的 UTF-8 令牌
         let conn = rusqlite::Connection::open(&db).unwrap();

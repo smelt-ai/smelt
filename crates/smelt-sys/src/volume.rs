@@ -55,12 +55,8 @@ mod tests {
     fn temp_dir_lives_on_a_volume_with_space() {
         let dir = tempfile::tempdir().unwrap();
         let volume = volume_of(dir.path()).expect("临时目录所在的卷");
-        assert!(
-            dir.path()
-                .canonicalize()
-                .unwrap()
-                .starts_with(&volume.mount)
-        );
+        // 和 volume_of 用同一个解析：Windows 上 canonicalize 带 `\\?\` 前缀，对不上挂载点。
+        assert!(resolve(dir.path()).unwrap().starts_with(&volume.mount));
         assert!(volume.total > 0);
         assert!(volume.available <= volume.total);
     }

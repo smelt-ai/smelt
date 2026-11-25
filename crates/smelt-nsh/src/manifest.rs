@@ -2923,7 +2923,7 @@ fn watch_sources(
             if !s.path.is_dir() {
                 let _ = fs::create_dir_all(&s.path);
             }
-            let canonical = fs::canonicalize(&s.path).ok()?;
+            let canonical = dunce::canonicalize(&s.path).ok()?;
             Some(WatchedDir {
                 original: s.path.clone(),
                 canonical,

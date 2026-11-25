@@ -33,6 +33,8 @@ nsh-bundler = { version = "=0.7.0", features = ["bundle"] }
 oxc = { version = "=0.153.0", features = ["semantic"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Windows 上 canonicalize 给 `\\?\D:\…`，打包器、notify 报的是 `D:\…`；dunce 换回后者，前缀对比才对得上。
+dunce = "1"
 # 盯插件目录热重载（`src/manifest.rs`），和宿主同一版。
 notify = "8"
 # 插件目录里 locales/ 的文案，和 smelt-plugin-api 用同一个加载函数读。

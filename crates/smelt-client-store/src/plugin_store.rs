@@ -506,7 +506,9 @@ mod tests {
             &override_store_at(&home, "smelt.files").unwrap()
         ));
 
-        // 丢掉后下次重新从自带版复制。
+        // 丢掉后下次重新从自带版复制。App 里只在覆写版还没装上时丢，没人拿着连接；Windows 上
+        // 开着的库文件删不掉，先放掉。
+        drop(fork);
         remove_override_data_at(&home, "smelt.files").unwrap();
         let again = override_store_at(&home, "smelt.files").unwrap();
         assert_eq!((version(&again), count(&again)), (1, 1));

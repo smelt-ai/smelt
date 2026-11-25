@@ -347,9 +347,11 @@ fn file_save_with_a_stale_version_is_a_conflict() {
 fn fs_read_dir_reports_a_missing_directory_instead_of_listing_it_empty() {
     use smelt_runtime_client::protocol::files::FilePathParams;
     use smelt_runtime_client::protocol::fs::FsReadDirCall;
+    // 要绝对路径：Windows 上 `/no/such/dir` 不算绝对，先报 InvalidParams。
+    let missing = std::env::temp_dir().join(format!("smeltd-missing-{}", uuid::Uuid::new_v4()));
     let error = in_process_runtime()
         .call::<FsReadDirCall>(
-            &FilePathParams::new("/no/such/dir"),
+            &FilePathParams::new(missing.to_string_lossy()),
             DEFAULT_REQUEST_TIMEOUT,
         )
         .unwrap_err();

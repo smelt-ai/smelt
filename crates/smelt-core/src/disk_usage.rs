@@ -443,8 +443,10 @@ mod tests {
 
     #[test]
     fn missing_root_is_an_error() {
+        // 要绝对路径：Windows 上 `/definitely/not/here` 不算绝对，先报 InvalidPath。
+        let missing = std::env::temp_dir().join(format!("smelt-missing-{}", uuid::Uuid::new_v4()));
         assert!(matches!(
-            scan("/definitely/not/here", &ScanControl::default(), &|_| {}),
+            scan(&missing.to_string_lossy(), &ScanControl::default(), &|_| {}),
             Err(FsError::NotFound(_))
         ));
         assert!(matches!(

@@ -287,7 +287,7 @@ impl Plugins {
     pub fn new(stage: &Path, shell: &str, ui_sets: Vec<SetDescription>) -> Result<Self, String> {
         let io = |error: io::Error| format!("{}: {error}", stage.display());
         fs::create_dir_all(stage).map_err(io)?;
-        let stage = stage.canonicalize().map_err(io)?;
+        let stage = dunce::canonicalize(stage).map_err(io)?;
         let dir = stage.join("shell");
         let files = [
             ("nsh.json", SHELL_NSH_CONFIG.as_str()),
@@ -692,10 +692,9 @@ fn stage_and_bundle(
         staged.iter().map(|(path, bytes)| (path.as_path(), *bytes)),
     )
     .map_err(|error| format!("{}: {error}", raw_dir.display()))?;
-    // macOS `/var` -> `/private/var` 符号链接解析，确保 `inside` 前缀对比一致。
-    let dir = raw_dir
-        .canonicalize()
-        .map_err(|error| format!("{}: {error}", raw_dir.display()))?;
+    // 解开 macOS `/var` -> `/private/var` 符号链接、Windows 短文件名，`inside` 前缀对比才一致。
+    let dir =
+        dunce::canonicalize(raw_dir).map_err(|error| format!("{}: {error}", raw_dir.display()))?;
     let bundle = bundle(&dir.join("entry.ts"), ui_sets, minify)?;
     if let Some(outside) = bundle.watch_files.iter().find(|file| !inside(file, &dir)) {
         return Err(format!(
@@ -1552,12 +1551,14 @@ fn bundle(
 /// 打包失败的摘要，几行：缺 SDK 导出的合成一句（插件比这个 App 新，最常见），其余每条一行。
 fn summarize_bundle_error(problems: &[nsh_bundler::BundleProblem], sdk: &Path) -> String {
     const SHOWN: usize = 3;
-    let sdk = sdk.canonicalize().ok();
+    let sdk = dunce::canonicalize(sdk).ok();
     let mut missing_sdk: Vec<&str> = Vec::new();
     let mut lines: Vec<String> = Vec::new();
     for problem in problems {
         match &problem.missing_export {
-            Some((exporter, name)) if sdk.is_some() && exporter.canonicalize().ok() == sdk => {
+            Some((exporter, name))
+                if sdk.is_some() && dunce::canonicalize(exporter).ok() == sdk =>
+            {
                 if !missing_sdk.contains(&name.as_str()) {
                     missing_sdk.push(name);
                 }

@@ -214,11 +214,21 @@ pub fn create_dir(path: &str) -> Result<(), FsError> {
 }
 
 /// 目标和来源是不是同一个东西。大小写不敏感的卷上，只改大小写的两个路径就是同一个。
-fn same_entry(from: &Path, to: &Metadata) -> bool {
-    std::fs::symlink_metadata(from)
-        .ok()
-        .and_then(|source| identity_of(&source))
-        .is_some_and(|source| Some(source) == identity_of(to))
+fn same_entry(from: &Path, to: &Path) -> bool {
+    let (Ok(source), Ok(target)) = (
+        std::fs::symlink_metadata(from),
+        std::fs::symlink_metadata(to),
+    ) else {
+        return false;
+    };
+    match (identity_of(&source), identity_of(&target)) {
+        (Some(source), Some(target)) => source == target,
+        // Windows 拿不到文件身份：比解开后的真实路径，NTFS 上只差大小写的两个名字解出同一个。
+        // 链接不比：canonicalize 会跟过去，把指向来源的链接当成来源本身。
+        _ if source.file_type().is_symlink() || target.file_type().is_symlink() => false,
+        _ => dunce::canonicalize(from)
+            .is_ok_and(|source| dunce::canonicalize(to).is_ok_and(|target| source == target)),
+    }
 }
 
 /// 改名、复制前腾出目标：不存在就好；存在又不许覆盖就报错；许覆盖就删掉。`keep_files` 时
@@ -260,7 +270,7 @@ fn move_paths(params: &FsMoveParams) -> Result<(&Path, &Path), FsError> {
 
 pub fn rename(params: &FsMoveParams) -> Result<(), FsError> {
     let (from, to) = move_paths(params)?;
-    let same = std::fs::symlink_metadata(to).is_ok_and(|meta| same_entry(from, &meta));
+    let same = same_entry(from, to);
     if !same {
         // 文件换文件交给 rename 原子替换；目录和文件互换 rename 做不了，先删目标。
         let from_is_dir = std::fs::symlink_metadata(from).is_ok_and(|meta| meta.is_dir());
@@ -285,7 +295,7 @@ pub fn rename(params: &FsMoveParams) -> Result<(), FsError> {
 
 pub fn copy(params: &FsMoveParams) -> Result<(), FsError> {
     let (from, to) = move_paths(params)?;
-    if from == to || std::fs::symlink_metadata(to).is_ok_and(|meta| same_entry(from, &meta)) {
+    if from == to || same_entry(from, to) {
         return Err(FsError::Exists(params.to.clone()));
     }
     clear_target(to, params, false)?;
