@@ -2015,6 +2015,58 @@ fn notice_is_not_startup_status_and_clears_when_the_user_starts_a_turn() {
     assert_eq!(s.notice, None);
 }
 
+/// 省略信封的帧清掉的字段，必须都在 `ENVELOPE_KEYS` 里；`keep_envelope` 必须把它们原样补回。
+/// 客户端（手机、桌面 hub）只认这一张表，出帧这边多省一个字段就会在这里失败。
+#[test]
+fn envelope_keys_match_what_omitted_frames_drop() {
+    let mut s = fresh_state();
+    apply_event(&mut s, ConversationEvent::UserChunk("标题来自这里".into()));
+    apply_event(
+        &mut s,
+        ConversationEvent::RuntimeNotice(RuntimeNote::SteerFailed { detail: "x".into() }),
+    );
+    s.available_commands.push(("plan".into(), "Plan".into()));
+    s.status_line = Some("状态".into());
+    s.queued_steering = vec!["转向".into()];
+    s.queued_follow_up = vec!["跟进".into()];
+    s.pending_prompts = vec![PendingPromptView {
+        id: 7,
+        text: "下一句".into(),
+        image_count: 0,
+        withdrawable: true,
+    }];
+    s.turn_started_at_ms = Some(5);
+    s.composer_restore_revision = 3;
+    s.composer_restore_texts = vec!["还回来".into()];
+    s.usage = Some((1, 2));
+
+    let total = s.entries_total();
+    let full = s.to_snapshot_range_selective(false, 0, total, false, false, true);
+    let omitted = s.to_snapshot_range_selective(false, 0, total, false, false, false);
+    assert!(omitted.envelope_omitted);
+    let full_json = serde_json::to_value(&full).unwrap();
+    let omitted_json = serde_json::to_value(&omitted).unwrap();
+    let null = serde_json::Value::Null;
+    let dropped: Vec<&String> = full_json
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|key| key.as_str() != "envelope_omitted")
+        .filter(|key| full_json[key.as_str()] != *omitted_json.get(key.as_str()).unwrap_or(&null))
+        .collect();
+    assert!(!dropped.is_empty());
+    for key in dropped {
+        assert!(
+            ConversationSnapshot::ENVELOPE_KEYS.contains(&key.as_str()),
+            "省略信封的帧清掉了 {key}，它却不在 ENVELOPE_KEYS 里"
+        );
+    }
+
+    let mut restored = omitted;
+    restored.keep_envelope(full);
+    assert_eq!(serde_json::to_value(&restored).unwrap(), full_json);
+}
+
 #[test]
 fn hosted_mirror_keeps_queue_and_notice_through_envelope_omitted_frames() {
     let mut host = fresh_state();

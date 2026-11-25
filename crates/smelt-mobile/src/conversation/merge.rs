@@ -1,24 +1,19 @@
-//! 快照窗口的合并：实时尾部、翻出来的更早页、断线重连后的整段帧都并进同一个连续窗口。
+//! 快照窗口的合并：拼条目的规则在 `smelt_model::entry_window`（桌面对话插件共用），这里按它的结果
+//! 拼条目、挑快照头。
 //!
-//! 规则搬自旧 Dart 的 `AcpSnapshot.merge`：
-//! - 恢复身份（`history_session_id`，没有时 `acp_session_id`）两边都有且不同：换了一段
-//!   对话，整个换成新的。
-//! - 快照头（相位、审批、模型……）取修订号较新的那份。
-//! - 两个窗口相交或相接就按下标拼接；不相接时，新的一份若到末尾就以它为准（实时尾部），
-//!   否则丢掉它的条目（孤立的旧页拼上去会留下空洞），只更新快照头。
-//! - 拼好后按快照头的 `entries_total` 截掉多出来的尾巴（对面删了条目）。
-//! - `envelope_omitted` 的帧只带正文和相位：信封字段沿用手里的那份。旧 Dart 只在拼接
-//!   路径上沿用，不相接的两条路径会把审批、模型等清空，这里统一沿用。
+//! `envelope_omitted` 的帧：快照头取它时，信封字段（`ConversationSnapshot::ENVELOPE_KEYS`）沿用手里的那份。
 
-use smelt_model::acp_session::ConversationSnapshot;
+use smelt_model::{
+    acp_session::ConversationSnapshot,
+    entry_window::{self, EntryWindow},
+};
 
 /// 跨重启稳定的对话身份。空串当没有。
 pub(crate) fn stable_history_id(snapshot: &ConversationSnapshot) -> Option<&str> {
-    snapshot
-        .history_session_id
-        .as_deref()
-        .or(snapshot.acp_session_id.as_deref())
-        .filter(|id| !id.trim().is_empty())
+    entry_window::conversation_id(
+        snapshot.history_session_id.as_deref(),
+        snapshot.acp_session_id.as_deref(),
+    )
 }
 
 pub(crate) fn entries_end(snapshot: &ConversationSnapshot) -> usize {
@@ -35,90 +30,25 @@ pub(crate) fn merge(
     mut current: ConversationSnapshot,
     mut next: ConversationSnapshot,
 ) -> ConversationSnapshot {
-    if let (Some(current_id), Some(next_id)) =
-        (stable_history_id(&current), stable_history_id(&next))
-        && current_id != next_id
-    {
-        return next;
-    }
+    let plan = entry_window::merge(&EntryWindow::of(&current), &EntryWindow::of(&next));
+    let entries = plan.splice(
+        std::mem::take(&mut current.entries),
+        std::mem::take(&mut next.entries),
+    );
     let envelope_omitted = next.envelope_omitted;
-    let (current_start, current_end) = (current.entries_offset, entries_end(&current));
-    let (next_start, next_end) = (next.entries_offset, entries_end(&next));
-    let current_entries = std::mem::take(&mut current.entries);
-    let next_entries = std::mem::take(&mut next.entries);
-
-    let (start, entries) = if next_end < current_start || next_start > current_end {
-        if next_end == next.entries_total {
-            // 不相接但到了末尾：实时尾部为准，丢掉手里的旧窗口。
-            next.entries = next_entries;
-            if envelope_omitted {
-                keep_envelope(&mut next, current);
-            }
-            return next;
-        }
-        (current_start, current_entries)
-    } else if next_start <= current_start {
-        let old_suffix = (next_end - current_start).min(current_entries.len());
-        let mut merged = next_entries;
-        merged.extend(current_entries.into_iter().skip(old_suffix));
-        (next_start, merged)
-    } else {
-        let prefix = (next_start - current_start).min(current_entries.len());
-        let suffix = (next_end - current_start).min(current_entries.len());
-        let mut merged = Vec::with_capacity(prefix + next_entries.len());
-        let mut old = current_entries.into_iter();
-        merged.extend(old.by_ref().take(prefix));
-        merged.extend(next_entries);
-        merged.extend(old.skip(suffix - prefix));
-        (current_start, merged)
-    };
-
-    let next_is_newer = next.snapshot_revision >= current.snapshot_revision;
-    let (mut merged, other) = if next_is_newer {
+    let (mut merged, other) = if plan.next_is_newer {
         (next, current)
     } else {
         (current, next)
     };
-    let allowed = merged.entries_total.saturating_sub(start);
-    let mut entries = entries;
-    entries.truncate(allowed);
-    merged.entries_offset = start;
-    merged.entries = entries;
-    if envelope_omitted && next_is_newer {
-        keep_envelope(&mut merged, other);
+    if envelope_omitted && plan.next_is_newer {
+        merged.keep_envelope(other);
     }
+    merged.entries_offset = plan.window.offset;
+    merged.entries_total = plan.window.total;
+    merged.entries = entries;
     merged.envelope_omitted = false;
     merged
-}
-
-/// `target` 是只带正文的帧：信封字段换回 `previous` 的。
-fn keep_envelope(target: &mut ConversationSnapshot, previous: ConversationSnapshot) {
-    target.pending_permissions = previous.pending_permissions;
-    target.pending_elicitation = previous.pending_elicitation;
-    target.status_line = previous.status_line;
-    target.available_commands = previous.available_commands;
-    target.usage = previous.usage;
-    target.usage_cached_read = previous.usage_cached_read;
-    target.usage_cost = previous.usage_cost;
-    target.usage_breakdown = previous.usage_breakdown;
-    target.plan = previous.plan;
-    target.background_tasks = previous.background_tasks;
-    target.subagents = previous.subagents;
-    target.peer_inbox = previous.peer_inbox;
-    target.model = previous.model;
-    target.config_options = previous.config_options;
-    target.conversation_state = previous.conversation_state;
-    target.provider_retry = previous.provider_retry;
-    target.notice = previous.notice;
-    target.memory_changes = previous.memory_changes;
-    target.pending_prompts = previous.pending_prompts;
-    target.queued_steering = previous.queued_steering;
-    target.queued_follow_up = previous.queued_follow_up;
-    target.turn_started_at_ms = previous.turn_started_at_ms;
-    target.turn_timings = previous.turn_timings;
-    target.completed_unread = previous.completed_unread;
-    target.turn_outcome = previous.turn_outcome;
-    target.envelope_omitted = false;
 }
 
 /// 存缓存用：只留最后 `limit` 条，`entries_total` 不变（缓存窗口没到开头）。
@@ -291,6 +221,28 @@ pub(crate) mod tests {
         let merged = merge(current, next);
         assert_eq!(merged.entries_offset, 50);
         assert_eq!(merged.status_line.as_deref(), Some("干活中"));
+    }
+
+    /// 省略信封的帧照样带用量、重试、回合结果（每帧都带的字段），要用本帧的；
+    /// 标题、还回输入框的原文是信封，要沿用手里的。
+    #[test]
+    fn an_envelope_omitted_frame_takes_per_frame_fields_and_keeps_title() {
+        let mut current = page(0..2, 2, 1);
+        current.session_title = Some("标题".into());
+        current.composer_restore_revision = 3;
+        current.composer_restore_texts = vec!["还回来".into()];
+        current.usage = Some((10, 100));
+        current.completed_unread = true;
+        let mut next = snapshot(1, 2, 2, &["e1'"]);
+        next.envelope_omitted = true;
+        next.usage = Some((20, 100));
+        next.completed_unread = false;
+        let merged = merge(current, next);
+        assert_eq!(merged.usage, Some((20, 100)));
+        assert!(!merged.completed_unread);
+        assert_eq!(merged.session_title.as_deref(), Some("标题"));
+        assert_eq!(merged.composer_restore_revision, 3);
+        assert_eq!(merged.composer_restore_texts, ["还回来"]);
     }
 
     #[test]

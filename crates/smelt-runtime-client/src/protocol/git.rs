@@ -40,7 +40,7 @@ pub struct ParsedDiff {
     pub hunks: Vec<DiffHunk>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitStatusData {
     pub ok: bool,
     pub branch: String,
@@ -90,7 +90,7 @@ impl GitStatusData {
 ///
 /// 丢弃不可撤销，而 agent 可能在同一个工作区里接着写：请求必须带上用户看到的这一份，
 /// 运行时丢弃前从磁盘重算，任一字段对不上就拒绝，用户没见过的内容不跟着丢。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitSeenChange {
     pub path: String,
     /// porcelain 的两位状态码。
@@ -105,7 +105,7 @@ impl GitSeenChange {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BranchList {
     pub local: Vec<String>,
     pub remote: Vec<String>,
@@ -121,7 +121,7 @@ impl BranchList {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RepoInfo {
     /// 当前分支；detached 时是 `HEAD`。
     pub branch: String,
@@ -136,7 +136,7 @@ pub struct RepoInfo {
     pub upstream_branch: Option<String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DiffScope {
     All,
@@ -259,7 +259,7 @@ pub fn hunk_patch(header: &str, hunk: &DiffHunk) -> String {
 
 /// 仓库在工作区里的身份。UI 用它区分图标与分组标题，写操作不看它——
 /// 任何 kind 的仓库都是独立的提交单位。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RepoKind {
     /// 项目根自己。
@@ -272,7 +272,7 @@ pub enum RepoKind {
 }
 
 /// 一个已确认的仓库。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DiscoveredRepo {
     /// 仓库真实根（`git rev-parse --show-toplevel` 的结果，已 canonicalize）。
     /// 运行时那台机器的路径，分隔符按那台机器，不用 `PathBuf`。
@@ -283,7 +283,7 @@ pub struct DiscoveredRepo {
 }
 
 /// 发现结果。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Discovery {
     /// 项目根排第一，其余按相对路径字典序。
     pub repos: Vec<DiscoveredRepo>,
@@ -292,7 +292,7 @@ pub struct Discovery {
 }
 
 /// 一条提交记录。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CommitNode {
     /// 完整 sha，父子关系全靠它对齐。
     pub hash: String,
@@ -313,7 +313,7 @@ pub struct CommitNode {
 ///
 /// 默认是 [`LogScope::Head`]——**当前分支**，跟 JetBrains 一致。一进来就 `--all`
 /// 会把所有分支的提交混在一起按时间排，跟「我这条线上都干了啥」完全是两回事。
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LogScope {
     /// 当前检出的分支（`git log` 不带 ref，默认就是 HEAD）。
@@ -661,18 +661,18 @@ git_calls! {
     GitCommitFileDiffCall => GitCommitFileDiff(GitCommitFileParams) -> GitTextResult;
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitRootParams {
     pub root: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitBranchParams {
     pub root: String,
     pub branch: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitBranchDeleteParams {
     pub root: String,
     pub branch: String,
@@ -680,27 +680,27 @@ pub struct GitBranchDeleteParams {
     pub remote: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitPathsParams {
     pub root: String,
     pub paths: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitDiscardFileParams {
     pub root: String,
     /// 未跟踪（`??`）的直接删盘，其余走 `git restore`。
     pub seen: GitSeenChange,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitDiscardAllParams {
     pub root: String,
     /// 用户看到的整份改动列表（[`GitStatusData::seen_changes`]）。
     pub seen: Vec<GitSeenChange>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GitPatchAction {
     /// `git apply --cached`：把这一块放进暂存区。
@@ -721,14 +721,14 @@ impl GitPatchAction {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitApplyPatchParams {
     pub root: String,
     pub action: GitPatchAction,
     pub patch: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitCommitParams {
     pub root: String,
     pub message: String,
@@ -737,7 +737,7 @@ pub struct GitCommitParams {
     pub branch: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitFileDiffParams {
     pub root: String,
     pub path: String,
@@ -745,7 +745,7 @@ pub struct GitFileDiffParams {
     pub scope: DiffScope,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitFileDiffResult {
     /// diff 原文。git 跑不起来时是一句说明，界面照样显示它。
     pub text: String,
@@ -757,7 +757,7 @@ pub struct GitFileDiffResult {
     pub worktree_file: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitAllDiffParams {
     pub root: String,
     pub scope: DiffScope,
@@ -765,42 +765,42 @@ pub struct GitAllDiffParams {
     pub untracked_paths: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitTextResult {
     pub text: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitRepoInfoResult {
     pub info: Option<RepoInfo>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitLogParams {
     pub root: String,
     pub scope: LogScope,
     pub limit: usize,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitLogResult {
     pub commits: Vec<CommitNode>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitCommitRefParams {
     pub root: String,
     pub hash: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitCommitFileParams {
     pub root: String,
     pub hash: String,
     pub path: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitCommitFilesResult {
     pub files: Vec<(String, String)>,
 }

@@ -16,7 +16,7 @@
 //! 不要再引入通用的 key/value 或 JSON 文档表。v17 及更早版本的形状以冻结的
 //! `V17_SCHEMA` 为准，旧版本的迁移和形状校验都从它推导。
 
-pub const TABLES: [&str; 45] = [
+pub const TABLES: [&str; 43] = [
     "acp_config_value",
     "acp_detail",
     "acp_launch_env",
@@ -48,8 +48,6 @@ pub const TABLES: [&str; 45] = [
     "project_repository_catalog",
     "published_session",
     "push_registration",
-    "quota_cache",
-    "quota_cache_provider",
     "quota_cache_status",
     "quota_cache_window",
     "quota_provider_pref",
@@ -552,14 +550,6 @@ CREATE TABLE terminal_theme_palette (
 CREATE TABLE auto_model_provider (
   provider TEXT PRIMARY KEY
 ) WITHOUT ROWID;
-CREATE TABLE quota_cache (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  saved_at_ms INTEGER NOT NULL,
-  schema_version INTEGER NOT NULL CHECK (schema_version >= 0)
-);
-CREATE TABLE quota_cache_provider (
-  provider_id TEXT PRIMARY KEY
-) WITHOUT ROWID;
 CREATE TABLE quota_cache_status (
   provider_id TEXT PRIMARY KEY,
   kind TEXT NOT NULL CHECK (kind IN ('windows', 'copilot')),
@@ -582,6 +572,7 @@ CREATE TABLE quota_cache_window (
   used_percent REAL NOT NULL,
   resets_at_ms INTEGER,
   reset_after_seconds INTEGER,
+  scope TEXT,
   PRIMARY KEY (provider_id, position)
 ) WITHOUT ROWID;
 CREATE TABLE quota_provider_pref (
@@ -1904,6 +1895,19 @@ ALTER TABLE session_group ADD COLUMN closed_workset_root TEXT;
 /// 的代码），客户端按语言说；`error` 改成只存细节。旧记录这一列是 NULL，`error` 是整句。
 /// 还给 `push_registration` 加了 `locale`：手机登记时的界面语言，推送摘要按它说；旧登记是
 /// NULL，按英文说，手机下次登记时补上。
+/// v40：额度缓存只留每家账户的状态。表头（上次写入时间、缓存格式版本）和当时查过的账户名单只用来
+/// 判断启动能不能不查，现在启动一律查一次，这两张表没人读了。
+pub const MIGRATE_V39_TO_V40: &str = "
+DROP TABLE IF EXISTS quota_cache_provider;
+DROP TABLE IF EXISTS quota_cache;
+";
+
+/// v41：额度窗口记下只管哪组模型（`scope`，如「Gemini」「Opus」），整个账户的是 NULL。旧行都是
+/// NULL，下次查询就换成带组名的。SQLite 把加的列插在最后一列后面、表约束前面，和
+/// `CREATE_SCHEMA` 一致。已经有的跳过（用当前结构造的夹具）。
+pub const V40_TO_V41_ADDED_COLUMNS: [(&str, &str, &str); 1] =
+    [("quota_cache_window", "scope", "TEXT")];
+
 pub const V38_TO_V39_ADDED_COLUMNS: [(&str, &str, &str); 2] = [
     ("automation_run", "error_code", "TEXT"),
     ("push_registration", "locale", "TEXT"),
@@ -1916,8 +1920,13 @@ pub const V38_TO_V39_DROPPED_COLUMNS: [(&str, &str); 4] = [
     ("acp_detail", "binding_automation_run_id"),
 ];
 
-/// v40：和本节点双向配对过的对端节点（见 `docs/cross-machine.md`）。
-pub const MIGRATE_V39_TO_V40: &str = "
+/// v42：和本节点双向配对过的对端节点（见 `docs/cross-machine.md`）。
+///
+/// main 上这张表是 v40（已随 rc 发出），js-plugins 的 v40/v41 是额度缓存那两步，两边撞号，
+/// 在 v42 合流：从 main 的 v40 升上来的库已经有这张表、还留着额度表头，从 js-plugins 的 v41
+/// 升上来的库反过来。所以 v42 再跑一遍 [`MIGRATE_V39_TO_V40`] 的删表（`IF EXISTS`），这张表
+/// 没有才建；`scope` 列由 v41 那步按「没有才加」补上。
+pub const MIGRATE_V41_TO_V42: &str = "
 CREATE TABLE peer_node (
   runtime_id TEXT PRIMARY KEY,
   endpoint_id TEXT NOT NULL UNIQUE,

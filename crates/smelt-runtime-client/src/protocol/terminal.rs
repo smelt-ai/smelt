@@ -11,14 +11,14 @@ use super::files::Base64Bytes;
 /// 单张终端图片的大小上限（与对话输入框一致：5 MiB）。
 pub const MAX_TERMINAL_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TerminalStageImageParams {
     pub session_id: String,
     pub mime: String,
     pub data: Base64Bytes,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TerminalStageImageResult {
     /// 运行时机器上的绝对路径。
     pub path: String,

@@ -1394,13 +1394,11 @@ fn wire__crate__api__files__list_project_dir_impl(
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_runtime_id = <String>::sse_decode(&mut deserializer);
-            let api_root = <String>::sse_decode(&mut deserializer);
             let api_dir = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, crate::api::error::SmeltError>((move || {
-                    let output_ok =
-                        crate::api::files::list_project_dir(api_runtime_id, api_root, api_dir)?;
+                    let output_ok = crate::api::files::list_project_dir(api_runtime_id, api_dir)?;
                     Ok(output_ok)
                 })())
             }

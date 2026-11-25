@@ -1,0 +1,9 @@
+{
+  "id": "smelt.sessions",
+  "name": "Sessions",
+  "version": "1.0.0",
+  "entry": "nsh.tsx",
+  "requires": [
+    "smelt/conversation"
+  ]
+}

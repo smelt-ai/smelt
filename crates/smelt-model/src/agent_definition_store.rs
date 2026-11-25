@@ -4,7 +4,7 @@ use crate::agent_kind::ConversationLaunchSpec;
 use serde::{Deserialize, Serialize};
 
 /// 客户端打开一段对话前，要运行时替它把启动规格补齐成什么样。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LaunchPrep {
     /// 产品智能体的定义 id；裸引擎为空。
     pub agent_definition_id: Option<String>,
@@ -21,7 +21,7 @@ pub struct LaunchPrep {
 }
 
 /// 重新开始时运行时重拼启动规格要的会话身份。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LaunchRestart {
     /// 执行引擎标识（`ConversationAgentKind::id()`）。运行时不认识就沿用原来的规格。
     pub engine_kind: String,
@@ -29,14 +29,14 @@ pub struct LaunchRestart {
     pub profile_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LaunchPrepareParams {
     pub launch: ConversationLaunchSpec,
     pub prep: LaunchPrep,
     pub cwd: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LaunchPrepareResult {
     pub launch: ConversationLaunchSpec,
     /// 这场会话会加载的技能，供对话头部展示。
@@ -46,13 +46,13 @@ pub struct LaunchPrepareResult {
     pub mcp_servers: Vec<crate::pi_mcp::PiMcpServer>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LoadedSkillsParams {
     pub launch: ConversationLaunchSpec,
     pub cwd: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LoadedSkillsResult {
     pub skills: Vec<crate::pi_plugin_catalog::PiPlugin>,
     /// 同 [`LaunchPrepareResult::mcp_servers`]。
@@ -60,7 +60,7 @@ pub struct LoadedSkillsResult {
     pub mcp_servers: Vec<crate::pi_mcp::PiMcpServer>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentDefinitionCreate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -86,7 +86,7 @@ pub struct AgentDefinitionCreate {
     pub memory_enabled: Option<bool>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentDefinitionPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,

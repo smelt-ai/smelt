@@ -28,6 +28,11 @@ export interface AuthProviderSummary {
 	status: "oauth" | "api_key" | "none";
 	/** Where the credential came from, e.g. "OAuth", "ANTHROPIC_API_KEY". */
 	source?: string;
+	/**
+	 * Models the current credential can serve; empty while the provider has
+	 * none. Listed here so one helper run fills the host's model picker.
+	 */
+	models: AuthModelSummary[];
 }
 
 export interface AuthModelSummary {

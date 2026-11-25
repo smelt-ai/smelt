@@ -1,0 +1,8 @@
+{
+  "id": "smelt.conversation",
+  "name": "Conversation UI",
+  "version": "1.0.0",
+  "module": "smelt/conversation",
+  "entry": "index.tsx",
+  "types": "index.d.ts"
+}

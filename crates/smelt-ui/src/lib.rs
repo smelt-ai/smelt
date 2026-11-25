@@ -1,8 +1,7 @@
-//! 共享 GPUI UI 基建：主 GUI 与 `smelt-acp-view` 渲染层共用。跟
+//! 共享 GPUI UI 基建：主 GUI 与宿主能力层共用。跟
 //! `smelt-core` 的分工——那边不许引 GPUI，这边允许，但只放「不专属某个具体
 //! 页面、被多处复用」的东西，别把整个应用的 UI 都塞进来。
 
-pub mod acp_completion;
 pub mod alert;
 pub mod assets;
 pub mod badge;
@@ -11,11 +10,9 @@ pub mod button;
 pub mod chart;
 pub mod choice;
 pub mod clipboard;
-pub mod code_editor;
 pub mod combobox;
 pub mod command_palette;
 pub mod dialog;
-pub mod diff;
 pub mod divider;
 pub mod dock;
 pub mod field;
@@ -29,7 +26,6 @@ pub mod keybind;
 pub mod kit;
 pub mod link;
 pub mod list_row;
-pub mod markdown_links;
 pub mod markdown_mermaid;
 pub mod menu;
 pub mod motion;
@@ -45,7 +41,6 @@ pub mod settings;
 pub mod slider;
 pub mod sticky;
 pub mod switch;
-pub mod syntax;
 pub mod tabs;
 pub mod theme_catalog;
 pub mod theme_config;
@@ -60,7 +55,6 @@ pub use base_theme::set_code_font;
 pub use button::Button;
 pub use choice::{Checkbox, Radio};
 pub use clipboard::Clipboard;
-pub use code_editor::CodeEditor;
 pub use combobox::{Combobox, ComboboxGroup, ComboboxOption};
 pub use command_palette::CommandPalette;
 pub use divider::Divider;
@@ -81,8 +75,8 @@ pub use switch::Switch;
 
 rust_i18n::i18n!("locales", fallback = "en");
 
-/// 装上本库的全局件：界面字体 Inter、菜单、下拉、可搜索列表和差异视图的键位、窗口对话框层、
-/// 编辑器的语言服务（见 [`syntax`]）。应用启动时、`gpui_base::init` 之后、开窗口之前调一次。
+/// 装上本库的全局件：界面字体 Inter、菜单、下拉、可搜索列表键位、窗口对话框层。
+/// 应用启动时、`gpui_base::init` 之后、开窗口之前调一次。
 pub fn init(cx: &mut gpui::App) {
     // 字体随二进制编进来，载不进是构建出了错，不是运行时能恢复的情况。
     cx.text_system()
@@ -91,8 +85,6 @@ pub fn init(cx: &mut gpui::App) {
     menu::init(cx);
     combobox::init(cx);
     dialog::init(cx);
-    diff::init(cx);
-    syntax::editing::init(cx);
 }
 
 /// 删除/移除统一用这枚（`kit::GLYPHS.trash`）。

@@ -38,7 +38,9 @@ pub fn normalize_provider_api(api: &str) -> &'static str {
 /// 端点报告的一个模型。
 ///
 /// Pi 的直连发现产出它：字段是配置里真正要落盘的那几项。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoveredModel {
     pub id: String,

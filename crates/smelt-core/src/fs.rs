@@ -10,7 +10,7 @@
 //!   够 UI 的文件树与编辑器用，也够模型可见的文件工具用。
 //! - **Provider**：[`LocalFs`]（本机真盘）；测试中另有内存实现 `MemFs`，作为
 //!   远程/沙箱实现的参照。
-//! - **Consumer**：[`list_dir`] 这类只依赖 trait 的纯逻辑，换 provider 即可
+//! - **Consumer**：[`is_regular_file`] 这类只依赖 trait 的纯逻辑，换 provider 即可
 //!   在别的执行世界里原样复用。
 //!
 //! 阻塞式而非 async：现有调用方都已经在后台线程/`background_executor` 里跑，
@@ -41,7 +41,7 @@ pub trait FileSystem: Send + Sync {
 
     fn write(&self, path: &Path, contents: &str) -> io::Result<()>;
 
-    /// 列一层目录（不递归）。顺序由调用方决定，见 [`list_dir`]。
+    /// 列一层目录（不递归），顺序不定。
     fn read_dir(&self, path: &Path) -> io::Result<Vec<DirEntry>>;
 
     fn remove_file(&self, path: &Path) -> io::Result<()>;
@@ -405,24 +405,6 @@ impl FileSystem for MemFs {
 
 // ===================== Consumer：只依赖 trait 的纯逻辑 =====================
 
-/// 文件树默认隐藏的目录项。噪音目录不该由每个调用点各写一份。
-pub const HIDDEN_ENTRIES: [&str; 4] = [".git", "node_modules", "target", ".DS_Store"];
-
-/// 列目录给文件树用：目录在前、同类按名字不区分大小写排序，并滤掉
-/// [`HIDDEN_ENTRIES`]。读不到目录时返回空列表（文件树原语义：不弹错、当空目录）。
-///
-/// 这是 Consumer 的样板——**只认 [`FileSystem`]，不认 `std::fs`**，所以本地
-/// 面板和远程运行时用的是同一份排序与过滤规则，不会各自漂移。
-pub fn list_dir(fs: &dyn FileSystem, dir: &Path) -> Vec<DirEntry> {
-    let mut items = match fs.read_dir(dir) {
-        Ok(items) => items,
-        Err(_) => return Vec::new(),
-    };
-    items.retain(|entry| !HIDDEN_ENTRIES.contains(&entry.name.as_str()));
-    items.sort_by_key(|entry| (!entry.is_dir, entry.name.to_lowercase()));
-    items
-}
-
 /// 检查路径是否存在且是普通文件（非目录）。
 ///
 /// 这是 Consumer 的样板——**只认 [`FileSystem`]，不认 `std::fs`**。
@@ -440,66 +422,6 @@ pub fn is_symlink(fs: &dyn FileSystem, path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 同一个 Consumer 跑在两个 Provider 上必须给出一致结果——这是「它确实是
-    /// 接缝」的判据，只有一个实现的 trait 证明不了任何事。
-    fn assert_list_dir_contract(fs: &dyn FileSystem, root: &Path) {
-        let listed = list_dir(fs, root);
-        let names: Vec<_> = listed.iter().map(|e| e.name.as_str()).collect();
-
-        assert_eq!(
-            names,
-            vec!["src", "zeta", "Alpha.md", "beta.rs"],
-            "目录在前，其后按名字不区分大小写排序"
-        );
-        assert!(listed[0].is_dir && listed[1].is_dir);
-        assert!(!listed[2].is_dir && !listed[3].is_dir);
-    }
-
-    fn seed_layout(fs: &dyn FileSystem, root: &Path) {
-        fs.create_dir_all(&root.join("src")).unwrap();
-        fs.create_dir_all(&root.join("zeta")).unwrap();
-        fs.create_dir_all(&root.join("target")).unwrap();
-        fs.create_dir_all(&root.join(".git")).unwrap();
-        fs.write(&root.join("beta.rs"), "fn main() {}").unwrap();
-        fs.write(&root.join("Alpha.md"), "# alpha").unwrap();
-        fs.write(&root.join(".DS_Store"), "junk").unwrap();
-    }
-
-    #[test]
-    fn list_dir_contract_holds_on_mem_provider() {
-        let fs = MemFs::new();
-        let root = Path::new("/proj");
-        seed_layout(&fs, root);
-
-        assert_list_dir_contract(&fs, root);
-    }
-
-    #[test]
-    fn list_dir_contract_holds_on_local_provider() {
-        let root = std::env::temp_dir().join(format!(
-            "smelt-fs-seam-{}-{:?}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let fs = LocalFs;
-        fs.create_dir_all(&root).unwrap();
-        seed_layout(&fs, &root);
-
-        assert_list_dir_contract(&fs, &root);
-
-        fs.remove_dir_all(&root).unwrap();
-        assert!(!fs.exists(&root));
-    }
-
-    #[test]
-    fn unreadable_dir_lists_as_empty_rather_than_erroring() {
-        let fs = MemFs::new();
-        assert_eq!(list_dir(&fs, Path::new("/missing")), Vec::new());
-    }
 
     #[test]
     fn mem_provider_round_trips_read_write_remove() {

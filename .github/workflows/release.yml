@@ -485,6 +485,11 @@ jobs:
         shell: bash
         run: bash scripts/third-party-licenses.sh dist/stage
 
+      # 自带 JS 插件放在安装目录的 plugins\，App 从那里只读加载（crates/smelt/src/plugins/builtin.rs）。
+      - name: Builtin plugins
+        shell: bash
+        run: bash scripts/stage-plugins.sh dist/stage/plugins
+
       - name: Package
         shell: pwsh
         run: |

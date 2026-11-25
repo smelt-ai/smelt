@@ -120,6 +120,7 @@ mod devices;
 mod app_requests;
 mod event_hub;
 mod files_control;
+mod fs_control;
 mod git_control;
 mod history_control;
 mod memory_peer_auth;
@@ -133,6 +134,7 @@ mod pi_control;
 mod presence;
 mod push;
 mod resource_usage;
+mod skills;
 mod subagent_transcript;
 use devices::Principal;
 mod project_watch;
@@ -171,8 +173,9 @@ use session_directory::SessionDirectory;
 #[cfg(test)]
 pub(crate) use session_state::AgentBlocker;
 pub(crate) use session_state::{
-    Phase, PhaseSource, SessionState, apply_agent_event, apply_program_status, bump_state_revision,
-    commit_session_phase, next_session_instance, now_unix,
+    Phase, PhaseSource, SessionState, apply_agent_event, apply_program_status, apply_prompt_start,
+    apply_terminal_reset, bump_state_revision, commit_session_phase, next_session_instance,
+    now_unix,
 };
 use smelt_core::agent_event::{AGENT_EVENT_VERSION, AgentEvent};
 use smelt_core::automation::{AutomationCommand, AutomationFile, AutomationInboundEvent};
@@ -181,10 +184,10 @@ use smelt_core::automation_store::{
 };
 use smelt_core::kitty_graphics::GraphicsSplitter;
 use smelt_core::osc::{
-    OscEvent, OscScan, TerminalGeometryOsc, program_status_reply, terminal_geometry_osc,
+    OscEvent, OscScan, ProgramState, TerminalGeometryOsc, terminal_geometry_osc,
 };
 use smelt_core::session_control::find_agent_option_for;
-use terminal_graphics::{FedOutput, TerminalGraphics, feed_output};
+use terminal_graphics::{FedOutput, TerminalGraphics, TerminalStreamEvent, feed_output};
 use terminal_output::{KeyframeNeed, OutputAttachment, SessionOutput, enqueue_session_streams};
 use terminal_progress::ProgressTracker;
 use terminal_registry::{TerminalRegistry, TerminalSlot};
@@ -2586,6 +2589,19 @@ fn main() {
     webhook::spawn(Arc::clone(&automations), Arc::clone(&event_hub));
     push::spawn();
 
+    // 后台预热本机 Agent CLI 探测与新建会话目录，避免首帧打开「+」弹窗撞上几十次 PATH stat。
+    {
+        let warm_hub = Arc::clone(&event_hub);
+        if let Err(error) = thread::Builder::new()
+            .name("smeltd-catalog-warm".into())
+            .spawn(move || {
+                warm_hub.refresh_new_session_catalog(true);
+            })
+        {
+            eprintln!("[smeltd] 启动目录预热线程失败：{error}");
+        }
+    }
+
     run_serve_loop(
         listener,
         sessions,
@@ -3063,7 +3079,7 @@ fn spawn_session(
     apply_interactive_pty_env(&mut cmd);
     apply_system_proxy_pty_env(&mut cmd);
     // 整条 hook 链路的地基：没有它，smelt-notify 没法知道自己在哪个会话里，
-    // 后面的 state op 全是空中楼阁（见 docs/archive/state-channel-plan.md）。
+    // 后面的 state op 全是空中楼阁（见 docs/notification-architecture.md）。
     cmd.env("SMELT_SESSION_ID", id);
     cmd.env("SMELT_AGENT_TOKEN", &agent_token);
     cmd.env("SMELT_SOCK", client_conn::child_smelt_sock());
@@ -3303,31 +3319,6 @@ fn start_pty_pump(
                     }
                     let mut first_text_at = None;
                     let chunk = &buf[..n];
-                    let mut notifications = Vec::new();
-                    let mut program_status = None;
-                    for event in chunk.iter().filter_map(|&byte| osc_scan.feed(byte)) {
-                        match event {
-                            OscEvent::Notification(notification) => {
-                                notifications.push(notification.text);
-                            }
-                            // 程序自己报的状态直接进会话相位，跟 hook 一样走状态广播；
-                            // 关注事件由客户端按相位变化生成，不再另发终端通知。
-                            OscEvent::ProgramStatus(status) => {
-                                let mut state = sess.state.lock().unwrap();
-                                if apply_program_status(&mut state, &status) {
-                                    program_status = Some(state.clone());
-                                }
-                            }
-                            OscEvent::Progress(report) => progress.observe(report, Instant::now()),
-                            // 在这批输出推进网格之前就回应：Pi 把探测和 DA 查询一起发，
-                            // 拿 DA 的回应当探测结束；DA 由守护网格在这批输出处理完后才
-                            // 写回，一定在这之后。
-                            OscEvent::ProgramStatusQuery(terminator) => {
-                                let _ =
-                                    write_session_input(&sess, &program_status_reply(terminator));
-                            }
-                        }
-                    }
                     // 放置图片要按格子像素算占几格。先读出来再拿网格锁：resize 走 ctl -> term。
                     let cell = {
                         let ctl = sess.ctl.lock().unwrap();
@@ -3346,6 +3337,7 @@ fn start_pty_pump(
                                 feed_output(
                                     chunk,
                                     &mut graphics_splitter,
+                                    &mut osc_scan,
                                     &mut parser,
                                     &mut *term,
                                     &mut graphics,
@@ -3401,7 +3393,65 @@ fn start_pty_pump(
                     // 颜色查询应答可能等待 PTY 输入队列变得可写；必须在释放网格锁后
                     // 再做，避免把 resize 的 ctl -> term 路径拖住。
                     flush_terminal_replies(&sess);
-                    if let Some(snapshot) = program_status {
+
+                    let now = Instant::now();
+                    let mut notifications = Vec::new();
+                    let mut state_snapshots: Vec<SessionState> = Vec::new();
+                    let mut push_snapshot = |snapshot: SessionState| {
+                        let same_edge = state_snapshots.last().is_some_and(|prev| {
+                            (prev.phase, prev.structured_events, prev.turn_events)
+                                == (
+                                    snapshot.phase,
+                                    snapshot.structured_events,
+                                    snapshot.turn_events,
+                                )
+                        });
+                        if same_edge {
+                            *state_snapshots.last_mut().unwrap() = snapshot;
+                        } else {
+                            state_snapshots.push(snapshot);
+                        }
+                    };
+                    if !fed.events.is_empty() {
+                        let mut state = sess.state.lock().unwrap();
+                        for event in fed.events {
+                            match event {
+                                TerminalStreamEvent::Osc(OscEvent::Notification(notification)) => {
+                                    notifications.push(notification.text);
+                                }
+                                TerminalStreamEvent::Osc(OscEvent::ProgramStatus(status)) => {
+                                    progress.observe_program_status(&status);
+                                    if apply_program_status(&mut state, &status) {
+                                        push_snapshot(state.clone());
+                                    }
+                                }
+                                TerminalStreamEvent::Osc(OscEvent::PromptStart) => {
+                                    if state.program_status.as_ref().is_some_and(|record| {
+                                        matches!(
+                                            record.state,
+                                            ProgramState::Working | ProgramState::Blocked
+                                        )
+                                    }) {
+                                        progress.clear_program_status();
+                                    }
+                                    if apply_prompt_start(&mut state) {
+                                        push_snapshot(state.clone());
+                                    }
+                                }
+                                TerminalStreamEvent::Osc(OscEvent::Progress(report)) => {
+                                    progress.observe(report, now);
+                                }
+                                TerminalStreamEvent::Osc(OscEvent::ProgramStatusQuery(_)) => {}
+                                TerminalStreamEvent::Reset => {
+                                    progress.reset();
+                                    if apply_terminal_reset(&mut state) {
+                                        push_snapshot(state.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for snapshot in state_snapshots {
                         broadcast_state(&event_hub, &snapshot);
                     }
                     publish_terminal_notifications(

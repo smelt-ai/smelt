@@ -1,0 +1,6 @@
+{
+  "id": "smelt.capabilities",
+  "name": "Capabilities",
+  "version": "1.0.0",
+  "entry": "nsh/main.tsx"
+}

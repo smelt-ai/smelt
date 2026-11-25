@@ -2,13 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HookProviderStatus {
     pub label: String,
     pub installed: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentHooksStatus {
     pub providers: Vec<HookProviderStatus>,
     /// hooks 调用的 `smelt-notify` 在运行时那台机器上的路径。

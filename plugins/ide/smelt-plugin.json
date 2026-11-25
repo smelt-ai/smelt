@@ -1,0 +1,6 @@
+{
+  "id": "smelt.ide",
+  "name": "Open With",
+  "version": "1.0.0",
+  "entry": "nsh.tsx"
+}

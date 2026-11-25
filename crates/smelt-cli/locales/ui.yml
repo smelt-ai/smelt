@@ -58,7 +58,7 @@ help.text:
       smelt mcp list | presets | add <preset id> | enable|disable|remove <server name>
       smelt pi skill list | import <directory> | remove <name>
       smelt pi extension list | import <path> | remove <name>
-      smelt model list | default <provider>/<model id> | thinking off|minimal|low|medium|high|xhigh
+      smelt model list | default <provider>/<model id> | thinking off|minimal|low|medium|high|xhigh|max
       smelt quota | quota refresh [<account id>] | quota settings | quota enable|disable <account id>
 
     Agent engines:
@@ -135,7 +135,7 @@ help.text:
       smelt mcp list | presets | add <预设id> | enable|disable|remove <服务器名>
       smelt pi skill list | import <目录> | remove <名字>
       smelt pi extension list | import <路径> | remove <名字>
-      smelt model list | default <provider>/<模型id> | thinking off|minimal|low|medium|high|xhigh
+      smelt model list | default <provider>/<模型id> | thinking off|minimal|low|medium|high|xhigh|max
       smelt quota | quota refresh [<账户id>] | quota settings | quota enable|disable <账户id>
 
     Agent 引擎：
@@ -281,8 +281,8 @@ help.gui:
   en: "Open the app"
   zh-CN: "启动图形界面"
 help.plugins:
-  en: "\nSmelt plugins (the app's own UI plugins, written in ~/.smelt/plugins/<id>/; no smeltd needed):\n  smelt plugin check <dir>      load and render once without the app; exits 1 on errors\n  smelt plugin status [<id>]    what the running app loaded and why a plugin failed\n"
-  zh-CN: "\nSmelt 插件（App 自己的界面插件，写在 ~/.smelt/plugins/<id>/；不需要 smeltd）：\n  smelt plugin check <目录>     不开 App 加载并渲染一次，有错退出码 1\n  smelt plugin status [<id>]    开着的 App 加载了哪些插件、失败的原因\n"
+  en: "\nSmelt plugins (the app's own NSH TSX/JS UI plugins in ~/.smelt/plugins/<id>/; no smeltd needed):\n  smelt plugin init <id> [--theme] [--name <name>] [--dir <dir>]   create a starter TSX plugin (or pure theme plugin with --theme)\n  smelt plugin fork <builtin-id> [--as <new-id>] [--dir <dir>]     copy a built-in plugin to override it (or rename with --as)\n  smelt plugin types <dir>                                         generate or refresh .nsh/types and tsconfig.json\n  smelt plugin check <dir>                                         validate manifest, locales, themes, bundle, imports and QuickJS compile; exits 1 on errors\n  smelt plugin status [<id>]                                       what the running app loaded, registered views, override/fallback state and errors\n"
+  zh-CN: "\nSmelt 插件（App 自己的 NSH TSX/JS 界面插件，写在 ~/.smelt/plugins/<id>/；不需要 smeltd）：\n  smelt plugin init <id> [--theme] [--name <名称>] [--dir <目录>]   创建起步 TSX 插件（加 --theme 创建纯主题插件）\n  smelt plugin fork <自带id> [--as <新id>] [--dir <目录>]          拷贝自带插件到用户目录（同 id 覆写自带，--as 改名并存）\n  smelt plugin types <目录>                                        生成或刷新 .nsh/types 和 tsconfig.json\n  smelt plugin check <目录>                                        离线校验清单、文案、主题、TSX 打包、import 与 QuickJS 编译，有错退出码 1\n  smelt plugin status [<id>]                                       开着的 App 加载了哪些插件、登记视图、覆写/回退状态及失败原因\n"
 history.not_found:
   en: "No history %{id} under %{cwd} (see smelt history list)"
   zh-CN: "%{cwd} 下没有历史 %{id}（smelt history list 查看）"

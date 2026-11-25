@@ -255,13 +255,16 @@ enum Edge {
 }
 
 /// 相位有没有翻篇。只看回合级结构化事件给的相位：标题、OSC 猜的不算，也不清旧提醒。
+/// 权威来源退出并明确回到 `Idle` / `Dead`（例如纯 OSC 7501 程序 `clear` / `RIS` / `OSC 133 A`）
+/// 时必须正常离开，清理待办并撤销推送。
 fn phase_edge(previous: &DaemonSessionState, state: &DaemonSessionState) -> Option<Edge> {
-    if !state.structured_events || !state.phase_is_authoritative() {
-        return None;
+    let prev_auth = previous.structured_events && previous.phase_is_authoritative();
+    let curr_auth = state.structured_events && state.phase_is_authoritative();
+    if !curr_auth {
+        return (prev_auth && matches!(state.phase, DaemonPhase::Idle | DaemonPhase::Dead))
+            .then_some(Edge::Leave);
     }
-    let same_phase = previous.phase == state.phase
-        && previous.structured_events
-        && previous.phase_is_authoritative();
+    let same_phase = previous.phase == state.phase && prev_auth;
     // 对话会话连着两个审批请求时相位不变，换的是请求。
     let new_request = matches!(
         state.phase,
@@ -606,6 +609,55 @@ mod tests {
         guessed.phase = DaemonPhase::Succeeded;
         assert_eq!(ledger.observe(guessed, now), Outcome::default());
         assert!(current(&ledger, "a").action.is_some());
+    }
+
+    /// 权威来源（如纯 OSC 7501 程序）撤回并回到 Idle 时，必须清掉旧待办、相位未读并撤推送。
+    #[test]
+    fn losing_authority_back_to_idle_clears_attention_and_cancels_push() {
+        for (id, phase) in [
+            ("approval", DaemonPhase::AwaitingApproval),
+            ("failed", DaemonPhase::Failed),
+            ("done", DaemonPhase::Succeeded),
+        ] {
+            let mut ledger = AttentionLedger::default();
+            let now = Instant::now();
+            seen(&mut ledger, id, DaemonPhase::Thinking, now);
+            ledger.observe(state(id, phase), now);
+
+            let mut cleared = state(id, DaemonPhase::Idle);
+            cleared.structured_events = false;
+            cleared.turn_events = false;
+            let outcome = ledger.observe(cleared, now);
+            let changed = outcome.changed.expect("撤回后应发出清空");
+            assert!(changed.session.is_empty(), "{id}: {changed:?}");
+            if phase != DaemonPhase::Succeeded {
+                assert_eq!(
+                    outcome.push,
+                    Some(push::Command::Cancel {
+                        session_id: id.into()
+                    })
+                );
+            } else {
+                assert_eq!(outcome.push, None);
+            }
+        }
+
+        // SessionStart（hook_structured = true, hook_turn = false）叠加 7501 后撤回同样清待办。
+        let mut ledger = AttentionLedger::default();
+        let now = Instant::now();
+        seen(&mut ledger, "hook-start", DaemonPhase::Thinking, now);
+        ledger.observe(state("hook-start", DaemonPhase::AwaitingApproval), now);
+        let mut cleared = state("hook-start", DaemonPhase::Idle);
+        cleared.structured_events = true;
+        cleared.turn_events = false;
+        let outcome = ledger.observe(cleared, now);
+        assert!(outcome.changed.unwrap().session.is_empty());
+        assert_eq!(
+            outcome.push,
+            Some(push::Command::Cancel {
+                session_id: "hook-start".into()
+            })
+        );
     }
 
     /// 运行时没了、会话删了：清掉并撤推送。

@@ -1,11 +1,11 @@
 ---
 name: smelt
-description: 用 smelt CLI 操作本机和配对过的其它机器上的 Smelt：产品智能体及其记忆、侧栏对话（含给别的对话发消息、取回复）、项目和任务工作树、各家 agent 的历史会话、自动化及其运行记录、MCP 服务器、默认模型、用量、agent 命令行工具和提醒钩子、外观设置、开着的 App 里插件开放的命令（开视图、开页面）；也讲怎么写 Smelt 插件（App 界面插件）。用户说新建/修改智能体、开对话、让另一个对话去做事、整理对话、开项目、开/收工作树、翻历史会话、建定时任务、看自动化跑得怎样、加 MCP、换模型、看用量、装 agent 命令行、改主题字体、在 App 里打开某个视图或页面、写 Smelt 插件时使用。
+description: 用 smelt CLI 操作本机和配对过的其它机器上的 Smelt：产品智能体及其记忆、侧栏对话（含给别的对话发消息、取回复）、项目和任务工作树、各家 agent 的历史会话、自动化及其运行记录、MCP 服务器、默认模型、用量、agent 命令行工具和提醒钩子、外观设置、开着的 App 里插件开放的命令（开视图、开页面）；也讲怎么写 Smelt 插件（基于 NSH 的 App 界面 TSX/JS 插件）。用户说新建/修改智能体、开对话、让另一个对话去做事、整理对话、开项目、开/收工作树、翻历史会话、建定时任务、看自动化跑得怎样、加 MCP、换模型、看用量、装 agent 命令行、改主题字体、在 App 里打开某个视图或页面、写 Smelt 插件时使用。
 ---
 
 # Smelt 控制面
 
-通过 `smelt` CLI 操作本机 Smelt（加 `--machine` 就是操作配对过的其它机器）。stdout 是 JSON，失败时原因在 stderr、退出码非 0。都要 smeltd 在跑。不要直接改 `~/.smelt/` 下的库和配置文件。`smelt --help` 有完整用法。
+通过 `smelt` CLI 操作本机 Smelt（加 `--machine` 就是操作配对过的其它机器）。stdout 是 JSON，失败时原因在 stderr、退出码非 0。控制面命令都要 `smeltd` 在跑；不要直接改 `~/.smelt/` 下的库和配置文件。`smelt --help` 有完整用法。
 
 先 list 再 update，id 从 list 的结果里取，不要猜。
 
@@ -19,10 +19,10 @@ description: 用 smelt CLI 操作本机和配对过的其它机器上的 Smelt�
 
 下面这些动作直接生效，执行前先把要做的事讲清楚、等用户同意：
 
-- 删除：`agent delete`、`automation delete`、`conversation delete`、`history delete`（不可恢复）。
+- 删除：`agent delete`、`automation delete`、`conversation delete`、`history delete`、删除 `~/.smelt/plugins/<id>/`（不可恢复）。
 - 收工作树：`worktree finish`（删掉 worktree 目录；`--allow-unconfirmed-merge` 更要先问）。
 - 给别人的对话发消息：`conversation send` 发进去的话那个 agent 会照着做；发给不是你自己开的对话前先确认。
-- 全局能力，对所有智能体生效：`mcp add|enable|disable|remove`、`model default|thinking`。
+- 全局能力，对所有智能体生效：`mcp add|enable|disable|remove`、`model default|thinking`、`pi skill|extension import|remove`。
 - 改这台机器的环境：`engine install`（用 brew 或 npm 装命令行工具）、`hooks install|uninstall`（改各家 agent 的配置文件）。
 - `app run` 一条会改数据的插件命令（看 `app commands` 里它的名字和参数判断；只开视图、页面、窗口的不用问）。
 
@@ -43,7 +43,7 @@ smelt agent delete <id>
 ```
 
 - `--skill` / `--extension` / `--mcp` / `--folder` / `--link` 可以重复写多个。update 时按类整份替换（技能、扩展各算一份，只写了技能就不动扩展），写 `""` 清空那一类；只改 prompt 时不要带它们。
-- `--skill` / `--extension` 勾的是这个智能体能用的 Pi 技能和扩展，和下面的 Smelt 插件无关，名字从 `smelt pi skill list`、`smelt pi extension list` 取。MCP 服务器名从 `smelt mcp list` 取，模型从 `smelt model list` 取；不存在的会直接报错。智能体只连 `--mcp` 列出的服务器，一个都没列就不连 MCP。
+- `--skill` / `--extension` 勾的是这个智能体能用的 Pi 技能和扩展，和下面的 Smelt App 插件无关，名字从 `smelt pi skill list`、`smelt pi extension list` 取。没有的先用 `smelt pi skill import <目录>`、`smelt pi extension import <路径>` 装进来，`remove <名字>` 卸掉。MCP 服务器名从 `smelt mcp list` 取，模型从 `smelt model list` 取；不存在的会直接报错。智能体只连 `--mcp` 列出的服务器，一个都没列就不连 MCP。
 - `--model default` 跟随 Pi 的默认模型。
 - `--memory on|off` 开关这个智能体的长期记忆（默认开）。关掉后不注入、不写入，已有记忆文件保留；正在进行的对话下一轮生效。
 - `chat` 开一场新对话，出现在桌面「对话」栏。带 `--message` 会把第一句话发出去。返回的 `session_id` 是这场对话的 id，后面的操作都用它，不要拿智能体 id 去改标题。
@@ -138,7 +138,7 @@ smelt mcp add <预设id>
 smelt mcp enable|disable|remove <服务器名>
 smelt model list
 smelt model default <provider>/<模型id>
-smelt model thinking off|minimal|low|medium|high|xhigh
+smelt model thinking off|minimal|low|medium|high|xhigh|max
 smelt quota
 smelt quota refresh [<账户id>]
 smelt quota settings
@@ -173,7 +173,7 @@ smelt app run smelt.app/open-page --args '{"page":"<页 id>"}'
 
 - 调的是本机开着的 Smelt App 里插件登记的命令，只有插件明确开给命令行的才列得出、调得了。App 没开会报错，不要替用户去开 App。
 - `commands` 列出每条命令的 `id`、`title` 和认的参数字段 `args`（空表就是不带参数）；`run` 把 `--args` 的 JSON 交给它，stdout 是命令交回的值。id 和参数照 `commands` 的写，不要猜。
-- `open-view` 的视图 id 是 `<来源>/<名字>`，插件的主视图是 `<插件 id>/main`；交回 `false` 是没有这个视图。`open-view`、`open-page` 要主窗口开着，没开先 `show-main-window`。
+- `open-view` 的视图 id 是 `<插件 id>/<视图名>`（由 `registerViews` 登记的 `name` 决定，不一定是 `main`；开着的插件可用 `smelt plugin status <id>` 的 `views` 字段查）；交回 `false` 是没有这个视图。`open-view`、`open-page` 要主窗口开着，没开先 `show-main-window`。
 
 ## 设置
 
@@ -185,7 +185,7 @@ smelt settings set appearance.theme_mode=light appearance.ui_font_px=16
 
 允许的外观设置：
 
-- `appearance.theme`：主题名，例如 `smelt Dark`、`Ayu Light`。
+- `appearance.theme`：主题名，例如 `smelt Dark`、`Ayu Light`；要自配配色可按下面的「写主题插件」新增主题。
 - `appearance.theme_mode`：dark|light，把当前主题拨到同一族的另一侧。
 - `appearance.ui_font_px`（14–26）、`appearance.ui_font_family`。
 - `appearance.font_family`：等宽字体（代码、终端）。终端字号在桌面设置的终端页里调，CLI 不提供。
@@ -200,32 +200,32 @@ smelt settings set appearance.theme_mode=light appearance.ui_font_px=16
 
 填空字符串清除。没配或服务不可用时，召回退回关键词 + 模型重排。召回重排模型用 `memory.rerank_model_provider` + `memory.rerank_model_id`（Pi 里已登录的模型），都空表示自动挑。
 
-## 写 Smelt 插件
+## 写 Smelt 插件（NSH TSX/JS）
 
-Smelt 插件是 App 自己的界面插件：一个目录，用 JavaScript（gpui-shell 脚本）写界面，GPUI 原生绘制。用户插件都在 `~/.smelt/plugins/<id>/`。用户问「会不会写 Smelt 插件」说的是这个，不是 Pi 的技能和扩展。下面的 `smelt plugin` 命令不需要 smeltd；Linux 上的 `smelt` 不带界面，没有这组命令。
+Smelt 的界面插件是 NSH 上的 TSX/JS：每个用户插件跑在自己的 QuickJS VM 里，界面由 App 原生绘制，保存就热重载。写在 `~/.smelt/plugins/<id>/`。用户问「写 Smelt 插件」说的是这个，不是上面 `smelt pi` 的 Pi 技能和扩展。`smelt plugin` 只在桌面版里有，Linux 不带界面的 `smelt` 没有。
 
+**动手前先读 [references/plugins.md](references/plugins.md)**（清单、NSH 写法红线、`smelt/sdk`、组件/图标/令牌、主题格式）；完整文档在仓库 `docs/plugins/`（<https://github.com/smelt-ai/smelt/tree/main/docs/plugins>）。
+
+```sh
+smelt plugin init <id> [--name "<名字>"]           # 起步 TSX 插件（带 locales/ 和 .nsh/types/）
+smelt plugin init <id> --theme [--name "<系列名>"]  # 纯主题插件，只改配色时用这个
+smelt plugin fork <自带 id> [--as <新 id>]          # 复制自带插件来改
+smelt plugin types <目录>                          # 刷新 .nsh/types/（升级 Smelt 后重跑）
+smelt plugin check <目录>                          # 离线校验，过了退出 0
+smelt plugin status [<id>]                         # 开着的 App 里的加载结果
 ```
-~/.smelt/plugins/com.example.hello/
-  gpui-shell.json   {"id": "com.example.hello", "name": "你好", "version": "0.1.0", "entry": "main.js"}
-  main.js           export default class Hello extends View { init(props, cx) {…} render(cx) {…} }
-```
 
-- id 只用小写字母、数字和 `.-_`，目录名就用 id。写之前看一眼 `~/.smelt/plugins/<id>/` 在不在，已有的是别的插件就换个 id。
-- 插件能加的：视图（面板）、页、命令、菜单项、布局、主题。改不了 Smelt 自己界面的画法（比如给整个窗口加背景图），用户要的东西超出这些就直说，不要硬凑。
-- 接口以 `gpui-kit.d.ts` 为准，不要凭印象写。它是 `gpui-kit`、`gpui-base`、`smelt-ui`、`smelt-plugin-api`、`smelt-fs` 等模块的完整声明，各插件拿到的是同一份：第一次 `smelt plugin check` 或 Smelt 加载后会生成到插件目录里，也可以先读别的插件目录里的（`ls ~/.smelt/plugins/*/gpui-kit.d.ts`）。文件很大，按模块名和函数名搜，不要整份读。
-- 示例：https://github.com/smelt-ai/smelt-plugin-demo（按钮、状态、系统通知、主题）。
-- 控件用 `smelt-ui` 的，样子和 Smelt 一致。`smelt-plugin-api` 里有：登记视图、命令、页面、布局、主题、菜单（`register_*`），`set_status_menu` 设本插件自己的 macOS 菜单栏图标（每个插件一个，互不顶掉；图标是 `asset()` 取的 PNG 路径），`await next_event()` 等宿主事件，`next_command()` 接自己登记的命令，`store_query` / `store_execute` 读写插件自己的 SQLite 库（在 `~/.smelt/plugin-data/<id>.sqlite3`），`call(machine, method, params)` 调运行时，`locale()` 取当前语言。
-- `render` 只读内存：读写文件、跑命令、联网都放到事件回调或 `cx.spawn` 里，结果存在视图上，render 只画它。要等变化就 `await next_event()`，不要定时轮询。
-- 图片和图标：插件目录里的文件经 `smelt-plugin-api` 的 `asset("assets/logo.png")` 取路径，再交给 `image()`、`svg()`、`Icon` 或登记视图、菜单项时的 `icon`；直接写 `"assets/logo.png"` 找不到，画出来是空的。路径相对插件目录，文件不在 `asset` 当场抛错（`smelt plugin check` 查得出）。不经 `asset` 的路径是 Smelt 自带的图标 `icons/<名字>.svg`（名字见 `gpui-kit.d.ts` 里 `ViewInfo.icon` 的说明）。`svg()` 和 `Icon` 只取形状、涂成文字色，彩色的 logo 用 `image()`（SVG、PNG 都行）。网上的图片眼下画不出来（下载进插件目录会触发重挂），用户要就直说。
-- 插件是可信代码，能读写任意文件、运行任意命令，和 Smelt 本身一样。
+写的流程：
 
-写和调试：
+1. 签名查 `<插件目录>/.nsh/types/`（`smelt/sdk.d.ts`、`nsh/index.d.ts`、`nsh/base.d.ts`、`nsh/tokens.d.ts`），按符号名搜，不要猜。
+2. 改完跑 `check`，不过不算写完。
+3. App 开着时保存一两秒后跑 `status <id>`：`stale: false`、`error: null`、`views` 里有登记的视图才算加载上；`stale: true` 是还没按最新源码重新加载完，稍等再查。
+4. 运行时日志和没接住的异常在 `~/.smelt/app.log`（`[plugin]`）。插件没有文件系统接口，数据存 `store.*`。
+5. 删插件是删 `~/.smelt/plugins/<id>/`，数据在 `~/.smelt/plugin-data/<id>/`；都先问用户。
 
-1. 直接在 `~/.smelt/plugins/<id>/` 里写和改，这就是装好的插件，不用导入。不要写在当前工作目录再让用户去「导入插件」。
-2. 每改一轮跑 `smelt plugin check ~/.smelt/plugins/<id>`：不开 App 加载并渲染一次，过了退出 0、stdout 是 JSON；没过退出 1，stderr 是带文件行列的错误。查得出语法错误、导入不存在的名字、`init` 和第一次 `render` 里的错、样式方法写错；查不出布局好不好看、点了之后的交互和异步状态。check 不过不算写完。
-3. Smelt 开着时，插件目录里文件一保存就自动重挂这个插件，不用重启（插件视图的状态从头来）。保存一两秒后跑 `smelt plugin status <id>` 确认 App 里挂上了：挂好了退出 0；没挂上或加载失败退出 1，原因在 stderr 和 JSON 的 `error` 里。`smelt plugin status` 不带 id 列全部。
-4. 运行时的 `console.log` 和脚本错误在 `~/.smelt/app.log`，带 `[plugin]` 标记；check 时直接打在 stderr。
-5. 插件运行时自己写的文件放到插件目录外面（比如 `~/.smelt/plugin-data/`），写进插件目录会触发重挂。
-6. 不要用截屏、AppleScript 之类去点 Smelt 的界面，用上面的命令。check 和 status 过了，用 `smelt app run smelt.app/open-view --args '{"view":"<id>/main"}'` 把它在 App 里打开给用户看。
-7. 插件自己的命令想让智能体也能调（`smelt app run`），登记时加 `cli: true` 并给 `args`（不带参数写 `[]`）。只开给参数能写成 JSON、不用人当场在界面上操作就有结果的命令。
-8. 删掉插件就是删 `~/.smelt/plugins/<id>/`，App 开着会自动撤下；要清干净再删 `~/.smelt/plugin-data/<id>.sqlite3`。删之前先跟用户确认。
+改自带插件：
+
+- 对话界面（输入框、消息流、卡片）在共享模块 `smelt.conversation`，不在 `smelt.sessions` 里；要改它 fork `smelt.conversation`。改了共享模块，宿主重编所有用它的插件（谁在用看 `status` 的 `uses_modules`）。
+- 不带 `--as` 是同 id 覆写：视图、命令 id 不变，别的插件照常接上。覆写版的数据是从自带版复制出来的一份（`plugin-data/.overrides/<id>/`），各改各的；再 fork 一次会重新复制。覆写版加载失败自动回退自带版，`status` 标 `fallback_to_builtin: true` 和 `error`。删掉覆写目录（或设置 →「面板插件」里「恢复默认…」）就回到自带版。
+- `--as` 是改名并存：只改清单 id，源码里写死的 `<自带 id>/…` 要自己搜着改；新 id 是空库；带主题的插件不能 `--as`。
+- 覆写版不跟着 Smelt 升级变，升级后对比 fork 结果里 `source_path` 的自带源码。

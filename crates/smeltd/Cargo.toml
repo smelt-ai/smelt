@@ -13,7 +13,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-dirs = "5"
+dirs.workspace = true
 notify = "8"
 smelt-paths = { path = "../smelt-paths" }
 smelt-version = { path = "../smelt-version" }
@@ -37,7 +37,6 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-clap.workspace = true
 uuid = { version = "1", features = ["v4"] }
 # 终端续接（terminal_resume）：认出启动命令跑的是哪家 CLI，要跳过 `NAME=value` 前缀。
 shell-words = "1"
@@ -52,10 +51,10 @@ axum = { version = "0.8.9", features = ["ws"] }
 agent-client-protocol = "=5.3.0"
 smol = "2"
 chrono = { version = "0.4", features = ["serde"] }
-sha2 = "0.11"
+sha2.workspace = true
 hex = "0.4"
 # `conversation.image`：手机按需取对话里的图，缩略图在运行时这边解码、缩放、重新编码。
-base64 = "0.23"
+base64.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # 终端 kitty 图形：程序用 `o=z` 发 zlib 压缩的像素数据。
 flate2 = "1"

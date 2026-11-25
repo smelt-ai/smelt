@@ -34,6 +34,7 @@ violations="$(
 host_src="$root/crates/smelt/src"
 host_violations=""
 for manifest in "$root"/crates/plugins/*/Cargo.toml; do
+  [ -f "$manifest" ] || continue
   dir="$(dirname "$manifest")"
   crate="$(sed -n 's/^name *= *"\(.*\)"/\1/p' "$manifest" | head -1 | tr - _)"
   owner="$(grep -rhoE 'const OWNER: &str = "[^"]+"' "$dir/src" | head -1 | sed -E 's/.*"([^"]+)"/\1/' || true)"

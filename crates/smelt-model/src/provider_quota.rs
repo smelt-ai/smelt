@@ -4,7 +4,7 @@ use crate::copilot_quota::CopilotQuota;
 
 /// 一家 provider 的额度数据。两种模型互不相容——窗口型按时间窗给百分比，
 /// Copilot 按本周期剩余额度计数——所以不强行合并成一个结构，由展示层归一。
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderQuotaData {
     Windows(ProviderQuota),
@@ -45,7 +45,7 @@ impl ProviderQuotaData {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ProviderQuotaWindow {
     /// 窗口时长，例如 `5h`、`7d`；服务端没给时长时是种类，显示用 [`Self::display_label`]。
     pub label: String,
@@ -55,9 +55,13 @@ pub struct ProviderQuotaWindow {
     pub resets_at_ms: Option<u64>,
     /// 没有绝对时间时保留相对重置秒数。
     pub reset_after_seconds: Option<u64>,
+    /// 只管一部分模型的额度：服务端给的模型组名（「Gemini」「Opus」「GPT-5.3-Codex-Spark」）。
+    /// 没有就是整个账户的。同一账户可以有几组同样时长的窗口，各算各的。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ProviderQuota {
     pub windows: Vec<ProviderQuotaWindow>,
 }
@@ -80,7 +84,7 @@ impl ProviderQuotaWindow {
 
 /// 查询结果总是有检查时间，即使 provider 返回未知格式或没有本地凭据；这样
 /// UI 能结束「查询中」，不会在每个 Idle 快照上无限重试。
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ProviderQuotaStatus {
     pub quota: Option<ProviderQuota>,
     pub checked_at_ms: u64,

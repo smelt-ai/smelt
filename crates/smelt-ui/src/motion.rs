@@ -5,6 +5,13 @@
 //! `.cached()` 子树直接复用上一帧。所以重的子树（对话列表、工作台各栏）要做成 cached 实体，
 //! 链上各层的 render 只读内存。应用不在前台、窗口失焦或系统开了减弱动态效果时，停在静态终态。
 
+mod list;
+
+pub use list::{
+    ARRIVAL_OPEN, FoldBody, GLOW, WASH_END, WASH_HOLD, WASH_PEAK, WASH_RISE, arrival_open,
+    disclosure_open, disclosure_settled_closed, fold_body, replay_elapsed, wash_alpha,
+};
+
 use gpui::{
     Anchor, AnyElement, App, AsyncApp, Bounds, BoxShadow, Element, ElementId, GlobalElementId,
     Hsla, InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Rgba, Styled,
@@ -99,14 +106,6 @@ pub struct AmbientAnimationElement {
     animate: bool,
     repeat: bool,
     renderer: Box<dyn Fn(f32) -> AnyElement>,
-}
-
-impl IntoElement for AmbientAnimationElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
 }
 
 impl Element for AmbientAnimationElement {
@@ -554,14 +553,6 @@ impl FlipSlot {
     /// 只在重排那一帧生效；`None` 时用上一帧画的位置。
     pub fn from_top(mut self, top: Option<Pixels>) -> Self {
         self.origin_top = top;
-        self
-    }
-}
-
-impl IntoElement for FlipSlot {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
         self
     }
 }

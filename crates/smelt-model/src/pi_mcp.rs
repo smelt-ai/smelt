@@ -319,7 +319,9 @@ pub fn find_preset(id: &str) -> Option<&'static PiMcpPreset> {
 
 /// 给人看的连接方式：运行时读 `mcp.json` 时已用 [`crate::redact`] 打过码（地址里的
 /// `?api_key=…`、命令行里的 `--token xxx` 之类），原样显示即可，不能拿来连接。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PiMcpTransport {
     Http {
@@ -333,7 +335,9 @@ pub enum PiMcpTransport {
     Unknown,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct PiMcpServer {
     pub name: String,
     pub transport: PiMcpTransport,

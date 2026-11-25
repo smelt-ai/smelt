@@ -293,16 +293,14 @@ pub(crate) fn upgrade_remote(key: &RuntimeKey, cx: &mut App) {
     let key = key.clone();
     cx.spawn(async move |cx| {
         let client = runtime.client().clone();
-        let (outcome, status) = cx
-            .background_executor()
-            .spawn(async move {
-                let outcome = crate::runtimes::push_upgrade(&client);
-                // 升上去了它正在重启，这会儿探只会是离线，留给订阅线程。
-                let status = (outcome != PushUpgrade::Restarting)
-                    .then(|| crate::runtimes::status_of(&client));
-                (outcome, status)
-            })
-            .await;
+        let (outcome, status) = smelt_sys::blocking::run(move || {
+            let outcome = crate::runtimes::push_upgrade(&client);
+            // 升上去了它正在重启，这会儿探只会是离线，留给订阅线程。
+            let status =
+                (outcome != PushUpgrade::Restarting).then(|| crate::runtimes::status_of(&client));
+            (outcome, status)
+        })
+        .await;
         let note = match outcome {
             PushUpgrade::Restarting => None,
             PushUpgrade::Current => {

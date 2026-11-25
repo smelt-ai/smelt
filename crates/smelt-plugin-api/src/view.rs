@@ -107,14 +107,17 @@ impl Global for ViewBadges {}
 /// 视图之前设也行；撤下视图不清，插件自己清。
 pub fn set_view_badge(id: &str, label: Option<SharedString>, cx: &mut App) {
     let label = label.filter(|label| !label.is_empty());
-    let badges = &mut cx.default_global::<ViewBadges>().0;
-    let changed = match label {
-        Some(label) => badges.insert(id.to_string(), label.clone()).as_ref() != Some(&label),
-        None => badges.remove(id).is_some(),
-    };
-    if changed {
-        crate::emit(HostEvent::ViewBadgesChanged, cx);
+    // 先只读比较：可写地取全局（`default_global`）就算它变了，读过它的视图都要重画、观察者都
+    // 收到通知，没变不能碰。
+    if view_badge(id, cx) == label {
+        return;
     }
+    let badges = &mut cx.default_global::<ViewBadges>().0;
+    match label {
+        Some(label) => badges.insert(id.to_string(), label),
+        None => badges.remove(id),
+    };
+    crate::emit(HostEvent::ViewBadgesChanged, cx);
 }
 
 /// 视图的角标。只读内存，render 里可以调。
@@ -615,5 +618,25 @@ mod tests {
             assert_eq!(built_view("p/kept", cx).unwrap().view().entity_id(), before);
             assert!(built_view("p/swapped", cx).is_none());
         });
+    }
+
+    /// 角标没变不碰全局：可写地取一下就算它变了，观察者和读过它的视图都会被惊动。
+    #[gpui::test]
+    fn setting_the_same_badge_leaves_the_global_untouched(cx: &mut TestAppContext) {
+        let writes = std::rc::Rc::new(std::cell::Cell::new(0));
+        cx.update(|cx| {
+            let writes = writes.clone();
+            cx.observe_global::<ViewBadges>(move |_| writes.set(writes.get() + 1))
+                .detach();
+        });
+        cx.update(|cx| set_view_badge("a/b", None, cx));
+        assert_eq!(writes.get(), 0, "本来就没有，清掉不算变");
+        cx.update(|cx| set_view_badge("a/b", Some("3".into()), cx));
+        assert_eq!(writes.get(), 1);
+        cx.update(|cx| set_view_badge("a/b", Some("3".into()), cx));
+        assert_eq!(writes.get(), 1, "和上次一样");
+        cx.update(|cx| set_view_badge("a/b", None, cx));
+        assert_eq!(writes.get(), 2);
+        assert_eq!(cx.update(|cx| view_badge("a/b", cx)), None);
     }
 }

@@ -7,7 +7,7 @@ JSONL RPC，不经 ACP。其它 CLI 可走 custom，不保证体验。）
 对标 Codex Desktop：**多 provider 结构化对话 · App 工作面 · Review · 手机远程 · 体验增强**
 约束：PTY/结构化对话二选一 · 权限门不关 · 引擎在本机 · 远程只指挥不搬服务器
 
-杂项点子 → [`roadmap.md`](roadmap.md) · 已删除的 JSON-WS 网关记录 → [`archive/remote-ops-roadmap.md`](archive/remote-ops-roadmap.md)
+杂项点子 → [`roadmap.md`](roadmap.md) · 桌面插件化进度 → [`app-plugins.md`](app-plugins.md)
 
 ---
 
@@ -24,11 +24,10 @@ JSONL RPC，不经 ACP。其它 CLI 可走 custom，不保证体验。）
 ```mermaid
 flowchart TB
   P["优先 4 家: Claude Code / Codex / Copilot / Grok"]
-  P --> A1["1 ACP 对接<br/>可配 agent 列表 · bun 代装 · 能力矩阵"]
+  P --> A1["1 ACP 对接<br/>内置适配器 · 能力矩阵"]
   P --> B1["3 Git Review<br/>审查回注 · 提交 · 回看"]
-  P --> C1["4 任务增强<br/>钉会话 · 双通道 · 自循环 · 编排"]
-  P --> D1["5 体验打磨<br/>桌面 + 手机细节"]
-  P --> R1["6 手机与远程<br/>操作台 · 推送 · 飞书 · tunnel"]
+  P --> D1["4 体验打磨<br/>桌面 + 手机细节"]
+  P --> R1["5 手机与远程<br/>指挥台 · 推送 · 飞书 · iroh"]
   A1 --> A2["2 App 能力<br/>非 TUI 消息流 · 多会话指挥"]
   A1 --> R1
   A2 --> R1
@@ -74,13 +73,13 @@ Claude、Codex 的官方 ACP 适配器和 Pi 一起编进 `smelt-agent`，**用�
 
 能力与权限语义（尤其 `request_permission`）**逐家实测**，不假设「接了 ACP = 会弹权限门」。
 
-- [x] **可配置的 agent 列表**（替单一 `acp_cmd`）：出厂八家 agent 用出厂命令（静态注册表 `CONVERSATION_AGENTS`）；要换命令、加参数、换数据目录用「自定义 Agent」
+- [x] **可配置的 agent 列表**（替单一 `acp_cmd`）：内置 agent 用出厂命令（静态注册表 `CONVERSATION_AGENTS`）；要换命令、加参数、换数据目录用「自定义 Agent」
 - [x] Claude、Codex 适配器锁定版本并编进 `smelt-agent`；Codex 走标准 `codex-acp` 通道
 - [x] Pi 原生 RPC 驱动：编译好的 `smelt-agent`、锁定依赖、流式/工具/权限/取消/恢复、模型与推理配置
 - [x] 侧栏选用哪家 agent；会话记住选的是谁；UI 标注「适配器（smelt 代管）/ 原生（需本机 CLI）」
+- [x] 连接层下沉 `smelt-core`（`crates/smelt-core/src/acp_conn.rs`）并由 `smeltd` 托管 ACP
 - [ ] 逐家实测矩阵：`session/load` · `request_permission` · elicitation
 - [ ] 启动命令支持引号；下载/拉包错误可读；adapter 版本可锁可升
-- [ ] 连接层下沉 smelt-core（为 smeltd 托管 ACP 做准备；见 §6）
 
 ```mermaid
 flowchart LR
@@ -111,8 +110,8 @@ flowchart LR
 
 ### 待做
 
-- [x] **P0 消息流工作面**（对标 Codex/Claude 桌面）：tool 卡片折叠 · 行内/附件 diff · turn 中 prompt 排队（`acp-view` 的 render / conversation / composer / cards 已落地）
-- [ ] **P1 多会话指挥**：同项目多线程 · 一键再开/换 provider · Remix 带上下文 · 文件/diff content block
+- [x] **P0 消息流工作面**（对标 Codex/Claude 桌面）：tool 卡片折叠 · 行内/附件 diff · turn 中 prompt 排队 · 交接与分叉（`session_handoff.rs` / Pi `--fork`）
+- [ ] **P1 多会话指挥**：同项目多线程体验打磨 · 一键再开/换 provider · 文件/diff content block
 - [ ] **P2** 会话内搜索 · `terminal/*` 代跑真 PTY + 会话内终端面板
 
 ```mermaid
@@ -149,10 +148,9 @@ flowchart LR
 
 **目标体验：** 在 smelt 内走完 **改动 → 审查 → 回注 agent → 再 diff → 提交 → 回看** 整条链路，不必跳到别的 Git 客户端或飞书里搬评论。
 
-- [ ] **审查闭环：** diff 行内选区 + 评论 → 打包（path/行号/hunk）→ 回注 agent（ACP 排队 / PTY 等 Idle）→ 新 diff 对照
-- [ ] **提交体验：** stage/commit/push 手感打磨 · AI commit message · 提交后可一键回到该次 diff
-- [ ] **回看：** 轻量 log · 点开单 commit 看 diff · 评论与 commit/sha 关联可回溯
-- [ ] 从 diff/tool 跳文件定位 · 外部变更提示 · 分支/stash · ~~删 worktree 前提示绑会话~~（已放弃（2026-10-18 移除 worktree 功能））
+- [x] **审查与回看基础：** diff 行内选区评论回注（`crates/plugins/git/src/panel/diff.rs`）、Git log / 分支图 / 单 commit diff（`crates/plugins/git/src/log_view.rs`）、任务工作树及关闭保护（`crates/smelt-git/src/worktree.rs`）
+- [ ] **提交体验：** stage/commit/push 手感打磨 · AI commit message · 提交后可一键回到该次 diff · 评论与 commit/sha 关联回溯
+- [ ] 从 diff/tool 跳文件定位 · 外部变更提示 · 分支/stash
 - [ ] 联机 review（后置，同一回注管道）
 
 ```mermaid
@@ -209,30 +207,27 @@ flowchart LR
 **目标体验：** 人不在电脑前，也能知道 agent 卡在哪、一点允许/拒绝、必要时短回复——**手机是指挥台，不是第二块小终端。**  
 引擎与会话仍在那台机器的 smeltd。手机和另一台桌面都是运行时的客户端，走 iroh，不经过网关。飞书卡片还没做。
 
-已落地（细节在 [`workspace.md`](workspace.md)）：Flutter 手机 App 同时连所有配对过的机器，看对话和终端、批权限、离线 SQLite 缓存；一次性配对码；Linux 无头 `smeltd`；Windows 本机 `smeltd`（x86_64 安装包，不签名、无自动更新）；一个桌面窗口挂多台运行时；远程桌面（noVNC）能看能接管。下面未勾的仍是未做或不按原设想走的（没有做手机 H5 / PWA）。
+已落地（细节在 [`workspace.md`](workspace.md)）：Flutter 手机 App 同时连所有配对过的机器，看对话和终端、批权限、离线 SQLite 缓存；一次性配对码；Linux 无头 `smeltd`；Windows 本机 `smeltd`（x86_64 安装包与桌面应用内更新，不签名）；一个桌面窗口挂多台运行时；远程桌面（noVNC）能看能接管。
 
 **给谁用：** 开会、通勤、下班后 agent 还在跑，不能坐回电脑的人。
 
-已删除的 JSON-WS 网关分层记录见 [`archive/remote-ops-roadmap.md`](archive/remote-ops-roadmap.md)，不是现行协议。
-
 ### 手机端（主入口）
 
-- [x] **会话列表**：各会话相位 · 角标 · 进详情（Flutter App，不是 H5）
-- [x] **操作台（默认，非 xterm）**：首屏是跨机器指挥台，等你处理的审批、询问以单据挂在顶上，原地批 / 答（PR #69，见 [`mobile-redesign.md`](mobile-redesign.md)）
+- [x] **会话列表**：各会话相位 · 角标 · 进详情（Flutter App）
+- [x] **操作台（默认，非 xterm）**：首屏是跨机器指挥台，等你处理的审批、询问以单据挂在顶上，原地批 / 答（见 [`mobile/PRODUCT.md`](../mobile/PRODUCT.md)）
 - [x] **ACP 会话**：结构化消息、权限/选择题、可发消息
-- [x] **PTY 会话**：手机渲染运行时转发的终端流。原设想「操作台为主、完整终端作二级」没有按这个层次落地
-- [x] 推送通知：等批准 / 等输入 / 失败，按类型开关；勿扰交给 iOS 专注模式（APNs 经推送中继，见 [`push-relay-deployment.md`](push-relay-deployment.md)）
+- [x] **PTY 会话**：手机渲染运行时转发的终端流
+- [x] 推送通知：等批准 / 等输入 / 失败 / 完成，按类型开关；勿扰交给 iOS 专注模式（APNs 经推送中继，见 [`push-relay-deployment.md`](push-relay-deployment.md)）
 - [x] 深链：通知一点进对应会话。鉴权已是设备配对，不是长期 token
 - [x] 弱网：断线提示、自动重连；离线先读手机本地 SQLite 缓存
-- [ ] ~~形态：先手机 H5 / PWA~~ 没走这条。现行客户端是仓库 `mobile/` 的 Flutter App
 
 ### 连接与托管（本机侧）
 
 - [x] smeltd 托管 **ACP** 子进程；GUI / 手机均可再连上
-- [x] 桌面和手机共用 `smelt-runtime-client`（iroh 或本机 socket）。JSON-WS 网关已删除
+- [x] 桌面和手机共用 `smelt-runtime-client`（iroh 或本机 socket）
 - [x] 公网可达：iroh P2P，默认可走 n0 公共 relay，也可自建；一次性配对码（10 分钟、用一次），设备可撤销
 - [x] Linux 无头运行时（systemd 用户服务，`smeltd install` / `pair` / `devices`）与桌面多运行时
-- [x] Windows 本机运行时（x86_64 安装包；不签名、无自动更新）
+- [x] Windows 本机运行时（x86_64 安装包与应用内更新，不签名；远程升级待办见 [`windows-support.md`](windows-support.md)）
 - [ ] 多端同时看不顶掉桌面 GUI；权限操作幂等、可审计
 
 ### 飞书（轻量通道，与手机共用 action）
@@ -270,31 +265,12 @@ flowchart TB
 
 ---
 
-## 实施顺序
+## 剩余主线优先级
 
-各线可并行。下表按**线内顺序**展开，覆盖 §1–§6；总览图 = 关系，本表 = 交付切片。
-
-| 线 | 步 | 做（对应正文） | 验收 |
-|----|----|----------------|------|
-| **ACP** | 1.1 | 可配 agent 列表 · 四家出厂 · bun 代装适配器 · 侧栏选用 | 四家握手并发一轮 prompt |
-| | 1.2 | 能力矩阵 · 引号参数 · 错误/版本策略 | 权限语义诚实；失败可读 |
-| | 2.0 | 消息流 P0：tool 折叠 · 行内 diff · prompt 排队 | 不看 TUI 完成一轮改代码 |
-| | 2.1 | 多会话 · Remix · content block · terminal/* 面板 | 同项目两线程；命令在真 PTY 可见 |
-| **Review** | 3.1 | diff 行内评论 → 回注 agent | 三条评论一键打回 |
-| | 3.2 | 提交 · 回看 log/commit diff · 评论挂 sha | 改→审→交→回看不离 smelt |
-| | 3.3 | 跳文件 · 分支/stash · ~~worktree 提示~~（已放弃（2026-10-18 移除 worktree 功能）） | 日常 Git 少切客户端 |
-| | 3.4 | 联机 review（后置） | 同事评论进同一管道 |
-| **任务** | 4.1 | 执行记录 · 相位 · 失败态 | 会话与任务不割裂 |
-| | 4.2 | ~~Issue Worktree~~（已放弃（2026-10-18 移除 worktree 功能）） · branch 绑定 | 多 Issue 隔离执行 |
-| | 4.3 | `channel=acp` · 完成边沿 | 任务可走多家 ACP |
-| | 4.4 | Runtime 执行 · ~~Worktree 保留~~（已放弃（2026-10-18 移除 worktree 功能）） · 显式交付入口 | 执行完成后由用户决定代码交付 |
-| **体验** | 5.* | §5 表（含手机小屏） | 高频路径变顺；与各线穿插 |
-| **远程** | 6.1 | 网关 action/state 稳 · 手机操作台 + 会话列表 | 手机能批一条权限回本机 |
-| | 6.2 | 推送 · 深链 · token · 弱网重连 | 通知一点进会话 |
-| | 6.3 | smeltd 托管 ACP · reattach · tunnel 一键 | 关桌面 GUI，手机仍能指挥 |
-| | 6.4 | ACP 消息流上手机 · PTY 终端二级入口 | 结构化会话手机好用 |
-| | 6.5 | 飞书卡片推送与按钮 | 不装 App 也能批一次 |
-
-**依赖（仅硬依赖）：**  
-2.x 依赖 1.1；4.3 依赖 1.1+2.0；6.1 可先对 **PTY** 会话落地；6.3/6.4 依赖 1.x；6.4 消息流依赖 2.0。  
-3.x / 4.1–4.2 / 5.* / 6.1–6.2 可与 1.x 并行。
+| 线 | 待推进内容 |
+|----|------------|
+| **桌面插件化** | 剩余 16 个 Rust 内置插件迁入 NSH JS/TSX 插件（见 [`app-plugins.md`](app-plugins.md)） |
+| **ACP & App** | 逐家能力矩阵 · 引号参数与错误可读 · 文件/diff content block · 会话内搜索 · `terminal/*` 会话内终端面板 |
+| **Review** | AI commit message · 评论挂 sha · 跳文件 / 分支 / stash · 联机 review（后置） |
+| **体验** | §5 体验债清单按痛感滚动打磨 |
+| **远程与通道** | 多端并发幂等与审计 · Windows 远程 `runtime_upgrade` · 飞书卡片推送与按钮 |

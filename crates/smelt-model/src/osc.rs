@@ -1,16 +1,29 @@
 //! alacritty 不解析的 OSC，逐字节自己扫。
 //!
-//! - `OscScan`：OSC 9 / 99 / 777 通知（跟 cmux 同协议）、OSC 9;4 进度和 OSC 7501 程序状态。smeltd 在
-//!   PTY 输出泵里扫，结果走事件总线；客户端不扫，免得没连着时丢、多个客户端各弹一遍。
+//! - `OscScan`：OSC 9 / 99 / 777 通知（跟 cmux 同协议）、OSC 9;4 进度、OSC 7501 程序状态
+//!   和 OSC 133 `A` 提示符起点。smeltd 在 PTY 输出泵里扫，结果走事件总线；客户端不扫，
+//!   免得没连着时丢、多个客户端各弹一遍。
 //! - `TerminalGeometryOscScan`：smeltd 发给渲染端的私有几何标记，只有客户端扫。
 
-/// OSC 9 / 99 / 777 / 7501 扫描：提取 `ESC ] … (BEL|ST)`，跨 `feed` 调用保持状态
-/// （字节可能跨 PTY read 边界断开）。
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum ScanState {
+    #[default]
+    Ground,
+    Esc,
+    Osc,
+    OscEsc,
+    IgnoredString,
+    IgnoredStringEsc,
+}
+
+/// OSC 9 / 99 / 777 / 7501 / 133 扫描：提取 `ESC ] … (BEL|ST)`，跨 `feed` 调用保持状态
+/// （字节可能跨 PTY read 边界断开）。遵循 VT500 串状态：DCS / APC / PM / SOS 内部载荷
+/// 不参与 OSC 匹配，CAN / SUB 或未闭合的下一个控制串会立即中止当前 OSC。
 #[derive(Default)]
 pub struct OscScan {
-    prev_esc: bool,
-    in_osc: bool,
+    state: ScanState,
     buf: Vec<u8>,
+    overflow: bool,
 }
 
 /// smeltd -> desktop renderer geometry synchronization. A PTY has one real
@@ -169,6 +182,9 @@ pub enum OscEvent {
     ProgramStatus(ProgramStatus),
     /// OSC 7501 特性探测 `OSC 7501 ; ? ST`，终端支持就要回应。
     ProgramStatusQuery(OscTerminator),
+    /// OSC 133 `A`（shell 提示符开始）：程序已交回控制权给 shell，规范要求清掉未结束的
+    /// `working` / `blocked`（以及 `idle`）记录。
+    PromptStart,
     /// OSC 9;4 进度。
     Progress(ProgressReport),
 }
@@ -236,9 +252,9 @@ pub enum ProgramBlockedKind {
 pub struct ProgramStatus {
     pub state: ProgramState,
     pub kind: Option<ProgramBlockedKind>,
-    /// 程序自报的机器名，如 `codex`、`pi`。
-    pub app: Option<String>,
-    /// 已解 base64 的说明文字。
+    /// `working` / `blocked` 附带的 0..=100 进度；未提供或不在运行/等待态时为 `None`。
+    pub progress: Option<u8>,
+    /// 已解 base64 并剥离不可见格式字符的说明文字。
     pub message: Option<String>,
 }
 
@@ -249,23 +265,93 @@ pub fn program_status_reply(terminator: OscTerminator) -> Vec<u8> {
     reply
 }
 
+const PROGRAM_STATUS_MAX_SEQUENCE_BYTES: usize = 4096;
+const PROGRAM_STATUS_MAX_KEY_BYTES: usize = 16;
+const PROGRAM_STATUS_MAX_APP_BYTES: usize = 32;
+const PROGRAM_STATUS_TITLE_MAX_ENCODED: usize = 256;
+const PROGRAM_STATUS_TITLE_MAX_DECODED: usize = 192;
 /// 规范对 `msg` 编码后长度的上限（解码后 2048 字节）。
 const PROGRAM_STATUS_MSG_MAX_ENCODED: usize = 2732;
+const PROGRAM_STATUS_MSG_MAX_DECODED: usize = 2048;
 
-/// 解析 `7501;` 之后的部分。不合规范的整条丢掉（规范要求终端这样做）。只认根记录：
-/// 带 `id` 的子记录是程序内部的分项进度，这里用不上。
-fn parse_program_status(pt: &str) -> Option<ProgramStatus> {
+fn is_disallowed_program_status_invisible(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{061C}'
+            | '\u{200B}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+
+/// 校验并解码 OSC 7501 的 base64 文本（`msg` / `title`）。超限、非法 base64、非 UTF-8 或含
+/// 控制字符时返回 `None`，调用方按规范丢弃整条报告。
+fn decode_program_status_text(
+    value: &str,
+    max_encoded: usize,
+    max_decoded: usize,
+) -> Option<Option<String>> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+
+    if value.len() > max_encoded {
+        return None;
+    }
+    let bytes = STANDARD
+        .decode(value.as_bytes())
+        .or_else(|_| STANDARD_NO_PAD.decode(value.as_bytes()))
+        .ok()?;
+    if bytes.len() > max_decoded {
+        return None;
+    }
+    let text = String::from_utf8(bytes).ok()?;
+    // 规范：说明或标题里带控制字符的报告整条丢掉。
+    if text.chars().any(char::is_control) {
+        return None;
+    }
+    let clean: String = text
+        .chars()
+        .filter(|&ch| !is_disallowed_program_status_invisible(ch))
+        .collect();
+    let trimmed = clean.trim();
+    Some((!trimmed.is_empty()).then(|| trimmed.to_string()))
+}
+
+/// 解析 `7501;` 之后的部分。遵循规范 0.4：
+/// - 畸形 pair（缺 `=`、非法 key 或值字符集）跳过，继续解析其余 pair；
+/// - 整条序列、key/app/title/msg 超限、base64 非法、解码含控制字符或 `state` 不认识时整条丢弃；
+/// - 只认根记录：带 `id`（含空值 `id=`）整条忽略，避免异常 id 回退覆盖根记录。
+fn parse_program_status(pt: &str, whole_len: usize) -> Option<ProgramStatus> {
+    if whole_len > PROGRAM_STATUS_MAX_SEQUENCE_BYTES {
+        return None;
+    }
     let mut state = None;
     let mut kind = None;
-    let mut app = None;
+    let mut progress = None;
     let mut message = None;
     for pair in pt.split(':').filter(|pair| !pair.is_empty()) {
-        let (key, value) = pair.split_once('=')?;
+        let Some((raw_key, raw_value)) = pair.split_once('=') else {
+            continue;
+        };
+        let key = raw_key.trim();
+        let value = raw_value.trim();
+        if key.is_empty() || !key.bytes().all(|b| b.is_ascii_lowercase()) {
+            continue;
+        }
+        if key.len() > PROGRAM_STATUS_MAX_KEY_BYTES {
+            return None;
+        }
+        if key == "id" {
+            return None;
+        }
         if !value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"_.,+/=-".contains(&b))
         {
-            return None;
+            continue;
         }
         match key {
             "state" => {
@@ -287,21 +373,32 @@ fn parse_program_status(pt: &str) -> Option<ProgramStatus> {
                     _ => None,
                 };
             }
-            "app" if (1..=32).contains(&value.len()) && !value.contains([',', '/', '=']) => {
-                app = Some(value.to_string());
+            "progress" => {
+                progress = value.parse::<u8>().ok().filter(|&v| v <= 100);
             }
-            "msg" if !value.is_empty() => {
-                if value.len() > PROGRAM_STATUS_MSG_MAX_ENCODED {
+            "app" => {
+                if value.len() > PROGRAM_STATUS_MAX_APP_BYTES {
                     return None;
                 }
-                let text = decode_base64_utf8(value)?;
-                // 规范：说明里带控制字符的报告整条丢掉。
-                if text.chars().any(char::is_control) {
-                    return None;
-                }
-                message = Some(text.trim().to_string()).filter(|text| !text.is_empty());
             }
-            "id" if !value.is_empty() => return None,
+            "title" if !value.is_empty() => {
+                let _ = decode_program_status_text(
+                    value,
+                    PROGRAM_STATUS_TITLE_MAX_ENCODED,
+                    PROGRAM_STATUS_TITLE_MAX_DECODED,
+                )?;
+            }
+            "msg" => {
+                if value.is_empty() {
+                    message = None;
+                } else {
+                    message = decode_program_status_text(
+                        value,
+                        PROGRAM_STATUS_MSG_MAX_ENCODED,
+                        PROGRAM_STATUS_MSG_MAX_DECODED,
+                    )?;
+                }
+            }
             _ => {}
         }
     }
@@ -309,7 +406,8 @@ fn parse_program_status(pt: &str) -> Option<ProgramStatus> {
     Some(ProgramStatus {
         state,
         kind: kind.filter(|_| state == ProgramState::Blocked),
-        app,
+        progress: progress
+            .filter(|_| matches!(state, ProgramState::Working | ProgramState::Blocked)),
         message,
     })
 }
@@ -317,57 +415,118 @@ fn parse_program_status(pt: &str) -> Option<ProgramStatus> {
 impl OscScan {
     /// 喂一个字节；扫到一条完整的、认得的 OSC 就返回它。
     pub fn feed(&mut self, b: u8) -> Option<OscEvent> {
-        if self.in_osc {
-            if b == 0x07 {
-                return self.finish(OscTerminator::Bel);
+        match self.state {
+            ScanState::Ground => {
+                if b == 0x1b {
+                    self.state = ScanState::Esc;
+                }
             }
-            if self.prev_esc && b == 0x5c {
-                self.buf.pop(); // 去掉刚推入的 ESC，ST（ESC \）结束
-                return self.finish(OscTerminator::St);
-            }
-            self.buf.push(b);
-            self.prev_esc = b == 0x1b;
-            if self.buf.len() > 4096 {
-                self.reset(); // 异常超长，丢弃
-            }
-        } else if self.prev_esc && b == 0x5d {
-            self.in_osc = true; // ESC ] 进入 OSC
-            self.buf.clear();
-            self.prev_esc = false;
-        } else {
-            self.prev_esc = b == 0x1b;
+            ScanState::Esc => match b {
+                b']' => {
+                    self.state = ScanState::Osc;
+                    self.buf.clear();
+                    self.overflow = false;
+                }
+                b'P' | b'_' | b'^' | b'X' => {
+                    self.state = ScanState::IgnoredString;
+                }
+                0x1b => {}
+                _ => self.state = ScanState::Ground,
+            },
+            ScanState::Osc => match b {
+                0x07 => return self.complete(OscTerminator::Bel),
+                0x18 | 0x1a => self.reset(),
+                0x1b => self.state = ScanState::OscEsc,
+                _ => {
+                    if !self.overflow {
+                        if self.buf.len() >= PROGRAM_STATUS_MAX_SEQUENCE_BYTES {
+                            self.overflow = true;
+                            self.buf.clear();
+                        } else {
+                            self.buf.push(b);
+                        }
+                    }
+                }
+            },
+            ScanState::OscEsc => match b {
+                b'\\' => return self.complete(OscTerminator::St),
+                b']' => {
+                    self.state = ScanState::Osc;
+                    self.buf.clear();
+                    self.overflow = false;
+                }
+                b'P' | b'_' | b'^' | b'X' => {
+                    self.buf.clear();
+                    self.overflow = false;
+                    self.state = ScanState::IgnoredString;
+                }
+                0x1b => {
+                    self.buf.clear();
+                    self.overflow = false;
+                    self.state = ScanState::Esc;
+                }
+                _ => self.reset(),
+            },
+            ScanState::IgnoredString => match b {
+                0x18 | 0x1a => self.state = ScanState::Ground,
+                0x1b => self.state = ScanState::IgnoredStringEsc,
+                _ => {}
+            },
+            ScanState::IgnoredStringEsc => match b {
+                b'\\' | 0x18 | 0x1a => self.state = ScanState::Ground,
+                b']' => {
+                    self.state = ScanState::Osc;
+                    self.buf.clear();
+                    self.overflow = false;
+                }
+                b'P' | b'_' | b'^' | b'X' => self.state = ScanState::IgnoredString,
+                0x1b => self.state = ScanState::Esc,
+                _ => self.state = ScanState::Ground,
+            },
         }
         None
     }
 
-    fn finish(&mut self, terminator: OscTerminator) -> Option<OscEvent> {
-        let event = std::str::from_utf8(&self.buf).ok().and_then(|s| {
-            let (ps, pt) = s.split_once(';')?;
-            if ps == "9"
-                && let Some(progress) = pt.strip_prefix("4;")
-            {
-                return parse_progress(progress).map(OscEvent::Progress);
-            }
-            let kind = match ps {
-                "9" => OscNotificationKind::Osc9,
-                "99" => OscNotificationKind::Osc99,
-                "777" => OscNotificationKind::Osc777,
-                "7501" if pt.starts_with('?') => {
-                    return Some(OscEvent::ProgramStatusQuery(terminator));
-                }
-                "7501" => return parse_program_status(pt).map(OscEvent::ProgramStatus),
-                _ => return None,
-            };
-            notify_text_from_osc(ps, pt)
-                .map(|text| OscEvent::Notification(OscNotification { kind, text }))
-        });
+    fn complete(&mut self, terminator: OscTerminator) -> Option<OscEvent> {
+        let event = (!self.overflow)
+            .then(|| self.parse_finish(terminator))
+            .flatten();
         self.reset();
         event
     }
 
-    fn reset(&mut self) {
-        self.in_osc = false;
-        self.prev_esc = false;
+    fn parse_finish(&self, terminator: OscTerminator) -> Option<OscEvent> {
+        let s = std::str::from_utf8(&self.buf).ok()?;
+        let (ps, pt) = s.split_once(';')?;
+        if ps == "9"
+            && let Some(progress) = pt.strip_prefix("4;")
+        {
+            return parse_progress(progress).map(OscEvent::Progress);
+        }
+        let kind = match ps {
+            "9" => OscNotificationKind::Osc9,
+            "99" => OscNotificationKind::Osc99,
+            "777" => OscNotificationKind::Osc777,
+            "133" => {
+                return (pt.split(';').next().map(str::trim) == Some("A"))
+                    .then_some(OscEvent::PromptStart);
+            }
+            "7501" if pt.trim() == "?" => {
+                return Some(OscEvent::ProgramStatusQuery(terminator));
+            }
+            "7501" => {
+                let whole_len = 2 + self.buf.len() + terminator.bytes().len();
+                return parse_program_status(pt, whole_len).map(OscEvent::ProgramStatus);
+            }
+            _ => return None,
+        };
+        notify_text_from_osc(ps, pt)
+            .map(|text| OscEvent::Notification(OscNotification { kind, text }))
+    }
+
+    pub fn reset(&mut self) {
+        self.state = ScanState::Ground;
+        self.overflow = false;
         self.buf.clear();
     }
 }
@@ -638,22 +797,30 @@ mod tests {
     }
 
     #[test]
-    fn program_status_reads_state_kind_app_and_base64_message() {
+    fn program_status_reads_state_kind_progress_and_base64_message() {
         // "批准 rm -rf" 的 base64，不带填充。
         let report = concat!(
-            "\x1b]7501;state=blocked:kind=permission:app=codex:",
+            "\x1b]7501;state=blocked:kind=permission:app=codex:progress=45:",
             "msg=5om55YeGIHJtIC1yZg\x1b\\",
         );
         let blocked = status(report.as_bytes()).unwrap();
         assert_eq!(blocked.state, ProgramState::Blocked);
         assert_eq!(blocked.kind, Some(ProgramBlockedKind::Permission));
-        assert_eq!(blocked.app.as_deref(), Some("codex"));
+        assert_eq!(blocked.progress, Some(45));
         assert_eq!(blocked.message.as_deref(), Some("批准 rm -rf"));
 
-        let done = status(b"\x1b]7501;state=done:kind=question\x07").unwrap();
+        let working = status(b"\x1b]7501;state=working:progress=100\x07").unwrap();
+        assert_eq!(working.state, ProgramState::Working);
+        assert_eq!(working.progress, Some(100));
+
+        let done = status(b"\x1b]7501;state=done:kind=question:progress=50\x07").unwrap();
         assert_eq!(done.state, ProgramState::Done);
         assert_eq!(done.kind, None, "kind 只对 blocked 有意义");
+        assert_eq!(done.progress, None, "progress 只在 working/blocked 有效");
         assert_eq!(done.message, None);
+
+        let out_of_range = status(b"\x1b]7501;state=working:progress=101\x07").unwrap();
+        assert_eq!(out_of_range.progress, None);
     }
 
     #[test]
@@ -665,25 +832,117 @@ mod tests {
         );
         assert_eq!(status(b"\x1b]7501;kind=permission\x07"), None, "缺 state");
         assert_eq!(
-            status(b"\x1b]7501;state=done:msg=a b\x07"),
+            status(b"\x1b]7501;state=done:msg=a\x07"),
             None,
-            "值里有空格"
+            "非法 base64 整条丢弃"
         );
         // "a\nb"：说明里带控制字符。
         assert_eq!(status(b"\x1b]7501;state=done:msg=YQpi\x07"), None);
+        // title 带控制字符同样整条丢弃。
+        assert_eq!(status(b"\x1b]7501;state=done:title=YQpi\x07"), None);
         assert_eq!(
             status(b"\x1b]7501;state=working:id=build\x07"),
             None,
             "子记录不当成根状态"
         );
+        assert_eq!(
+            status(b"\x1b]7501;state=working:id=\x07"),
+            None,
+            "空 id 也不回退覆盖根记录"
+        );
+        assert_eq!(
+            status(b"\x1b]7501;state=working:id=bad!id\x07"),
+            None,
+            "畸形 id 不得回退覆盖根记录"
+        );
+        assert_eq!(
+            status(&format!("\x1b]7501;state=done:{}=1\x07", "k".repeat(17)).into_bytes()),
+            None,
+            "key 超 16 字节整条丢弃"
+        );
+        assert_eq!(
+            status(&format!("\x1b]7501;state=done:app={}\x07", "a".repeat(33)).into_bytes()),
+            None,
+            "app 超 32 字节整条丢弃"
+        );
         let oversized = format!("\x1b]7501;state=done:msg={}\x07", "A".repeat(2800));
         assert_eq!(status(oversized.as_bytes()), None);
+        let seq_4097 = format!("\x1b]7501;state=done:future={}\x1b\\", "A".repeat(4070));
+        assert_eq!(seq_4097.len(), 4097);
+        assert_eq!(status(seq_4097.as_bytes()), None);
+    }
+
+    #[test]
+    fn program_status_skips_malformed_pairs_strips_bidi_and_handles_repeat_keys() {
+        // 缺 `=`、值含空格、大写 key 都只跳过该 pair；重复 key 后值生效；key/value 两端去空白。
+        let got =
+            status(b"\x1b]7501;badpair: state = idle :BAD=1:msg=a b:state = done\x07").unwrap();
+        assert_eq!(got.state, ProgramState::Done);
+        assert_eq!(got.message, None);
+
+        // 7501 探测必须是精确 `?`（忽略两端空白）。
+        assert_eq!(scan_events(b"\x1b]7501;?garbage\x1b\\"), vec![]);
+        assert_eq!(
+            scan_events(b"\x1b]7501; ? \x07"),
+            vec![OscEvent::ProgramStatusQuery(OscTerminator::Bel)]
+        );
+
+        // Bidi 覆盖与不可见伪装字符被剥离，ZWJ 组合 emoji 保留。
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD_NO_PAD
+            .encode("run\u{202E}txt \u{1F469}\u{200D}\u{1F4BB}\u{200B}");
+        let seq = format!("\x1b]7501;state=working:msg={encoded}\x07");
+        let got = status(seq.as_bytes()).unwrap();
+        assert_eq!(
+            got.message.as_deref(),
+            Some("runtxt \u{1F469}\u{200D}\u{1F4BB}")
+        );
+    }
+
+    #[test]
+    fn osc_scan_handles_vt_strings_abort_and_osc133_prompt_start() {
+        // CAN / SUB 立即中止未闭合 OSC，随后新 OSC 照常解析。
+        assert_eq!(
+            scan_events(b"\x1b]7501;state=working\x18\x1b]7501;state=done\x07").len(),
+            1
+        );
+        assert_eq!(
+            scan_events(b"\x1b]9;aborted\x1a\x1b]9;real\x07")
+                .into_iter()
+                .map(|e| match e {
+                    OscEvent::Notification(n) => n.text,
+                    other => panic!("unexpected {other:?}"),
+                })
+                .collect::<Vec<_>>(),
+            vec!["real"]
+        );
+
+        // 未闭合的 OSC 被 DCS / APC（`ESC P` / `ESC _`）中止，且其中的 `BEL` 与普通字节不会触发。
+        assert_eq!(
+            scan_events(
+                b"\x1b]7501;state=working\x1bP123]7501;state=done\x07\x1b\\\x1b]9;aborted\x1b_Gabc]9;fake\x07\x1b\\"
+            ),
+            vec![]
+        );
+
+        // 未闭合 OSC 紧跟新 `ESC ]` 时丢弃前一条、解析新一条。
+        let got = status(b"\x1b]9;unclosed\x1b]7501;state=done\x07").unwrap();
+        assert_eq!(got.state, ProgramState::Done);
+
+        // OSC 133 A（含参数）触发 PromptStart，B / C / D 不触发。
+        assert_eq!(
+            scan_events(
+                b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;A;k=i\x1b\\"
+            ),
+            vec![OscEvent::PromptStart, OscEvent::PromptStart]
+        );
     }
 
     #[test]
     fn program_status_ignores_unknown_keys_and_empty_values() {
         let status = status(b"\x1b]7501;state=working:progress=40:future=1:msg=\x07").unwrap();
         assert_eq!(status.state, ProgramState::Working);
+        assert_eq!(status.progress, Some(40));
         assert_eq!(status.message, None);
     }
 

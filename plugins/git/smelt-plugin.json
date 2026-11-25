@@ -1,0 +1,6 @@
+{
+  "id": "smelt.git",
+  "name": "Changes",
+  "version": "1.0.0",
+  "entry": "nsh.tsx"
+}

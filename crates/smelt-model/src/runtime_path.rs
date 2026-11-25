@@ -8,6 +8,11 @@
 //!
 //! 本机客户端自己的文件（配置、数据库、系统文件框）继续用 `std::path`。
 
+use typed_path::{
+    Utf8Components as _, Utf8UnixComponent, Utf8UnixPath, Utf8WindowsComponent, Utf8WindowsPath,
+    Utf8WindowsPrefix, Utf8WindowsPrefixComponent,
+};
+
 /// 路径属于哪种系统。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathStyle {
@@ -39,11 +44,12 @@ impl PathStyle {
         }
     }
 
-    /// 绝对路径。Windows 认盘符开头和 `\` 开头，也认 `/` 开头（运行时有时这样报）。
+    /// 绝对路径。Windows 认盘符根、UNC、verbatim 和 `\` 开头，也认 `/` 开头（运行时有时这样报）；
+    /// 盘符相对路径如 `C:foo` 不算绝对路径。
     pub fn is_absolute(self, path: &str) -> bool {
         match self {
-            Self::Posix => is_absolute(path),
-            Self::Windows => is_windows_absolute(path) || is_absolute(path),
+            Self::Posix => Utf8UnixPath::new(path).is_absolute(),
+            Self::Windows => Utf8WindowsPath::new(path).has_root(),
         }
     }
 
@@ -58,8 +64,8 @@ impl PathStyle {
     /// 最后一段普通名字。`.`、`..` 和根目录没有文件名。
     pub fn file_name(self, path: &str) -> Option<&str> {
         match self {
-            Self::Posix => file_name_posix(path),
-            Self::Windows => file_name_windows(path),
+            Self::Posix => Utf8UnixPath::new(path).file_name(),
+            Self::Windows => Utf8WindowsPath::new(path).file_name(),
         }
     }
 
@@ -106,7 +112,7 @@ impl PathStyle {
 }
 
 fn join_posix(base: &str, child: &str) -> String {
-    if is_absolute(child) {
+    if Utf8UnixPath::new(child).is_absolute() {
         return child.to_string();
     }
     if child.is_empty() {
@@ -115,35 +121,47 @@ fn join_posix(base: &str, child: &str) -> String {
         }
         return format!("{base}/");
     }
-    if base.is_empty() || base.ends_with('/') {
-        format!("{base}{child}")
+    Utf8UnixPath::new(base).join(child).into_string()
+}
+
+fn posix_parts(path: &str) -> (bool, Vec<&str>) {
+    let mut has_root = false;
+    let mut parts = Vec::new();
+    for component in Utf8UnixPath::new(path).components() {
+        match component {
+            Utf8UnixComponent::RootDir => has_root = true,
+            Utf8UnixComponent::CurDir => {}
+            Utf8UnixComponent::ParentDir => parts.push(".."),
+            Utf8UnixComponent::Normal(seg) => parts.push(seg),
+        }
+    }
+    (has_root, parts)
+}
+
+fn render_posix(has_root: bool, parts: &[&str]) -> String {
+    if has_root {
+        if parts.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", parts.join("/"))
+        }
     } else {
-        format!("{base}/{child}")
+        parts.join("/")
     }
 }
 
 fn parent_posix(path: &str) -> Option<String> {
-    let (absolute, parts) = significant_parts(path);
+    let (has_root, parts) = posix_parts(path);
     if parts.is_empty() {
         return None;
     }
-    let parent_parts = &parts[..parts.len() - 1];
-    Some(render(absolute, parent_parts))
-}
-
-fn file_name_posix(path: &str) -> Option<&str> {
-    let name = raw_name(path)?;
-    if name == "." || name == ".." {
-        None
-    } else {
-        Some(name)
-    }
+    Some(render_posix(has_root, &parts[..parts.len() - 1]))
 }
 
 fn strip_prefix_posix(path: &str, prefix: &str) -> Option<String> {
-    let (path_abs, path_parts) = significant_parts(path);
-    let (prefix_abs, prefix_parts) = significant_parts(prefix);
-    if path_abs != prefix_abs || path_parts.len() < prefix_parts.len() {
+    let (path_root, path_parts) = posix_parts(path);
+    let (prefix_root, prefix_parts) = posix_parts(prefix);
+    if path_root != prefix_root || path_parts.len() < prefix_parts.len() {
         return None;
     }
     if path_parts[..prefix_parts.len()] != prefix_parts[..] {
@@ -153,200 +171,196 @@ fn strip_prefix_posix(path: &str, prefix: &str) -> Option<String> {
 }
 
 fn clean_posix(path: &str) -> String {
-    let absolute = is_absolute(path);
+    let (has_root, parts) = posix_parts(path);
     let mut stack: Vec<&str> = Vec::new();
-    for part in path
-        .split('/')
-        .filter(|part| !part.is_empty() && *part != ".")
-    {
+    for part in parts {
         if part == ".." {
             if stack.last().is_some_and(|top| *top != "..") {
                 stack.pop();
-            } else if !absolute {
+            } else if !has_root {
                 stack.push("..");
             }
         } else {
             stack.push(part);
         }
     }
-    render(absolute, &stack)
-}
-
-fn is_absolute(path: &str) -> bool {
-    path.starts_with('/')
-}
-
-fn is_windows_absolute(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    path.starts_with('\\')
-        || (bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && (bytes[2] == b'\\' || bytes[2] == b'/'))
+    render_posix(has_root, &stack)
 }
 
 fn join_windows(base: &str, child: &str) -> String {
-    if is_windows_absolute(child) || is_absolute(child) {
+    let child_path = Utf8WindowsPath::new(child);
+    if child_path.has_root() || child_path.components().has_prefix() {
         return child.to_string();
     }
+    let normalized_base = normalize_windows_slashes(base);
     if child.is_empty() {
-        if base.is_empty() || base.ends_with('\\') || base.ends_with('/') {
-            return base.replace('/', "\\");
+        if normalized_base.is_empty() || normalized_base.ends_with('\\') {
+            return normalized_base;
         }
-        return format!("{}\\", base.replace('/', "\\"));
+        return format!("{normalized_base}\\");
     }
-    let base = base.replace('/', "\\");
-    let child = child.replace('/', "\\");
-    if base.is_empty() || base.ends_with('\\') {
-        format!("{base}{child}")
+    let normalized_child = child.replace('/', "\\");
+    if normalized_base.is_empty() || normalized_base.ends_with('\\') {
+        format!("{normalized_base}{normalized_child}")
     } else {
-        format!("{base}\\{child}")
+        format!("{normalized_base}\\{normalized_child}")
     }
 }
 
-fn split_windows(path: &str) -> (String, Vec<String>) {
-    let path = path.replace('/', "\\");
-    if let Some(rest) = path.strip_prefix("\\\\") {
-        let mut pieces = rest.split('\\').filter(|part| !part.is_empty());
-        let server = pieces.next().unwrap_or("");
-        let share = pieces.next().unwrap_or("");
-        let prefix = format!("\\\\{server}\\{share}");
-        let parts = pieces.map(str::to_string).collect();
-        return (prefix, parts);
+/// 将普通 Windows 路径里的 `/` 规范为 `\`；verbatim 前缀本身已由 Windows 规定使用 `\`，保持原样。
+fn normalize_windows_slashes(path: &str) -> String {
+    if path.starts_with(r"\\?\") {
+        path.to_string()
+    } else {
+        path.replace('/', "\\")
     }
-    if path.len() >= 2 && path.as_bytes()[1] == b':' {
-        let prefix = path[..2].to_string();
-        let rest = path[2..].trim_start_matches('\\');
-        let parts = if rest.is_empty() {
-            Vec::new()
-        } else {
-            rest.split('\\')
-                .filter(|part| !part.is_empty() && *part != ".")
-                .map(str::to_string)
-                .collect()
-        };
-        return (prefix, parts);
-    }
-    let parts = path
-        .split('\\')
-        .filter(|part| !part.is_empty() && *part != ".")
-        .map(str::to_string)
-        .collect();
-    (String::new(), parts)
 }
 
-fn render_windows(prefix: &str, parts: &[String]) -> String {
-    if prefix.is_empty() {
-        return parts.join("\\");
+struct WindowsParts<'a> {
+    prefix: Option<Utf8WindowsPrefixComponent<'a>>,
+    /// 是否带物理或隐式根（`C:\`、`\`、`\\server\share`、`\\?\C:\` 为 true；`C:foo`、`foo` 为 false）。
+    has_root: bool,
+    parts: Vec<&'a str>,
+}
+
+fn windows_parts(path: &str) -> WindowsParts<'_> {
+    let comps = Utf8WindowsPath::new(path).components();
+    let has_root = comps.has_root();
+    let mut prefix = None;
+    let mut parts = Vec::new();
+    for component in comps {
+        match component {
+            Utf8WindowsComponent::Prefix(p) => prefix = Some(p),
+            Utf8WindowsComponent::RootDir | Utf8WindowsComponent::CurDir => {}
+            Utf8WindowsComponent::ParentDir => parts.push(".."),
+            Utf8WindowsComponent::Normal(seg) => parts.push(seg),
+        }
     }
-    if parts.is_empty() {
-        return if prefix.starts_with("\\\\") {
-            prefix.to_string()
-        } else {
-            format!("{prefix}\\")
-        };
+    WindowsParts {
+        prefix,
+        has_root,
+        parts,
     }
-    format!("{prefix}\\{}", parts.join("\\"))
+}
+
+fn format_windows_prefix(prefix: Utf8WindowsPrefixComponent<'_>) -> String {
+    match prefix.kind() {
+        Utf8WindowsPrefix::Verbatim(_)
+        | Utf8WindowsPrefix::VerbatimUNC(..)
+        | Utf8WindowsPrefix::VerbatimDisk(_) => prefix.as_str().to_string(),
+        Utf8WindowsPrefix::DeviceNS(_)
+        | Utf8WindowsPrefix::UNC(..)
+        | Utf8WindowsPrefix::Disk(_) => prefix.as_str().replace('/', "\\"),
+    }
+}
+
+fn render_windows_parts(
+    prefix: Option<Utf8WindowsPrefixComponent<'_>>,
+    has_root: bool,
+    parts: &[&str],
+) -> String {
+    match prefix {
+        None => {
+            if has_root {
+                if parts.is_empty() {
+                    r"\".to_string()
+                } else {
+                    format!(r"\{}", parts.join(r"\"))
+                }
+            } else {
+                parts.join(r"\")
+            }
+        }
+        Some(prefix) => {
+            let prefix_str = format_windows_prefix(prefix);
+            let is_disk = matches!(
+                prefix.kind(),
+                Utf8WindowsPrefix::Disk(_) | Utf8WindowsPrefix::VerbatimDisk(_)
+            );
+            if parts.is_empty() {
+                if is_disk && has_root {
+                    format!(r"{prefix_str}\")
+                } else {
+                    prefix_str
+                }
+            } else if is_disk && !has_root {
+                format!("{prefix_str}{}", parts.join(r"\"))
+            } else {
+                format!(r"{prefix_str}\{}", parts.join(r"\"))
+            }
+        }
+    }
+}
+
+fn windows_prefix_eq(
+    a: Option<Utf8WindowsPrefixComponent<'_>>,
+    b: Option<Utf8WindowsPrefixComponent<'_>>,
+) -> bool {
+    match (a.map(|p| p.kind()), b.map(|p| p.kind())) {
+        (None, None) => true,
+        (Some(Utf8WindowsPrefix::Disk(da)), Some(Utf8WindowsPrefix::Disk(db))) => da == db,
+        (Some(Utf8WindowsPrefix::VerbatimDisk(da)), Some(Utf8WindowsPrefix::VerbatimDisk(db))) => {
+            da == db
+        }
+        (Some(Utf8WindowsPrefix::UNC(sa, sha)), Some(Utf8WindowsPrefix::UNC(sb, shb)))
+        | (
+            Some(Utf8WindowsPrefix::VerbatimUNC(sa, sha)),
+            Some(Utf8WindowsPrefix::VerbatimUNC(sb, shb)),
+        ) => sa.eq_ignore_ascii_case(sb) && sha.eq_ignore_ascii_case(shb),
+        (Some(Utf8WindowsPrefix::Verbatim(va)), Some(Utf8WindowsPrefix::Verbatim(vb))) => {
+            va.eq_ignore_ascii_case(vb)
+        }
+        (Some(Utf8WindowsPrefix::DeviceNS(da)), Some(Utf8WindowsPrefix::DeviceNS(db))) => {
+            da.eq_ignore_ascii_case(db)
+        }
+        _ => false,
+    }
 }
 
 fn parent_windows(path: &str) -> Option<String> {
-    let (prefix, parts) = split_windows(path);
-    if parts.is_empty() {
+    let parsed = windows_parts(path);
+    if parsed.parts.is_empty() {
         return None;
     }
-    let parent = &parts[..parts.len() - 1];
-    if prefix.is_empty() && parent.is_empty() {
-        return Some(String::new());
-    }
-    Some(render_windows(&prefix, parent))
-}
-
-fn file_name_windows(path: &str) -> Option<&str> {
-    let trimmed = path.trim_end_matches(['\\', '/']);
-    if trimmed.is_empty() || trimmed.ends_with(':') {
-        return None;
-    }
-    let name = trimmed.rsplit(['\\', '/']).next().unwrap_or(trimmed);
-    if name == "." || name == ".." || name.contains(':') {
-        None
-    } else {
-        Some(name)
-    }
+    let parent = &parsed.parts[..parsed.parts.len() - 1];
+    Some(render_windows_parts(parsed.prefix, parsed.has_root, parent))
 }
 
 fn strip_prefix_windows(path: &str, prefix: &str) -> Option<String> {
-    let (path_prefix, path_parts) = split_windows(path);
-    let (prefix_prefix, prefix_parts) = split_windows(prefix);
-    if !path_prefix.eq_ignore_ascii_case(&prefix_prefix) || path_parts.len() < prefix_parts.len() {
-        return None;
-    }
-    if path_parts
-        .iter()
-        .zip(&prefix_parts)
-        .any(|(path, prefix)| !path.eq_ignore_ascii_case(prefix))
+    let path_parsed = windows_parts(path);
+    let prefix_parsed = windows_parts(prefix);
+    if !windows_prefix_eq(path_parsed.prefix, prefix_parsed.prefix)
+        || path_parsed.has_root != prefix_parsed.has_root
+        || path_parsed.parts.len() < prefix_parsed.parts.len()
     {
         return None;
     }
-    Some(path_parts[prefix_parts.len()..].join("\\"))
+    if path_parsed
+        .parts
+        .iter()
+        .zip(&prefix_parsed.parts)
+        .any(|(a, b)| !a.eq_ignore_ascii_case(b))
+    {
+        return None;
+    }
+    Some(path_parsed.parts[prefix_parsed.parts.len()..].join(r"\"))
 }
 
 fn clean_windows(path: &str) -> String {
-    let normalized = path.replace('/', "\\");
-    let (mut prefix, _) = split_windows(&normalized);
-    let absolute = !prefix.is_empty();
-    let mut stack: Vec<String> = Vec::new();
-    let body = if normalized.starts_with("\\\\") {
-        let mut pieces = normalized.trim_start_matches('\\').split('\\');
-        let _server = pieces.next();
-        let _share = pieces.next();
-        pieces.collect::<Vec<_>>().join("\\")
-    } else if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
-        normalized[2..].trim_start_matches('\\').to_string()
-    } else {
-        prefix.clear();
-        normalized
-    };
-    for part in body.split('\\').filter(|part| !part.is_empty() && *part != ".") {
+    let parsed = windows_parts(path);
+    let mut stack: Vec<&str> = Vec::new();
+    for part in parsed.parts {
         if part == ".." {
-            if stack.last().is_some_and(|top| top != "..") {
+            if stack.last().is_some_and(|top| *top != "..") {
                 stack.pop();
-            } else if !absolute {
-                stack.push("..".to_string());
+            } else if !parsed.has_root {
+                stack.push("..");
             }
         } else {
-            stack.push(part.to_string());
+            stack.push(part);
         }
     }
-    render_windows(&prefix, &stack)
-}
-
-/// 去掉空段和 `.`，保留 `..` 和普通名字。
-fn significant_parts(path: &str) -> (bool, Vec<&str>) {
-    let parts = path
-        .split('/')
-        .filter(|part| !part.is_empty() && *part != ".")
-        .collect();
-    (is_absolute(path), parts)
-}
-
-fn raw_name(path: &str) -> Option<&str> {
-    let trimmed = path.trim_end_matches('/');
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed.rsplit('/').next().unwrap_or(trimmed))
-}
-
-fn render(absolute: bool, parts: &[&str]) -> String {
-    if absolute {
-        if parts.is_empty() {
-            "/".to_string()
-        } else {
-            format!("/{}", parts.join("/"))
-        }
-    } else {
-        parts.join("/")
-    }
+    render_windows_parts(parsed.prefix, parsed.has_root, &stack)
 }
 
 fn same_path_posix(a: &str, b: &str) -> bool {
@@ -536,6 +550,52 @@ mod tests {
         assert!(Windows.starts_with("C:/proj/src", r"C:\proj"));
         assert_eq!(Windows.clean("C:/proj/../src"), r"C:\src");
         assert_eq!(Windows.extension(r"C:\proj\main.RS"), Some("RS"));
+    }
+
+    #[test]
+    fn windows_root_relative_drive_relative_and_verbatim_paths() {
+        // 1. 盘符相对根路径 `\foo\bar` 不得吞掉前导 `\`，也不得与相对路径混淆
+        assert_eq!(Windows.clean(r"\foo\..\bar"), r"\bar");
+        assert_eq!(Windows.clean(r"\.."), r"\");
+        assert_eq!(Windows.parent(r"\foo"), Some(r"\".into()));
+        assert_eq!(Windows.parent(r"\"), None);
+        assert_eq!(Windows.strip_prefix(r"foo\bar", r"\foo"), None);
+        assert_eq!(
+            Windows.strip_prefix(r"\Foo\Bar", r"\foo").as_deref(),
+            Some("Bar")
+        );
+
+        // 2. 盘符相对路径 `C:foo` 不得与盘符绝对路径 `C:\foo` 混淆
+        assert!(!Windows.is_absolute("C:foo"));
+        assert_eq!(Windows.clean("C:foo"), "C:foo");
+        assert_eq!(Windows.clean(r"C:foo\..\bar"), "C:bar");
+        assert_eq!(Windows.parent("C:foo"), Some("C:".into()));
+        assert_eq!(Windows.parent("C:"), None);
+        assert_eq!(Windows.strip_prefix(r"C:\foo\bar", "C:foo"), None);
+        assert_eq!(Windows.strip_prefix(r"C:foo\bar", r"C:\foo"), None);
+
+        // 3. Verbatim 与 Verbatim UNC 路径不得误切成普通 UNC
+        assert!(Windows.is_absolute(r"\\?\C:\proj\src"));
+        assert!(Windows.is_absolute(r"\\?\UNC\server\share\a"));
+        assert_eq!(Windows.parent(r"\\?\C:\proj"), Some(r"\\?\C:\".into()));
+        assert_eq!(Windows.parent(r"\\?\C:\"), None);
+        assert_eq!(Windows.clean(r"\\?\C:\proj\..\src"), r"\\?\C:\src");
+        assert_eq!(
+            Windows.clean(r"\\?\UNC\server\share\a\..\b"),
+            r"\\?\UNC\server\share\b"
+        );
+        assert_eq!(
+            Windows
+                .strip_prefix(r"\\?\C:\Proj\Src", r"\\?\c:\proj")
+                .as_deref(),
+            Some("Src")
+        );
+        assert_eq!(
+            Windows
+                .strip_prefix(r"\\server\share\sub\file.rs", r"\\SERVER\Share")
+                .as_deref(),
+            Some(r"sub\file.rs")
+        );
     }
 
     #[test]

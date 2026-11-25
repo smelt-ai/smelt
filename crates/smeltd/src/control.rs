@@ -14,7 +14,7 @@ use smelt_core::control_api::{
     AgentDefinitionGetResult, AgentDefinitionIdParams, AgentDefinitionListResult,
     AgentDefinitionUpdateParams, AgentMemoryRecordReadParams, AgentMemoryRecordWriteParams,
     AgentMemorySessionParams, AutomationGetResult, AutomationListResult, AutomationRunOnceResult,
-    AutomationSetEnabledParams, SessionListResult,
+    AutomationSetEnabledParams, NewSessionCatalogParams, SessionListResult,
 };
 use smelt_runtime_client::protocol::control::{
     CONTROL_API_MIN_SUPPORTED_VERSION, CONTROL_API_VERSION, ControlError, ControlErrorCode,
@@ -179,9 +179,7 @@ fn dispatch_control(
             Ok(result) => success_value(control_version, &request_id, result),
             Err(error) => error_value(control_version, request_id, error),
         },
-        files @ (ControlMethod::ProjectTree
-        | ControlMethod::ProjectSearch
-        | ControlMethod::ProjectDeleteEntry
+        files @ (ControlMethod::ProjectSearch
         | ControlMethod::FileOpen
         | ControlMethod::FileSave
         | ControlMethod::SessionCompleteFiles) => {
@@ -190,6 +188,31 @@ fn dispatch_control(
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
+        fs @ (ControlMethod::FsStat
+        | ControlMethod::FsReadDir
+        | ControlMethod::FsDelete
+        | ControlMethod::FsVolume
+        | ControlMethod::FsKnownDirs
+        | ControlMethod::FsCreateDir
+        | ControlMethod::FsRename
+        | ControlMethod::FsCopy
+        | ControlMethod::FsRead
+        | ControlMethod::FsWrite
+        | ControlMethod::FsUsageScan
+        | ControlMethod::FsUsageChildren
+        | ControlMethod::FsUsageRelease) => {
+            match super::fs_control::dispatch(fs, params, event_hub) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        skills @ (ControlMethod::SkillsScan
+        | ControlMethod::SkillsInspectImport
+        | ControlMethod::SkillsPlan
+        | ControlMethod::SkillsApply) => match super::skills::dispatch(skills, params) {
+            Ok(result) => success_value(control_version, &request_id, result),
+            Err(error) => error_value(control_version, request_id, error),
+        },
         history @ (ControlMethod::HistoryList
         | ControlMethod::HistoryDetail
         | ControlMethod::HistoryDelete) => {
@@ -210,6 +233,7 @@ fn dispatch_control(
         | ControlMethod::PiConfigEnsureFile
         | ControlMethod::PiModelsSetThinkingLevel
         | ControlMethod::PiModelsSaveDefault
+        | ControlMethod::PiModelsClearDefault
         | ControlMethod::PiProvidersDiscoverModels
         | ControlMethod::PiProvidersSaveCustom
         | ControlMethod::PiProvidersRemoveCustom
@@ -309,11 +333,9 @@ fn dispatch_control(
                     Ok(params) => params,
                     Err(response) => return response,
                 };
-            success_value(
-                control_version,
-                &request_id,
-                smelt_core::new_session::toggle_pin(params),
-            )
+            let preferences = smelt_core::new_session::toggle_pin(params);
+            event_hub.refresh_new_session_catalog(false);
+            success_value(control_version, &request_id, preferences)
         }
         ControlMethod::RemoteConfigGet => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
@@ -528,11 +550,9 @@ fn dispatch_control(
                 Ok(params) => params,
                 Err(response) => return response,
             };
-            success_value(
-                control_version,
-                &request_id,
-                smelt_core::acp_conn::inspect_acp_runtime(),
-            )
+            let diagnostics = smelt_core::acp_conn::inspect_acp_runtime();
+            event_hub.update_runtime_diagnostics(diagnostics.clone());
+            success_value(control_version, &request_id, diagnostics)
         }
         ControlMethod::AgentCliInstall => {
             let params: smelt_core::control_api::AgentCliInstallParams =
@@ -554,14 +574,18 @@ fn dispatch_control(
                 );
             };
             match smelt_core::acp_conn::install_acp_cli(agent) {
-                Ok(report) => success_value(
-                    control_version,
-                    &request_id,
-                    smelt_core::control_api::AgentCliInstallResult {
-                        installer: report.installer.to_string(),
-                        diagnostics: smelt_core::acp_conn::inspect_acp_runtime(),
-                    },
-                ),
+                Ok(report) => {
+                    let diagnostics = smelt_core::acp_conn::inspect_acp_runtime();
+                    event_hub.update_runtime_diagnostics(diagnostics.clone());
+                    success_value(
+                        control_version,
+                        &request_id,
+                        smelt_core::control_api::AgentCliInstallResult {
+                            installer: report.installer.to_string(),
+                            diagnostics,
+                        },
+                    )
+                }
                 Err(error) => error_value(
                     control_version,
                     request_id,
@@ -615,14 +639,15 @@ fn dispatch_control(
             }
         }
         ControlMethod::NewSessionCatalog => {
-            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
-                Ok(params) => params,
-                Err(response) => return response,
-            };
+            let params: NewSessionCatalogParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
             success_value(
                 control_version,
                 &request_id,
-                super::session_control::new_session_catalog(),
+                event_hub.new_session_catalog(params.refresh),
             )
         }
         ControlMethod::SessionCreate => {
@@ -678,6 +703,17 @@ fn dispatch_control(
                     Err(response) => return response,
                 };
             match super::conversation_prompt_index::prompt_index(params, acp_sessions, event_hub) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::ConversationForkCut => {
+            let params: smelt_core::control_api::ConversationForkCutParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::conversation_prompt_index::fork_cut(params, acp_sessions, event_hub) {
                 Ok(result) => success_value(control_version, &request_id, result),
                 Err(error) => error_value(control_version, request_id, error),
             }
@@ -1205,7 +1241,10 @@ fn dispatch_control(
                     Err(response) => return response,
                 };
             match smelt_core::launch_settings::replace_entries(&params.base, params.entries) {
-                Ok(settings) => success_value(control_version, &request_id, settings),
+                Ok(settings) => {
+                    event_hub.refresh_new_session_catalog(false);
+                    success_value(control_version, &request_id, settings)
+                }
                 Err(error) => {
                     let code = match error {
                         smelt_core::launch_settings::LaunchError::Conflict => {
@@ -2116,6 +2155,21 @@ mod tests {
         );
         assert_eq!(missing["status"], "error");
         assert_eq!(missing["error"]["code"], "not_found");
+    }
+
+    #[test]
+    fn conversation_fork_cut_is_dispatched() {
+        let missing = dispatch_for_test(
+            "conversation.fork_cut",
+            serde_json::json!({"session_id": "acp-nope", "entry_index": 0, "side": "after"}),
+        );
+        assert_eq!(missing["error"]["code"], "not_found");
+
+        let bad_side = dispatch_for_test(
+            "conversation.fork_cut",
+            serde_json::json!({"session_id": "acp-nope", "entry_index": 0, "side": "middle"}),
+        );
+        assert_eq!(bad_side["error"]["code"], "invalid_params");
     }
 
     #[test]

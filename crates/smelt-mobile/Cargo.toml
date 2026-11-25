@@ -28,14 +28,14 @@ iroh = "1.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
-base64 = "0.23"
+base64.workspace = true
 # 离线缓存（会话列表、最近对话的尾部）。业务持久化统一用 SQLite；bundled 自带源码，
 # iOS / Android 都能编，不依赖系统库版本。
 rusqlite = { version = "0.41", features = ["bundled"] }
 
 # 文件预览的语法高亮。syntect 解析 Sublime / TextMate 语法，two-face 补上 bat 那套语法
 # （TypeScript、TOML、Kotlin、Swift、Dart、Vue 等 syntect 自带的没有）。正则用 oniguruma：
-# 比纯 Rust 的 fancy-regex 快约 4.6 倍、包还小，实测见 docs/remote-mobile-files.md 第 5.5 节。
+# 比纯 Rust 的 fancy-regex 快约 4.6 倍、包还小（实测 onig 1.7MB / 220 语法 / 0.8s vs fancy 2.2MB / 213 语法 / 3.7s）。
 # 主题不要，颜色由 Dart 的主题按语义类别给。
 syntect = { version = "5.3", default-features = false, features = ["parsing", "default-syntaxes", "regex-onig"] }
 two-face = { version = "0.5", default-features = false, features = ["syntect-onig"] }

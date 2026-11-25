@@ -121,7 +121,10 @@ fn registered_theme_entries(cx: &App) -> Vec<smelt_model::theme_index::ThemeEntr
                 "light"
             }
             .into(),
-            family: scoped_theme_family(theme.owner.as_ref().map(|owner| owner.as_ref()), &theme.family),
+            family: scoped_theme_family(
+                theme.owner.as_ref().map(|owner| owner.as_ref()),
+                &theme.family,
+            ),
         })
         .collect()
 }
@@ -230,8 +233,8 @@ pub fn load_appearance() -> Appearance {
 }
 
 fn save_appearance(appearance: &Appearance) {
-    if let Err(error) = smelt_client_store::client_store()
-        .and_then(|store| save_appearance_on(appearance, store))
+    if let Err(error) =
+        smelt_client_store::client_store().and_then(|store| save_appearance_on(appearance, store))
     {
         eprintln!("[storage] 保存外观设置失败: {error}");
     }
@@ -323,6 +326,9 @@ fn set_window_backdrop(edit: impl FnOnce(&mut Appearance), cx: &mut App) {
 /// 设置内容视图的 id，打开设置就是打开它。宿主的视图，和插件的视图在同一张表里；只摆在
 /// 设置那一页（[`SETTINGS_PAGE`]），打开它就是去那一页。
 pub(crate) const SETTINGS_VIEW: &str = "smelt/settings";
+
+/// 设置「面板插件」页的视图 id。
+pub(crate) const PANEL_PLUGINS_VIEW: &str = "smelt/panel-plugins";
 
 /// 设置那一页的 id。
 const SETTINGS_PAGE: &str = "smelt/settings";
@@ -489,7 +495,7 @@ const HOST_PAGES: [HostPage; 3] = [
             "安装插件",
             "删除插件",
             "卸载插件",
-            "gpui-shell",
+            "nsh",
         ],
         build: build_panel_plugins,
     },
@@ -582,14 +588,41 @@ fn select_page(id: SharedString, cx: &mut App) {
     }
 }
 
+/// 当前选中的设置页 `(视图 id, 标题)`（供 `SMELT_SHELL=nsh` 主壳直接渲染内容区）。
+pub(crate) fn resolved_page(cx: &App) -> Option<(SharedString, SharedString)> {
+    let nav = settings_nav(&smelt_plugin_api::views(cx));
+    let leaf = resolve_page(&nav, chosen_page(cx))?;
+    Some((leaf.id.clone(), SharedString::from(leaf.title.clone())))
+}
+
+/// 监听设置当前选中页的变化（供 `SMELT_SHELL=nsh` 同步到 `MainShell`）。
+pub(crate) fn observe_selection(
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+    f: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+) -> Subscription {
+    cx.observe_global_in::<SettingsSelection>(window, f)
+}
+
+fn needs_attention(view: &smelt_plugin_api::ViewInfo, cx: &App) -> bool {
+    view.settings.is_some() && smelt_plugin_api::view_badge(&view.id, cx).is_some()
+}
+
+/// 设置里所有挂着角标的页（导航里每一页的红点看它）。只读内存。
+pub(super) fn attention_pages(cx: &App) -> std::collections::BTreeSet<SharedString> {
+    smelt_plugin_api::views(cx)
+        .into_iter()
+        .filter(|view| needs_attention(view, cx))
+        .map(|view| view.id)
+        .collect()
+}
+
 /// 设置里有没有要你处理的事，有的话落在哪一页：设置页挂着角标（比如「关于」页有新版本）→
-/// 那一页。导航里那一页的红点看它。只读内存。
+/// 那一页。只读内存。
 fn attention(cx: &App) -> Option<SharedString> {
     smelt_plugin_api::views(cx)
         .into_iter()
-        .find(|view| {
-            view.settings.is_some() && smelt_plugin_api::view_badge(&view.id, cx).is_some()
-        })
+        .find(|view| needs_attention(view, cx))
         .map(|view| view.id)
 }
 

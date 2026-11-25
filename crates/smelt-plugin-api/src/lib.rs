@@ -23,15 +23,18 @@ pub use smelt_client::runtime::{Runtime, RuntimeKey};
 // 发给运行时的短请求（守护协议），如改历史会话的名字。
 pub use smelt_client::session_ops;
 // 插件自己的库：每个来源一个 SQLite 文件，表由插件自己建、自己迁移。
-pub use smelt_client_store::{PluginStore, plugin_store, rusqlite};
+pub use smelt_client_store::{
+    PluginStore, override_data_dir, override_store, plugin_data_dir, plugin_store,
+    remove_override_data, rusqlite,
+};
 pub use smelt_model as model;
 // 本机数据目录（`~/.smelt`）在哪。
 pub use smelt_paths as paths;
 pub use smelt_runtime_client as client;
 // 量进程的 CPU 和内存（桌面进程自己在这里量，会话的由运行时报）。
 pub use smelt_sys::process_usage;
-// 应用日志（`app.log`）和在后台线程里跑一个要 tokio 的 future。
-pub use smelt_sys::{app_log, block_on};
+// 应用日志（`app.log`）以及专用阻塞/IO 池。
+pub use smelt_sys::{app_log, blocking};
 // 这个构建的版本号。
 pub use smelt_version;
 // 桌面的在线更新（macOS 换 .app 包，Windows 拉起安装程序），和 macOS 上 App 放的位置。
@@ -49,15 +52,19 @@ pub use smelt_ui::theme_catalog::{
 // 接口库自己的界面文案（docs/i18n.md）。
 rust_i18n::i18n!("locales", fallback = "en");
 
+mod color;
 mod command;
 mod connections;
 mod context;
 mod context_menu;
 mod event;
+mod facts;
 mod file;
+mod image_asset;
 mod layout;
 mod locale;
 mod menu;
+mod new_session;
 mod online;
 mod page;
 mod quit;
@@ -67,9 +74,7 @@ mod status_menu;
 mod topic;
 mod view;
 
-#[cfg(feature = "js")]
-pub mod js;
-
+pub use color::{hex_color, parse_hex_color};
 pub use command::{
     Command, CommandHandler, CommandInfo, CommandResult, CommandSpec, Handled, RunCommand,
     arg_fields, command, commands, invoke, no_main_window, register_commands, run,
@@ -83,11 +88,17 @@ pub use connections::{
 };
 pub use context::{ActiveContext, ViewedSession, active_context, set_active_context};
 pub use context_menu::{
-    ContextMenuAction, ContextMenuItem, context_menu_args, context_menu_items,
-    register_context_menu_items, unregister_context_menu_items,
+    ContextMenuAction, ContextMenuItem, MenuImage, MenuReport, context_menu_args,
+    context_menu_items, register_context_menu_items, unregister_context_menu_items,
+    with_context_menu_items,
 };
 pub use event::Event;
+pub use facts::{
+    ConversationAgent, Placement, conversation_agent, conversation_cwd, conversation_name,
+    is_automation_run, placement,
+};
 pub use file::{FileLocation, open_file, register_file_opener, unregister_file_opener};
+pub use image_asset::{image_asset, load_image_asset};
 pub use layout::{
     DockAreaState, LAYOUT_VERSION, LayoutInfo, LayoutMaterials, LayoutSource, Material, PanelInfo,
     PanelState, STACK_PANEL, Stack, StackAxis, StackContent, StackItem, layout, layout_stacks,
@@ -97,6 +108,7 @@ pub use locale::{
     FALLBACK_LOCALE, LOCALES, Text, locale, set_locale, supported_locale, system_locale,
 };
 pub use menu::{MenuEntry, MenuSlot, menu_items, register_menu_items, unregister_menu_items};
+pub use new_session::{conversation_acp, new_session_icon};
 pub use online::wait_online;
 pub use page::{
     OPEN_PAGE, OUTLET_VIEW, OpenPage, PageInfo, PageSource, home_page, page, pages, register_pages,
@@ -284,9 +296,17 @@ pub enum HostEvent {
     MachinesChanged,
     /// 活动上下文变了：当前项目或露着的会话（读 [`active_context`]）。
     ActiveContextChanged,
-    /// 有机器的会话状态或工作区目录变了（读 [`Host::session_states`]、
-    /// [`Host::workspace_directory`]）。
+    /// 有机器的会话状态、会话提醒或工作区目录变了（读 [`Host::session_states`]、
+    /// [`Host::session_attention`]、[`Host::workspace_directory`]）。
     SessionsChanged,
+    /// 那台机器上一段会话刚来了一条该响一下的提醒（系统通知、推送用）。运行时判定、同一段
+    /// 会话同样的提醒 60 秒内只来一次；重新连上时的快照里没有，后连上的不补响。发之前镜像
+    /// 已经更新（[`Host::session_attention`]）。`session` 是这段会话此刻的提醒。
+    AttentionAlert {
+        machine: RuntimeKey,
+        session: model::daemon_state::SessionAttention,
+        alert: model::daemon_state::AttentionItem,
+    },
     /// 系统通知的授权变了（读 [`Host::notification_permission`]）。
     NotificationPermissionChanged,
     /// 看得见的视图变了：有的露出来、有的被挡住或收起，设置换了页、开了或关了（读
@@ -413,6 +433,20 @@ pub trait Host: 'static {
         machine: &RuntimeKey,
         cx: &App,
     ) -> Option<model::workspace_directory::WorkspaceDirectory>;
+    /// 那台机器上有提醒的会话（运行时推来的镜像，权威在运行时）：等你处理的事、还没看过的
+    /// 提醒。还没收到快照（没连上过、刚连上）是 `None`，这时不能拿「没有」当「看过了」。变了
+    /// 发 [`HostEvent::SessionsChanged`]。
+    fn session_attention(
+        &self,
+        _machine: &RuntimeKey,
+        _cx: &App,
+    ) -> Option<Vec<model::daemon_state::SessionAttention>> {
+        None
+    }
+    /// 那台机器的 `(工作区目录修订, 会话状态与提醒修订)`；宿主提供时用于增量缓存，未提供返回 `None`。
+    fn sessions_revision(&self, _machine: &RuntimeKey, _cx: &App) -> Option<(u64, u64)> {
+        None
+    }
     /// 系统通知的授权。应用回到前台时重查；变了发
     /// [`HostEvent::NotificationPermissionChanged`]。
     fn notification_permission(&self, cx: &App) -> NotificationPermission;
@@ -442,12 +476,6 @@ pub fn host(cx: &App) -> Rc<dyn Host> {
 /// 订阅 [`HostEvent`] 用的实体。
 pub fn events(cx: &App) -> Entity<HostEvents> {
     cx.global::<HostGlobal>().events.clone()
-}
-
-/// [`events`]，宿主还没装（测试里）是 `None`。
-#[cfg(feature = "js")]
-pub(crate) fn try_events(cx: &App) -> Option<Entity<HostEvents>> {
-    Some(cx.try_global::<HostGlobal>()?.events.clone())
 }
 
 /// 宿主发一条事件给所有订阅的插件。宿主还没装（测试里）就没人订阅，什么都不做。
@@ -503,8 +531,11 @@ where
 {
     let client = host(cx).client(machine, cx);
     cx.background_executor().spawn(async move {
-        let client = client.ok_or_else(machine_removed)?;
-        client.call::<C>(&params, timeout).map_err(call_error_text)
+        smelt_sys::blocking::run(move || {
+            let client = client.ok_or_else(machine_removed)?;
+            client.call::<C>(&params, timeout).map_err(call_error_text)
+        })
+        .await
     })
 }
 

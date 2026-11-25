@@ -38,7 +38,7 @@ pub const SMELTD_SOCK: &str = "smeltd.sock";
 ///
 /// 设置里的「清理残留」只留这里的条目，别的一律当历史残留删掉。所以**往 `~/.smelt` 顶层
 /// 新放任何文件或目录都要在这里登记**，不然用户一清理就没了。条目里面的东西归各自主人管，
-/// 这里只看顶层。插件的数据一律放 `plugin-data/<插件 id>…`，不另占顶层。
+/// 这里只看顶层。插件的数据一律放 `plugin-data/<插件 id>/`，不另占顶层。
 pub const DECLARED_ENTRIES: &[&str] = &[
     // 运行时主库（smelt-store）。
     "smelt.sqlite3",

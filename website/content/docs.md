@@ -237,9 +237,6 @@ Android 安装包是 Release 里的 `Smelt-<版本>-android-arm64.apk`。发版�
   [collaboration.md](https://github.com/smelt-ai/smelt/blob/main/docs/collaboration.md)
 - **应用商店上架**。Android 签名包已经随 Releases 发布，iOS 可以打 TestFlight 归档
 
-[`remote-ops-roadmap.md`](https://github.com/smelt-ai/smelt/blob/main/docs/archive/remote-ops-roadmap.md)
-是已删除的 JSON-WS 网关路线图，不是现行协议。
-
 明确不打算做的：在飞书里内嵌完整终端、自建 WebRTC 信令或 WireGuard 中转、重新做浏览器面板、
 把主 GUI 换成 Electron、做成一个完整的项目管理工具。
 

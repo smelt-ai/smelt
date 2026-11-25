@@ -164,7 +164,6 @@ fn pi_config_with(
     };
     serde_json::to_value(PiConfig {
         model_settings,
-        settings_summary: Err("没读".into()),
         mcp_servers: mcp,
         plugins: vec![
             PiPlugin {

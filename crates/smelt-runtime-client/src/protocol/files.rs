@@ -1,9 +1,8 @@
-//! 项目文件和文件查看器的业务方法。
+//! 项目和文件查看器的业务方法。
 //!
-//! 没有通用的读写原语（见设计文档 D4）：浏览、删除、搜索以项目为范围，运行时拒绝
-//! 越出项目根的路径；查看器按路径打开和保存，因为要打开的文件可能来自终端里的
-//! `smelt open`、对话中的链接，不一定在任何项目里。大小上限、二进制识别、保存冲突
-//! 这些规则都在运行时里执行。
+//! 搜索、监听以项目为范围（要按 ignore 规则、滤掉构建产物）；查看器按路径打开和保存，
+//! 大小上限、二进制识别、保存冲突这些规则都在运行时里执行。列目录、删除这些通用操作
+//! 见 [`super::fs`]。
 
 use serde::{Deserialize, Serialize};
 
@@ -26,12 +25,8 @@ macro_rules! file_calls {
 }
 
 file_calls! {
-    /// 项目里一个目录的直接子项。遵守噪音目录过滤，目录在前，按名字排序。
-    ProjectTreeCall => ProjectTree(ProjectDirParams) -> ProjectTreeResult;
     /// 按文件名和内容搜索项目，遵守 ignore 规则，命中数有上限。
     ProjectSearchCall => ProjectSearch(ProjectSearchParams) -> ProjectSearchResult;
-    /// 删除项目里的一个文件或目录（目录连同内容）。不能删项目根本身。
-    ProjectDeleteEntryCall => ProjectDeleteEntry(ProjectPathParams) -> EmptyParams;
     /// 打开文件查看或编辑。超过大小上限、不是 UTF-8 文本的，只说明原因不给内容。
     FileOpenCall => FileOpen(FilePathParams) -> FileOpenResult;
     /// 保存。`base_version` 和磁盘当前内容对不上时返回 `conflict`，不写入。
@@ -42,39 +37,20 @@ file_calls! {
     ProjectWatchCall => ProjectWatch(ProjectRootParams) -> EmptyParams;
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProjectRootParams {
     /// 项目根，绝对路径。
     pub root: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectDirParams {
-    /// 项目根，绝对路径。
-    pub root: String,
-    /// 要列的目录，绝对路径，必须在 `root` 之内（可以就是 `root`）。
-    pub dir: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectEntry {
-    pub name: String,
-    pub is_dir: bool,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectTreeResult {
-    pub entries: Vec<ProjectEntry>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProjectSearchParams {
     pub root: String,
     /// 大小写不敏感。
     pub query: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProjectSearchHit {
     /// 命中文件的绝对路径。
     pub path: String,
@@ -84,7 +60,7 @@ pub struct ProjectSearchHit {
     pub line: Option<(usize, String)>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProjectSearchResult {
     /// 文件名命中在前、内容命中在后。
     pub hits: Vec<ProjectSearchHit>,
@@ -92,14 +68,7 @@ pub struct ProjectSearchResult {
     pub truncated: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectPathParams {
-    pub root: String,
-    /// 绝对路径，必须在 `root` 之内，且不能是 `root` 本身。
-    pub path: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FilePathParams {
     /// 运行时那台机器上的绝对路径。
     pub path: String,
@@ -117,7 +86,7 @@ impl FilePathParams {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FileContent {
     Text {
@@ -139,12 +108,12 @@ pub enum FileContent {
     TooLarge { size: u64, limit: u64 },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FileOpenResult {
     pub content: FileContent,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FileSaveParams {
     pub path: String,
     pub text: String,
@@ -152,19 +121,19 @@ pub struct FileSaveParams {
     pub base_version: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FileSaveResult {
     /// 写入后的新版本。
     pub version: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CompleteFilesParams {
     /// 会话的工作目录。
     pub cwd: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CompleteFilesResult {
     /// 相对 `cwd` 的文件，以及它们的上级目录（目录以 `/` 结尾），已排序。
     pub entries: Vec<String>,
@@ -205,6 +174,20 @@ impl Serialize for Base64Bytes {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use base64::Engine as _;
         serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(&self.0))
+    }
+}
+
+impl schemars::JsonSchema for Base64Bytes {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Base64Bytes".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "string", "contentEncoding": "base64" })
     }
 }
 

@@ -55,7 +55,10 @@ fn recovered_state(id: &str) -> SessionState {
             agent_id: None,
             tool_name: None,
         }),
-        program_status: false,
+        program_status: None,
+        hook_structured: true,
+        hook_turn: true,
+        hook_tool: None,
         runtime: true,
     }
 }

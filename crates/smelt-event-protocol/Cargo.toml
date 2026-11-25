@@ -11,6 +11,8 @@ workspace = true
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 线上类型的 JSON Schema：JS 插件的类型声明由它生成（smelt-plugin-api 的 js/control_types.rs）。
+schemars = "1.2"
 # 运行时自己说的话（note.rs）的文案，见 docs/i18n.md。
 rust-i18n.workspace = true
 

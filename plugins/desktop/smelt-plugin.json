@@ -1,0 +1,6 @@
+{
+  "id": "smelt.desktop",
+  "name": "Remote Desktop",
+  "version": "1.0.0",
+  "entry": "nsh.tsx"
+}

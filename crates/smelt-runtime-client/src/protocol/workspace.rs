@@ -20,7 +20,7 @@ impl ControlCall for WorkspaceBrowseDirsCall {
     const METHOD: ControlMethod = ControlMethod::WorkspaceBrowseDirs;
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BrowseDirsParams {
     /// 要列的目录，绝对路径。为空时列用户主目录。
     pub path: Option<String>,
@@ -29,7 +29,7 @@ pub struct BrowseDirsParams {
     pub include_files: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BrowseDirsResult {
     /// 实际列出的目录（规范化后的绝对路径）。
     pub path: String,
@@ -41,7 +41,7 @@ pub struct BrowseDirsResult {
     pub entries: Vec<BrowseEntry>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BrowseEntry {
     pub name: String,
     pub path: String,

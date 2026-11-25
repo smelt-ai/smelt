@@ -1,0 +1,24 @@
+# ACP 对话纯非 UI 能力层（不依赖 GPUI、不认识任何插件 id、不含文案）：
+# - 连 smeltd 的 `acp_open` / `acp_snapshot` / `acp_restart`，后台线程收增量快照并做 `FrameMirror` 归约；
+# - 按 `(owner, sub_id)` 管理活体订阅、同帧 `reuse_key` 暂存复用、事件驱动 30ms 流式节流；
+# - 维护有界内存图片字节与缩略图缓存（大图不进 QuickJS 堆，发送时按 `ref_id` 还原）。
+[package]
+name = "smelt-acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+smelt-plugin-api = { path = "../smelt-plugin-api" }
+base64.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2.workspace = true
+smol = "2"
+thiserror.workspace = true
+uuid = { version = "1", features = ["v4"] }

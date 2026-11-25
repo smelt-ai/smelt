@@ -1,19 +1,8 @@
 # Pi 子智能体：独立实体、子会话落盘、对话外查看
 
-状态：已实现（`b6a9f15`），「实施顺序」1–5 都已落地。手机界面按「手机」一节没做，手机仍显示结果状态行。
+状态：已实现（`b6a9f15`）。手机界面仍显示结果状态行，待按「手机」一节补齐。
 
-## 要解决的问题
-
-现在的 Pi 子智能体（`agent/src/subagent`）有四个毛病，根子是同一个：它没有自己的模型，后台运行时借的是「挂接的后台任务」，前台运行时只活在一次工具调用的进度里。
-
-1. **跑完什么都不剩。** 子进程用 `--no-session`，父会话的工具结果又只留结果（`finalSubagentDetails` 去掉了 `messages`）。子智能体默认能用全部工具，项目受信时还带 `--approve`，它改了哪些文件、跑了哪些命令，事后只剩它自己写的总结。
-2. **后台跑的看不到过程。** 转后台后工具调用立刻返回 `results: []`，进度只以纯文本写进宿主的任务日志（`hostTask.progress(text)`），卡片里没有子行。单任务和并行默认都在后台。
-3. **卡片状态是猜的。** 卡片的「失败」只看工具调用自己的状态，后台派发那次调用总是「完成」，子智能体失败或被停止，任务结束后卡片照样打勾。「还在后台跑」靠 `background_task_running_for` 按 `tool_call_id` 去后台任务列表里找；「有 `tool_call_id` 的后台任务就是子智能体」是个隐含约定，全仓库只有一处挂接，碰巧成立。
-4. **过程会被新对话冲走。** 后台子智能体本来就是让这一轮先结束、用户接着聊别的。它的卡片留在派发的位置，越聊越远。
-
-业内对照（Claude Code、Codex、OpenCode、Roo Code、PI-Desktop、pi-subagents）：父模型上下文只进结果，子智能体的过程一律落盘、能回看、多数能续跑。只有 Pi 官方的最小示例扩展用 `--no-session`，smelt 是从它继承来的。
-
-## 决定
+## 设计决定
 
 - **子智能体是独立实体。** 前台、后台、并行里的每一个、串联里的每一步，都是一条子智能体记录，有自己的 id、状态和子会话文件。它不再是后台任务，后台任务列表里不再出现它。
 - **一次 `subagent` 工具调用是一次派发。** 派发是投递单位：后台派发跑完，整批结果作为一条消息交回会话。子智能体是查看和停止的单位。
@@ -31,7 +20,7 @@
 ~/.smelt/subagents/<子智能体 id>.jsonl      目录 0700，文件 0600
 ```
 
-- 子 Pi 进程用 `--session <这个路径>` 启动（Pi 1.1 的 `--session` 接受文件路径），不再用 `--no-session`。文件就是 Pi 原生的会话格式，由子进程自己写，每条消息结束时落一次。
+- 子 Pi 进程用 `--session <这个路径>` 启动（Pi 的 `--session` 接受文件路径），不再用 `--no-session`。文件就是 Pi 原生的会话格式，由子进程自己写，每条消息结束时落一次。
 - **不放在 Pi 的会话目录里。** smelt 的历史列表会递归扫 Pi 会话目录下所有 `*.jsonl`、只按头部的 `cwd` 过滤（`session_history.rs` 的 `walk_pi_session_files`），放进去每个子会话都会冒成一条独立历史。Pi profile 还会改会话目录（`PI_CODING_AGENT_DIR`），放在 `~/.smelt` 下由运行时统一管，不跟 profile 走。
 - **路径只按子智能体 id 定，不按父会话。** 父会话的 Pi 会话 id 会变：对话内回退（Pi `fork(entryId)`）换一份新文件，桌面「从这里分叉」用 `--fork` 复制出新会话。复制出来的记录里引用的还是同一批子智能体 id，按 id 找文件不受影响。
 - 子智能体 id 由会话宿主分配（`sa-` 加 12 位十六进制），文件路径也由宿主算好交给扩展。扩展不自己拼 `~/.smelt` 路径。
@@ -53,7 +42,7 @@
 **一次派发：**
 
 1. 每次 `subagent` 工具调用向会话宿主开一条派发连接：`subagent_dispatch { owner, toolCallId, background, title }`。连接一直保持到这次派发结束；连接断了而没有 `finish`，宿主把其中还在跑的子智能体记成「已中断」，没有结果可交。
-2. 每起一个子智能体，在这条连接上登记：`{"op":"start", ref, parentSessionId, title, agent, model}`。`parentSessionId` 取 `ctx.sessionManager.getSessionId()`（Pi 1.1 的 `ReadonlySessionManager` 有）。宿主在同一条连接上回 `{"op":"started", ref, id, sessionFile}`。
+2. 每起一个子智能体，在这条连接上登记：`{"op":"start", ref, parentSessionId, title, agent, model}`。`parentSessionId` 取 `ctx.sessionManager.getSessionId()`。宿主在同一条连接上回 `{"op":"started", ref, id, sessionFile}`。
 3. 用 `--session <sessionFile>` 起子进程，其余参数不变（`--exclude-tools subagent` 等）。
 4. 运行中按 500ms 限频上报 `{"op":"progress", id, turns, toolCalls, lastActivity}`。`lastActivity` 是最近一次工具调用的标题，给底部入口显示「正在做什么」。不再带消息窗口：过程以子会话文件为准。
 5. 每个子智能体结束上报 `{"op":"end", id, status}`，`status` 是 `completed | failed | stopped`。
@@ -131,10 +120,10 @@ pub struct SubagentView {
 
 ### 读取子会话（Control API）
 
-新增守护进程操作：
+Control API 方法：
 
 ```text
-subagent_transcript { session_id, subagent_id, before?, limit? }
+subagent.transcript { session_id, subagent_id, before?, limit? }
   → { entries: Vec<AcpEntry>, revision, has_more }
 ```
 
@@ -187,62 +176,9 @@ ACP 智能体（Claude Code、Codex 经 ACP）自己的子智能体卡片不变�
 
 - 放在对话视图（`AcpView`）自己的右侧，是它的一部分，所以天然跟对话走：切到别的对话就是别的对话的侧边视图。右侧工具面板（文件树、变更、历史、插件）按项目走（`ProjectUiState`），不放那里。
 - 内容：子智能体的标题、状态、模型、耗时，下面是子会话的对话条目，只读，没有输入框，运行中有「停止」。
-- 打开时和 `revision` 变化时取一页 `subagent_transcript`，结果缓存在视图状态上；render 只读缓存（AGENTS.md「render 只读内存」）。
-- 开着哪个子智能体、宽度，不落盘：重开对话时侧边视图是关的。
-- 具体用哪个 gpui-kit 组件、宽度和动效，实现前按 gpui-kit 设计规范定。
+- 打开时和 `revision` 变化时取一页 `subagent.transcript`，结果缓存在视图状态上；render 只读缓存。
+- 开着哪个子智能体、宽度，不落盘：重开对话时侧边视图是关的。实现位于 `crates/plugins/conversation/src/view/render/subagents.rs`。
 
-### 手机
+### 手机（待补齐界面）
 
-这次不做界面。`ConversationView` 加上 `subagents` 列表，`subagent_transcript` 和停止操作手机也能调，界面下一步做。在那之前手机继续显示结果状态行（`TaskNote`）。
-
-## 删除的东西
-
-- 宿主在时子进程的 `--no-session`。
-- 后台任务的 `attach` 操作及其字段，`BackgroundTaskView.tool_call_id`，`background_task_running_for`。
-- 进度里的消息窗口（`progressMessage` / `progressWindow`），`pi_rpc` 里从子智能体 `details` 生成 `ToolChildren` 的链路。ACP 智能体的 `ToolChildren` 保留。
-- Pi 子智能体卡片里按工具调用状态打勾的逻辑。
-
-## 测试（先写，先失败）
-
-扩展（`bun test`）：
-
-- 宿主在时，子进程参数带 `--session <宿主给的路径>`，不带 `--no-session`。
-- 前台、后台、并行、串联，每个子智能体都登记一次，结束都上报一次 `end`，派发结束上报一次 `finish`。
-- 后台启动的工具结果带全部 `runs[].id`，状态都是 `running`。
-- 并行后台批次只发一条结果消息，带 `toolCallId` 和每个子智能体的状态。
-- `subagent_stop` 只停自己会话的子智能体；不传 id 停全部。
-
-会话宿主和状态（`cargo test`）：
-
-- 登记后 `subagents` 出现一条，`progress` 更新计数和 `revision`，`end` 定状态。
-- 派发连接断开而没有 `finish` → 还在跑的子智能体 `Interrupted`，没有结果交回。
-- `StopSubagent` 让扩展收到 `stop`，最终状态是 `Stopped`。
-- 后台派发的结果经 `listen` 交回，ack 前 `clear_queue` 会静默重发。
-- 后台任务列表里不再出现子智能体。
-
-界面（`cargo test`，`acp_view/tests.rs`）：
-
-- 后台子智能体失败后，卡片显示失败，不打勾。
-- 重新加载后：有结果消息的显示结果消息里的状态；没有的显示「已中断」。
-- 输入栏子智能体和后台任务分开计数。
-- `pi_rpc` 在进度、结束、历史回放时都给 `subagent` 工具调用发 `SubagentRuns`；别的工具 details 里碰巧有 `runs` 也不算；ACP 智能体带 `ToolChildren` 的卡片照旧显示。
-
-smeltd 和历史：
-
-- 从一份 Pi 记录里认出它引用的子智能体 id（只认 `subagent` 工具结果）。
-- `history.delete` 删掉最后一份引用它的记录时删子会话文件，同目录还有别的记录（分叉、回退）引用时保留。
-- `subagent_transcript` 读出子会话的对话条目；格式不对的 id 被拒绝。
-
-## 实施顺序
-
-每块验证通过就提交。
-
-1. 会话宿主：派发和子智能体记录、`subagents` 状态、`StopSubagent`；删 `attach`。
-2. 扩展：派发连接、`--session`、新的 `details` 和结果消息、`subagent_stop`。1 和 2 要一起提交，中间状态不能用。
-3. 历史删除时连带删子会话；`subagent_transcript`。
-4. 界面：卡片状态、一行卡片、输入栏入口和弹层、侧边视图。
-5. 手机 API：`ConversationView.subagents`。
-
-## 待定
-
-- ~~侧边视图的组件形态：对话内可调宽的右侧分栏，还是浮在对话上的侧边抽屉。~~ 已随实现定下，见 `crates/plugins/conversation/src/view/render/subagents.rs`。
+`ConversationView` 已有 `subagents` 列表，手机也能调 `subagent.transcript` 和停止操作，但 Flutter 界面目前仍只显示结果状态行（`TaskNote`），完整查看界面待做。

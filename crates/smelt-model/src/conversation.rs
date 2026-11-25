@@ -7,7 +7,9 @@ use crate::acp_chat::AcpImage;
 
 /// 不设兜底值：它决定能不能往对话里发普通输入，还参与记忆、对端的身份判断。认不出的类型不能被
 /// 悄悄读成 `Direct`，宁可整条读不出来，所以加类型要升协议版本；加字段不用。
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConversationBinding {
     #[default]
@@ -19,7 +21,9 @@ pub enum ConversationBinding {
 
 /// 客户端发给运行时，保持严格：旧运行时要是忽略新字段，用户的输入会悄悄丢掉一部分（比如附件），
 /// 严格解码时它会明确拒绝。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationInput {
     /// 一次用户提交跨 daemon 边界保持不变的身份。旧客户端缺失时 daemon 会补齐。
@@ -48,7 +52,9 @@ impl ConversationInput {
 
 /// daemon 拥有的会话输入状态镜像。`ConversationSnapshot` 里外层使用 `Option`：缺失表示
 /// 对端版本尚不支持该状态，不能据此把客户端已有的待发预设清空。
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct ConversationStateSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<ConversationBinding>,
@@ -69,7 +75,9 @@ pub fn merge_agent_preset(preset: Option<&str>, input: &str) -> String {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationSubmitErrorKind {
     /// 请求被明确拒绝，远端没有接受本次提交。
@@ -80,7 +88,9 @@ pub enum ConversationSubmitErrorKind {
     Unknown,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct ConversationSubmitError {
     pub kind: ConversationSubmitErrorKind,
     pub message: String,

@@ -117,9 +117,20 @@ define_control_methods! {
     GitLog => (GIT_LOG_METHOD, "git.log"),
     GitCommitFiles => (GIT_COMMIT_FILES_METHOD, "git.commit.files"),
     GitCommitFileDiff => (GIT_COMMIT_FILE_DIFF_METHOD, "git.commit.file_diff"),
-    ProjectTree => (PROJECT_TREE_METHOD, "project.tree"),
     ProjectSearch => (PROJECT_SEARCH_METHOD, "project.search"),
-    ProjectDeleteEntry => (PROJECT_DELETE_ENTRY_METHOD, "project.delete_entry"),
+    FsStat => (FS_STAT_METHOD, "fs.stat"),
+    FsReadDir => (FS_READ_DIR_METHOD, "fs.read_dir"),
+    FsDelete => (FS_DELETE_METHOD, "fs.delete"),
+    FsVolume => (FS_VOLUME_METHOD, "fs.volume"),
+    FsKnownDirs => (FS_KNOWN_DIRS_METHOD, "fs.known_dirs"),
+    FsCreateDir => (FS_CREATE_DIR_METHOD, "fs.create_dir"),
+    FsRename => (FS_RENAME_METHOD, "fs.rename"),
+    FsCopy => (FS_COPY_METHOD, "fs.copy"),
+    FsRead => (FS_READ_METHOD, "fs.read"),
+    FsWrite => (FS_WRITE_METHOD, "fs.write"),
+    FsUsageScan => (FS_USAGE_SCAN_METHOD, "fs.usage.scan"),
+    FsUsageChildren => (FS_USAGE_CHILDREN_METHOD, "fs.usage.children"),
+    FsUsageRelease => (FS_USAGE_RELEASE_METHOD, "fs.usage.release"),
     FileOpen => (FILE_OPEN_METHOD, "file.open"),
     FileSave => (FILE_SAVE_METHOD, "file.save"),
     SessionCompleteFiles => (SESSION_COMPLETE_FILES_METHOD, "session.complete_files"),
@@ -158,6 +169,7 @@ define_control_methods! {
     PiConfigEnsureFile => (PI_CONFIG_ENSURE_FILE_METHOD, "pi.config.ensure_file"),
     PiModelsSetThinkingLevel => (PI_MODELS_SET_THINKING_LEVEL_METHOD, "pi.models.set_thinking_level"),
     PiModelsSaveDefault => (PI_MODELS_SAVE_DEFAULT_METHOD, "pi.models.save_default"),
+    PiModelsClearDefault => (PI_MODELS_CLEAR_DEFAULT_METHOD, "pi.models.clear_default"),
     PiProvidersDiscoverModels => (PI_PROVIDERS_DISCOVER_MODELS_METHOD, "pi.providers.discover_models"),
     PiProvidersSaveCustom => (PI_PROVIDERS_SAVE_CUSTOM_METHOD, "pi.providers.save_custom"),
     PiProvidersRemoveCustom => (PI_PROVIDERS_REMOVE_CUSTOM_METHOD, "pi.providers.remove_custom"),
@@ -224,12 +236,17 @@ define_control_methods! {
     SessionAgentBindings => (SESSION_AGENT_BINDINGS_METHOD, "session.agent_bindings"),
     ConversationImage => (CONVERSATION_IMAGE_METHOD, "conversation.image"),
     ConversationPromptIndex => (CONVERSATION_PROMPT_INDEX_METHOD, "conversation.prompt_index"),
+    ConversationForkCut => (CONVERSATION_FORK_CUT_METHOD, "conversation.fork_cut"),
     ConversationPrompt => (CONVERSATION_PROMPT_METHOD, "conversation.prompt"),
     ConversationTurnResult => (CONVERSATION_TURN_RESULT_METHOD, "conversation.turn_result"),
     SubagentTranscript => (SUBAGENT_TRANSCRIPT_METHOD, "subagent.transcript"),
     ResourceUsage => (RESOURCE_USAGE_METHOD, "resource.usage"),
     AppCommandList => (APP_COMMAND_LIST_METHOD, "app.command.list"),
     AppCommandRun => (APP_COMMAND_RUN_METHOD, "app.command.run"),
+    SkillsScan => (SKILLS_SCAN_METHOD, "skills.scan"),
+    SkillsInspectImport => (SKILLS_INSPECT_IMPORT_METHOD, "skills.inspect_import"),
+    SkillsPlan => (SKILLS_PLAN_METHOD, "skills.plan"),
+    SkillsApply => (SKILLS_APPLY_METHOD, "skills.apply"),
     TerminalStageImage => (TERMINAL_STAGE_IMAGE_METHOD, "terminal.stage_image"),
 }
 
@@ -237,14 +254,17 @@ pub const SUPPORTED_CONTROL_METHODS: &[ControlMethod] = ControlMethod::ALL;
 
 /// 一个编译期 RPC 描述：调用方不能把 A 方法的参数配到 B 方法，也不能把响应解成
 /// 另一种类型。非 Rust 客户端使用同一组公开 method 常量与 JSON 契约。
+///
+/// 参数和结果都要有 JSON Schema：JS 插件的类型声明由它生成（smelt-plugin-api 的
+/// `js/control_types.rs`），新方法不带就编译不过，声明不会漏。
 pub trait ControlCall {
-    type Params: Serialize + DeserializeOwned;
-    type Result: Serialize + DeserializeOwned;
+    type Params: Serialize + DeserializeOwned + schemars::JsonSchema;
+    type Result: Serialize + DeserializeOwned + schemars::JsonSchema;
 
     const METHOD: ControlMethod;
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct EmptyParams {}
 
 pub enum SystemDescribe {}
@@ -256,7 +276,7 @@ impl ControlCall for SystemDescribe {
     const METHOD: ControlMethod = ControlMethod::SystemDescribe;
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ControlProtocolDescription {
     pub current_version: u16,
     pub min_supported_version: u16,
@@ -265,7 +285,7 @@ pub struct ControlProtocolDescription {
     pub methods: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct DaemonRuntimeInfo {
     pub version: String,
     pub exe_mtime: u64,
@@ -302,7 +322,7 @@ pub struct DaemonRuntimeInfo {
 
 /// 事件订阅这一侧的版本。控制方法能按方法清单逐个看，订阅推来的投影不行：协议对不上，
 /// 客户端订阅了也解不出来，只会断开再连。所以运行时在这里报出来，客户端订阅前先对。
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct EventProtocolDescription {
     /// `event_subscribe` 握手的事件总线协议版本。客户端只看它（见 `compat`）。
     pub protocol_version: u16,
@@ -316,7 +336,7 @@ pub struct EventProtocolDescription {
     pub session_state_schema_version: u16,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SystemDescribeResult {
     pub control: ControlProtocolDescription,
     pub daemon: DaemonRuntimeInfo,
@@ -325,7 +345,7 @@ pub struct SystemDescribeResult {
     pub events: Option<EventProtocolDescription>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlErrorCode {
     InvalidRequest,
@@ -344,13 +364,13 @@ pub enum ControlErrorCode {
     Unknown,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ControlVersionRange {
     pub min_supported_version: u16,
     pub max_supported_version: u16,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ControlError {
     pub code: ControlErrorCode,
     /// 运行时按自己的默认语言（英文）说的一句话。给人看用 [`ControlError::text`]。
@@ -405,7 +425,7 @@ impl ControlError {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ControlResponse<T> {
     pub control_version: u16,
     pub request_id: String,
@@ -413,7 +433,7 @@ pub struct ControlResponse<T> {
     pub outcome: ControlOutcome<T>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ControlOutcome<T> {
     Ok { result: T },
@@ -450,7 +470,7 @@ impl<T> ControlResponse<T> {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ControlRequestEnvelope {
     pub control_version: u16,
     pub request_id: String,

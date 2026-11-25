@@ -73,9 +73,8 @@ String accentName(L10n l10n, int index) => switch (index) {
 
 /// 各机器的中继设置是否混用：有的指定了、有的没指定，或指定了不止一个。
 ///
-/// 内核的 iroh endpoint 形态由全部机器的中继设置决定（docs/mobile-redesign.md「iroh
-/// endpoint」）：都不指定、或都指定同一个时没问题；其它组合下自建中继的域名走 iroh 自带的
-/// 解析器，iOS 开着系统代理时可能连不上。界面据此决定要不要写那行说明。
+/// 内核的 iroh endpoint 形态由全部机器的中继设置决定：都不指定、或都指定同一个时没问题；
+/// 其它组合下自建中继的域名走 iroh 自带的解析器，iOS 开着系统代理时可能连不上。界面据此决定要不要写那行说明。
 bool relaySetupMixed(FleetView fleet) =>
     {for (final r in fleet.runtimes) r.record.relayUrl}.length > 1;
 

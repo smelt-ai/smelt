@@ -14,9 +14,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Bounds, Element, ElementId, EntityId, Global, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, ScrollHandle, SharedString,
-    Window, point, px,
+    AnyElement, App, Bounds, Element, ElementId, EntityId, GlobalElementId, InspectorElementId,
+    IntoElement, LayoutId, ParentElement, Pixels, ScrollHandle, SharedString, Window, point, px,
 };
 use gpui_base::ElementExt as _;
 
@@ -78,6 +77,18 @@ impl ScrollAnchors {
         element.on_prepaint(move |bounds, _, _| {
             let edges = (f32::from(bounds.top()), f32::from(bounds.bottom()));
             state.borrow_mut().pending.insert(key, edges);
+        })
+    }
+
+    /// 给一项挂上 `key`，记进包着它的最里层那块滚动内容（[`ScrollAnchors::root`]）。手里没有
+    /// 定位表的元素（脚本插件交来的）用它；外面没有定位表就不记。
+    pub fn anchor_enclosing<E: ParentElement>(key: impl Into<SharedString>, element: E) -> E {
+        let key = key.into();
+        element.on_prepaint(move |bounds, _, _| {
+            if let Some(anchors) = innermost() {
+                let edges = (f32::from(bounds.top()), f32::from(bounds.bottom()));
+                anchors.state.borrow_mut().pending.insert(key, edges);
+            }
         })
     }
 
@@ -151,18 +162,24 @@ impl ScrollAnchors {
     }
 }
 
-/// 正在 prepaint 的定位表，里层的在最后。吸顶区段从这里找到自己所在的那一块。
-#[derive(Default)]
-struct ActiveAnchors(Vec<ScrollAnchors>);
+thread_local! {
+    /// 正在 prepaint 的定位表，里层的在最后。里面的项、吸顶区段从这里找到自己所在的那一块。
+    ///
+    /// 只在一块内容 prepaint 期间有，压了就出，和 GPUI 自己的 content mask 栈一样是绘制时的
+    /// 上下文，不是谁该依赖的状态，所以不放 GPUI 全局：放全局的话每次压、出都算写了它，在
+    /// prepaint 里读过它的视图（每块用定位表的滚动内容）下一帧都要重建，窗口里随便哪里画
+    /// 一帧（终端出字）就整个重跑一遍，而且重跑又写一遍，停不下来。
+    static ACTIVE: RefCell<Vec<ScrollAnchors>> = const { RefCell::new(Vec::new()) };
+}
 
-impl Global for ActiveAnchors {}
+/// 包着眼下这个元素的最里层定位表；不在哪块定位表的内容里 prepaint 是 `None`。
+fn innermost() -> Option<ScrollAnchors> {
+    ACTIVE.with_borrow(|active| active.last().cloned())
+}
 
 /// 吸顶区段报自己的标题（见 [`ScrollAnchors::sticky_header`]）。外面没有定位表就不报。
-pub(crate) fn report_sticky_header(viewport_top: Pixels, header: Pixels, stuck: Pixels, cx: &App) {
-    if let Some(anchors) = cx
-        .try_global::<ActiveAnchors>()
-        .and_then(|active| active.0.last())
-    {
+pub(crate) fn report_sticky_header(viewport_top: Pixels, header: Pixels, stuck: Pixels) {
+    if let Some(anchors) = innermost() {
         anchors.sticky_header(f32::from(viewport_top), f32::from(header), f32::from(stuck));
     }
 }
@@ -221,14 +238,6 @@ struct AnchorRoot {
     child: AnyElement,
 }
 
-impl IntoElement for AnchorRoot {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl Element for AnchorRoot {
     type RequestLayoutState = ();
     type PrepaintState = ();
@@ -263,11 +272,9 @@ impl Element for AnchorRoot {
         // 滚动区域先于内容 prepaint：这里的可视区是这一帧的。
         let viewport_top = f32::from(window.content_mask().bounds.top());
         self.anchors.state.borrow_mut().viewport_top = Some(viewport_top);
-        cx.default_global::<ActiveAnchors>()
-            .0
-            .push(self.anchors.clone());
+        ACTIVE.with_borrow_mut(|active| active.push(self.anchors.clone()));
         self.child.prepaint(window, cx);
-        cx.default_global::<ActiveAnchors>().0.pop();
+        ACTIVE.with_borrow_mut(|active| active.pop());
         let view = window.current_view();
         self.anchors.commit(f32::from(bounds.top()), view, cx);
     }
@@ -327,5 +334,82 @@ mod tests {
             Some(-388.),
             "远处的滚到标题以下那段的中间"
         );
+    }
+
+    mod retained {
+        use std::cell::Cell;
+
+        use gpui::{
+            AnyView, AppContext as _, Context, Render, ScrollHandle, Styled as _, TestAppContext,
+            div,
+        };
+
+        use super::super::*;
+
+        /// 用定位表的滚动内容：行经包着它的定位表记位置（脚本插件交来的行就这样）。
+        struct List {
+            renders: Rc<Cell<u32>>,
+            anchors: ScrollAnchors,
+        }
+
+        impl Render for List {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.renders.set(self.renders.get() + 1);
+                let row = ScrollAnchors::anchor_enclosing("row", div().h(px(10.)));
+                div()
+                    .size(px(100.))
+                    .child(self.anchors.root(div().child(row)))
+            }
+        }
+
+        /// 旁边一直在出帧的视图（终端出字），自己也有一块定位表。
+        struct Ticking {
+            anchors: ScrollAnchors,
+        }
+
+        impl Render for Ticking {
+            fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                window.request_animation_frame();
+                div()
+                    .size(px(100.))
+                    .child(self.anchors.root(div().h(px(10.))))
+            }
+        }
+
+        struct Both(AnyView, AnyView);
+
+        impl Render for Both {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .child(self.0.clone())
+                    .child(self.1.clone())
+            }
+        }
+
+        /// 别处出帧不重建用定位表的内容：定位表栈是绘制时的上下文，压、出不算改了谁读过的
+        /// 东西。头一帧画完收下行的位置（和没画过不一样）再画一次，之后不动。
+        #[gpui::test]
+        fn drawing_elsewhere_leaves_anchored_content_alone(cx: &mut TestAppContext) {
+            let renders = Rc::new(Cell::new(0));
+            let counted = renders.clone();
+            let (_, window) = cx.add_window_view(move |_, cx| {
+                let list = cx.new(|_| List {
+                    renders: counted,
+                    anchors: ScrollAnchors::new(&ScrollHandle::new()),
+                });
+                let ticking = cx.new(|_| Ticking {
+                    anchors: ScrollAnchors::new(&ScrollHandle::new()),
+                });
+                Both(list.into(), ticking.into())
+            });
+            for _ in 0..6 {
+                window.update(|window, cx| {
+                    window.simulate_next_frame(cx);
+                    window.draw(cx).clear(cx);
+                });
+            }
+            assert_eq!(renders.get(), 2);
+        }
     }
 }

@@ -1,8 +1,9 @@
 //! 运行时话题的订阅：插件登记自己要哪些话题，宿主按所有插件要的并集向每台机器订阅，推来的
 //! 原样转成 [`crate::HostEvent::RuntimeTopic`] 广播给所有插件，按 `topic` 认自己要的。
 //!
-//! 宿主不认识任何话题：订什么全由插件登记决定，没人要的话题不订。核心订阅里的会话状态、
-//! 工作区目录不走这里（见 [`crate::Host::session_states`]）。
+//! 宿主只认它自己镜像给插件读的会话提醒（`attention.changed`，见
+//! [`crate::Host::session_attention`]），也经这里登记；别的话题订什么全由插件登记决定，没人
+//! 要的话题不订。核心订阅里的会话状态、工作区目录不走这里（见 [`crate::Host::session_states`]）。
 //!
 //! 每个话题向每台机器单独订一条：运行时不认识某个话题（多半是它比这个话题旧）只拒掉那一条，
 //! 收到一条 [`crate::TopicMessage::Unavailable`]，别的话题不受影响。订上时带快照的话题先推
@@ -84,7 +85,7 @@ pub fn unregister_topics(owner: &str, cx: &mut App) {
 
 /// 来源 `owner` 有没有登记话题 `topic`。推来的话题只交给登记了它的 JS 插件（Rust 插件
 /// 收全部，按 `topic` 自己认）。
-#[cfg_attr(not(feature = "js"), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn wants(owner: &str, topic: &str, cx: &App) -> bool {
     cx.try_global::<Topics>().is_some_and(|topics| {
         topics

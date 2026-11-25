@@ -53,21 +53,26 @@ impl QuotaTarget {
         crate::pi_quota::pi_quota_provider(provider).map(|provider| Self::pi(provider.id))
     }
 
-    /// 侧栏文案里的名字。
-    pub fn label(self) -> &'static str {
-        self.agent.short_label()
+    /// 账户属于哪家服务：agent 自己的账户就是它，Pi 底下的按 provider 归到对应那家
+    /// （`pi:github-copilot` 是 Copilot）。
+    pub fn service(self) -> ConversationAgentKind {
+        self.provider
+            .and_then(crate::pi_quota::pi_quota_provider)
+            .map_or(self.agent, |provider| provider.service)
     }
 
-    /// 设置页列表里的名字。Pi 底下有多家，要带上 provider 才分得清。
+    /// 界面上的名字：服务名，凭据不是那家 agent 自己的再带上来源（`Copilot · Pi`）。
     pub fn display_name(self) -> String {
-        match self.provider {
-            Some(provider) => format!("{} · {provider}", self.label()),
-            None => self.label().to_string(),
+        let service = self.service().short_label();
+        if self.service() == self.agent {
+            service.to_string()
+        } else {
+            format!("{service} · {}", self.agent.short_label())
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QuotaStatus {
     pub quota: Option<ProviderQuotaData>,
     pub checked_at_ms: u64,
@@ -89,22 +94,35 @@ impl<'de> Deserialize<'de> for QuotaTarget {
     }
 }
 
-/// 客户端启动时要的：开着查询的全部账户（决定展示顺序）、缓存里的结果、要不要立刻查一次。
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// 线上是 [`QuotaTarget::id`] 那串：agent id，Pi 的是 `pi:<provider>`。
+impl schemars::JsonSchema for QuotaTarget {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "QuotaTarget".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "string" })
+    }
+}
+
+/// 客户端启动时要的：开着查询的全部账户（决定展示顺序）和缓存里还不旧的结果。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QuotaSnapshot {
     pub targets: Vec<QuotaTarget>,
     pub statuses: Vec<(QuotaTarget, QuotaStatus)>,
-    /// 缓存新鲜且覆盖了全部账户：不必启动首查。
-    pub fresh: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QuotaRefreshParams {
     /// `None`：后台刷新全部账户；否则是用户点了这一个，可以弹钥匙串窗口。
     pub target: Option<QuotaTarget>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QuotaRefreshResult {
     /// 开着查询的全部账户。全量刷新时客户端据此更新展示顺序（新登录的 Pi provider 由此出现）。
     pub targets: Vec<QuotaTarget>,
@@ -113,7 +131,7 @@ pub struct QuotaRefreshResult {
 }
 
 /// 设置页的一行。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QuotaProviderSetting {
     pub target: QuotaTarget,
     pub enabled: bool,
@@ -122,7 +140,7 @@ pub struct QuotaProviderSetting {
 }
 
 /// 全部账户的额度开关，含关掉的。
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QuotaSettings {
     pub providers: Vec<QuotaProviderSetting>,
 }
@@ -138,8 +156,30 @@ impl QuotaSettings {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QuotaSetEnabledParams {
     pub target: QuotaTarget,
     pub enabled: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pi 底下的账户按 provider 归到对应那家服务，名字带上来源。
+    #[test]
+    fn pi_targets_belong_to_the_service_of_their_provider() {
+        let copilot = QuotaTarget::agent(ConversationAgentKind::Copilot);
+        let pi_copilot = QuotaTarget::pi("github-copilot");
+        assert_eq!(copilot.service(), ConversationAgentKind::Copilot);
+        assert_eq!(pi_copilot.service(), ConversationAgentKind::Copilot);
+        assert_eq!(copilot.display_name(), "Copilot");
+        assert_eq!(pi_copilot.display_name(), "Copilot · Pi");
+        for provider in crate::pi_quota::PI_QUOTA_PROVIDERS {
+            assert_ne!(
+                QuotaTarget::pi(provider.id).service(),
+                ConversationAgentKind::Pi
+            );
+        }
+    }
 }

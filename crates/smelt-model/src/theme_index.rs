@@ -9,7 +9,7 @@ use serde::Deserialize;
 pub const DEFAULT_DARK: &str = "smelt Dark";
 pub const DEFAULT_LIGHT: &str = "smelt Light";
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 pub struct ThemeEntry {
     pub name: String,
     pub mode: String,

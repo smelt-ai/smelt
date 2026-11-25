@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 远程访问配置。运行时收到新配置就照着开关 iroh endpoint，守护重启后也按它自愈。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RemoteConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -13,7 +13,7 @@ pub struct RemoteConfig {
 }
 
 /// 远程访问现在的样子。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RemoteAccessState {
     #[default]
@@ -33,12 +33,12 @@ pub enum RemoteAccessState {
 pub const REMOTE_STATUS_WAIT_MAX: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// `remote.status.wait` 的参数：调用方手里的状态。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RemoteStatusWaitParams {
     pub known: RemoteAccessState,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct DeviceInfo {
     /// 设备的 iroh endpoint id，运行时按它认设备。
     pub endpoint_id: String,
@@ -49,32 +49,32 @@ pub struct DeviceInfo {
     pub connected: bool,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct DeviceList {
     pub devices: Vec<DeviceInfo>,
 }
 
 /// 一次性配对串。用一次或过期就作废。
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct PairingOffer {
     pub pairing_uri: String,
     pub expires_at_ms: i64,
 }
 
 /// 新设备提交配对码。只有这个方法对未配对设备开放。
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct PairParams {
     pub code: String,
     /// 设备名，显示在设备列表里。
     pub name: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct DeviceIdParams {
     pub endpoint_id: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RevokeResult {
     /// 是否真有这台设备。
     pub revoked: bool,
@@ -89,7 +89,7 @@ pub struct RevokeResult {
 pub const PUSH_PAYLOAD_VERSION: u32 = 2;
 
 /// `push.register` 的参数。哪台设备由连接的身份决定，不在参数里。
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct PushRegisterParams {
     /// 推送中继发的句柄（加密过的 APNs 令牌）。运行时只转交，解不开。
     pub handle: String,

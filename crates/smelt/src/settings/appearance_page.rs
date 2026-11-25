@@ -297,7 +297,7 @@ fn layout_section(workspace: WeakEntity<Workspace>, cx: &App) -> Section {
         .collect();
     let section = Section::new().title(t!("appearance.layout"));
     if options.is_empty() {
-        // 兜底的摆法不存档，没有可恢复的。
+        // 没有可选的首页布局，没有可恢复的存档。
         return section.child(
             Row::new(t!("appearance.layout"))
                 .description(t!("appearance.layout_none_hint"))

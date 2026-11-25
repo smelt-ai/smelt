@@ -33,9 +33,9 @@ use smelt_model::automation::AutomationRun;
 use smelt_model::control_api::{
     AgentDefinitionIdParams, AgentDefinitionList, AutomationDelete, AutomationGet, AutomationList,
     AutomationRunOnce, AutomationUpsertCall,
-    AutomationSetEnabled, AutomationSetEnabledParams, NewSessionCatalog, NewSessionCatalogResult,
-    SessionAgentBindings, SessionCreate, SessionCreateKind, SessionCreateParams, SessionDelete,
-    SessionIdParams, WorkspaceProjectOpen,
+    AutomationSetEnabled, AutomationSetEnabledParams, NewSessionCatalog, NewSessionCatalogParams,
+    NewSessionCatalogResult, SessionAgentBindings, SessionCreate, SessionCreateKind,
+    SessionCreateParams, SessionDelete, SessionIdParams, WorkspaceProjectOpen,
 };
 use smelt_model::daemon_state::{
     DaemonStateEvent, DaemonStateEventClient, SubscriptionShape, daemon_reconnect_backoff,
@@ -374,7 +374,7 @@ impl Catalog {
         let catalog = runtime
             .client
             .call::<NewSessionCatalog>(
-                &EmptyParams::default(),
+                &NewSessionCatalogParams::default(),
                 self.shared.timing.slow_call_timeout,
             )
             .map_err(control_error)?;

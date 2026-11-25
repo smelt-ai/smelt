@@ -1,0 +1,295 @@
+_version: 2
+action.import:
+  en: "Import %{name}"
+  zh-CN: "导入 %{name}"
+action.repair:
+  en: "Make %{name} available to %{agents}"
+  zh-CN: "让 %{name} 在 %{agents} 可用"
+action.repair_all:
+  en: "Make All Skills Available to Every Agent"
+  zh-CN: "让所有技能在全部 agent 可用"
+action.rescope:
+  en: "Change the scope of %{name}"
+  zh-CN: "调整 %{name} 的作用范围"
+broken.action:
+  en: "Clean up broken entries"
+  zh-CN: "清理已失效的条目"
+broken.button:
+  en: "Clean Up…"
+  zh-CN: "清理…"
+broken.confirm:
+  en: "Clean Up"
+  zh-CN: "清理"
+broken.confirm_body:
+  en: "The skills they point to no longer exist. Only these entries are removed; no real folder is touched.\n%{paths}"
+  zh-CN: "它们指向的技能已经不存在。只删这些条目本身，不会动任何真实目录。\n%{paths}"
+broken.confirm_title.one:
+  en: "Clean up 1 broken entry?"
+  zh-CN: "清理 1 个已失效的条目？"
+broken.confirm_title.other:
+  en: "Clean up %{count} broken entries?"
+  zh-CN: "清理 %{count} 个已失效的条目？"
+broken.more:
+  en: "…%{count} in total"
+  zh-CN: "等共 %{count} 条"
+broken.title:
+  en: "Broken"
+  zh-CN: "已失效"
+cancel:
+  en: "Cancel"
+  zh-CN: "取消"
+conflict.action:
+  en: "Resolve the copies of %{name}"
+  zh-CN: "处理 %{name} 的同名副本"
+conflict.hint:
+  en: "There are %{count} independent copies. Pick one to keep; the rest move to %{trash}."
+  zh-CN: "有 %{count} 份彼此独立的副本。选一份为准，其余移进 %{trash}。"
+conflict.keep:
+  en: "Keep Selected Copy"
+  zh-CN: "保留选中的一份"
+conflict.title:
+  en: "Name conflict: %{name}"
+  zh-CN: "同名冲突：%{name}"
+coverage.legacy:
+  en: "Stored in Smelt's private folder, which no agent reads."
+  zh-CN: "放在 smelt 私有目录，没有 agent 读得到。"
+coverage.none:
+  en: "None of the agents in use on this machine can read it."
+  zh-CN: "这台机器上在用的 agent 都读不到它。"
+coverage.repair_many:
+  en: "Let Them Use It Too"
+  zh-CN: "让它们也能用"
+coverage.repair_one:
+  en: "Let %{agent} Use It Too"
+  zh-CN: "让 %{agent} 也能用"
+coverage.row_missing:
+  en: "%{agent} · not yet"
+  zh-CN: "%{agent} · 还不能用"
+coverage.title:
+  en: "Available To"
+  zh-CN: "可用 agent"
+delete.action:
+  en: "Delete %{name}"
+  zh-CN: "删除 %{name}"
+delete.body:
+  en: "The skill folder moves to %{trash}, where you can recover it by hand. No agent will use it anymore."
+  zh-CN: "技能目录会移到 %{trash}，可以手动找回。所有 agent 都不会再用到它。"
+delete.button:
+  en: "Delete…"
+  zh-CN: "删除…"
+delete.confirm:
+  en: "Delete"
+  zh-CN: "删除"
+delete.title:
+  en: "Delete \"%{name}\"?"
+  zh-CN: "删除「%{name}」？"
+empty.no_match_body:
+  en: "No name or description contains \"%{query}\"."
+  zh-CN: "名称和描述里都没有「%{query}」。"
+empty.no_match_title:
+  en: "No matching skills"
+  zh-CN: "没有匹配的技能"
+empty.none_body:
+  en: "Click \"Import\" to choose a folder containing SKILL.md, or put it in ~/.agents/skills/<name>/."
+  zh-CN: "点「导入」选一个含 SKILL.md 的目录，或放到 ~/.agents/skills/<名字>/。"
+empty.none_title:
+  en: "No skills yet"
+  zh-CN: "还没有 skill"
+import.button:
+  en: "Import"
+  zh-CN: "导入"
+import.destination:
+  en: "Install To"
+  zh-CN: "装到哪里"
+import.pick:
+  en: "Choose Folder…"
+  zh-CN: "选择目录…"
+import.pick_confirm:
+  en: "Import"
+  zh-CN: "导入"
+import.pick_title:
+  en: "Choose a skill folder"
+  zh-CN: "选择技能目录"
+import.plan_pending:
+  en: "Shown after you choose a source."
+  zh-CN: "选好来源后显示。"
+import.repick:
+  en: "Choose Another…"
+  zh-CN: "换一个…"
+import.replaces:
+  en: "A skill with this name already exists. Importing replaces it and moves the old version to %{trash}."
+  zh-CN: "已有同名技能，导入会替换它，旧版本移进 %{trash}。"
+import.shadows_user:
+  en: "A user-level skill named \"%{name}\" already exists. Installing at project level overrides it in this project; to update the user-level one, switch the level to User."
+  zh-CN: "用户级已有同名「%{name}」。装到项目级会在这个项目里盖过它；想更新用户级那份，把层级改成用户级。"
+import.source:
+  en: "Source"
+  zh-CN: "来源"
+import.source_hint:
+  en: "Choose a folder containing SKILL.md. The whole folder is copied in."
+  zh-CN: "选一个含 SKILL.md 的目录，整个目录会被复制进来。"
+import.title:
+  en: "Import Skill"
+  zh-CN: "导入技能"
+list.separator:
+  en: ", "
+  zh-CN: "、"
+menu.more:
+  en: "More Actions"
+  zh-CN: "更多操作"
+menu.open_trash:
+  en: "Open Trash Folder"
+  zh-CN: "打开回收目录"
+menu.refresh:
+  en: "Refresh"
+  zh-CN: "刷新"
+migrate.action:
+  en: "Migrate the old folder"
+  zh-CN: "迁移旧目录"
+migrate.button:
+  en: "Move to .agents/skills"
+  zh-CN: "迁移到 .agents/skills"
+migrate.moved.one:
+  en: "Moved 1 skill to .agents/skills: %{names}"
+  zh-CN: "已迁移 1 个到 .agents/skills：%{names}"
+migrate.moved.other:
+  en: "Moved %{count} skills to .agents/skills: %{names}"
+  zh-CN: "已迁移 %{count} 个到 .agents/skills：%{names}"
+migrate.none:
+  en: "No skills to migrate."
+  zh-CN: "没有需要迁移的 skill。"
+migrate.skipped.one:
+  en: "1 skill couldn't be moved because .agents/skills already has one with the same name. Resolve the conflict first: %{names}"
+  zh-CN: "1 个迁不动：.agents/skills 里已有同名的 skill。请先处理冲突再迁：%{names}"
+migrate.skipped.other:
+  en: "%{count} skills couldn't be moved because .agents/skills already has ones with the same names. Resolve the conflicts first: %{names}"
+  zh-CN: "%{count} 个迁不动：.agents/skills 里已有同名的 skill。请先处理冲突再迁：%{names}"
+no_description:
+  en: "(No description)"
+  zh-CN: "（没有描述）"
+notice.close:
+  en: "Close"
+  zh-CN: "关闭"
+notice.done:
+  en: "%{action}: done"
+  zh-CN: "%{action}完成"
+notice.failed:
+  en: "%{action} failed: %{error}"
+  zh-CN: "%{action}失败：%{error}"
+notice.pick_failed:
+  en: "Couldn't choose a folder: %{error}"
+  zh-CN: "选择目录失败：%{error}"
+offline:
+  en: "Waiting for runtime connection…"
+  zh-CN: "正在等待运行时连接…"
+place.conflict:
+  en: "Conflict ×%{count}"
+  zh-CN: "冲突 ×%{count}"
+place.legacy:
+  en: "Old Location"
+  zh-CN: "旧位置"
+place.universal:
+  en: "Universal"
+  zh-CN: "通用"
+plan.computing:
+  en: "Working it out…"
+  zh-CN: "正在计算…"
+plan.title:
+  en: "Steps"
+  zh-CN: "将执行"
+scope.apply:
+  en: "Apply"
+  zh-CN: "应用"
+scope.change:
+  en: "Change"
+  zh-CN: "修改"
+scope.for:
+  en: "For"
+  zh-CN: "给谁"
+scope.hide:
+  en: "Hide"
+  zh-CN: "收起"
+scope.level:
+  en: "Level"
+  zh-CN: "层级"
+scope.not_installed:
+  en: "%{agent} (not installed)"
+  zh-CN: "%{agent}（未安装）"
+scope.only:
+  en: "Only %{agent}"
+  zh-CN: "仅 %{agent}"
+scope.project:
+  en: "Project"
+  zh-CN: "项目级"
+scope.project_at:
+  en: "Project (%{path})"
+  zh-CN: "项目级（%{path}）"
+scope.project_none:
+  en: "Project (no project open)"
+  zh-CN: "项目级（没有打开项目）"
+scope.specific:
+  en: "Only specific agents"
+  zh-CN: "仅指定 agent"
+scope.title:
+  en: "Scope"
+  zh-CN: "作用范围"
+scope.unchanged:
+  en: "Already set up this way; nothing to change."
+  zh-CN: "已经是这个状态，无需改动。"
+scope.universal_all:
+  en: "All agents (universal)"
+  zh-CN: "所有 agent（通用）"
+scope.user:
+  en: "User"
+  zh-CN: "用户级"
+search.label:
+  en: "Search skills"
+  zh-CN: "搜索技能"
+search.placeholder:
+  en: "Search names or descriptions"
+  zh-CN: "搜索名称或描述"
+status.agents.one:
+  en: "1 agent"
+  zh-CN: "1 个 agent"
+status.agents.other:
+  en: "%{count} agents"
+  zh-CN: "%{count} 个 agent"
+status.choose:
+  en: "Choose one"
+  zh-CN: "需选择"
+status.missing_many:
+  en: "%{count} agents can't use it yet"
+  zh-CN: "%{count} 个 agent 还不能用"
+status.missing_one:
+  en: "%{agent} can't use it yet"
+  zh-CN: "%{agent} 还不能用"
+status.unread:
+  en: "No agent reads it"
+  zh-CN: "没有 agent 读到"
+step.copy:
+  en: "Copy to %{path}"
+  zh-CN: "复制到 %{path}"
+step.link:
+  en: "Create link %{path}"
+  zh-CN: "建立链接 %{path}"
+step.link_for:
+  en: "Let %{agent} read it: %{path}"
+  zh-CN: "让 %{agent} 能读到：%{path}"
+step.move:
+  en: "Move %{from} → %{to}"
+  zh-CN: "移动 %{from} → %{to}"
+step.trash:
+  en: "Move to the trash folder: %{path}"
+  zh-CN: "移入回收目录 %{path}"
+step.unlink:
+  en: "Remove link %{path}"
+  zh-CN: "移除链接 %{path}"
+step.unlink_for:
+  en: "%{agent} stops reading: %{path}"
+  zh-CN: "%{agent} 不再读：%{path}"
+time.unknown:
+  en: "Unknown time"
+  zh-CN: "未知时间"
+view.title:
+  en: "Skills"
+  zh-CN: "技能"

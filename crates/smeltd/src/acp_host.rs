@@ -1339,6 +1339,7 @@ fn acp_snapshot_writer(writer: SnapshotWriter) {
         note_snapshot_writer_stopped(&inner, &detach, &id, kind, fd, &error);
         return;
     }
+    let mut last_sent: Option<std::time::Instant> = None;
     loop {
         let job = {
             let mut mailbox = inner.mailbox.lock().unwrap();
@@ -1354,7 +1355,7 @@ fn acp_snapshot_writer(writer: SnapshotWriter) {
                     mailbox = inner.cv.wait(mailbox).unwrap();
                     continue;
                 }
-                break take_coalesced_snapshot(&inner, mailbox);
+                break take_coalesced_snapshot(&inner, mailbox, last_sent);
             }
         };
         if inner.closed.load(Ordering::SeqCst) && !inner.finishing.load(Ordering::SeqCst) {
@@ -1390,6 +1391,7 @@ fn acp_snapshot_writer(writer: SnapshotWriter) {
             note_snapshot_writer_stopped(&inner, &detach, &id, kind, fd, &error);
             return;
         }
+        last_sent = Some(std::time::Instant::now());
         if encoded.included_tool_debug {
             inner
                 .tool_debug_generation_sent
@@ -1399,15 +1401,20 @@ fn acp_snapshot_writer(writer: SnapshotWriter) {
     }
 }
 
-/// 非紧急脏标记再等一个很短的窗口，让随后到达的 token 并进同一帧。
-/// 等待期间若变成落盘/调试帧，或连接正在关闭，立刻取出。
+/// 非紧急脏标记采用 Leading-Edge + 16ms 节流合并：
+/// 距上一帧发出已满 `ACP_SNAPSHOT_COALESCE`（或此前空闲）时立刻取出（首帧 0ms 延迟）；
+/// 若距上一帧不足 16ms，则最多等到 `last_sent + ACP_SNAPSHOT_COALESCE`，把紧随到达的 token 并进同一帧。
+/// 等待期间若变成落盘/调试/信封帧，或连接正在关闭，立刻取出。
 fn take_coalesced_snapshot(
     inner: &SnapshotLinkInner,
     mut mailbox: std::sync::MutexGuard<'_, SnapshotMailbox>,
+    last_sent: Option<std::time::Instant>,
 ) -> Option<SnapshotDirty> {
     let urgent = mailbox.dirty.as_ref().is_some_and(snapshot_dirty_is_urgent);
-    if !urgent && mailbox.dirty.is_some() {
-        let deadline = std::time::Instant::now() + ACP_SNAPSHOT_COALESCE;
+    if !urgent
+        && mailbox.dirty.is_some()
+        && let Some(deadline) = last_sent.map(|t| t + ACP_SNAPSHOT_COALESCE)
+    {
         while std::time::Instant::now() < deadline {
             if mailbox.dirty.as_ref().is_some_and(snapshot_dirty_is_urgent)
                 || inner.closed.load(Ordering::SeqCst)
@@ -5336,5 +5343,80 @@ mod snapshot_link_tests {
         );
         let sent = slot.value.out.lock().clients[0].snapshots_sent();
         assert_eq!(sent, 1, "写线程恢复后只应序列化一次");
+    }
+
+    #[test]
+    fn non_urgent_burst_after_first_frame_coalesces() {
+        use std::io::{BufRead, BufReader};
+
+        let slot = Arc::new(AcpSlot {
+            lifecycle: SessionLock::new(()),
+            value: make_acp_session("acp-leading", None, None, None),
+        });
+        let (server, client) = RuntimeStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (_, mirror) = full_frame(&serde_json::json!({ "snapshot": { "entries": [] } }));
+        let link = acp_snapshot_link_for_slot(
+            &slot,
+            server,
+            Vec::new(),
+            mirror,
+            0,
+            "acp-leading",
+            "acp-client",
+            SnapshotProjection::FULL,
+        )
+        .unwrap();
+        slot.value.out.lock().clients.push(link);
+
+        let mut reader = BufReader::new(client);
+        slot.value
+            .reduced
+            .lock()
+            .entries_mut()
+            .push(smelt_core::acp_chat::AcpEntry::Assistant {
+                text: "first-delta".into(),
+                thought: false,
+            });
+        push_acp_snapshot_since_with_runtime_debug(&slot.value, false, Some(0), false, false, None);
+
+        let mut first_line = String::new();
+        reader.read_line(&mut first_line).unwrap();
+        assert!(first_line.contains("first-delta"));
+
+        // 紧随 16ms 窗内的连续非紧急增量应合并，不会一帧发一次
+        for i in 0..10 {
+            let mut st = slot.value.reduced.lock();
+            st.entries_mut()[0] = smelt_core::acp_chat::AcpEntry::Assistant {
+                text: format!("burst-{i}"),
+                thought: false,
+            };
+            drop(st);
+            push_acp_snapshot_since_with_runtime_debug(
+                &slot.value,
+                false,
+                Some(0),
+                false,
+                false,
+                None,
+            );
+        }
+
+        let mut last_line = String::new();
+        let mut lines_after_first = 0;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && !last_line.contains("burst-9") {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            lines_after_first += 1;
+            last_line = line;
+        }
+        assert!(last_line.contains("burst-9"));
+        assert!(
+            lines_after_first <= 2,
+            "16ms 窗口内的 10 次突发 delta 应被合并，实际发出 {lines_after_first} 帧"
+        );
     }
 }

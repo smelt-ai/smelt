@@ -4,7 +4,7 @@
 BIN := smelt
 DAEMON := smeltd
 
-.PHONY: help build icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test test-sh pi-agent-check check-all smelt-agent ios
+.PHONY: help build icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test test-sh pi-agent-check check-all smelt-agent ios bench
 
 SMELT_AGENT := target/smelt-agent/smelt-agent
 PI_AGENT_SOURCES := $(shell find agent/src -type f -name '*.ts') $(shell find agent/skills -type f)
@@ -69,6 +69,9 @@ test-sh: ## 运行打包、安装、部署脚本的 shell 测试（scripts/test-
 # 不含 fmt-check：仓库还没整体 rustfmt 干净过，CI 也不查格式（见 ci.yml）。
 check-all: lint lint-sh lint-paths test test-sh pi-agent-check ## 完整检查 (Clippy + shell + 路径合规 + Rust/TS/脚本测试)
 
+bench: ## 运行 NSH/GPUI 核心性能基准套（可用 ARGS="--suite quick" 传参）
+	./scripts/bench-nsh.sh $(ARGS)
+
 $(SMELT_AGENT): agent/package.json agent/bun.lock agent/scripts/compile-smelt-agent.ts agent/scripts/build-smelt-agent.sh scripts/fetch-bun.sh $(PI_AGENT_SOURCES)
 	./agent/scripts/build-smelt-agent.sh
 
@@ -97,7 +100,12 @@ install: $(SMELT_AGENT) ## 原子安装到 /Applications（不打 dmg）：退�
 		&& [ -f target/release/smelt-notify ] \
 		&& [ -f target/release/smelt-installer ] || { \
 		echo "✗ 缺少 release 产物，先 make build"; exit 1; }
-	@sig_ok=0; \
+	@plugins_stale=0; \
+	staged="$$(mktemp -d)"; \
+	./scripts/stage-plugins.sh "$$staged/plugins" >/dev/null; \
+	diff -rq "$$staged/plugins" dist/Smelt.app/Contents/Resources/plugins >/dev/null 2>&1 || plugins_stale=1; \
+	rm -rf "$$staged"; \
+	sig_ok=0; \
 	identity="$${SMELT_CODESIGN_IDENTITY:-Smelt Local Signing}"; \
 	if [ -d dist/Smelt.app ]; then \
 		sig="$$(codesign -dvv dist/Smelt.app 2>&1 || true)"; \
@@ -119,8 +127,9 @@ install: $(SMELT_AGENT) ## 原子安装到 /Applications（不打 dmg）：退�
 		|| [ target/smelt-agent/smelt-agent -nt dist/Smelt.app/Contents/Resources/smelt-agent/smelt-agent ] \
 		|| [ target/smelt-agent/photon_rs_bg.wasm -nt dist/Smelt.app/Contents/Resources/smelt-agent/photon_rs_bg.wasm ] \
 		|| ! diff -rq target/smelt-agent/skills dist/Smelt.app/Contents/Resources/smelt-agent/skills >/dev/null 2>&1 \
+		|| [ "$$plugins_stale" -ne 0 ] \
 		|| [ "$$sig_ok" -ne 1 ]; then \
-		echo "· dist 落后于 release 或签名不对，重新打包"; \
+		echo "· dist 落后于 release、自带插件有改动，或签名不对，重新打包"; \
 		./scripts/package-mac.sh --no-dmg; \
 	fi
 	@# 和在线更新同一条提交：让 Smelt 退出 → 停守护 → 原子交换 App → 打开新版。

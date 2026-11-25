@@ -1,10 +1,9 @@
-//! 设置页：面板插件（gpui-shell 插件，每个是工作台布局里的一个视图）。宿主自己的页，和插件
+//! 设置页：面板插件（NSH JS/TSX 插件，每个是工作台布局里的一个视图）。宿主自己的页，和插件
 //! 的设置页一样是登记的视图（见 [`super::view_specs`]）。
 //!
-//! 列出眼下加载的插件，导入、删除自己装的插件。App 自带的插件跟着 smelt 更新，不能删；用户
-//! 装一个同 id 的副本就能盖过它。和能力库里 Pi 的技能与扩展是两回事：这些插件跑在 smelt 界面
-//! 里，只在本机。改磁盘放后台线程；插件目录一变，工作台自己重挂改动的插件（见
-//! `plugins::watch`），这页不用管挂载。
+//! 列出眼下加载的插件，导入、删除自己装的插件。App 自带的插件跟着 smelt 更新，不能删；和
+//! 能力库里 Pi 的技能与扩展是两回事：这些插件跑在 smelt 界面里，只在本机。改磁盘放后台线程；
+//! 主壳盯着插件目录，文件一变自己重编热重载，这页不用管挂载。
 
 use super::*;
 use crate::plugins::InstalledPlugin;
@@ -71,10 +70,7 @@ impl PanelPluginsPage {
             if !matches!(this.update(cx, |this, cx| this.begin_change(cx)), Ok(true)) {
                 return;
             }
-            let result = cx
-                .background_executor()
-                .spawn(async move { crate::plugins::import(&source) })
-                .await;
+            let result = smelt_sys::blocking::run(move || crate::plugins::import(&source)).await;
             let _ = this.update(cx, |this, cx| {
                 this.finish_change(
                     result.map(|name| t!("plugins.imported", name = name).into_owned()),
@@ -110,15 +106,14 @@ impl PanelPluginsPage {
         }
         cx.spawn_in(window, async move |this, cx| {
             let root = plugin.root.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move { crate::plugins::uninstall(&root) })
-                .await;
+            let result = smelt_sys::blocking::run(move || crate::plugins::uninstall(&root)).await;
             let _ = this.update(cx, |this, cx| {
-                this.finish_change(
-                    result.map(|()| t!("plugins.deleted", name = plugin.name).into_owned()),
-                    cx,
-                )
+                let message = if plugin.overrides_builtin {
+                    t!("plugins.restored", name = plugin.name).into_owned()
+                } else {
+                    t!("plugins.deleted", name = plugin.name).into_owned()
+                };
+                this.finish_change(result.map(|()| message), cx)
             });
         })
         .detach();
@@ -129,12 +124,19 @@ impl PanelPluginsPage {
         let Some(dir) = self.user_dir.clone() else {
             return;
         };
-        if let Err(error) = std::fs::create_dir_all(&dir) {
-            self.error = Some(t!("plugins.create_dir_failed", error = error).into_owned());
-            cx.notify();
-            return;
-        }
-        cx.open_with_system(&dir);
+        cx.spawn(async move |this, cx| {
+            let dir_for_create = dir.clone();
+            let created =
+                smelt_sys::blocking::run(move || std::fs::create_dir_all(&dir_for_create)).await;
+            let _ = this.update(cx, |this, cx| match created {
+                Ok(()) => cx.open_with_system(&dir),
+                Err(error) => {
+                    this.error = Some(t!("plugins.create_dir_failed", error = error).into_owned());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// 返回能不能开始：同一时刻只做一件。
@@ -228,18 +230,30 @@ impl PanelPluginsPage {
             .into_owned()
         }];
         detail.push(plugin.root.display().to_string());
-        if let Some(error) = &plugin.error {
-            detail.push(t!("plugins.load_failed", error = error).into_owned());
+        if plugin.overrides_builtin && !plugin.fallback_to_builtin {
+            detail.push(t!("plugins.override_builtin").into_owned());
         }
 
-        let row = Row::new(plugin.name.clone()).description(detail.join("\n"));
+        let mut row = Row::new(plugin.name.clone()).description(detail.join("\n"));
+        if let Some(error) = &plugin.error {
+            row = row.error(if plugin.fallback_to_builtin {
+                t!("plugins.override_fallback", error = error)
+            } else {
+                t!("plugins.load_failed", error = error)
+            });
+        }
         if pending {
             let confirm_id = id.clone();
+            let confirm_label = if plugin.overrides_builtin {
+                t!("plugins.confirm_restore")
+            } else {
+                t!("plugins.confirm_delete")
+            };
             row.child(
                 Button::new(format!("confirm-delete-panel-plugin-{id}"))
                     .danger()
                     .small()
-                    .label(t!("plugins.confirm_delete"))
+                    .label(confirm_label)
                     .disabled(self.busy)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.confirm_delete(confirm_id.clone(), window, cx)
@@ -253,11 +267,16 @@ impl PanelPluginsPage {
                     .on_click(cx.listener(|this, _, _, cx| this.cancel_delete(cx))),
             )
         } else {
+            let action_label = if plugin.overrides_builtin {
+                t!("plugins.restore_default")
+            } else {
+                t!("plugins.delete")
+            };
             row.child(
                 Button::new(format!("delete-panel-plugin-{id}"))
                     .quiet()
                     .small()
-                    .label(t!("plugins.delete"))
+                    .label(action_label)
                     .disabled(self.busy)
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.request_delete(id.clone(), cx)),

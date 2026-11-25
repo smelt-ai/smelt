@@ -30,14 +30,6 @@ impl StickySection {
     }
 }
 
-impl IntoElement for StickySection {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl Element for StickySection {
     /// 标题的布局，prepaint 时取它的位置。
     type RequestLayoutState = LayoutId;
@@ -91,7 +83,7 @@ impl Element for StickySection {
         } else {
             px(0.)
         };
-        crate::scroll_anchors::report_sticky_header(viewport.top(), header.size.height, stuck, cx);
+        crate::scroll_anchors::report_sticky_header(viewport.top(), header.size.height, stuck);
         let mask = (shift > 0.).then(|| {
             let top = (header.bottom() + px(shift)).min(viewport.bottom());
             ContentMask {

@@ -18,7 +18,9 @@ pub fn is_rule_memory_kind(kind: Option<&str>) -> bool {
     kind.is_some_and(|kind| CORE_MEMORY_TYPES.contains(&kind))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct MemoryEntry {
     pub file_name: String,
     pub name: String,
@@ -72,7 +74,9 @@ impl MemoryEntry {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct MemoryListing {
     pub entries: Vec<MemoryEntry>,
     /// 已生效的规则正文超出常驻预算（通常是手改的），启动时只会注入一部分。
@@ -81,7 +85,9 @@ pub struct MemoryListing {
 
 /// 用户采纳一条待确认的记忆：之后照常注入和召回。
 /// 设置页看的两层记忆：智能体自己的，和所有智能体共享的用户全局层。
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct AgentMemories {
     pub agent: MemoryListing,
     pub user: MemoryListing,

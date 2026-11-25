@@ -13,7 +13,7 @@ use crate::daemon_state::DaemonSessionState;
 use crate::runtime_path::PathStyle;
 
 /// 整份目录。`revision` 每次有改动加一，只在同一个 `epoch` 里能比，见 [`WorkspaceRevision`]。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceDirectory {
     /// 运行时这份库的随机身份。库换过（删了重建）就不同，版本号从头数。
     #[serde(default)]
@@ -33,7 +33,7 @@ pub struct WorkspaceDirectory {
     pub conversations: Vec<WorkspaceConversation>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceProjectRepository {
     pub project_root: String,
     pub name: String,
@@ -43,13 +43,13 @@ pub struct WorkspaceProjectRepository {
     pub managed_link: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceProjectRepositoryActionParams {
     pub project_root: String,
     pub action: WorkspaceProjectRepositoryAction,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkspaceProjectRepositoryAction {
     Discover,
@@ -58,7 +58,7 @@ pub enum WorkspaceProjectRepositoryAction {
     Remove { name: String },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceWorkset {
     pub id: String,
     pub project_root: String,
@@ -79,7 +79,7 @@ impl WorkspaceWorkset {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceWorksetRepository {
     pub name: String,
     pub root: String,
@@ -90,7 +90,7 @@ pub struct WorkspaceWorksetRepository {
 }
 
 /// 一段对话：侧栏里的一条。要么是一段 ACP 对话，要么是一组终端。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceConversation {
     /// 新建它的客户端生成，之后不再变。
     pub id: String,
@@ -162,7 +162,7 @@ impl WorkspaceConversation {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceTerminal {
     /// 守护里的终端会话 id。没起过的终端没有，运行时用对话 id 派生一个占位。
     #[serde(default)]
@@ -178,7 +178,7 @@ pub struct WorkspaceTerminal {
 }
 
 /// ACP 对话的启动参数和尚未交付的状态。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceAcp {
     pub cwd: Option<String>,
     /// 守护托管用的会话 id。写入时必填。
@@ -206,12 +206,12 @@ pub struct WorkspaceAcp {
     pub automation_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceConversationIdParams {
     pub conversation_id: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceConversationArchiveParams {
     pub conversation_id: String,
     pub archived: bool,
@@ -221,7 +221,7 @@ pub struct WorkspaceConversationArchiveParams {
 
 /// `workspace.rename` 的参数。带 `terminal_id` 是给这段对话里的这一格终端改名，不带是给
 /// 整段对话改名。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceRenameParams {
     pub conversation_id: String,
     #[serde(default)]
@@ -230,12 +230,12 @@ pub struct WorkspaceRenameParams {
     pub title: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceProjectParams {
     pub root: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceWorksetCreateParams {
     pub project_root: String,
     pub task: String,
@@ -261,13 +261,13 @@ fn default_workset_branch_prefix() -> String {
     "feat".to_string()
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceWorksetRenameParams {
     pub workset_id: String,
     pub task: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceWorksetFinishParams {
     pub workset_id: String,
     /// 判断不了分支是否已合并（合进基线有冲突）的仓库也照关。有未提交改动、确实没合并的
@@ -276,13 +276,13 @@ pub struct WorkspaceWorksetFinishParams {
     pub allow_unconfirmed_merge: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceWorksetInspectParams {
     pub workset_id: String,
 }
 
 /// 工作树分支上的改动进没进基线。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceWorksetMerge {
     Merged,
@@ -292,7 +292,7 @@ pub enum WorkspaceWorksetMerge {
     Unconfirmed,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceWorksetRepositoryState {
     pub name: String,
     /// 有未提交的改动或未跟踪的文件。
@@ -303,7 +303,7 @@ pub struct WorkspaceWorksetRepositoryState {
 }
 
 /// 关闭工作树前的检查：先 fetch 各仓库的基线，再看每个仓库干不干净、分支合没合进去。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceWorksetInspectResult {
     pub repositories: Vec<WorkspaceWorksetRepositoryState>,
     /// fetch 失败的说明；这时合并情况按本地已有的远端分支算。
@@ -324,7 +324,7 @@ impl WorkspaceWorksetInspectResult {
 }
 
 /// 新建工作树的回执。目录版本平铺在顶层，和以前只回 `WorkspaceRevision` 时同一个形状。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceWorksetCreateResult {
     #[serde(flatten)]
     pub revision: WorkspaceRevision,
@@ -333,7 +333,7 @@ pub struct WorkspaceWorksetCreateResult {
     pub setup: Vec<WorkspaceWorksetSetupResult>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceWorksetSetupResult {
     pub repository: String,
     pub success: bool,
@@ -342,7 +342,7 @@ pub struct WorkspaceWorksetSetupResult {
     pub output: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceWorksetFinishResult {
     pub revision: WorkspaceRevision,
     pub retained_branches: Vec<String>,
@@ -353,7 +353,7 @@ pub struct WorkspaceWorksetFinishResult {
 ///
 /// 版本号只在同一个 `epoch` 里能比。`epoch` 不同说明运行时的库换过，版本号从头数，
 /// 新的那份不能因为数小就被当成旧的扔掉。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceRevision {
     #[serde(default)]
     pub epoch: String,

@@ -332,7 +332,12 @@ fn build_agent_event(
         _ => {}
     }
     event.message = message;
-    event.conversation_id = hook_conversation_id(hook);
+    // 子智能体的 id 不是终端里这段对话的，不能拿来换绑定。
+    event.conversation_id = if is_antigravity_subagent(hook, provider) {
+        None
+    } else {
+        hook_conversation_id(hook)
+    };
     event.tool_name = hook_tool_name(hook).map(String::from);
     event.tool_use_id = first_present_str(hook, &["tool_use_id", "toolUseId"])
         .map(String::from)
@@ -485,6 +490,17 @@ fn normalize_antigravity_stop(
     }
 }
 
+/// Antigravity 的子智能体是一段独立的会话，hook 带的是它自己的 id，也不带上级是谁
+/// （`parentConversationId` 这类字段定义里有、实际不填）。照原样上报，守护会当成用户在
+/// 终端里换了一段对话，把名字清掉。能认出它的是 `lastUserInput`：子智能体的任务是主会话
+/// 派的，这一项一直是空；主会话的每条 hook 都带着用户最后说的话。
+fn is_antigravity_subagent(hook: &serde_json::Value, provider: &str) -> bool {
+    provider == "antigravity"
+        && hook["lastUserInput"]
+            .as_str()
+            .is_none_or(|input| input.trim().is_empty())
+}
+
 /// Claude Stop / SubagentStop 的 `background_tasks` 里还在跑的子智能体和 workflow 个数。
 /// 后台 shell、monitor 不算：开发服务器、`tail -f` 会一直挂着，算上会话就永远不完成；
 /// teammate 空闲时也一直报 running。没有这个字段（旧版本、其它 provider）就是 0。
@@ -535,7 +551,7 @@ fn antigravity_title_event(
     provider: &str,
     root: Option<&str>,
 ) -> Option<AgentEvent> {
-    if provider != "antigravity" {
+    if provider != "antigravity" || is_antigravity_subagent(hook, provider) {
         return None;
     }
     if !matches!(
@@ -1637,7 +1653,8 @@ mod tests {
         drop(conn);
         let dir = root.to_str();
         for name in ["PreInvocation", "Stop"] {
-            let hook = json!({ "hook_event_name": name, "conversationId": "c1" });
+            let hook =
+                json!({ "hook_event_name": name, "conversationId": "c1", "lastUserInput": "hi" });
             let event = antigravity_title_event(&hook, "antigravity", dir).expect(name);
             assert_eq!(event.kind, AgentEventKind::SessionTitleChanged);
             assert_eq!(event.conversation_id.as_deref(), Some("c1"));
@@ -1647,9 +1664,44 @@ mod tests {
         assert_eq!(antigravity_title_event(&tool, "antigravity", dir), None);
         let other = json!({ "hook_event_name": "Stop", "conversationId": "c1" });
         assert_eq!(antigravity_title_event(&other, "claude", dir), None);
-        let unknown = json!({ "hook_event_name": "Stop", "conversationId": "c2" });
+        let unknown =
+            json!({ "hook_event_name": "Stop", "conversationId": "c2", "lastUserInput": "hi" });
         assert_eq!(antigravity_title_event(&unknown, "antigravity", dir), None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 子智能体的 hook 带它自己的 id；照原样上报，守护会以为换了对话、把名字清掉。
+    /// 字段取自 agy 实抓的 hook（主会话和子智能体各一条）。
+    #[test]
+    fn antigravity_subagent_hooks_do_not_rebind_the_conversation() {
+        let main = json!({
+            "hookEventName": "PreInvocation", "invocationNum": 0, "initialNumSteps": 1,
+            "conversationId": "main", "lastUserInput": "Start two research subagents"
+        });
+        let child = json!({
+            "hookEventName": "PreInvocation", "invocationNum": 0, "initialNumSteps": 0,
+            "conversationId": "child", "lastUserInput": ""
+        });
+        let child_stop = json!({
+            "hookEventName": "Stop", "fullyIdle": true, "terminationReason": "NO_TOOL_CALL",
+            "conversationId": "child"
+        });
+        let main = normalize_hook_event_for_provider(&main, "antigravity").unwrap();
+        assert_eq!(main.conversation_id.as_deref(), Some("main"));
+        for hook in [child, child_stop] {
+            let event = normalize_hook_event_for_provider(&hook, "antigravity").unwrap();
+            assert_eq!(event.conversation_id, None, "{hook}");
+            assert_eq!(antigravity_title_event(&hook, "antigravity", None), None);
+        }
+        // 只认 Antigravity：别家的 hook 不带这一项也照常绑定。
+        let claude = json!({ "hook_event_name": "Stop", "session_id": "s" });
+        assert_eq!(
+            normalize_hook_event_for_provider(&claude, "claude")
+                .unwrap()
+                .conversation_id
+                .as_deref(),
+            Some("s")
+        );
     }
 
     #[test]

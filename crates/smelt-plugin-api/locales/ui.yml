@@ -11,12 +11,12 @@ command.missing:
 command.not_applicable:
   en: The command "%{id}" doesn't apply right now
   zh-CN: 命令「%{id}」眼下不适用
+command.failed:
+  en: "“%{command}” didn't work: %{error}"
+  zh-CN: "「%{command}」没做成：%{error}"
 command.unfinished:
   en: The command didn't finish
   zh-CN: 命令没有执行完
-command.plugin_unloaded:
-  en: The plugin was unloaded before the command finished
-  zh-CN: 插件已卸下，命令没有执行完
 daemon_outdated:
   en: The running smeltd is too old to support this. Upgrade the daemon and try again
   zh-CN: 正在运行的 smeltd 版本较旧，还不支持这个操作；升级守护进程后重试

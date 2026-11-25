@@ -1,0 +1,98 @@
+_version: 2
+view:
+  title:
+    en: History
+    zh-CN: 历史
+search:
+  en: Search names or original titles…
+  zh-CN: 搜索名称或原始标题…
+refresh:
+  en: Refresh
+  zh-CN: 刷新
+cancel:
+  en: Cancel
+  zh-CN: 取消
+rename:
+  en: Rename
+  zh-CN: 重命名
+rename_failed:
+  en: "Couldn't rename: %{error}"
+  zh-CN: 改名失败：%{error}
+interrupted:
+  en: Interrupted
+  zh-CN: 已中断
+empty:
+  no_project:
+    en: No active project
+    zh-CN: 当前没有活动项目
+  loading:
+    en: Loading…
+    zh-CN: 加载中…
+  no_history:
+    en: This project has no locally saved history yet
+    zh-CN: 这个项目还没有本地保存的历史会话
+  no_match:
+    en: No matching history
+    zh-CN: 没有匹配的历史会话
+  pick:
+    en: ← Pick a session to see its content
+    zh-CN: ← 选择一个历史会话查看内容
+  no_turns:
+    en: This session has no conversation to show
+    zh-CN: 这份会话没有可展示的对话内容
+row:
+  messages:
+    en: "%{count} messages"
+    zh-CN: "%{count} 条消息"
+  when_ran:
+    en: "%{time} · ran %{minutes} min"
+    zh-CN: "%{time} · 跑了 %{minutes} 分钟"
+menu:
+  continue_agent:
+    en: Continue Conversation
+    zh-CN: 继续对话
+  continue_acp:
+    en: Continue via ACP
+    zh-CN: ACP 继续
+  continue_cli:
+    en: Continue in CLI/TUI
+    zh-CN: CLI/TUI 继续
+  hand_off:
+    en: Hand Off To
+    zh-CN: 迁移到
+  reset_title:
+    en: Restore Default Name
+    zh-CN: 恢复默认名称
+  copy_path:
+    en: Copy File Path
+    zh-CN: 复制文件路径
+handoff:
+  unreadable:
+    en: "Can't read this history session; hand-off cancelled: %{path}"
+    zh-CN: 读不出这条历史会话，迁移取消：%{path}
+  read_failed:
+    en: "Couldn't read the history session; hand-off cancelled: %{error}"
+    zh-CN: 读取历史会话失败，迁移取消：%{error}
+delete:
+  action:
+    en: Delete
+    zh-CN: 删除
+  confirm:
+    en: Delete this history session?
+    zh-CN: 确定删除这条历史会话吗？
+  description:
+    en: "%{agent}'s “%{title}” and its local conversation record will be permanently deleted. This can't be undone."
+    zh-CN: 将永久删除 %{agent} 的「%{title}」及其本地对话记录，此操作不可撤销。
+  done:
+    en: Deleted history session “%{title}”
+    zh-CN: 已删除历史会话「%{title}」
+  failed:
+    en: "Couldn't delete the history session: %{error}"
+    zh-CN: 删除历史会话失败：%{error}
+notify:
+  done:
+    en: Done
+    zh-CN: 完成
+  error:
+    en: Error
+    zh-CN: 错误

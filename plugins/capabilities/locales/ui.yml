@@ -1,0 +1,718 @@
+_version: 2
+auth:
+  change_api_key:
+    en: "Change API Key…"
+    zh-CN: "更换 API key…"
+  copied:
+    en: "Copied"
+    zh-CN: "已复制"
+  copy_link:
+    en: "Copy Link"
+    zh-CN: "复制链接"
+  device_code:
+    en: "Open the verification page in your browser and enter this code:"
+    zh-CN: "在浏览器里打开验证页，输入下面这串码："
+  enter_api_key:
+    en: "Enter API Key…"
+    zh-CN: "填写 API key…"
+  example:
+    en: "Example: %{placeholder}"
+    zh-CN: "示例：%{placeholder}"
+  failed:
+    en: "Sign-in failed: %{error}"
+    zh-CN: "登录失败：%{error}"
+  mcp_signed_in:
+    en: "Signed in to MCP server %{name}"
+    zh-CN: "MCP 服务器 %{name} 已登录"
+  more_actions:
+    en: "More Actions"
+    zh-CN: "更多操作"
+  open_authorization:
+    en: "Open Authorization Page in Browser"
+    zh-CN: "在浏览器中打开授权页"
+  open_verification:
+    en: "Open Verification Page"
+    zh-CN: "打开验证页"
+  sign_in:
+    en: "Sign In…"
+    zh-CN: "登录…"
+  sign_in_again:
+    en: "Sign In Again…"
+    zh-CN: "重新登录…"
+  sign_in_step_by_step:
+    en: "Sign In Step by Step…"
+    zh-CN: "逐项登录…"
+  sign_in_tooltip:
+    en: "Finish in your browser; steps with only one right answer are skipped"
+    zh-CN: "在浏览器里完成授权；只有一个正确答案的步骤会自动跳过"
+  sign_out:
+    en: "Sign Out"
+    zh-CN: "退出登录"
+  sign_out_title:
+    en: "Sign out of %{name}?"
+    zh-CN: "退出 %{name} 的登录？"
+  sign_out_question:
+    en: "You will need to sign in again to use %{name}."
+    zh-CN: "之后使用 %{name} 时需要重新登录。"
+  status:
+    api_key:
+      en: "API key"
+      zh-CN: "API key"
+    api_key_from:
+      en: "API key · %{source}"
+      zh-CN: "API key · %{source}"
+    none:
+      en: "Not set up"
+      zh-CN: "未配置"
+    none_subscription:
+      en: "Not signed in · subscription available"
+      zh-CN: "未登录 · 可用订阅登录"
+    oauth:
+      en: "Signed in"
+      zh-CN: "已登录"
+  submit:
+    en: "Submit"
+    zh-CN: "提交"
+  submit_empty:
+    en: "Submit Empty"
+    zh-CN: "留空提交"
+  submit_failed:
+    en: "Couldn't submit: %{error}"
+    zh-CN: "提交失败：%{error}"
+  use_api_key:
+    en: "Use an API Key Instead…"
+    zh-CN: "改用 API key…"
+  waiting:
+    en: "An authorization link or code will appear shortly; finish signing in in your browser."
+    zh-CN: "稍后会给出授权链接或验证码，用浏览器完成登录。"
+command:
+  open_on_machine:
+    en: "Open Capabilities on This Machine"
+    zh-CN: "在这台机器上打开能力库"
+common:
+  action_failed:
+    en: "Action failed: %{error}"
+    zh-CN: "操作失败：%{error}"
+  cancel:
+    en: "Cancel"
+    zh-CN: "取消"
+  close:
+    en: "Close"
+    zh-CN: "关闭"
+  copy:
+    en: "Copy"
+    zh-CN: "复制"
+  delete:
+    en: "Delete"
+    zh-CN: "删除"
+  retry:
+    en: "Retry"
+    zh-CN: "重试"
+  save:
+    en: "Save"
+    zh-CN: "保存"
+config:
+  loading:
+    en: "Reading Pi configuration…"
+    zh-CN: "正在读取 Pi 配置…"
+  loading_remote:
+    en: "Reading this machine's Pi configuration…"
+    zh-CN: "正在读取这台机器的 Pi 配置…"
+  native_files:
+    en: "Native Config Files"
+    zh-CN: "原生配置文件"
+  reload_tooltip:
+    en: "Reload the config in ~/.pi/agent/"
+    zh-CN: "重新读取 ~/.pi/agent/ 下的配置"
+  remote_file:
+    en: "The config file is on “%{name}” and can't be opened from this computer. Edit it in a terminal on that machine."
+    zh-CN: "配置文件在「%{name}」上，这台电脑打不开。可以在那台机器的终端里改。"
+  thinking_level:
+    off:
+      en: "Off"
+      zh-CN: "关闭"
+    minimal:
+      en: "Minimal"
+      zh-CN: "极简"
+    low:
+      en: "Low"
+      zh-CN: "低"
+    medium:
+      en: "Medium"
+      zh-CN: "中"
+    high:
+      en: "High"
+      zh-CN: "高"
+    xhigh:
+      en: "Very high"
+      zh-CN: "很高"
+    max:
+      en: "Max"
+      zh-CN: "最高"
+default_model:
+  auto:
+    en: "Automatic"
+    zh-CN: "自动"
+  auto_description:
+    en: "Pi picks one from the providers you are signed in to."
+    zh-CN: "由 Pi 从已登录的服务商里挑。"
+  manual_menu:
+    en: "Enter Manually…"
+    zh-CN: "手动填写…"
+  none:
+    en: "No models yet: sign in to a provider below"
+    zh-CN: "还没有能用的模型：先在下面登录服务商"
+  read_failed:
+    en: "Couldn't read settings.json: %{error}"
+    zh-CN: "读不了 settings.json：%{error}"
+  signed_out:
+    en: "Not signed in"
+    zh-CN: "未登录"
+  thinking:
+    en: "Reasoning Effort"
+    zh-CN: "推理强度"
+  thinking_unset:
+    en: "Pi's default"
+    zh-CN: "Pi 默认"
+  title:
+    en: "Default Model"
+    zh-CN: "默认模型"
+discovery:
+  auto:
+    en: "No models listed: they'll be fetched from the API address on save and refreshed on every launch. To pin your own list, add models above."
+    zh-CN: "未列出任何模型：保存时将从 API 地址自动获取，并在每次启动时刷新。想自己固定一份目录，就在上面添加模型。"
+  empty:
+    en: "This endpoint didn't report any models; enter them below."
+    zh-CN: "该端点没有报告任何模型，请在下方手动填写。"
+  failed:
+    en: "Couldn't read the model list: %{error} (you can still enter models below)"
+    zh-CN: "未能读取模型列表：%{error}（仍可在下方手动填写）"
+  found:
+    en: "This endpoint offers %{count} models; click to add them to the list below:"
+    zh-CN: "该端点提供 %{count} 个模型，点击添加到下方列表："
+  hint:
+    en: "Click “Fetch from Endpoint” to read the models this service offers from its API address instead of typing each one."
+    zh-CN: "可以点「从端点获取」从 API 地址读取该服务提供的模型，不必逐个手填。"
+  loading:
+    en: "Asking the endpoint for available models…"
+    zh-CN: "正在向该端点询问可用模型…"
+editor:
+  key_configured:
+    en: "Already set; enter a new value to replace it"
+    zh-CN: "已配置；输入新值以覆盖"
+error:
+  no_place:
+    en: "There's nowhere to show Capabilities"
+    zh-CN: "没有能放能力库的地方"
+machine_picker:
+  en: "Machine: %{name}"
+  zh-CN: "机器：%{name}"
+mcp:
+  add:
+    en: "Add"
+    zh-CN: "添加"
+  add_tooltip:
+    en: "Writes to ~/.pi/agent/mcp.json; new conversations can use it right away"
+    zh-CN: "写入 ~/.pi/agent/mcp.json，新开的对话里就能用"
+  add_tooltip_sign_in:
+    en: "Writes to ~/.pi/agent/mcp.json; then click “Sign In” to authorize"
+    zh-CN: "写入 ~/.pi/agent/mcp.json，之后点「登录」授权"
+  added:
+    en: "Added"
+    zh-CN: "已添加"
+  builtin:
+    en: "Built-in"
+    zh-CN: "内置"
+  configured:
+    en: "Configured"
+    zh-CN: "已配置"
+  disable:
+    en: "Disable"
+    zh-CN: "停用"
+  disabled:
+    en: "Disabled"
+    zh-CN: "已停用"
+  empty:
+    en: "No MCP servers yet. Add a built-in server above, or edit mcp.json directly."
+    zh-CN: "还没有 MCP 服务器。添加上面的内置服务器，或直接编辑 mcp.json。"
+  enable:
+    en: "Enable"
+    zh-CN: "启用"
+  footer:
+    en: "Plain Pi conversations connect to every enabled server; agents connect only to the ones checked on their detail page. Changes apply to new conversations; send /reload in an open one to reload."
+    zh-CN: "普通 Pi 对话连所有启用的服务器；智能体只连在它的详情页里勾选的。改动对新开的对话生效，已经开着的对话发 /reload 重新加载。"
+  install_extension:
+    en: "Install Extension"
+    zh-CN: "安装扩展"
+  install_extension_tooltip:
+    en: "Open the extension's page in the Chrome Web Store"
+    zh-CN: "打开 Chrome 应用商店里的扩展页"
+  local_command:
+    en: "Local command · %{command} %{args}"
+    zh-CN: "本地命令 · %{command} %{args}"
+  local_command_bare:
+    en: "Local command · %{command}"
+    zh-CN: "本地命令 · %{command}"
+  missing_transport:
+    en: "Missing url or command"
+    zh-CN: "缺少 url 或 command"
+  read_failed:
+    en: "Couldn't read mcp.json: %{error}"
+    zh-CN: "无法读取 mcp.json：%{error}"
+  remove:
+    en: "Remove"
+    zh-CN: "移除"
+  remove_title:
+    en: "Remove MCP server “%{name}”?"
+    zh-CN: "移除 MCP 服务器「%{name}」？"
+  remove_body:
+    en: "Removes this entry from mcp.json. Sign-in credentials are kept, so re-adding a server with the same name and address won't need another sign-in."
+    zh-CN: "从 mcp.json 删掉这一项。登录凭据保留，重新添加同名同地址的服务器不用再登录。"
+  remove_tooltip:
+    en: "Remove from mcp.json"
+    zh-CN: "从 mcp.json 移除"
+  sign_in_tooltip:
+    en: "Authorize in the browser; servers that need no sign-in just report they're connected"
+    zh-CN: "用浏览器授权；不需要登录的服务器会直接提示已连接"
+  waiting:
+    en: "Waiting for authorization…"
+    zh-CN: "等待授权…"
+memory:
+  api_key:
+    en: "API Key (optional)"
+    zh-CN: "API Key（可选）"
+  base_url:
+    en: "Service Address"
+    zh-CN: "服务地址"
+  base_url_placeholder:
+    en: "e.g. http://localhost:11434/v1"
+    zh-CN: "如 http://localhost:11434/v1"
+  clear_all:
+    en: "Clear Settings"
+    zh-CN: "清空配置"
+  clear_key:
+    en: "Clear Key"
+    zh-CN: "清除密钥"
+  cleared:
+    en: "Settings cleared"
+    zh-CN: "已清空配置"
+  description:
+    en: "Attaches memories relevant to each question to the conversation. Keyword search is always on; the rerank model and vector search are optional and fall back automatically when unavailable."
+    zh-CN: "按问题把相关的记忆附到对话里。关键词检索总是开着；重排模型和向量检索都可选，不可用时自动退回。"
+  form_description:
+    en: "Enter an OpenAI-compatible /embeddings service (local ones like Ollama work too, e.g. http://localhost:11434/v1). Without one, or when it's unavailable, only keyword search + model reranking is used."
+    zh-CN: "填一个 OpenAI 兼容的 /embeddings 服务（含 Ollama 等本地服务，如 http://localhost:11434/v1）。没配或服务不可用时，只用关键词 + 模型重排。"
+  key_cleared:
+    en: "Key cleared"
+    zh-CN: "已清除密钥"
+  key_empty:
+    en: "Optional; local services usually don't need one"
+    zh-CN: "可选，本地服务一般不需要"
+  key_hint:
+    en: "Leave the API key empty to keep it unchanged; a saved key is never shown."
+    zh-CN: "API Key 留空表示保持不变；已存的密钥不会显示。"
+  key_set:
+    en: "Set"
+    zh-CN: "已设置"
+  loading:
+    en: "Loading…"
+    zh-CN: "正在读取…"
+  model:
+    en: "Model"
+    zh-CN: "模型"
+  model_placeholder:
+    en: "e.g. bge-m3"
+    zh-CN: "如 bge-m3"
+  need_both:
+    en: "Fill in both the service address and the model, or leave both empty to skip vector search"
+    zh-CN: "服务地址和模型需要同时填写；都留空表示不用向量检索"
+  need_both_to_test:
+    en: "Fill in the service address and the model before testing"
+    zh-CN: "填好服务地址和模型再测试"
+  rerank_auto:
+    en: "Automatic (the cheapest model from the current conversation's provider)"
+    zh-CN: "自动（当前对话所用提供方里最便宜的）"
+  rerank_description:
+    en: "On a session's first turn, after compaction and on memory_search, this model picks the relevant memories from the candidates. A small, fast model is enough; if the chosen model is unavailable, that turn uses search results only and never switches to another model. Reasoning is set to the lowest level automatically."
+    zh-CN: "会话第一轮、压缩之后和 memory_search 时，用它从候选里挑相关的记忆。选小而快的模型即可；指定的模型不可用时这一轮只用检索结果，不会换成别的模型。推理自动压到最低档。"
+  rerank_title:
+    en: "Rerank Model"
+    zh-CN: "重排模型"
+  rerank_updated:
+    en: "Rerank model updated"
+    zh-CN: "已更新重排模型"
+  saved:
+    en: "Saved"
+    zh-CN: "已保存"
+  status_configured:
+    en: "Set up: %{model} @ %{url}"
+    zh-CN: "已配置：%{model} @ %{url}"
+  status_unconfigured:
+    en: "Not set up: keyword search + model reranking only"
+    zh-CN: "未配置：只用关键词 + 模型重排"
+  test:
+    en: "Test Connection"
+    zh-CN: "测试连接"
+  test_failed:
+    en: "Test failed: %{message}"
+    zh-CN: "测试失败：%{message}"
+  test_ok:
+    en: "Works: %{dimensions} dimensions, took %{ms} ms"
+    zh-CN: "可用：向量维度 %{dimensions}，耗时 %{ms} ms"
+  test_tooltip:
+    en: "Send one request with the values above to check the service works (no need to save first)"
+    zh-CN: "用上面填的值发一次请求，确认服务可用（不必先保存）"
+  testing:
+    en: "Testing…"
+    zh-CN: "测试中…"
+  vector_title:
+    en: "Vector Search Service (optional)"
+    zh-CN: "向量检索服务（可选）"
+model_editor:
+  api_key:
+    en: "API Key (optional)"
+    zh-CN: "API key（可选）"
+  base_url:
+    en: "API URL (optional)"
+    zh-CN: "API 地址（可选）"
+  base_url_placeholder:
+    en: "Leave empty for the provider's own endpoint"
+    zh-CN: "留空用官方端点"
+  key_placeholder:
+    en: "Leave empty to keep the saved one"
+    zh-CN: "留空不改已存的"
+  key_required:
+    en: "%{provider} has no credentials yet: enter an API key, or sign in below"
+    zh-CN: "%{provider} 还没有凭据：填 API key，或在下面登录"
+  model:
+    en: "Model ID"
+    zh-CN: "模型 ID"
+  model_placeholder:
+    en: "e.g. claude-sonnet-4-5"
+    zh-CN: "如 claude-sonnet-4-5"
+  model_required:
+    en: "Enter a model ID"
+    zh-CN: "填一下模型 ID"
+  provider:
+    en: "Provider ID"
+    zh-CN: "服务商 ID"
+  provider_placeholder:
+    en: "e.g. anthropic"
+    zh-CN: "如 anthropic"
+  provider_required:
+    en: "Enter a provider ID"
+    zh-CN: "填一下服务商 ID"
+model_row:
+  context:
+    en: "Context"
+    zh-CN: "上下文"
+  context_placeholder:
+    en: "Context length (optional)"
+    zh-CN: "上下文长度（可选）"
+  id:
+    en: "Model ID"
+    zh-CN: "模型 ID"
+  id_placeholder:
+    en: "e.g. gpt-5-mini"
+    zh-CN: "例如 gpt-5-mini"
+  max_tokens:
+    en: "Max Output"
+    zh-CN: "最大输出"
+  max_tokens_placeholder:
+    en: "Max output (optional)"
+    zh-CN: "最大输出（可选）"
+  name:
+    en: "Display Name"
+    zh-CN: "显示名称"
+  name_placeholder:
+    en: "Display name (optional)"
+    zh-CN: "显示名称（可选）"
+  remove_tooltip:
+    en: "Remove This Model"
+    zh-CN: "移除这个模型"
+notify:
+  done:
+    en: "Done"
+    zh-CN: "完成"
+  error:
+    en: "Error"
+    zh-CN: "错误"
+pi_login:
+  answered_browser:
+    en: "Answered “%{question}” for you: sign in with the browser"
+    zh-CN: "已代答「%{question}」：用浏览器完成登录"
+  answered_github_dot_com:
+    en: "Answered “%{question}” for you: left the GitHub Enterprise domain blank to sign in to github.com"
+    zh-CN: "已代答「%{question}」：GitHub 企业版域名留空，按 github.com 登录"
+  callback_failed:
+    en: "Couldn't pass the address to the callback: %{error}"
+    zh-CN: "转交回调失败：%{error}"
+  callback_received:
+    en: "Got the address, finishing sign-in…"
+    zh-CN: "已收到地址，正在完成登录…"
+  callback_rejected:
+    en: "The callback didn't accept that address (HTTP %{status}). Authorize again, then paste the new address."
+    zh-CN: "回调没有接受这个地址（HTTP %{status}），请重新授权后再粘贴"
+  helper_exited:
+    en: "The Pi credential helper exited without a result"
+    zh-CN: "Pi 凭据助手没有输出结果就退出了"
+  helper_exited_with:
+    en: "The Pi credential helper exited without a result: %{detail}"
+    zh-CN: "Pi 凭据助手没有输出结果就退出了：%{detail}"
+  login_failed:
+    en: "Sign-in failed (exit code %{code})"
+    zh-CN: "登录失败（退出码 %{code}）"
+  no_authorization_result:
+    en: "The address has no authorization result (code). Approve on the authorization page first, then copy it."
+    zh-CN: "地址里没有授权结果（code），请在授权页点完同意后再复制"
+  no_redirect:
+    en: "The authorization link has no callback address, so it can't be passed along. Authorize in a browser on this machine."
+    zh-CN: "授权链接里没有回调地址，没法转交，请在这台机器的浏览器里授权"
+  not_full_address:
+    en: "That isn't a full address. Copy the whole thing from the browser's address bar (it starts with http://)."
+    zh-CN: "这不是完整的地址，请从浏览器地址栏整段复制（以 http:// 开头）"
+  paste_callback:
+    en: "If the browser can't open the 127.0.0.1 page after you authorize (for example when you authorize on a phone or another computer), paste the full address from its address bar here"
+    zh-CN: "授权后浏览器打不开 127.0.0.1 的页面时（比如在手机或另一台电脑上授权），把地址栏里的完整地址粘贴到这里"
+  sign_in_in_browser:
+    en: "Sign in and approve access in the browser, then come back here."
+    zh-CN: "在浏览器里登录并同意授权，完成后回到这里。"
+  wrong_callback:
+    en: "That isn't this sign-in's callback address; it should start with %{expected}"
+    zh-CN: "这不是这次登录的回调地址，应以 %{expected} 开头"
+pi_model:
+  base_url_invalid:
+    en: "The API URL must be a full HTTP(S) URL"
+    zh-CN: "API 地址必须是完整的 HTTP(S) URL"
+  provider_id_invalid:
+    en: "Provider ID \"%{id}\" is invalid: it must start with a letter and contain only letters, digits and hyphens"
+    zh-CN: "Provider ID「%{id}」无效：须以字母开头，只能含字母、数字和短连字符"
+  provider_id_required:
+    en: "Enter a Provider ID"
+    zh-CN: "请填写 Provider ID"
+plugins:
+  broken:
+    en: "Broken: %{reason}"
+    zh-CN: "失效：%{reason}"
+  confirm_delete:
+    en: "Delete"
+    zh-CN: "删除"
+  delete_title:
+    en: "Delete “%{name}”?"
+    zh-CN: "删除「%{name}」？"
+  delete_description:
+    en: "Moves the files to ~/.smelt/trash and unchecks it in every agent."
+    zh-CN: "会把文件移进 ~/.smelt/trash，并清掉所有智能体里对它的勾选。"
+  duplicates:
+    en: "%{count} more copies with the same name; pick one to keep."
+    zh-CN: "同名还有 %{count} 份，挑一份为准，其余移进回收目录。"
+  import_confirm:
+    en: "Import"
+    zh-CN: "导入"
+  import_description:
+    extension:
+      en: "Copy an extension file or folder into Pi's extension folder. One with the same name is replaced and moved to the trash."
+      zh-CN: "把扩展文件或目录拷进 Pi 的扩展目录。已有同名的会被换下，移进回收目录。"
+    skill:
+      en: "Copy a skill folder (with SKILL.md) into ~/.agents/skills, where Claude Code and other agents can read it too. One with the same name is replaced and moved to the trash."
+      zh-CN: "把技能目录（含 SKILL.md）拷进 ~/.agents/skills，Claude Code 等别的 agent 也读得到。已有同名的会被换下，移进回收目录。"
+  import_extension:
+    en: "Import Extension"
+    zh-CN: "导入扩展"
+  import_skill:
+    en: "Import Skill Folder"
+    zh-CN: "导入技能目录"
+  import_title:
+    en: "Choose a Skill or Extension to Import"
+    zh-CN: "选择要导入的技能或扩展"
+  installed:
+    en: "Installed"
+    zh-CN: "已安装"
+  installed_description:
+    en: "Deleting moves the files to ~/.smelt/trash and unchecks it in every agent."
+    zh-CN: "删除会把文件移进 ~/.smelt/trash，并清掉所有智能体里对它的勾选。"
+  last_failed:
+    en: "Last Action Failed"
+    zh-CN: "上一次操作失败"
+  legacy:
+    en: "In an old location: only Smelt agents can read it."
+    zh-CN: "在旧位置，只有 Smelt 的智能体读得到。"
+  move:
+    en: "Move to ~/.agents/skills"
+    zh-CN: "移到 ~/.agents/skills"
+  none:
+    extension:
+      en: "No extensions installed yet."
+      zh-CN: "还没有装扩展。"
+    skill:
+      en: "No skills installed yet."
+      zh-CN: "还没有装技能。"
+  origin_builtin:
+    en: "Built into %{origin}"
+    zh-CN: "%{origin} 内置"
+  pick_copy:
+    en: "Keep…"
+    zh-CN: "以哪份为准"
+  rescan:
+    en: "Rescan"
+    zh-CN: "重新扫描"
+  scan:
+    en: "Scanned Folders"
+    zh-CN: "扫描目录"
+  sources:
+    en: "Sources"
+    zh-CN: "来源"
+  sources_description:
+    extension:
+      en: "Extensions are TypeScript modules that register tools and commands."
+      zh-CN: "扩展是注册工具、命令的 TypeScript 模块。"
+    skill:
+      en: "Skills are markdown capability packs. ~/.agents/skills is shared with the other coding agents."
+      zh-CN: "技能是 markdown 能力包。~/.agents/skills 和别的 Coding Agent 共用。"
+  summary:
+    extension:
+      en: "%{usable} usable extensions installed. Agents load only the ones checked for them."
+      zh-CN: "已装 %{usable} 个可用的扩展。智能体只加载给它勾上的。"
+    skill:
+      en: "%{usable} usable skills installed. Agents load only the ones checked for them."
+      zh-CN: "已装 %{usable} 个可用的技能。智能体只加载给它勾上的。"
+  summary_broken:
+    extension:
+      en: "%{usable} usable extensions installed, plus %{broken} broken entries (usually dead symlinks) that should be deleted."
+      zh-CN: "已装 %{usable} 个可用的扩展，另有 %{broken} 个失效条目（多半是断掉的软链），建议删掉。"
+    skill:
+      en: "%{usable} usable skills installed, plus %{broken} broken entries (usually dead symlinks) that should be deleted."
+      zh-CN: "已装 %{usable} 个可用的技能，另有 %{broken} 个失效条目（多半是断掉的软链），建议删掉。"
+  unused:
+    en: "Not used by any agent"
+    zh-CN: "没有智能体在用"
+  used_by:
+    en: "Used by %{names}"
+    zh-CN: "%{names} 在用"
+  user_separator:
+    en: ", "
+    zh-CN: "、"
+provider:
+  add:
+    en: "Add Custom Provider…"
+    zh-CN: "添加自定义服务商…"
+  add_model:
+    en: "Add Model"
+    zh-CN: "添加模型"
+  add_title:
+    en: "New Custom Provider"
+    zh-CN: "新的自定义服务商"
+  add_tooltip:
+    en: "An OpenAI- or Anthropic-compatible gateway, a self-hosted server, or another model endpoint"
+    zh-CN: "OpenAI / Anthropic 兼容网关、自托管服务或别的模型端点"
+  api:
+    en: "Protocol"
+    zh-CN: "协议"
+  api_key:
+    en: "API Key (optional)"
+    zh-CN: "API key（可选）"
+  auto_synced:
+    en: "synced from the endpoint"
+    zh-CN: "照端点同步"
+  base_url:
+    en: "API URL"
+    zh-CN: "API 地址"
+  base_url_required:
+    en: "Enter the API address"
+    zh-CN: "请填写 API 地址"
+  edit:
+    en: "Edit…"
+    zh-CN: "编辑…"
+  edit_title:
+    en: "Edit %{id}"
+    zh-CN: "编辑 %{id}"
+  fetch_models:
+    en: "Fetch from Endpoint"
+    zh-CN: "从端点获取"
+  id:
+    en: "Provider ID"
+    zh-CN: "服务商 ID"
+  id_placeholder:
+    en: "e.g. acme-gateway"
+    zh-CN: "例如 acme-gateway"
+  key_placeholder:
+    en: "Leave empty for endpoints without auth"
+    zh-CN: "无鉴权的端点可留空"
+  model_count:
+    en: "%{count} models"
+    zh-CN: "%{count} 个模型"
+  models:
+    en: "Models"
+    zh-CN: "模型"
+  name:
+    en: "Display Name (optional)"
+    zh-CN: "显示名称（可选）"
+  name_placeholder:
+    en: "Optional; defaults to the provider ID"
+    zh-CN: "可选，默认用 Provider ID"
+  no_key:
+    en: "no API key"
+    zh-CN: "无 API key"
+  remove:
+    en: "Delete…"
+    zh-CN: "删除…"
+  remove_confirm:
+    en: "Delete"
+    zh-CN: "删除"
+  remove_title:
+    en: "Delete provider “%{name}”?"
+    zh-CN: "删除服务商「%{name}」？"
+  remove_question:
+    en: "Its entry in models.json and its saved key will be deleted too."
+    zh-CN: "models.json 里它的配置和存下的 key 会一起删掉。"
+  save_default:
+    en: "Save and Make Default"
+    zh-CN: "保存并设为默认"
+providers:
+  failed:
+    en: "Couldn't read the providers: %{error}"
+    zh-CN: "读不到服务商：%{error}"
+  loading:
+    en: "Reading sign-in status… the first time sets up the Pi runtime and can take a while"
+    zh-CN: "正在读取登录状态…第一次要准备 Pi 运行时，会慢一些"
+  show_all:
+    en: "Show All Providers (%{hidden} more)"
+    zh-CN: "显示全部服务商（另有 %{hidden} 个）"
+  show_common:
+    en: "Show Common Only"
+    zh-CN: "只看常用"
+  title:
+    en: "Providers"
+    zh-CN: "服务商"
+tab:
+  extensions:
+    en: "Extensions"
+    zh-CN: "扩展"
+  mcp:
+    en: "MCP"
+    zh-CN: "MCP"
+  memory:
+    en: "Memory"
+    zh-CN: "记忆"
+  models:
+    en: "Models"
+    zh-CN: "模型"
+  skills:
+    en: "Skills"
+    zh-CN: "技能"
+title:
+  en: "Capabilities"
+  zh-CN: "能力库"
+uses:
+  button:
+    en: "Use in Agents"
+    zh-CN: "给智能体用"
+  failed:
+    en: "Couldn't change the agent: %{error}"
+    zh-CN: "没改成智能体的配置：%{error}"
+  no_agents:
+    en: "No agents on this machine yet."
+    zh-CN: "这台机器上还没有智能体。"
+  title:
+    en: "Which agents use it"
+    zh-CN: "给哪些智能体用"

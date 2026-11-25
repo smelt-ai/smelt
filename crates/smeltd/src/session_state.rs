@@ -165,14 +165,36 @@ pub(crate) struct SessionState {
     /// 等待状态的来源身份，仅供 reducer 防止无关子任务/工具完成误清等待。
     #[serde(skip)]
     pub(crate) active_blocker: Option<AgentBlocker>,
-    /// 终端里的程序在用 OSC 7501 报状态，相位以它为准：它自己把后台子智能体、自动重试
-    /// 都算进去了。hook 这时只在「在跑」里细分思考 / 执行工具，以及报进程退出。
-    /// 根记录被 `clear`、进程退出时交还给 hook。
+    /// 终端里的程序用 OSC 7501 报出的根记录。活跃时相位以它为准：它自己把后台子智能体、
+    /// 自动重试都算进去了，hook 这时只在 `working` 下细分工具名，以及报进程退出。
+    /// 根记录被 `clear`、终端 `RIS`、进程退出时清掉；`done` / `error` 跨过新提示符后
+    /// 标为 `exited_to_prompt`，让随后新起的 hook 会话接管相位。
     #[serde(skip)]
-    pub(crate) program_status: bool,
+    pub(crate) program_status: Option<ProgramStatusRecord>,
+    /// 来自结构化 hook 的 `structured_events` 基线，用于 7501 撤回时还原而不误删 hook 能力。
+    #[serde(skip)]
+    pub(crate) hook_structured: bool,
+    /// 来自结构化 hook 的 `turn_events` 基线。
+    #[serde(skip)]
+    pub(crate) hook_turn: bool,
+    /// 7501 `working` 期间由 hook 细分出来的当前执行工具及说明；`Some(...)` 表示处于
+    /// `ExecutingTool`。
+    #[serde(skip)]
+    pub(crate) hook_tool: Option<Option<String>>,
     /// 本进程是否仍持有 PTY/ACP 运行时。与客户端是否 attach（list 里的 connected）
     /// 正交。崩溃恢复的幽灵会话为 false；活会话缺省 true。
     pub(crate) runtime: bool,
+}
+
+/// 终端程序通过 OSC 7501 报出的根记录（`state` 永不为 `Clear`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProgramStatusRecord {
+    pub(crate) state: ProgramState,
+    pub(crate) kind: Option<ProgramBlockedKind>,
+    pub(crate) message: Option<String>,
+    /// 跨过一次新 shell 提示符（OSC 133 `A`）后留存的 `done` / `error` 记录：
+    /// 展示相位保留，但不再阻止新起的 hook 会话接管相位。
+    pub(crate) exited_to_prompt: bool,
 }
 
 impl SessionState {
@@ -229,7 +251,10 @@ impl Default for SessionState {
             turn_events: false,
             agent_event_version: None,
             active_blocker: None,
-            program_status: false,
+            program_status: None,
+            hook_structured: false,
+            hook_turn: false,
+            hook_tool: None,
             runtime: true,
         }
     }
@@ -400,6 +425,105 @@ fn note_prompt_fallback(state: &mut SessionState, event: &AgentEvent) {
     }
 }
 
+fn project_program_status(
+    record: &ProgramStatusRecord,
+    hook_tool: Option<&Option<String>>,
+) -> (Phase, Option<PendingLine>) {
+    match record.state {
+        ProgramState::Working => {
+            if let Some(tool_msg) = hook_tool {
+                (
+                    Phase::ExecutingTool,
+                    PendingLine::said(tool_msg.clone().or_else(|| record.message.clone())),
+                )
+            } else {
+                (Phase::Thinking, PendingLine::said(record.message.clone()))
+            }
+        }
+        ProgramState::Blocked => {
+            let phase = match record.kind {
+                Some(ProgramBlockedKind::Permission) => Phase::AwaitingApproval,
+                Some(ProgramBlockedKind::Question | ProgramBlockedKind::Auth) | None => {
+                    Phase::WaitingForUser
+                }
+            };
+            (phase, PendingLine::said(record.message.clone()))
+        }
+        ProgramState::Done => (Phase::Succeeded, PendingLine::said(record.message.clone())),
+        ProgramState::Error => (Phase::Failed, PendingLine::said(record.message.clone())),
+        ProgramState::Idle | ProgramState::Clear => (Phase::Idle, None),
+    }
+}
+
+/// 活跃 OSC 7501 记录持有相位期间对 hook 事件的归约：回合开始、等待、完成都不再改相位，
+/// 只在 7501 报 `working` 时细分工具名，以及在 `SessionEnded` 时退出交还控制权。
+fn apply_hook_under_program_status(
+    state: &mut SessionState,
+    event: &AgentEvent,
+    occupancy: Occupancy,
+) {
+    match occupancy {
+        Occupancy::Metadata => {
+            if event.kind == AgentEventKind::SessionStarted {
+                state.cli_exited = false;
+            }
+            if event.kind == AgentEventKind::SessionTitleChanged
+                && let Some(title) = smelt_core::session_title::provider_session_title(
+                    event.conversation_title.as_deref(),
+                )
+            {
+                state.title = Some(title.to_string());
+            }
+        }
+        Occupancy::OpenTurn => {
+            state.cli_exited = false;
+            note_prompt_fallback(state, event);
+        }
+        Occupancy::ResumeWork { .. } => {
+            state.cli_exited = false;
+            if let Some(record) = state
+                .program_status
+                .as_ref()
+                .filter(|record| record.state == ProgramState::Working)
+            {
+                state.hook_tool = Some(event.message.clone());
+                let (next_phase, next_pending) =
+                    project_program_status(record, state.hook_tool.as_ref());
+                let _ = commit_session_phase(state, PhaseSource::Hook, next_phase);
+                state.pending = next_pending;
+            }
+        }
+        Occupancy::Progress { .. } => {
+            state.cli_exited = false;
+            if let Some(record) = state
+                .program_status
+                .as_ref()
+                .filter(|record| record.state == ProgramState::Working)
+            {
+                state.hook_tool = None;
+                let (next_phase, next_pending) =
+                    project_program_status(record, state.hook_tool.as_ref());
+                let _ = commit_session_phase(state, PhaseSource::Hook, next_phase);
+                state.pending = next_pending;
+            }
+        }
+        Occupancy::Wait { .. } | Occupancy::Finish { .. } => {
+            state.cli_exited = false;
+        }
+        Occupancy::EndProcess => {
+            state.cli_exited = true;
+            state.program_status = None;
+            state.hook_tool = None;
+            if !state.phase.is_finished() {
+                let _ = commit_session_phase(state, PhaseSource::Hook, Phase::Dead);
+                state.pending = None;
+                state.active_blocker = None;
+            }
+            state.agent_token = uuid::Uuid::new_v4().simple().to_string();
+        }
+    }
+}
+
 /// 将 provider 适配器产出的统一事件归约进会话。
 ///
 /// 相位只按 [`Occupancy`] 改：元数据不动，OpenTurn 打开回合，ResumeWork 在
@@ -412,128 +536,134 @@ pub(crate) fn apply_agent_event(state: &mut SessionState, event: &AgentEvent) ->
 
     let previous_phase = state.phase;
     let occupancy = event.kind.occupancy();
-    let waiting = state.phase.is_waiting();
-    let matching_blocker = state
-        .active_blocker
-        .as_ref()
-        .is_none_or(|blocker| event_matches_blocker(blocker, event));
-    let allow = if state.program_status {
-        // 回合开始、等待、完成都由 7501 说了算；hook 只在它报「在跑」时细分思考和执行
-        // 工具（7501 不带工具名），以及报进程退出。迟到的工具事件碰上已完成也不会重开。
-        match occupancy {
-            Occupancy::ResumeWork { .. } | Occupancy::Progress { .. } => {
-                matches!(state.phase, Phase::Thinking | Phase::ExecutingTool)
-            }
-            Occupancy::EndProcess => !state.phase.is_finished(),
-            _ => false,
-        }
-    } else {
-        occupancy.allows_phase_change(
-            state.phase.is_dead(),
-            state.phase.turn_closed(),
-            state.phase.is_finished(),
-            waiting,
-            matching_blocker,
-        )
-    };
+    state.hook_structured = true;
+    if occupancy.records_turn() {
+        state.hook_turn = true;
+    }
 
     if let Some(provider) = TerminalAgentKind::from_id(event.provider.trim()) {
         state.provider = Some(provider.id().to_string());
     }
     let _ = switch_conversation(state, event);
-    // 进程退出和对话身份分开。SessionEnded 无条件记下退出，写在相位门控之前：
-    // 回合已经 Finished 时 EndProcess 不改相位，退出标记一样要落下。之后
-    // `SessionStarted`，或相位门控放行的活事件，说明进程又在跑，再清掉。
-    // 回合已关闭之后的迟到进度不放行，也不把退出标记抹掉。
-    if occupancy == Occupancy::EndProcess {
-        state.cli_exited = true;
-        // 进程退出，它报的记录跟着作废（7501 规范要求丢掉 working / blocked）。
-        state.program_status = false;
-    } else if event.kind == AgentEventKind::SessionStarted || allow || state.program_status {
-        state.cli_exited = false;
+
+    if state
+        .program_status
+        .as_ref()
+        .is_some_and(|record| record.exited_to_prompt)
+    {
+        state.program_status = None;
+        state.hook_tool = None;
     }
 
-    match occupancy {
-        Occupancy::Metadata => {
-            if event.kind == AgentEventKind::SessionTitleChanged
-                && let Some(title) = smelt_core::session_title::provider_session_title(
-                    event.conversation_title.as_deref(),
-                )
-            {
-                state.title = Some(title.to_string());
-            }
+    if state.program_status.is_some() {
+        apply_hook_under_program_status(state, event, occupancy);
+    } else {
+        let waiting = state.phase.is_waiting();
+        let matching_blocker = state
+            .active_blocker
+            .as_ref()
+            .is_none_or(|blocker| event_matches_blocker(blocker, event));
+        let allow = occupancy.allows_phase_change(
+            state.phase.is_dead(),
+            state.phase.turn_closed(),
+            state.phase.is_finished(),
+            waiting,
+            matching_blocker,
+        );
+
+        // 进程退出和对话身份分开。SessionEnded 无条件记下退出，写在相位门控之前：
+        // 回合已经 Finished 时 EndProcess 不改相位，退出标记一样要落下。之后
+        // `SessionStarted`，或相位门控放行的活事件，说明进程又在跑，再清掉。
+        // 回合已关闭之后的迟到进度不放行，也不把退出标记抹掉。
+        if occupancy == Occupancy::EndProcess {
+            state.cli_exited = true;
+        } else if event.kind == AgentEventKind::SessionStarted || allow {
+            state.cli_exited = false;
         }
-        Occupancy::OpenTurn => {
-            if allow {
-                let _ = commit_session_phase(state, PhaseSource::Hook, Phase::Thinking);
-                state.pending = None;
-                state.active_blocker = None;
-            }
-            note_prompt_fallback(state, event);
-        }
-        Occupancy::ResumeWork {
-            follow_matched_wait,
-        } => {
-            if allow {
-                let _ = commit_session_phase(state, PhaseSource::Hook, Phase::ExecutingTool);
-                state.pending = PendingLine::said(event.message.clone());
-                if follow_matched_wait {
-                    state.active_blocker = None;
+
+        match occupancy {
+            Occupancy::Metadata => {
+                if event.kind == AgentEventKind::SessionTitleChanged
+                    && let Some(title) = smelt_core::session_title::provider_session_title(
+                        event.conversation_title.as_deref(),
+                    )
+                {
+                    state.title = Some(title.to_string());
                 }
             }
-        }
-        Occupancy::Progress {
-            follow_matched_wait,
-        } => {
-            if allow {
-                let _ = commit_session_phase(state, PhaseSource::Hook, Phase::Thinking);
-                if follow_matched_wait {
+            Occupancy::OpenTurn => {
+                if allow {
+                    let _ = commit_session_phase(state, PhaseSource::Hook, Phase::Thinking);
+                    state.pending = None;
+                    state.active_blocker = None;
+                }
+                note_prompt_fallback(state, event);
+            }
+            Occupancy::ResumeWork {
+                follow_matched_wait,
+            } => {
+                if allow {
+                    let _ = commit_session_phase(state, PhaseSource::Hook, Phase::ExecutingTool);
+                    state.pending = PendingLine::said(event.message.clone());
+                    if follow_matched_wait {
+                        state.active_blocker = None;
+                    }
+                }
+            }
+            Occupancy::Progress {
+                follow_matched_wait,
+            } => {
+                if allow {
+                    let _ = commit_session_phase(state, PhaseSource::Hook, Phase::Thinking);
+                    if follow_matched_wait {
+                        state.pending = PendingLine::said(event.message.clone());
+                        state.active_blocker = None;
+                    } else {
+                        state.pending = None;
+                    }
+                }
+            }
+            Occupancy::Wait { approval } => {
+                if allow {
+                    let next = if approval {
+                        Phase::AwaitingApproval
+                    } else {
+                        Phase::WaitingForUser
+                    };
+                    let _ = commit_session_phase(state, PhaseSource::Hook, next);
+                    state.pending = PendingLine::said(
+                        event.message.clone().or_else(|| event.tool_name.clone()),
+                    );
+                    state.active_blocker = Some(AgentBlocker {
+                        tool_use_id: event.tool_use_id.clone(),
+                        agent_id: event.agent_id.clone(),
+                        tool_name: event.tool_name.clone(),
+                    });
+                }
+            }
+            Occupancy::Finish { failed } => {
+                if allow {
+                    let next = if failed {
+                        Phase::Failed
+                    } else {
+                        Phase::Succeeded
+                    };
+                    let _ = commit_session_phase(state, PhaseSource::Hook, next);
                     state.pending = PendingLine::said(event.message.clone());
                     state.active_blocker = None;
-                } else {
-                    state.pending = None;
                 }
             }
-        }
-        Occupancy::Wait { approval } => {
-            if allow {
-                let next = if approval {
-                    Phase::AwaitingApproval
-                } else {
-                    Phase::WaitingForUser
-                };
-                let _ = commit_session_phase(state, PhaseSource::Hook, next);
-                state.pending =
-                    PendingLine::said(event.message.clone().or_else(|| event.tool_name.clone()));
-                state.active_blocker = Some(AgentBlocker {
-                    tool_use_id: event.tool_use_id.clone(),
-                    agent_id: event.agent_id.clone(),
-                    tool_name: event.tool_name.clone(),
-                });
+            Occupancy::EndProcess => {
+                // 退出标记在上面已经落下，对话 id 留着。能不能续接看 `cli_exited`
+                // （`resume_of`），不靠把身份清掉。provider 和 title 同样留着。
+                // 不发 SessionEnd 的 provider 走不到这里，见 `terminal_resume`。
+                if allow {
+                    let _ = commit_session_phase(state, PhaseSource::Hook, Phase::Dead);
+                    state.pending = None;
+                    state.active_blocker = None;
+                }
+                state.agent_token = uuid::Uuid::new_v4().simple().to_string();
             }
-        }
-        Occupancy::Finish { failed } => {
-            if allow {
-                let next = if failed {
-                    Phase::Failed
-                } else {
-                    Phase::Succeeded
-                };
-                let _ = commit_session_phase(state, PhaseSource::Hook, next);
-                state.pending = PendingLine::said(event.message.clone());
-                state.active_blocker = None;
-            }
-        }
-        Occupancy::EndProcess => {
-            // 退出标记在上面已经落下，对话 id 留着。能不能续接看 `cli_exited`
-            // （`resume_of`），不靠把身份清掉。provider 和 title 同样留着。
-            // 不发 SessionEnd 的 provider 走不到这里，见 `terminal_resume`。
-            if allow {
-                let _ = commit_session_phase(state, PhaseSource::Hook, Phase::Dead);
-                state.pending = None;
-                state.active_blocker = None;
-            }
-            state.agent_token = uuid::Uuid::new_v4().simple().to_string();
         }
     }
 
@@ -550,6 +680,40 @@ pub(crate) fn apply_agent_event(state: &mut SessionState, event: &AgentEvent) ->
     true
 }
 
+fn clear_program_status(state: &mut SessionState) -> bool {
+    if state.program_status.is_none() {
+        return false;
+    }
+    let wire_before = (
+        state.phase,
+        state.pending.clone(),
+        state.structured_events,
+        state.turn_events,
+    );
+    state.program_status = None;
+    state.hook_tool = None;
+    state.active_blocker = None;
+    if !state.phase.is_dead() {
+        let _ = commit_session_phase(state, PhaseSource::ProgramStatus, Phase::Idle);
+    }
+    state.pending = None;
+    state.structured_events = state.hook_structured;
+    state.turn_events = state.hook_turn;
+    if wire_before
+        == (
+            state.phase,
+            state.pending.clone(),
+            state.structured_events,
+            state.turn_events,
+        )
+    {
+        return false;
+    }
+    state.updated_at = now_unix();
+    bump_state_revision(state);
+    true
+}
+
 /// 将终端里的程序用 OSC 7501 报的根记录归约进会话。返回是否有变化。
 ///
 /// 规范：<https://www.superlogical.com/rex/docs/build/program-status>。报告内容不可信，
@@ -557,62 +721,70 @@ pub(crate) fn apply_agent_event(state: &mut SessionState, event: &AgentEvent) ->
 /// 权限边界（见 docs/notification-architecture.md）。报过一次之后相位就以它为准，见
 /// [`SessionState::program_status`]。
 pub(crate) fn apply_program_status(state: &mut SessionState, status: &ProgramStatus) -> bool {
-    let before = (state.phase, state.pending.clone(), state.program_status);
-    let message = status.message.clone();
-    match status.state {
-        ProgramState::Working => {
-            // 已经在跑就留着 hook 细分出的执行工具和工具名，只在有说明时换说明。
-            if matches!(state.phase, Phase::Thinking | Phase::ExecutingTool) {
-                if message.is_some() {
-                    state.pending = PendingLine::said(message);
-                }
-            } else {
-                let _ = commit_session_phase(state, PhaseSource::ProgramStatus, Phase::Thinking);
-                state.pending = PendingLine::said(message);
-            }
-        }
-        ProgramState::Blocked => {
-            let next = match status.kind {
-                Some(ProgramBlockedKind::Permission) => Phase::AwaitingApproval,
-                Some(ProgramBlockedKind::Question | ProgramBlockedKind::Auth) | None => {
-                    Phase::WaitingForUser
-                }
-            };
-            let _ = commit_session_phase(state, PhaseSource::ProgramStatus, next);
-            state.pending = PendingLine::said(message);
-        }
-        ProgramState::Done => {
-            let _ = commit_session_phase(state, PhaseSource::ProgramStatus, Phase::Succeeded);
-            state.pending = PendingLine::said(message);
-        }
-        ProgramState::Error => {
-            let _ = commit_session_phase(state, PhaseSource::ProgramStatus, Phase::Failed);
-            state.pending = PendingLine::said(message);
-        }
-        ProgramState::Idle => {
-            let _ = commit_session_phase(state, PhaseSource::ProgramStatus, Phase::Idle);
-            state.pending = None;
-        }
-        // 程序撤掉了全部记录（退出前会这样做）：没有状态了，相位交还给 hook。进程已经退出
-        // 的不复活。
-        ProgramState::Clear => {
-            if !state.phase.is_dead() {
-                let _ = commit_session_phase(state, PhaseSource::ProgramStatus, Phase::Idle);
-            }
-            state.pending = None;
-        }
+    if status.state == ProgramState::Clear {
+        return clear_program_status(state);
     }
+    let wire_before = (
+        state.phase,
+        state.pending.clone(),
+        state.structured_events,
+        state.turn_events,
+    );
+    let record = ProgramStatusRecord {
+        state: status.state,
+        kind: status.kind,
+        message: status.message.clone(),
+        exited_to_prompt: false,
+    };
+    if status.state != ProgramState::Working {
+        state.hook_tool = None;
+    }
+    let (next_phase, next_pending) = project_program_status(&record, state.hook_tool.as_ref());
+    let _ = commit_session_phase(state, PhaseSource::ProgramStatus, next_phase);
+    state.pending = next_pending;
     state.active_blocker = None;
-    state.program_status = status.state != ProgramState::Clear;
-    if before == (state.phase, state.pending.clone(), state.program_status) {
-        return false;
-    }
+    state.program_status = Some(record);
     // 跟 hook 一样：这是程序明确报出的回合状态，客户端据此判断相位可信、关掉终端通知兜底。
     state.structured_events = true;
     state.turn_events = true;
+    if wire_before
+        == (
+            state.phase,
+            state.pending.clone(),
+            state.structured_events,
+            state.turn_events,
+        )
+    {
+        return false;
+    }
     state.updated_at = now_unix();
     bump_state_revision(state);
     true
+}
+
+/// 终端收到完整复位（`ESC c`，RIS）时按 OSC 7501 规范清掉所有程序状态记录。
+pub(crate) fn apply_terminal_reset(state: &mut SessionState) -> bool {
+    clear_program_status(state)
+}
+
+/// shell 报出新提示符（OSC 133 `A`）时收敛上一段程序留下的 OSC 7501 记录：
+/// `working` / `blocked` / `idle` 立即清理交还控制权；`done` / `error` 按规范跨提示符保留
+/// 展示，同时标记 `exited_to_prompt` 让后续新起的 hook 会话接管。
+pub(crate) fn apply_prompt_start(state: &mut SessionState) -> bool {
+    let Some(record) = state.program_status.as_mut() else {
+        return false;
+    };
+    match record.state {
+        ProgramState::Working
+        | ProgramState::Blocked
+        | ProgramState::Idle
+        | ProgramState::Clear => clear_program_status(state),
+        ProgramState::Done | ProgramState::Error => {
+            record.exited_to_prompt = true;
+            state.hook_tool = None;
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1224,8 +1396,17 @@ mod program_status_tests {
         ProgramStatus {
             state,
             kind: None,
-            app: Some("claude-code".to_string()),
+            progress: None,
             message: None,
+        }
+    }
+
+    fn report_msg(state: ProgramState, msg: &str) -> ProgramStatus {
+        ProgramStatus {
+            state,
+            kind: None,
+            progress: None,
+            message: Some(msg.to_string()),
         }
     }
 
@@ -1242,7 +1423,7 @@ mod program_status_tests {
             &mut state,
             &report(ProgramState::Idle)
         ));
-        assert!(state.program_status && state.structured_events && state.turn_events);
+        assert!(state.program_status.is_some() && state.structured_events && state.turn_events);
         assert_eq!(state.phase, Phase::Idle);
 
         apply_agent_event(&mut state, &hook(AgentEventKind::PromptSubmitted));
@@ -1314,21 +1495,155 @@ mod program_status_tests {
         let mut state = SessionState::default();
         apply_program_status(&mut state, &report(ProgramState::Working));
         apply_program_status(&mut state, &report(ProgramState::Clear));
-        assert!(!state.program_status);
+        assert!(state.program_status.is_none());
         assert_eq!(state.phase, Phase::Idle);
         apply_agent_event(&mut state, &hook(AgentEventKind::PromptSubmitted));
         assert_eq!(state.phase, Phase::Thinking, "交还后 hook 照旧开回合");
 
         apply_program_status(&mut state, &report(ProgramState::Working));
         apply_agent_event(&mut state, &hook(AgentEventKind::SessionEnded));
-        assert!(!state.program_status);
+        assert!(state.program_status.is_none());
         assert_eq!(state.phase, Phase::Dead, "进程退出时 working 作废");
         assert!(state.cli_exited);
-        apply_program_status(&mut state, &report(ProgramState::Clear));
+        assert!(!apply_program_status(
+            &mut state,
+            &report(ProgramState::Clear)
+        ));
         assert_eq!(state.phase, Phase::Dead, "退出后迟到的 clear 不复活");
 
         apply_program_status(&mut state, &report(ProgramState::Idle));
         assert_eq!(state.phase, Phase::Idle, "同一个 shell 里又起了程序");
-        assert!(state.program_status);
+        assert!(state.program_status.is_some());
+    }
+
+    #[test]
+    fn hook_tool_finish_restores_program_status_message_without_losing_hook_baseline() {
+        let mut state = SessionState::default();
+        apply_agent_event(&mut state, &hook(AgentEventKind::SessionStarted));
+        apply_agent_event(&mut state, &hook(AgentEventKind::PromptSubmitted));
+        assert!(state.hook_structured && state.hook_turn);
+
+        apply_program_status(
+            &mut state,
+            &report_msg(ProgramState::Working, "Subagents running"),
+        );
+        assert_eq!(
+            state.pending,
+            Some(PendingLine::Said("Subagents running".into()))
+        );
+
+        let mut tool = hook(AgentEventKind::ToolStarted);
+        tool.message = Some("Bash: cargo test".into());
+        apply_agent_event(&mut state, &tool);
+        assert_eq!(state.phase, Phase::ExecutingTool);
+        assert_eq!(
+            state.pending,
+            Some(PendingLine::Said("Bash: cargo test".into()))
+        );
+
+        apply_agent_event(&mut state, &hook(AgentEventKind::ToolFinished));
+        assert_eq!(state.phase, Phase::Thinking);
+        assert_eq!(
+            state.pending,
+            Some(PendingLine::Said("Subagents running".into())),
+            "工具结束应恢复 7501 自己的说明，不被普通 Progress 抹成 None"
+        );
+
+        // hook 基线仍在：7501 clear 后保留 hook 的 structured_events / turn_events。
+        apply_program_status(&mut state, &report(ProgramState::Clear));
+        assert!(state.structured_events && state.turn_events);
+    }
+
+    #[test]
+    fn pure_program_status_restores_unstructured_state_on_clear_and_reset() {
+        let mut state = SessionState::default();
+        apply_program_status(
+            &mut state,
+            &report_msg(ProgramState::Working, "brew upgrade"),
+        );
+        assert!(state.structured_events && state.turn_events);
+
+        assert!(apply_program_status(
+            &mut state,
+            &report(ProgramState::Clear)
+        ));
+        assert!(state.program_status.is_none());
+        assert_eq!(state.phase, Phase::Idle);
+        assert!(!state.structured_events && !state.turn_events);
+
+        // 没有 7501 记录时收到 clear 不应干扰正在跑的 hook 会话。
+        apply_agent_event(&mut state, &hook(AgentEventKind::PromptSubmitted));
+        assert_eq!(state.phase, Phase::Thinking);
+        assert!(!apply_program_status(
+            &mut state,
+            &report(ProgramState::Clear)
+        ));
+        assert_eq!(state.phase, Phase::Thinking);
+        assert!(state.structured_events && state.turn_events);
+
+        // 纯 7501 会话遇到终端 RIS 复位时清掉状态和权威标记。
+        let mut ris_state = SessionState::default();
+        apply_program_status(
+            &mut ris_state,
+            &ProgramStatus {
+                kind: Some(ProgramBlockedKind::Permission),
+                ..report_msg(ProgramState::Blocked, "Allow?")
+            },
+        );
+        assert_eq!(ris_state.phase, Phase::AwaitingApproval);
+        assert!(apply_terminal_reset(&mut ris_state));
+        assert_eq!(ris_state.phase, Phase::Idle);
+        assert_eq!(ris_state.pending, None);
+        assert!(!ris_state.structured_events && !ris_state.turn_events);
+    }
+
+    #[test]
+    fn osc133_prompt_start_drops_active_states_keeps_finished_and_yields_to_new_hooks() {
+        // working / blocked / idle 在新提示符出现时清掉交还控制权。
+        for initial in [
+            ProgramState::Working,
+            ProgramState::Blocked,
+            ProgramState::Idle,
+        ] {
+            let mut state = SessionState::default();
+            apply_program_status(&mut state, &report(initial));
+            assert!(apply_prompt_start(&mut state), "{initial:?}");
+            assert!(state.program_status.is_none());
+            assert_eq!(state.phase, Phase::Idle);
+            assert!(!state.structured_events && !state.turn_events);
+        }
+
+        // done / error 跨提示符保留展示，同时让新起的 hook 会话接管，RIS 可彻底清掉。
+        let mut state = SessionState::default();
+        apply_program_status(&mut state, &report_msg(ProgramState::Done, "Deployed"));
+        assert!(!apply_prompt_start(&mut state));
+        assert_eq!(state.phase, Phase::Succeeded);
+        assert_eq!(state.pending, Some(PendingLine::Said("Deployed".into())));
+        assert!(state.structured_events && state.turn_events);
+
+        apply_agent_event(&mut state, &hook(AgentEventKind::PromptSubmitted));
+        assert!(state.program_status.is_none());
+        assert_eq!(state.phase, Phase::Thinking, "新 hook 会话接管相位");
+
+        let mut error_state = SessionState::default();
+        apply_program_status(&mut error_state, &report_msg(ProgramState::Error, "failed"));
+        assert!(!apply_prompt_start(&mut error_state));
+        assert_eq!(error_state.phase, Phase::Failed);
+        assert!(apply_terminal_reset(&mut error_state));
+        assert_eq!(error_state.phase, Phase::Idle);
+        assert!(!error_state.structured_events && !error_state.turn_events);
+    }
+
+    #[test]
+    fn late_title_event_under_program_status_does_not_clear_cli_exited() {
+        let mut state = SessionState {
+            cli_exited: true,
+            ..Default::default()
+        };
+        apply_program_status(&mut state, &report(ProgramState::Idle));
+        let mut title = hook(AgentEventKind::SessionTitleChanged);
+        title.conversation_title = Some("late title".into());
+        apply_agent_event(&mut state, &title);
+        assert!(state.cli_exited);
     }
 }

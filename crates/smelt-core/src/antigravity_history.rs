@@ -86,7 +86,7 @@ fn open_readonly(path: &Path) -> Option<rusqlite::Connection> {
 /// 读出索引表里属于 `want_cwd` 这个项目的会话。
 ///
 /// 过滤按 `workspace_uris` 做：它是一段 JSON 数组文本，形如
-/// `["file:///Users/x/proj"]`。这里不引 JSON 解析，直接比对解码后的路径集合。
+/// `["file:///Users/x/proj"]`。解析后比对本机路径集合。
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub fn list_conversations(override_dir: Option<&str>, want_cwd: &str) -> Vec<ConversationRow> {
     let Some(conn) = open_readonly(&summaries_db(override_dir)) else {
@@ -173,51 +173,43 @@ pub(crate) fn workspace_matches_in(
         .any(|path| style.same_path(path, want_cwd))
 }
 
-/// 从 `["file:///a/b", ...]` 这段文本里取出本地路径。
+/// 从 `["file:///a/b", ...]` 这段 JSON 数组文本里取出路径。
 ///
-/// 优先按 JSON 数组解，兼容路径里带逗号/空格和百分号编码；非 JSON 文本回退到按分隔符拆分。
+/// 解 JSON 数组（路径里的逗号、方括号、引号转义都由 JSON 管），每个 `file://` URI 交给 `url`
+/// 解析、再按 `style` 还原成那台机器的路径：Windows 盘符 `file:///E:/...`（含 `e%3A`）、
+/// `file://server/share` 的 UNC 路径都按 Windows 习惯写回反斜杠，本机是 macOS 也能测。
 pub fn workspace_uris_paths(workspace_uris: &str) -> Vec<String> {
     workspace_uris_paths_in(PathStyle::LOCAL, workspace_uris)
 }
 
 pub(crate) fn workspace_uris_paths_in(style: PathStyle, workspace_uris: &str) -> Vec<String> {
-    if let Ok(uris) = serde_json::from_str::<Vec<String>>(workspace_uris) {
-        return uris
-            .into_iter()
-            .filter_map(|uri| file_uri_to_path_in(style, uri.trim()))
-            .collect();
-    }
-    workspace_uris
-        .split(['[', ']', ',', '"'])
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .filter_map(|uri| file_uri_to_path_in(style, uri))
+    let Ok(uris) = serde_json::from_str::<Vec<String>>(workspace_uris) else {
+        return Vec::new();
+    };
+    uris.iter()
+        .filter_map(|uri| file_uri_to_path_in(style, uri.trim()))
         .collect()
 }
 
 fn file_uri_to_path_in(style: PathStyle, uri: &str) -> Option<String> {
-    let prefix = uri.get(..7)?;
-    if !prefix.eq_ignore_ascii_case("file://") {
+    let url = url::Url::parse(uri).ok()?;
+    if url.scheme() != "file" {
         return None;
     }
-    let mut rest = &uri[7..];
-    if rest
-        .get(..10)
-        .is_some_and(|host| host.eq_ignore_ascii_case("localhost/"))
-    {
-        rest = &rest[9..];
-    }
-    if rest.starts_with('/') {
-        let decoded = percent_decode(rest);
-        if style == PathStyle::Windows && is_uri_windows_drive(&decoded) {
-            return Some(decoded[1..].replace('/', "\\"));
+    let path = percent_encoding::percent_decode_str(url.path())
+        .decode_utf8()
+        .ok()?
+        .into_owned();
+    // `url` 按 WHATWG 规则把 `localhost` 主机归成空。
+    let host = url.host_str().filter(|host| !host.is_empty());
+    match (style, host) {
+        (PathStyle::Windows, None) if is_uri_windows_drive(&path) => {
+            Some(path[1..].replace('/', "\\"))
         }
-        return Some(decoded);
+        (PathStyle::Windows, Some(host)) => Some(format!(r"\\{host}{}", path.replace('/', "\\"))),
+        (_, None) => Some(path),
+        (PathStyle::Posix, Some(_)) => None,
     }
-    if style == PathStyle::Windows && !rest.is_empty() && !rest.eq_ignore_ascii_case("localhost") {
-        return Some(format!(r"\\{}", percent_decode(rest).replace('/', "\\")));
-    }
-    None
 }
 
 fn is_uri_windows_drive(path: &str) -> bool {
@@ -227,25 +219,6 @@ fn is_uri_windows_drive(path: &str) -> bool {
         && bytes[1].is_ascii_alphabetic()
         && bytes[2] == b':'
         && (bytes.len() == 3 || bytes[3] == b'/')
-}
-
-fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
-            if let Some(byte) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
 }
 
 // ===================== steps 正文 =====================
@@ -591,6 +564,14 @@ mod tests {
         let uris = r#"["file:///Users/a/one","file:///Users/a/two"]"#;
         assert!(workspace_matches(uris, "/Users/a/one"));
         assert!(workspace_matches(uris, "/Users/a/two"));
+    }
+
+    #[test]
+    fn workspace_路径支持逗号方括号与json转义() {
+        let uris = r#"["file:///Users/a/proj,v2","file:///Users/a/%5Bdraft%5D","file:///Users/a/sub\/dir"]"#;
+        assert!(workspace_matches(uris, "/Users/a/proj,v2"));
+        assert!(workspace_matches(uris, "/Users/a/[draft]"));
+        assert!(workspace_matches(uris, "/Users/a/sub/dir"));
     }
 
     #[test]

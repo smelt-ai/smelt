@@ -24,62 +24,37 @@ smelt-runtime-client = { path = "../smelt-runtime-client" }
 smelt-client-store = { path = "../smelt-client-store" }
 # 共享 GPUI 组件库（见它的 Cargo.toml 文件头注释）。
 smelt-ui = { path = "../smelt-ui" }
-smelt-plugin-api = { path = "../smelt-plugin-api", features = ["js"] }
-# 内置插件：只在 `plugin_host::install` 里登记，宿主别处不认识它们。
-smelt-agents = { path = "../plugins/agents" }
-smelt-archive = { path = "../plugins/archive" }
-smelt-automations = { path = "../plugins/automations" }
-smelt-buddies = { path = "../plugins/buddies" }
-smelt-capabilities = { path = "../plugins/capabilities" }
-smelt-conversation = { path = "../plugins/conversation" }
-smelt-desktop = { path = "../plugins/desktop" }
-smelt-files-ui = { path = "../plugins/files" }
-smelt-git-ui = { path = "../plugins/git" }
-smelt-history = { path = "../plugins/history" }
-smelt-ide = { path = "../plugins/ide" }
-smelt-launcher = { path = "../plugins/launcher" }
-smelt-language = { path = "../plugins/language" }
-smelt-layouts = { path = "../plugins/layouts" }
-smelt-machines = { path = "../plugins/machines" }
-smelt-maintenance = { path = "../plugins/maintenance" }
-smelt-notifications = { path = "../plugins/notifications" }
-smelt-resources = { path = "../plugins/resources" }
-smelt-sessions = { path = "../plugins/sessions" }
-smelt-skills = { path = "../plugins/skills" }
-smelt-terminal = { path = "../plugins/terminal" }
-smelt-themes = { path = "../plugins/themes" }
-smelt-updater-ui = { path = "../plugins/updater" }
-tokio = { version = "1", features = ["full"] }
+smelt-terminal = { path = "../smelt-terminal" }
+smelt-plugin-api = { path = "../smelt-plugin-api" }
+smelt-nsh = { path = "../smelt-nsh" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# 插件的 console 输出是 gpui-shell 发的 tracing 事件，接到 app.log（见 src/plugins/log.rs）。
+# NSH 插件的 console 输出和运行时告警走 log crate，iroh 走 tracing，一起接到 app.log（见 src/plugins/log.rs）。
+log = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
-reqwest = { version = "0.13", features = ["json"] }
 url = "2"
 anyhow = "1"
-dirs = "5"
 uuid = { version = "1", features = ["v4"] }
 futures-util = { version = "0.3", features = ["sink", "async-await"] }
-# GPUI 用上游 gpui-kit 钉的 crates.io 快照 gpui-pre =0.3.12。
+# GPUI 用 gpui-kit 钉的 GPUI Fast（gpui-fast =0.1.19）：保留模式，一个视图变了只重画它自己，
+# 窗口其余部分沿用上一帧，侧栏一个动画不会拖着整窗每帧重画。gpui-kit 的每个依赖都开
+# `gpui-fast` 特性跟它走；gpui-kit 仍会把默认的 gpui-pre 一起编进来（特性只能叠加），用不上。
 # gpui-kit 各 crate 跟 longbridge/gpui-kit 上游 main，不用 fork。两边必须同一套，
 # 不能只改其中一个。gpui_platform 开 runtime_shaders 免装完整 Xcode。
-gpui = { package = "gpui-pre", version = "=0.3.12" }
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui = { package = "gpui-fast", version = "=0.1.19" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "82f1c1dc1f2970d93f1adfe10cbd772516c21ce7", features = ["gpui-fast"] }
+gpui_platform = { package = "gpui-fast-platform", version = "=0.1.19", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 # 调试 HUD（Cmd+Shift+F）：帧耗时取自 GPUI 自己的帧追踪，不靠连续重绘去量。
-gpui-fps = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b" }
-# 插件：gpui-shell 脚本应用（见 src/plugins）。JS 写界面，GPUI 原生绘制，
-# 引擎 QuickJS 跑在 UI 线程。脚本能用的控件是 smelt-ui 的（`smelt_plugin_api::js::ui`），
-# 不开 `components`：那会带进 gpui-component 和它的控件目录。
-# 不开默认的 `webview`：它会把整个运行时切到 gpui-fast，而 smelt 用 gpui-pre。
-gpui-shell = { git = "https://github.com/longbridge/gpui-kit", rev = "69dab1accf3570bf3c0974bc32241bb031cc0b1b", default-features = false, features = ["quickjs"] }
+gpui-fps = { git = "https://github.com/longbridge/gpui-kit", rev = "82f1c1dc1f2970d93f1adfe10cbd772516c21ce7", features = ["gpui-fast"] }
 libc = "0.2"
 smol = "2"  # 定时器、channel
 # 盯着 App 里的 smeltd：重编译、覆盖安装后查一次守护是否落后（见 Workspace::start_daemon_outdated_watch）。
 notify = "8"
-# 菜单栏图标按颜色重新着色（见 src/status_item.rs 的 `tint_png`）。
+# 菜单栏图标按颜色重新着色与 SVG 栅格化（见 src/status_item.rs）。
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+resvg = { version = "0.46", default-features = false }
+tiny-skia = "0.11"
 # macOS：菜单栏 status item 需要直接操作 AppKit（GPUI 没有 status item 概念），
 # 用 objc crate 声明 Objective-C 类做 target-action。系统通知使用现代、带异步回执的
 # UserNotifications API；objc2 相关版本与现有依赖树对齐。
@@ -97,7 +72,7 @@ raw-window-handle = "0.6"
 [dev-dependencies]
 # 测试要用运行时的归约器和存储层校验格式；正式代码不依赖它们（设计文档 P1）。
 smelt-store = { path = "../smelt-store" }
-gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
+gpui = { package = "gpui-fast", version = "=0.1.19", features = ["test-support"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 
 # smelt-core 是 smeltd 的进程和套接字层，第 1 步不移植到 Windows。测试里用到它的
@@ -107,7 +82,7 @@ smelt-core = { path = "../smelt-core" }
 
 # 插件资源的渲染测试离屏真画一帧、取像素（同 smelt-ui 的快照）。
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-gpui_apple = { package = "gpui-pre-apple", version = "=0.3.12", features = ["font-kit", "runtime_shaders", "test-support"] }
+gpui_apple = { package = "gpui-fast-apple", version = "=0.1.19", features = ["font-kit", "runtime_shaders", "test-support"] }
 
 # Windows 11 的 Mica 要按窗口设深浅，系统版本要绕过兼容层读真的（见 window_backdrop.rs）。
 [target.'cfg(windows)'.dependencies]

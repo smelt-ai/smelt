@@ -377,7 +377,7 @@ class FrbBackend implements Backend {
     String runtimeId, {
     required String root,
     required String dir,
-  }) => files.listProjectDir(runtimeId: runtimeId, root: root, dir: dir);
+  }) => files.listProjectDir(runtimeId: runtimeId, dir: dir);
 
   @override
   Future<FileSearch> searchProject(

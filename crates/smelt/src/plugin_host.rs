@@ -11,16 +11,10 @@ use smelt_plugin_api::{self as api, CommandSpec, HostEvent, Machine, RuntimeKey}
 use smelt_runtime_client::RuntimeClient;
 
 use crate::dir_picker::PathPick;
-use crate::{DaemonStates, MainWindow, Workspace, current_workspace, runtimes, status_item};
+use crate::{DaemonStates, MainWindow, Workspace, runtimes, status_item};
 
 struct SmeltHost {
     current: Rc<RefCell<Option<MainWindow>>>,
-}
-
-impl SmeltHost {
-    fn workspace(&self) -> Option<Entity<Workspace>> {
-        current_workspace(&self.current)?.upgrade()
-    }
 }
 
 impl api::Host for SmeltHost {
@@ -73,16 +67,13 @@ impl api::Host for SmeltHost {
 
     fn window_active(&self, cx: &App) -> bool {
         // 应用在不在前台现问：全屏窗口切到别的 Space 后不再出帧，窗口也还是 key，只有应用级的
-        // 状态跟得上。窗口是不是 key 随激活事件记下，不靠出帧。
-        status_item::is_app_active()
-            && self
-                .workspace()
-                .is_some_and(|workspace| workspace.read(cx).main_window_key)
+        // 状态跟得上。窗口是不是 key 随激活事件记在全局，不读 Workspace 实体，避免工作台更新
+        // 期间（如 sync_shell_view -> MainShell::publish）二次借用 panic。
+        status_item::is_app_active() && main_window_key(cx)
     }
 
     fn overlay_open(&self, cx: &App) -> bool {
-        self.workspace()
-            .is_some_and(|workspace| workspace.read(cx).main_overlay_open())
+        main_overlay_open(cx)
     }
 
     fn main_window(&self, _cx: &App) -> Option<AnyWindowHandle> {
@@ -122,6 +113,21 @@ impl api::Host for SmeltHost {
             .received
             .get(machine)
             .cloned()
+    }
+
+    fn session_attention(
+        &self,
+        machine: &RuntimeKey,
+        cx: &App,
+    ) -> Option<Vec<api::model::daemon_state::SessionAttention>> {
+        DaemonStates::attention(machine, cx)
+    }
+
+    fn sessions_revision(&self, machine: &RuntimeKey, cx: &App) -> Option<(u64, u64)> {
+        Some((
+            crate::WorkspaceDirectoriesGlobal::revision(machine, cx),
+            DaemonStates::revision(machine, cx),
+        ))
     }
 
     fn notification_permission(&self, _cx: &App) -> api::NotificationPermission {
@@ -197,7 +203,7 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
     let views = workspace.clone();
     let pages = workspace.clone();
     let shown = workspace.clone();
-    vec![
+    let commands = vec![
         // 开窗口、开视图、开页面只改人眼前看到的，开给命令行：智能体写完插件能把它亮出来。
         api::SHOW_MAIN_WINDOW
             .spec(
@@ -243,12 +249,28 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
                 Ok(())
             },
         ),
-        api::OPEN_IN_TEXT_EDITOR.spec(api::text!("command.open_in_text_editor"), |args, _, _| {
-            crate::system_open::open_in_system_text_editor(&args.path)
-        }),
-        api::OPEN_IN_FILE_MANAGER.spec(api::text!("command.open_in_file_manager"), |args, _, _| {
-            crate::system_open::open_in_file_manager(&args.path)
-        }),
+        api::OPEN_IN_TEXT_EDITOR.spec_async(
+            api::text!("command.open_in_text_editor"),
+            |args, _, cx| {
+                cx.spawn(async move |_| {
+                    smelt_sys::blocking::run(move || {
+                        crate::system_open::open_in_system_text_editor(&args.path)
+                    })
+                    .await
+                })
+            },
+        ),
+        api::OPEN_IN_FILE_MANAGER.spec_async(
+            api::text!("command.open_in_file_manager"),
+            |args, _, cx| {
+                cx.spawn(async move |_| {
+                    smelt_sys::blocking::run(move || {
+                        crate::system_open::open_in_file_manager(&args.path)
+                    })
+                    .await
+                })
+            },
+        ),
         api::PICK_PATHS.spec_async(
             api::text!("command.pick_paths"),
             move |request, window, cx| {
@@ -297,7 +319,7 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
                     if api::page(&args.page, cx).is_none() {
                         return Ok(false);
                     }
-                    Ok(workspace.navigate(Some(args.page), window, cx))
+                    Ok(workspace.navigate(args.page, window, cx))
                 })
             })
             .callable_from_cli(),
@@ -363,7 +385,8 @@ pub(crate) fn app_commands(workspace: &WorkspaceRef) -> Vec<CommandSpec> {
             crate::runtime_events::probe_remotes(cx);
             Ok(())
         }),
-    ]
+    ];
+    commands
 }
 
 /// 连接表里的一台远程机器的 id。本机不在表里，移除、改名这些都不适用。
@@ -389,30 +412,6 @@ pub(crate) fn install(current: Rc<RefCell<Option<MainWindow>>>, cx: &mut App) {
         api::emit(HostEvent::SessionsChanged, cx)
     })
     .detach();
-    // 语言最先：用户选的界面语言在别的插件建东西之前换上。
-    smelt_language::register(cx);
-    // 会话插件起来就要用终端、对话的视图和智能体配置，这三个排在它前面。
-    smelt_terminal::register(cx);
-    smelt_conversation::register(cx);
-    smelt_agents::register(cx);
-    smelt_sessions::register(cx);
-    smelt_archive::register(cx);
-    smelt_automations::register(cx);
-    smelt_buddies::register(cx);
-    smelt_capabilities::register(cx);
-    smelt_desktop::register(cx);
-    smelt_files_ui::register(cx);
-    smelt_git_ui::register(cx);
-    smelt_history::register(cx);
-    smelt_ide::register(cx);
-    smelt_launcher::register(cx);
-    smelt_layouts::register(cx);
-    smelt_machines::register(cx);
-    smelt_maintenance::register(cx);
-    smelt_notifications::register(cx);
-    smelt_resources::register(cx);
-    smelt_skills::register(cx);
-    smelt_updater_ui::register(cx);
 }
 
 /// 此刻看得见的视图。摆视图的地方各报各的：主窗口报开着的那页里露着的视图（含出口里
@@ -442,20 +441,25 @@ pub(crate) fn view_shown(id: &str, cx: &App) -> bool {
 
 /// 主窗口里看得见的视图；主窗口关了报空的。
 pub(crate) fn set_window_shown(shown: HashSet<String>, cx: &mut App) {
-    let views = cx.default_global::<ShownViews>();
-    if views.window != shown {
-        views.window = shown;
-        api::emit(HostEvent::ShownViewsChanged, cx);
+    // 先只读比较：可写地取全局（`default_global`）就算它变了，读过它的视图都要重画、观察者都
+    // 收到通知，没变不能碰。
+    let current = cx.try_global::<ShownViews>();
+    if current.map_or(shown.is_empty(), |views| views.window == shown) {
+        return;
     }
+    cx.default_global::<ShownViews>().window = shown;
+    api::emit(HostEvent::ShownViewsChanged, cx);
 }
 
 /// 设置停着的那一页（设置页视图的 id）；设置视图放掉了报 `None`。
 pub(crate) fn set_settings_shown(page: Option<SharedString>, cx: &mut App) {
-    let views = cx.default_global::<ShownViews>();
-    if views.settings != page {
-        views.settings = page;
-        api::emit(HostEvent::ShownViewsChanged, cx);
+    // 同 `set_window_shown`：没变不碰全局。
+    let current = cx.try_global::<ShownViews>();
+    if current.map_or(page.is_none(), |views| views.settings == page) {
+        return;
     }
+    cx.default_global::<ShownViews>().settings = page;
+    api::emit(HostEvent::ShownViewsChanged, cx);
 }
 
 /// 摆在各页眼下装的布局里的视图（`workspace_layout::sync_laid_out_views` 算），插件经
@@ -467,11 +471,100 @@ impl Global for LaidOutViews {}
 
 /// 换一份摆着的视图；变了发 [`HostEvent::LaidOutViewsChanged`]。
 pub(crate) fn set_laid_out(views: HashSet<String>, cx: &mut App) {
-    let laid_out = cx.default_global::<LaidOutViews>();
-    if laid_out.0 != views {
-        laid_out.0 = views;
-        api::emit(HostEvent::LaidOutViewsChanged, cx);
+    // 同 `set_window_shown`：没变不碰全局。
+    let current = cx.try_global::<LaidOutViews>();
+    if current.map_or(views.is_empty(), |laid_out| laid_out.0 == views) {
+        return;
     }
+    cx.default_global::<LaidOutViews>().0 = views;
+    api::emit(HostEvent::LaidOutViewsChanged, cx);
+}
+
+/// 主窗口给 [`SmeltHost`] 读的两份状态：是不是 key window、有没有开宿主遮罩层。
+///
+/// 独立存全局而不是让 `SmeltHost` 去读 `Workspace` 实体：主壳（`MainShell::publish`）和插件
+/// 视图在 `Workspace` 正被借用期间（如 `sync_shell_view`、`sync_outlet`、`open_view`）就会查
+/// 这两个状态，再借工作台实体会触发 GPUI 的 `double_lease_panic`。按 `owner` 认当前主窗口，
+/// 避免关窗重开时旧工作台滞后释放把新窗口的状态清掉。
+#[derive(Default)]
+struct MainWindowState {
+    owner: Option<EntityId>,
+    window_key: bool,
+    overlay_open: bool,
+}
+
+impl Global for MainWindowState {}
+
+fn main_window_key(cx: &App) -> bool {
+    cx.try_global::<MainWindowState>()
+        .is_some_and(|state| state.window_key)
+}
+
+fn main_overlay_open(cx: &App) -> bool {
+    cx.try_global::<MainWindowState>()
+        .is_some_and(|state| state.overlay_open)
+}
+
+/// 主窗口建好时接管状态：写入初始 key 状态并清掉上一扇窗口可能遗留的遮罩状态。
+pub(crate) fn attach_main_window(owner: EntityId, window_key: bool, cx: &mut App) {
+    let had_overlay = main_overlay_open(cx);
+    cx.set_global(MainWindowState {
+        owner: Some(owner),
+        window_key,
+        overlay_open: false,
+    });
+    if had_overlay {
+        api::emit(HostEvent::OverlayChanged, cx);
+    }
+}
+
+/// 同步主窗口是不是 key window；旧工作台或值未变时不动全局（`prepare_frame` 每帧都走这里）。
+pub(crate) fn set_main_window_key(owner: EntityId, window_key: bool, cx: &mut App) {
+    let current = cx.try_global::<MainWindowState>();
+    if current.is_some_and(|state| state.owner.is_some() && state.owner != Some(owner)) {
+        return;
+    }
+    if current.is_some_and(|state| state.owner == Some(owner) && state.window_key == window_key) {
+        return;
+    }
+    let state = cx.default_global::<MainWindowState>();
+    state.owner = Some(owner);
+    state.window_key = window_key;
+}
+
+/// 同步主窗口里宿主遮罩层的开关；变了发 [`HostEvent::OverlayChanged`]。
+pub(crate) fn set_overlay_open(owner: EntityId, open: bool, cx: &mut App) {
+    let current = cx.try_global::<MainWindowState>();
+    if current.is_some_and(|state| state.owner.is_some() && state.owner != Some(owner)) {
+        return;
+    }
+    let changed = current.map_or(open, |state| state.overlay_open != open);
+    if !changed && (current.is_some_and(|state| state.owner == Some(owner)) || !open) {
+        return;
+    }
+    let state = cx.default_global::<MainWindowState>();
+    state.owner = Some(owner);
+    state.overlay_open = open;
+    if changed {
+        api::emit(HostEvent::OverlayChanged, cx);
+    }
+}
+
+/// 主窗口释放时清理它持有的状态。若已经重开了新的主窗口，旧工作台滞后释放时不覆盖新窗口，
+/// 返回 `false` 让调用方也跳过清空视图可见状态。
+pub(crate) fn release_main_window(owner: EntityId, cx: &mut App) -> bool {
+    let Some(current) = cx.try_global::<MainWindowState>() else {
+        return true;
+    };
+    if current.owner != Some(owner) {
+        return false;
+    }
+    let had_overlay = current.overlay_open;
+    cx.set_global(MainWindowState::default());
+    if had_overlay {
+        api::emit(HostEvent::OverlayChanged, cx);
+    }
+    true
 }
 
 impl Workspace {
@@ -487,11 +580,14 @@ impl Workspace {
             window,
             |this, _, event: &HostEvent, window, cx| match event {
                 HostEvent::ViewsChanged => {
-                    // 没有首页时兜底那页摆的视图跟着视图登记变。
-                    crate::workspace_layout::sync_laid_out_views(cx);
                     this.reload_layout(window, cx);
                     this.sync_outlet(window, cx);
+                    this.sync_nsh_settings_page(cx);
                     cx.notify();
+                }
+                HostEvent::LocaleChanged => {
+                    this.sync_nsh_chrome(cx);
+                    this.sync_nsh_settings_page(cx);
                 }
                 HostEvent::LayoutsChanged | HostEvent::PagesChanged => this.sync_pages(window, cx),
                 HostEvent::ThemesChanged => {
@@ -510,10 +606,156 @@ impl Workspace {
     /// 遮罩层开了或关了就告诉插件：画着原生网页视图的插件要让开。插件视图在面板里是缓存着
     /// 画的，工作台重画不会带着它重画，只能靠事件。
     pub(crate) fn note_overlay(&mut self, cx: &mut Context<Self>) {
-        let open = self.main_overlay_open();
-        if self.plugin_overlay_open != open {
-            self.plugin_overlay_open = open;
-            api::emit(HostEvent::OverlayChanged, cx);
+        set_overlay_open(cx.entity_id(), self.main_overlay_open(), cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashSet;
+    use std::rc::Rc;
+
+    use gpui::AppContext as _;
+    use smelt_plugin_api::{self as api, HostEvent};
+
+    // 不 `use super::*`：上面 `use gpui::*` 带进来的 `gpui::test` 会把 `#[test]` 解析成它自己，
+    // 无限展开。
+    use super::{
+        LaidOutViews, MainWindowState, ShownViews, SmeltHost, attach_main_window, main_window_key,
+        release_main_window, set_laid_out, set_main_window_key, set_overlay_open,
+        set_settings_shown, set_window_shown, view_shown,
+    };
+
+    /// 没变不碰全局：工作台每次同步布局都会把摆着、露着的视图重报一遍，可写地取一下就算
+    /// 它变了，读过它的视图、观察者都会被惊动。
+    #[gpui::test]
+    fn reporting_the_same_views_leaves_the_globals_untouched(cx: &mut gpui::TestAppContext) {
+        let shown = Rc::new(Cell::new(0));
+        let laid_out = Rc::new(Cell::new(0));
+        cx.update(|cx| {
+            let shown = shown.clone();
+            cx.observe_global::<ShownViews>(move |_| shown.set(shown.get() + 1))
+                .detach();
+            let laid_out = laid_out.clone();
+            cx.observe_global::<LaidOutViews>(move |_| laid_out.set(laid_out.get() + 1))
+                .detach();
+        });
+        let views = HashSet::from(["a/list".to_string()]);
+        for _ in 0..2 {
+            cx.update(|cx| {
+                set_window_shown(views.clone(), cx);
+                set_settings_shown(Some("a/settings".into()), cx);
+                set_laid_out(views.clone(), cx);
+            });
         }
+        assert_eq!(shown.get(), 1, "露着的视图第二次报的和第一次一样");
+        assert_eq!(laid_out.get(), 1, "摆着的视图第二次报的和第一次一样");
+        assert!(cx.update(|cx| view_shown("a/list", cx)));
+    }
+
+    /// 宿主状态从全局读，工作台实体正被借用更新期间查 `window_active` / `overlay_open`
+    /// 不会二次借用；重复报相同值不动全局；重开主窗口后旧工作台滞后释放不覆盖新窗口。
+    #[gpui::test]
+    fn main_window_state_is_readable_during_entity_update_and_guarded_by_owner(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state_writes = Rc::new(Cell::new(0));
+        let overlay_events = Rc::new(Cell::new(0));
+        let (owner_a, owner_b) = cx.update(|cx| {
+            api::install(
+                SmeltHost {
+                    current: Rc::new(RefCell::new(None)),
+                },
+                cx,
+            );
+            let writes = state_writes.clone();
+            cx.observe_global::<MainWindowState>(move |_| writes.set(writes.get() + 1))
+                .detach();
+            let events = overlay_events.clone();
+            cx.subscribe(&api::events(cx), move |_, event: &HostEvent, _| {
+                if matches!(event, HostEvent::OverlayChanged) {
+                    events.set(events.get() + 1);
+                }
+            })
+            .detach();
+            (cx.new(|_| ()), cx.new(|_| ()))
+        });
+
+        owner_a.update(cx, |_, cx| {
+            let id = cx.entity_id();
+            attach_main_window(id, true, cx);
+            assert!(main_window_key(cx));
+            assert!(!api::host(cx).overlay_open(cx));
+            // 即使实体正被可变借用，调 window_active 也不二次借用。
+            let _ = api::host(cx).window_active(cx);
+
+            set_main_window_key(id, true, cx);
+            set_overlay_open(id, false, cx);
+        });
+        assert_eq!(
+            state_writes.get(),
+            1,
+            "重复报相同的 key/overlay 不应再触全局"
+        );
+        assert_eq!(
+            overlay_events.get(),
+            0,
+            "遮罩层始终关闭，不应发 OverlayChanged"
+        );
+
+        owner_a.update(cx, |_, cx| {
+            let id = cx.entity_id();
+            set_overlay_open(id, true, cx);
+            assert!(api::host(cx).overlay_open(cx));
+            set_overlay_open(id, true, cx);
+        });
+        assert_eq!(state_writes.get(), 2);
+        assert_eq!(overlay_events.get(), 1);
+
+        // 重开新主窗口：接管所有权，清掉旧窗口遗留的遮罩状态并通知插件。
+        owner_b.update(cx, |_, cx| {
+            attach_main_window(cx.entity_id(), true, cx);
+            assert!(main_window_key(cx));
+            assert!(!api::host(cx).overlay_open(cx));
+        });
+        assert_eq!(overlay_events.get(), 2);
+
+        // 旧工作台滞后更新和释放不得覆盖新主窗口。
+        cx.update(|cx| {
+            let old = owner_a.entity_id();
+            set_main_window_key(old, false, cx);
+            set_overlay_open(old, true, cx);
+            assert!(
+                !release_main_window(old, cx),
+                "旧工作台释放不应返回 true 清掉新主窗口的视图状态"
+            );
+            assert!(main_window_key(cx));
+            assert!(!api::host(cx).overlay_open(cx));
+        });
+
+        // 当前主窗口在遮罩开着时释放：清空状态并补发一次 OverlayChanged。
+        cx.update(|cx| {
+            let active = owner_b.entity_id();
+            set_overlay_open(active, true, cx);
+            assert!(api::host(cx).overlay_open(cx));
+            assert!(release_main_window(active, cx));
+            assert!(!main_window_key(cx));
+            assert!(!api::host(cx).overlay_open(cx));
+        });
+        assert_eq!(overlay_events.get(), 4);
+    }
+
+    #[test]
+    fn smelt_host_never_reads_workspace_entity() {
+        let src = include_str!("plugin_host.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("plugin_host.rs 含测试模块");
+        assert!(
+            !prod.contains("workspace.read("),
+            "SmeltHost 必须只读全局状态，禁止 workspace.read(cx) 以免更新期间二次借用 panic"
+        );
     }
 }

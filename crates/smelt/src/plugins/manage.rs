@@ -1,19 +1,27 @@
-//! 用户插件的导入和删除：只动 `~/.smelt/plugins/`，App 自带的插件不归这里管。
+//! 用户插件的导入和删除：只动 `~/.smelt/plugins/`，App 自带的插件不归这里管；用户导入或 fork
+//! 与自带插件同 `id` 的目录后会覆写自带版（删掉用户目录即恢复自带版）。
 //!
 //! 导入是把一个插件目录复制进来，之后和原目录无关。删除是挪进回收目录，不直接抹掉。
-//! 两者都只改磁盘；工作台盯着插件目录，变了自己重挂（见 `watch`）。都是阻塞 IO，放后台线程调。
+//! 两者都只改磁盘；主壳盯着插件目录，变了自己重编热重载。都是阻塞 IO，放后台线程调。
 
 use rust_i18n::t;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use gpui_shell::plugin::{MANIFEST_FILE, PluginManifest};
+use smelt_nsh::{MANIFEST_FILE, PluginManifest};
 
 use super::PLUGIN_DIR;
 
-/// 复制时不带的条目：版本库，以及 smelt 加载插件时给编辑器生成的文件（到新位置会重新生成）。
-const SKIPPED_AT_ROOT: &[&str] = &[".git", "gpui-kit.d.ts", "jsconfig.json"];
+/// 复制时不带的条目：版本库、依赖缓存、生成文件与预编译字节码。
+const SKIPPED_AT_ROOT: &[&str] = &[
+    ".git",
+    ".nsh",
+    "node_modules",
+    "tsconfig.json",
+    "bundle.nshc",
+    "bundle.meta.json",
+];
 
 /// 用户插件目录 `~/.smelt/plugins/`。
 pub(crate) fn user_plugin_dir() -> Option<PathBuf> {
@@ -25,29 +33,52 @@ fn trash_dir() -> Option<PathBuf> {
     smelt_paths::smelt_home().map(|home| home.join("trash").join(PLUGIN_DIR))
 }
 
+fn read_import_manifest(source: &Path) -> Result<PluginManifest, String> {
+    if !source.join(MANIFEST_FILE).is_file() {
+        return Err(t!("plugins.no_manifest", file = MANIFEST_FILE).into_owned());
+    }
+    PluginManifest::read(source)
+        .map_err(|error| t!("plugins.bad_manifest", error = error).into_owned())
+}
+
 /// 把 `source` 目录里的插件复制进用户插件目录。返回插件名。
 pub(crate) fn import(source: &Path) -> Result<String, String> {
     let plugins = user_plugin_dir().ok_or_else(|| t!("plugins.no_data_dir").into_owned())?;
-    import_into(source, &plugins).map(|manifest| manifest.name().to_string())
+    let manifest = read_import_manifest(source)?;
+    start_override(&plugins, &manifest.id)?;
+    import_into(source, &plugins).map(|manifest| manifest.name)
+}
+
+/// 用户目录里要新出现一份覆写 `id` 的插件：丢掉以前的覆写留下的数据，新覆写版第一次用库时
+/// 从自带版重新复制（见 `smelt_plugin_api::override_store`）。不是自带插件的 id、或者用户
+/// 目录里已经有它（覆写版正在用那份数据），什么都不做。要在插件落进用户目录之前调：落进去
+/// 就会被加载、打开库。
+pub(super) fn start_override(plugins: &Path, id: &str) -> Result<(), String> {
+    let overrides_builtin =
+        super::builtin::dir().is_some_and(|dir| installed_root(dir, id).is_some());
+    if !overrides_builtin || installed_root(plugins, id).is_some() {
+        return Ok(());
+    }
+    smelt_plugin_api::remove_override_data(id).map_err(|error| error.to_string())
 }
 
 /// 把用户插件目录里的 `root` 挪进回收目录。
 pub(crate) fn uninstall(root: &Path) -> Result<(), String> {
     let plugins = user_plugin_dir().ok_or_else(|| t!("plugins.no_data_dir").into_owned())?;
     let trash = trash_dir().ok_or_else(|| t!("plugins.no_data_dir").into_owned())?;
-    uninstall_into(root, &plugins, &trash).map(|_| ())
+    uninstall_into(root, &plugins, super::builtin::dir(), &trash).map(|_| ())
 }
 
 fn import_into(source: &Path, plugins: &Path) -> Result<PluginManifest, String> {
-    let manifest = PluginManifest::read(source).map_err(|error| {
-        if source.join(MANIFEST_FILE).is_file() {
-            t!("plugins.bad_manifest", error = error).into_owned()
-        } else {
-            t!("plugins.no_manifest", file = MANIFEST_FILE).into_owned()
+    let manifest = read_import_manifest(source)?;
+    if manifest.is_layout_only() {
+        for layout in &manifest.layouts {
+            if !source.join(&layout.file).is_file() {
+                return Err(t!("plugins.no_entry", entry = layout.file).into_owned());
+            }
         }
-    })?;
-    if !source.join(manifest.entry()).is_file() {
-        return Err(t!("plugins.no_entry", entry = manifest.entry()).into_owned());
+    } else if !source.join(&manifest.entry).is_file() {
+        return Err(t!("plugins.no_entry", entry = manifest.entry).into_owned());
     }
 
     fs::create_dir_all(plugins)
@@ -57,18 +88,18 @@ fn import_into(source: &Path, plugins: &Path) -> Result<PluginManifest, String> 
     if canonical_source.starts_with(&canonical_plugins) {
         return Err(t!("plugins.already_inside").into_owned());
     }
-    if let Some(existing) = installed_root(plugins, manifest.id()) {
+    if let Some(existing) = installed_root(plugins, &manifest.id) {
         return Err(t!("plugins.duplicate_id", path = existing.display()).into_owned());
     }
 
-    // id 只含小写字母、数字和 `.-_`，不以点开头，直接当目录名。
-    let target = plugins.join(manifest.id());
+    // id 只含合法目录名字符，不以点开头，直接当目录名。
+    let target = plugins.join(&manifest.id);
     if fs::symlink_metadata(&target).is_ok() {
         return Err(t!("plugins.target_exists", path = target.display()).into_owned());
     }
     // 先复制到点开头的暂存目录（发现插件时跳过它），完整了再一次改名到位：
     // 复制到一半失败或重新加载，都不会出现一个半截的插件。
-    let staging = plugins.join(format!(".importing-{}", manifest.id()));
+    let staging = plugins.join(format!(".importing-{}", manifest.id));
     if fs::symlink_metadata(&staging).is_ok() {
         fs::remove_dir_all(&staging)
             .map_err(|error| t!("plugins.cleanup_failed", error = error).into_owned())?;
@@ -81,8 +112,8 @@ fn import_into(source: &Path, plugins: &Path) -> Result<PluginManifest, String> 
     Ok(manifest)
 }
 
-/// 用户插件目录里 id 为 `id` 的插件。
-fn installed_root(plugins: &Path, id: &str) -> Option<PathBuf> {
+/// 插件目录里 id 为 `id` 的插件。
+pub(super) fn installed_root(plugins: &Path, id: &str) -> Option<PathBuf> {
     fs::read_dir(plugins)
         .ok()?
         .flatten()
@@ -92,23 +123,46 @@ fn installed_root(plugins: &Path, id: &str) -> Option<PathBuf> {
                 .file_name()
                 .is_some_and(|name| name.to_string_lossy().starts_with('.'))
         })
-        .find(|root| PluginManifest::read(root).is_ok_and(|manifest| manifest.id() == id))
+        .find(|root| PluginManifest::read(root).is_ok_and(|manifest| manifest.id == id))
+}
+
+/// 复制自带插件源码供用户修改：跳过版本库/缓存/预编译字节码以及单测目录与 `.test.` 文件。
+pub(super) fn copy_plugin_source(from: &Path, to: &Path) -> io::Result<()> {
+    copy_tree_filtered(from, to, true, true)
 }
 
 /// 复制目录树。软链不复制：插件只能读主目录，带进一条指向别处的链接，不是坏掉就是越界。
 fn copy_tree(from: &Path, to: &Path, root: bool) -> io::Result<()> {
-    fs::create_dir(to)?;
+    copy_tree_filtered(from, to, root, false)
+}
+
+fn copy_tree_filtered(from: &Path, to: &Path, root: bool, fork_mode: bool) -> io::Result<()> {
+    if !to.exists() {
+        fs::create_dir(to)?;
+    }
     for entry in fs::read_dir(from)? {
         let entry = entry?;
         let name = entry.file_name();
+        let name_str = name.to_string_lossy();
         if root && SKIPPED_AT_ROOT.iter().any(|skipped| name == *skipped) {
             continue;
         }
         // `DirEntry::file_type` 不跟随软链。
         let file_type = entry.file_type()?;
+        if fork_mode {
+            if name_str.starts_with('.') {
+                continue;
+            }
+            if file_type.is_dir() && name_str == "tests" {
+                continue;
+            }
+            if file_type.is_file() && name_str.contains(".test.") {
+                continue;
+            }
+        }
         let target = to.join(&name);
         if file_type.is_dir() {
-            copy_tree(&entry.path(), &target, false)?;
+            copy_tree_filtered(&entry.path(), &target, false, fork_mode)?;
         } else if file_type.is_file() {
             fs::copy(entry.path(), &target)?;
         }
@@ -117,10 +171,19 @@ fn copy_tree(from: &Path, to: &Path, root: bool) -> io::Result<()> {
 }
 
 /// 返回插件在回收目录里的新位置。
-fn uninstall_into(root: &Path, plugins: &Path, trash: &Path) -> Result<PathBuf, String> {
+fn uninstall_into(
+    root: &Path,
+    plugins: &Path,
+    builtin: Option<&Path>,
+    trash: &Path,
+) -> Result<PathBuf, String> {
     // 只认用户插件目录的直接子项：App 自带的、仓库里的插件都不能从这里删。
     if root.parent() != Some(plugins) {
         return Err(t!("plugins.only_user").into_owned());
+    }
+    let dependents = dependents_of(root, plugins, builtin);
+    if !dependents.is_empty() {
+        return Err(t!("plugins.still_required", plugins = dependents.join(", ")).into_owned());
     }
     let name = root
         .file_name()
@@ -138,6 +201,51 @@ fn uninstall_into(root: &Path, plugins: &Path, trash: &Path) -> Result<PathBuf, 
     fs::rename(root, &target)
         .map_err(|error| t!("plugins.delete_failed", error = error).into_owned())?;
     Ok(target)
+}
+
+/// 删掉 `root` 这个共享模块插件后会编不过的插件（名字）：清单 `requires` 列着它的模块名的。
+/// 它覆写的是同一模块名的自带插件时，删了回到自带版，没人受影响。不是共享模块、清单读不了的，
+/// 也没人依赖。用户插件顶替了同 id 的自带插件时，只看用户那份。
+fn dependents_of(root: &Path, plugins: &Path, builtin: Option<&Path>) -> Vec<String> {
+    let Ok(manifest) = PluginManifest::read(root) else {
+        return Vec::new();
+    };
+    let Some(spec) = manifest.module else {
+        return Vec::new();
+    };
+    let manifests_in = |dir: &Path| -> Vec<(PathBuf, PluginManifest)> {
+        fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                !path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+            })
+            .filter_map(|path| {
+                PluginManifest::read(&path)
+                    .ok()
+                    .map(|manifest| (path, manifest))
+            })
+            .collect()
+    };
+    let user = manifests_in(plugins);
+    let builtin = builtin.map(manifests_in).unwrap_or_default();
+    let restores_builtin = builtin
+        .iter()
+        .any(|(_, other)| other.id == manifest.id && other.module.as_ref() == Some(&spec));
+    if restores_builtin {
+        return Vec::new();
+    }
+    let shadowed = |id: &str| user.iter().any(|(_, other)| other.id == id);
+    user.iter()
+        .filter(|(path, _)| path != root)
+        .chain(builtin.iter().filter(|(_, other)| !shadowed(&other.id)))
+        .filter(|(_, other)| other.requires.contains(&spec))
+        .map(|(_, other)| other.name.clone())
+        .collect()
 }
 
 #[cfg(test)]
@@ -173,9 +281,12 @@ mod tests {
         fn plugin(&self, relative: &str, id: &str) -> PathBuf {
             self.write(
                 &format!("{relative}/{MANIFEST_FILE}"),
-                &format!(r#"{{"id":"{id}","name":"Demo","version":"0.1.0","entry":"main.js"}}"#),
+                &format!(r#"{{"id":"{id}","name":"Demo","version":"0.1.0","entry":"nsh.tsx"}}"#),
             );
-            self.write(&format!("{relative}/main.js"), "export default class {}");
+            self.write(
+                &format!("{relative}/nsh.tsx"),
+                "export function root() { return null; }",
+            );
             self.path(relative)
         }
     }
@@ -195,11 +306,11 @@ mod tests {
 
         let manifest = import_into(&source, &plugins).unwrap();
 
-        assert_eq!(manifest.id(), "com.example.demo");
+        assert_eq!(manifest.id, "com.example.demo");
         let target = plugins.join("com.example.demo");
         assert!(target.join(MANIFEST_FILE).is_file());
         assert!(target.join("lib/util.js").is_file());
-        assert!(source.join("main.js").is_file(), "原目录不动");
+        assert!(source.join("nsh.tsx").is_file(), "原目录不动");
         assert!(!plugins.join(".importing-com.example.demo").exists());
     }
 
@@ -221,7 +332,7 @@ mod tests {
                 .join("com.example.theme/themes/colors.json")
                 .is_file()
         );
-        assert!(!plugins.join("com.example.theme/main.js").exists());
+        assert!(!plugins.join("com.example.theme/nsh.tsx").exists());
     }
 
     #[test]
@@ -229,8 +340,9 @@ mod tests {
         let scratch = Scratch::new();
         let source = scratch.plugin("src/demo", "com.example.demo");
         scratch.write("src/demo/.git/HEAD", "ref: refs/heads/main");
-        scratch.write("src/demo/gpui-kit.d.ts", "declare module 'x' {}");
-        scratch.write("src/demo/jsconfig.json", "{}");
+        scratch.write("src/demo/.nsh/types/nsh/index.d.ts", "export {}");
+        scratch.write("src/demo/node_modules/x/index.js", "");
+        scratch.write("src/demo/tsconfig.json", "{}");
         scratch.write("outside/secret.txt", "secret");
         #[cfg(unix)]
         std::os::unix::fs::symlink(scratch.path("outside"), source.join("linked")).unwrap();
@@ -240,8 +352,9 @@ mod tests {
 
         let target = plugins.join("com.example.demo");
         assert!(!target.join(".git").exists());
-        assert!(!target.join("gpui-kit.d.ts").exists());
-        assert!(!target.join("jsconfig.json").exists());
+        assert!(!target.join(".nsh").exists());
+        assert!(!target.join("node_modules").exists());
+        assert!(!target.join("tsconfig.json").exists());
         assert!(fs::symlink_metadata(target.join("linked")).is_err());
     }
 
@@ -252,7 +365,7 @@ mod tests {
         scratch.write(&format!("src/broken/{MANIFEST_FILE}"), "{");
         scratch.write(
             &format!("src/no-entry/{MANIFEST_FILE}"),
-            r#"{"id":"com.example.x","name":"X","version":"0.1.0","entry":"main.js"}"#,
+            r#"{"id":"com.example.x","name":"X","version":"0.1.0","entry":"nsh.tsx"}"#,
         );
         let plugins = scratch.path("plugins");
 
@@ -261,7 +374,23 @@ mod tests {
         let broken = import_into(&scratch.path("src/broken"), &plugins).unwrap_err();
         assert!(broken.contains("manifest has a problem"), "{broken}");
         let no_entry = import_into(&scratch.path("src/no-entry"), &plugins).unwrap_err();
-        assert!(no_entry.contains("main.js"), "{no_entry}");
+        assert!(no_entry.contains("nsh.tsx"), "{no_entry}");
+    }
+
+    #[test]
+    fn import_allows_overriding_a_builtin_id_and_skips_precompiled_bytecode() {
+        let scratch = Scratch::new();
+        let source = scratch.plugin("src/override", "smelt.git");
+        scratch.write("src/override/bundle.nshc", "bytecode");
+        scratch.write("src/override/bundle.meta.json", "{}");
+        let plugins = scratch.path("plugins");
+
+        let manifest = import_into(&source, &plugins).unwrap();
+        assert_eq!(manifest.id, "smelt.git");
+        let target = plugins.join("smelt.git");
+        assert!(target.join("nsh.tsx").is_file());
+        assert!(!target.join("bundle.nshc").exists());
+        assert!(!target.join("bundle.meta.json").exists());
     }
 
     #[test]
@@ -289,8 +418,13 @@ mod tests {
         let scratch = Scratch::new();
         let root = scratch.plugin("plugins/demo", "com.example.demo");
 
-        let moved =
-            uninstall_into(&root, &scratch.path("plugins"), &scratch.path("trash")).unwrap();
+        let moved = uninstall_into(
+            &root,
+            &scratch.path("plugins"),
+            None,
+            &scratch.path("trash"),
+        )
+        .unwrap();
 
         assert!(!root.exists());
         assert!(moved.starts_with(scratch.path("trash")));
@@ -306,7 +440,13 @@ mod tests {
         let link = scratch.path("plugins/demo");
         std::os::unix::fs::symlink(&checkout, &link).unwrap();
 
-        uninstall_into(&link, &scratch.path("plugins"), &scratch.path("trash")).unwrap();
+        uninstall_into(
+            &link,
+            &scratch.path("plugins"),
+            None,
+            &scratch.path("trash"),
+        )
+        .unwrap();
 
         assert!(fs::symlink_metadata(&link).is_err());
         assert!(checkout.join(MANIFEST_FILE).is_file(), "开发目录原样不动");
@@ -319,10 +459,85 @@ mod tests {
         let nested = scratch.plugin("plugins/demo/inner", "com.example.inner");
 
         for root in [elsewhere, nested] {
-            let error = uninstall_into(&root, &scratch.path("plugins"), &scratch.path("trash"))
-                .unwrap_err();
+            let error = uninstall_into(
+                &root,
+                &scratch.path("plugins"),
+                None,
+                &scratch.path("trash"),
+            )
+            .unwrap_err();
             assert!(error.contains("Only plugins you installed"), "{error}");
             assert!(root.join(MANIFEST_FILE).is_file());
         }
+    }
+
+    #[test]
+    fn uninstall_refuses_a_module_others_still_require() {
+        let scratch = Scratch::new();
+        scratch.write(
+            &format!("plugins/widgets/{MANIFEST_FILE}"),
+            r#"{"id":"com.example.widgets","name":"Widgets","module":"example/widgets","entry":"index.tsx"}"#,
+        );
+        scratch.write(
+            &format!("plugins/dash/{MANIFEST_FILE}"),
+            r#"{"id":"com.example.dash","name":"Dash","entry":"nsh.tsx","requires":["example/widgets"]}"#,
+        );
+        let widgets = scratch.path("plugins/widgets");
+
+        let error = uninstall_into(
+            &widgets,
+            &scratch.path("plugins"),
+            None,
+            &scratch.path("trash"),
+        )
+        .unwrap_err();
+        assert!(error.contains("Dash"), "{error}");
+        assert!(widgets.join(MANIFEST_FILE).is_file());
+
+        // 自带插件里也有同名模块：删掉覆写回到自带版，照删。
+        scratch.write(
+            &format!("builtin/widgets/{MANIFEST_FILE}"),
+            r#"{"id":"com.example.widgets","name":"Widgets","module":"example/widgets","entry":"index.tsx"}"#,
+        );
+        uninstall_into(
+            &widgets,
+            &scratch.path("plugins"),
+            Some(&scratch.path("builtin")),
+            &scratch.path("trash"),
+        )
+        .unwrap();
+        assert!(!widgets.exists());
+
+        // 依赖它的走了，模块就能删。
+        scratch.write(
+            &format!("plugins/lone/{MANIFEST_FILE}"),
+            r#"{"id":"com.example.lone","name":"Lone","module":"example/lone","entry":"index.tsx"}"#,
+        );
+        scratch.write(
+            &format!("plugins/user/{MANIFEST_FILE}"),
+            r#"{"id":"com.example.user","name":"User","entry":"nsh.tsx","requires":["example/lone"]}"#,
+        );
+        let error = uninstall_into(
+            &scratch.path("plugins/lone"),
+            &scratch.path("plugins"),
+            None,
+            &scratch.path("trash"),
+        )
+        .unwrap_err();
+        assert!(error.contains("User"), "{error}");
+        uninstall_into(
+            &scratch.path("plugins/user"),
+            &scratch.path("plugins"),
+            None,
+            &scratch.path("trash"),
+        )
+        .unwrap();
+        uninstall_into(
+            &scratch.path("plugins/lone"),
+            &scratch.path("plugins"),
+            None,
+            &scratch.path("trash"),
+        )
+        .unwrap();
     }
 }

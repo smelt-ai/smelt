@@ -2636,6 +2636,7 @@ mod tests {
                     description: None,
                     current_name: mode.into(),
                     options: vec![(mode.into(), mode.into())],
+                    is_thought_level: false,
                     boolean: None,
                     smelt: None,
                 }];

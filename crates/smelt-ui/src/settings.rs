@@ -13,9 +13,10 @@
 
 use gpui::{
     AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement, RenderOnce,
-    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Window, div,
-    prelude::FluentBuilder as _, px, rems, rgb,
+    ScrollHandle, SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled, Window,
+    div, prelude::FluentBuilder as _, px, rems, rgb,
 };
+use gpui_base::StyledExt as _;
 
 use crate::kit::{RADIUS, TYPE, TypeStyled as _};
 use crate::scrollbar::{Scrollable, ScrollbarAxis};
@@ -37,10 +38,12 @@ const HEADER_GAP: f32 = 8.;
 pub const PAGE_MAX_WIDTH: f32 = 45.;
 
 /// 一页设置：一列 [`SettingsSection`]，超出时竖着滚。`id` 在同一窗口里要唯一；换了 `id`
-/// 滚动位置就从头开始（宿主换页时换它）。
+/// 滚动位置就从头开始（宿主换页时换它）。样式落在那一列上（限宽、内边距、组间距），滚动区
+/// 照旧铺满。
 #[derive(IntoElement)]
 pub struct SettingsPage {
     id: ElementId,
+    style: StyleRefinement,
     children: Vec<AnyElement>,
 }
 
@@ -48,6 +51,7 @@ impl SettingsPage {
     pub fn new(id: impl Into<ElementId>) -> Self {
         Self {
             id: id.into(),
+            style: StyleRefinement::default(),
             children: Vec::new(),
         }
     }
@@ -56,6 +60,12 @@ impl SettingsPage {
 impl ParentElement for SettingsPage {
     fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
         self.children.extend(elements);
+    }
+}
+
+impl Styled for SettingsPage {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
     }
 }
 
@@ -75,6 +85,7 @@ impl RenderOnce for SettingsPage {
             .px(px(24.))
             .pt(px(16.))
             .pb(px(32.))
+            .refine_style(&self.style)
             .children(self.children);
         let content = div()
             .w_full()
@@ -86,11 +97,13 @@ impl RenderOnce for SettingsPage {
     }
 }
 
-/// 一组设置：可选的标题和说明，下面一张卡片装各项。没有子项时只画标题和说明。
+/// 一组设置：可选的标题和说明，下面一张卡片装各项。没有子项时只画标题和说明。样式落在
+/// 整组的外框上。
 #[derive(IntoElement, Default)]
 pub struct SettingsSection {
     title: Option<SharedString>,
     description: Option<SharedString>,
+    style: StyleRefinement,
     children: Vec<AnyElement>,
 }
 
@@ -114,6 +127,12 @@ impl SettingsSection {
 impl ParentElement for SettingsSection {
     fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
         self.children.extend(elements);
+    }
+}
+
+impl Styled for SettingsSection {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
     }
 }
 
@@ -178,6 +197,7 @@ impl RenderOnce for SettingsSection {
             .flex()
             .flex_col()
             .gap(px(HEADER_GAP))
+            .refine_style(&self.style)
             .children(header)
             .children(card)
     }
@@ -190,12 +210,16 @@ impl RenderOnce for SettingsSection {
 ///
 /// 说明长短不由我们定时（技能、扩展的自述），用 [`SettingsRow::clamp_description`] 收成
 /// 几行、悬停看全文；来源、状态这类短句放 [`SettingsRow::note`]，不跟着收。
+///
+/// 样式落在整行的外框上。
 #[derive(IntoElement)]
 pub struct SettingsRow {
     title: SharedString,
     description: Option<SharedString>,
     clamp: Option<(ElementId, usize)>,
     note: Option<SharedString>,
+    error: Option<SharedString>,
+    style: StyleRefinement,
     children: Vec<AnyElement>,
 }
 
@@ -206,6 +230,8 @@ impl SettingsRow {
             description: None,
             clamp: None,
             note: None,
+            error: None,
+            style: StyleRefinement::default(),
             children: Vec::new(),
         }
     }
@@ -226,11 +252,23 @@ impl SettingsRow {
         self.note = Some(note.into());
         self
     }
+
+    /// 这一项出了什么错，红字放在最下面；换行照原样分行。失败就地报在出错的那一项上。
+    pub fn error(mut self, error: impl Into<SharedString>) -> Self {
+        self.error = Some(error.into());
+        self
+    }
 }
 
 impl ParentElement for SettingsRow {
     fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
         self.children.extend(elements);
+    }
+}
+
+impl Styled for SettingsRow {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
     }
 }
 
@@ -276,6 +314,14 @@ impl RenderOnce for SettingsRow {
                         .text_color(rgb(ui_theme::muted()))
                         .child(note),
                 )
+            })
+            .when_some(self.error, |this, error| {
+                this.child(
+                    div()
+                        .type_style(TYPE.text_small)
+                        .text_color(rgb(ui_theme::bad()))
+                        .child(error),
+                )
             });
         div()
             .flex()
@@ -283,6 +329,7 @@ impl RenderOnce for SettingsRow {
             .justify_between()
             .gap(px(16.))
             .min_h(px(ROW_MIN_HEIGHT))
+            .refine_style(&self.style)
             .child(label)
             .when(!self.children.is_empty(), |this| {
                 this.child(

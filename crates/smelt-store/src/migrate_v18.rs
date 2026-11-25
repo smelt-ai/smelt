@@ -3,12 +3,10 @@
 //! 只服务这一次迁移。`kv` 有两种存法：二进制 blob（一个 key 一个值），以及把一份 JSON
 //! 拆成节点的「作用域对象」（`$` 是根，子节点的 key 是以 `/` 连接的路径，`~0`/`~1` 转义）。
 //! 这里把需要的作用域还原出来，按新表的字段写回；客户端的界面状态、已经没人读的作用域
-//! 不搬，随 `kv` 一起删掉。单项解析不了就跳过这一项，不让整次升级失败。
+//! 不搬，随 `kv` 一起删掉。额度缓存也不搬：启动只显示一小时内查到的数字，升级上来的旧缓存
+//! 早过期了。单项解析不了就跳过这一项，不让整次升级失败。
 
-use crate::{
-    MemorySettingsRecord, QuotaCacheQuota, QuotaCacheSnapshot, QuotaCacheStatusRecord,
-    QuotaCacheWindowRecord, RemoteConfigSnapshot, StoreError, TerminalThemeSnapshot,
-};
+use crate::{MemorySettingsRecord, RemoteConfigSnapshot, StoreError, TerminalThemeSnapshot};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Map, Number, Value};
 use std::collections::BTreeMap;
@@ -38,7 +36,6 @@ pub(crate) struct V17RuntimeState {
     remote_config: Option<RemoteConfigSnapshot>,
     terminal_theme: Option<TerminalThemeSnapshot>,
     pi_auto_models: Vec<String>,
-    quota_cache: Option<QuotaCacheSnapshot>,
     launch_version: Option<u32>,
     agent_host_pref: Option<(bool, bool)>,
     acp: Vec<(String, AcpExtras)>,
@@ -135,8 +132,6 @@ pub(crate) fn read_v17_state(connection: &Connection) -> Result<V17RuntimeState,
     if let Some(object) = scoped_object(connection, "pi_auto_models")? {
         state.pi_auto_models = string_list(object.get("providers"));
     }
-    state.quota_cache =
-        scoped_object(connection, "quota_cache")?.map(|object| quota_cache(&object));
     state.launch_version = read_scope_nodes(connection, "launch")
         .ok()
         .and_then(|nodes| decode_tree(&nodes, "version").ok().flatten())
@@ -245,9 +240,6 @@ pub(crate) fn write_v18_state(
             [provider],
         )?;
     }
-    if let Some(quota) = &state.quota_cache {
-        crate::config::write_quota_cache_snapshot(transaction, quota)?;
-    }
     if let Some(version) = state.launch_version {
         transaction.execute(
             "INSERT INTO launch_settings(id, version) VALUES (1, ?1)",
@@ -291,79 +283,6 @@ pub(crate) fn write_v18_state(
         }
     }
     Ok(())
-}
-
-fn quota_cache(object: &Map<String, Value>) -> QuotaCacheSnapshot {
-    let mut statuses = Vec::new();
-    for (provider_id, cached) in object
-        .get("providers")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flatten()
-    {
-        let (kind, status) = match (cached.get("windows"), cached.get("copilot")) {
-            (Some(status), _) => ("windows", status),
-            (None, Some(status)) => ("copilot", status),
-            (None, None) => continue,
-        };
-        let Some(quota) = status.get("quota").filter(|quota| quota.is_object()) else {
-            continue;
-        };
-        let quota = if kind == "windows" {
-            QuotaCacheQuota::Windows(
-                quota
-                    .get("windows")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .map(|window| QuotaCacheWindowRecord {
-                        label: as_string(window.get("label")).unwrap_or_default(),
-                        used_percent: window
-                            .get("used_percent")
-                            .and_then(Value::as_f64)
-                            .unwrap_or(0.0),
-                        resets_at_ms: window.get("resets_at_ms").and_then(Value::as_i64),
-                        reset_after_seconds: window
-                            .get("reset_after_seconds")
-                            .and_then(Value::as_i64),
-                    })
-                    .collect(),
-            )
-        } else {
-            let unit = match quota.get("unit").and_then(Value::as_str) {
-                Some("AiCredits") => "ai_credits",
-                Some("PremiumRequests") => "premium_requests",
-                _ => continue,
-            };
-            QuotaCacheQuota::Copilot {
-                unit: unit.to_string(),
-                remaining: quota
-                    .get("remaining")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0),
-                limit: quota.get("limit").and_then(Value::as_f64),
-                used: quota.get("used").and_then(Value::as_f64),
-            }
-        };
-        statuses.push(QuotaCacheStatusRecord {
-            provider_id: provider_id.clone(),
-            checked_at_ms: status
-                .get("checked_at_ms")
-                .and_then(Value::as_i64)
-                .unwrap_or(0),
-            error: as_string(status.get("error")),
-            quota,
-        });
-    }
-    QuotaCacheSnapshot {
-        saved_at_ms: object
-            .get("saved_at_ms")
-            .and_then(Value::as_i64)
-            .unwrap_or(0),
-        schema_version: u32_field(object.get("schema_version")).unwrap_or(0),
-        provider_ids: string_list(object.get("provider_ids")),
-        statuses,
-    }
 }
 
 fn blobs(connection: &Connection, scope: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {

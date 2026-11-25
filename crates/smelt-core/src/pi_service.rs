@@ -8,7 +8,7 @@ pub use smelt_model::pi_service::*;
 
 use std::path::PathBuf;
 
-use crate::pi_model_settings::{PiCustomModel, PiDefaultModelConfig};
+use crate::pi_model_settings::PiCustomModel;
 
 fn config_file_path(file: PiConfigFile) -> PathBuf {
     {
@@ -25,7 +25,6 @@ pub fn config() -> PiConfig {
     let text = |path: PathBuf| path.to_string_lossy().into_owned();
     PiConfig {
         model_settings: crate::pi_model_settings::load_pi_model_settings(),
-        settings_summary: crate::pi_model_settings::pi_settings_summary(),
         mcp_servers: crate::pi_mcp::load_pi_mcp_servers(),
         plugins: crate::pi_plugin_catalog::selectable_plugins(),
         model_choice_groups: crate::pi_model_settings::list_pi_model_choice_groups(),
@@ -39,28 +38,20 @@ pub fn config() -> PiConfig {
     }
 }
 
-/// 只改默认模型的推理强度。用户还没选过默认模型时拒绝：写进去的 provider/model
-/// 会是 Pi 的兜底值，等于替用户做了选择。
+/// 新会话的推理强度。Pi 把它当全局设置读，和选没选默认模型无关。
 pub fn set_thinking_level(params: ThinkingLevelParams) -> Result<(), String> {
-    let summary = crate::pi_model_settings::pi_settings_summary()?;
-    let Some((provider, model)) = summary.default_model.and_then(|model| {
-        Some((
-            model.provider.filter(|v| !v.trim().is_empty())?,
-            model.model.filter(|v| !v.trim().is_empty())?,
-        ))
-    }) else {
-        return Err("Pick a default model before setting the reasoning effort".into());
-    };
-    let config = PiDefaultModelConfig {
-        provider,
-        model,
-        base_url: String::new(),
-        thinking_level: params.level,
-    };
-    crate::pi_model_settings::save_pi_default_model(&config, None)
+    crate::pi_model_settings::save_pi_thinking_level(&params.level)
+}
+
+/// 不再指定默认模型，交回 Pi 自己挑。
+pub fn clear_default_model() -> Result<(), String> {
+    crate::pi_model_settings::clear_pi_default_model()
 }
 
 pub fn save_default_model(params: SaveDefaultModelParams) -> Result<(), String> {
+    if !params.config.base_url.is_empty() {
+        crate::pi_model_settings::validate_api_base_url(&params.config.base_url)?;
+    }
     crate::pi_model_settings::save_pi_default_model(&params.config, params.api_key.as_deref())?;
     if params.reset_base_url && params.config.base_url.is_empty() {
         crate::pi_model_settings::clear_pi_provider_base_url(&params.config.provider)?;
@@ -111,6 +102,7 @@ pub fn save_custom_provider(params: SaveCustomProviderParams) -> Result<bool, St
         set_default,
     } = params;
     crate::pi_model_settings::validate_custom_provider_id(&provider.id)?;
+    crate::pi_model_settings::validate_api_base_url(&provider.base_url)?;
     let auto = provider.models.is_empty();
     if auto {
         // Pi 从 models.json 解析模型，写一份空列表等于这个 provider 一个模型都选不了。
@@ -290,18 +282,14 @@ pub fn refresh_auto_models() -> bool {
 mod tests {
     use super::*;
     use crate::pi_mcp::PiMcpServer;
-    use crate::pi_model_settings::{PiCustomProvider, PiSettingsSummary};
+    use crate::pi_model_settings::PiCustomProvider;
     use crate::pi_plugin_catalog::{PiPlugin, PiPluginKind};
 
     /// 快照里各块各自带错误：一块读不出，其余照常显示，传到客户端也还是这个样子。
     #[test]
     fn config_snapshot_round_trips_with_partial_errors() {
         let config = PiConfig {
-            model_settings: Err("解析 models.json 失败".into()),
-            settings_summary: Ok(PiSettingsSummary {
-                path: PathBuf::from("/home/me/.pi/agent/settings.json"),
-                default_model: None,
-            }),
+            model_settings: Err("解析 settings.json 失败".into()),
             mcp_servers: Ok(vec![PiMcpServer {
                 name: "docs".into(),
                 transport: crate::pi_mcp::PiMcpTransport::Http {

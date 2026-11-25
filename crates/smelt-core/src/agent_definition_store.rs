@@ -58,6 +58,18 @@ fn projection_from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentUiPr
     }
 }
 
+/// 从已读取的 UI 快照还原全部智能体定义（供同一次快照复用，避免重复加锁读库）。
+pub(crate) fn agent_definitions_from_snapshot(
+    snapshot: &smelt_store::AgentUiSnapshot,
+) -> Vec<AgentDefinition> {
+    snapshot
+        .agents
+        .iter()
+        .cloned()
+        .map(agent_from_record)
+        .collect()
+}
+
 fn agent_from_record(record: smelt_store::AgentDefinitionRecord) -> AgentDefinition {
     AgentDefinition {
         id: record.id,

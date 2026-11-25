@@ -1,5 +1,7 @@
 //! 能查额度的 Pi 订阅 provider 白名单。读凭据、查询在运行时。
 
+use crate::agent_kind::ConversationAgentKind;
+
 /// `auth.json` 里哪个字段才是额度接口要的令牌。
 ///
 /// 这个区分不是风格问题：Pi 的 `github-copilot` 把 GitHub OAuth 令牌存在
@@ -19,6 +21,8 @@ pub struct PiQuotaProvider {
     /// 这里不再重复维护一份。
     pub id: &'static str,
     pub token_field: PiTokenField,
+    /// 账户属于哪家服务。额度那一条按服务一家一个环，和这家 agent 自己的账户并到一起。
+    pub service: ConversationAgentKind,
 }
 
 /// Pi 的 OAuth provider 里，有已知只读额度接口的那些。顺序即侧栏展示顺序。
@@ -31,19 +35,23 @@ pub static PI_QUOTA_PROVIDERS: &[PiQuotaProvider] = &[
         id: "anthropic",
         // Pi 用的是 Claude Code 的 client_id 和 scope，令牌能直接查 claude.ai 额度。
         token_field: PiTokenField::Access,
+        service: ConversationAgentKind::Claude,
     },
     PiQuotaProvider {
         id: "github-copilot",
         token_field: PiTokenField::Refresh,
+        service: ConversationAgentKind::Copilot,
     },
     PiQuotaProvider {
         id: "openai-codex",
         token_field: PiTokenField::Access,
+        service: ConversationAgentKind::Codex,
     },
     PiQuotaProvider {
         id: "xai",
         // Pi 的 xAI 登录带 `grok-cli:access` scope，和 Grok CLI 的会话令牌同源。
         token_field: PiTokenField::Access,
+        service: ConversationAgentKind::Grok,
     },
 ];
 

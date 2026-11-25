@@ -127,9 +127,8 @@ Bundle ID 推送。
 
 - 设置里显示「连不上推送服务」：手机访问不到中继的 `/v1/register`。先在手机浏览器里打开
   `https://push.example.com/healthz`。
-- 开着推送却收不到：看中继日志（`journalctl -u smelt-push-relay`）。`APNs 拒绝：
+- 开着推送却收不到：看中继日志（`journalctl -u smelt-push-relay`）。`APNs 拒收：
   InvalidProviderToken` 是 Key ID / Team ID 不对；`TopicDisallowed` 是这把 key 不属于
   App 所在的 Team；`BadDeviceToken` 多半是开发版的令牌发到了 production（或反过来），检查
   `SMELT_APNS_ENVIRONMENT`。再看 smeltd 日志里以「推送：」开头的行。
-- 提醒一产生就推，在电脑前处理掉的事手机也会响一次。推送里的会话名、项目名和一行摘要是明文，
-  经过中继；中继日志不记这些内容。
+- 本机桌面活跃且人在 Mac 前时，常规推送会被抑制（审批/输入等离开后补推，完成/失败不推；详见 [`notification-architecture.md`](notification-architecture.md)「手机推送」）；只有智能体主动消息（`notify_user` / `smelt notify`）立刻推。推送里的会话名、项目名和一行摘要是明文，经过中继；中继日志不记这些内容。

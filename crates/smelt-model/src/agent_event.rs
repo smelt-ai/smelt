@@ -20,7 +20,9 @@ pub fn notify_executable_path() -> std::path::PathBuf {
         .join(name)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct AgentEvent {
     pub version: u32,
     pub provider: String,
@@ -70,7 +72,9 @@ impl AgentEvent {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentEventKind {
     SessionStarted,

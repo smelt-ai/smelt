@@ -29,60 +29,6 @@ fn auth_entry_configured(auth_json: &serde_json::Value, provider_id: &str) -> bo
         .is_some()
 }
 
-/// 读取 `settings.json` 概况用于展示当前默认模型与文件位置。
-pub fn pi_settings_summary() -> Result<PiSettingsSummary, String> {
-    pi_settings_summary_at(&pi_agent_dir())
-}
-
-pub fn pi_settings_summary_at(agent_dir: &Path) -> Result<PiSettingsSummary, String> {
-    let path = agent_dir.join("settings.json");
-    if !path.is_file() {
-        return Ok(PiSettingsSummary {
-            path,
-            default_model: None,
-        });
-    }
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(e) => return Err(format!("couldn't read {}: {e}", path.display())),
-    };
-    if raw.trim().is_empty() {
-        return Ok(PiSettingsSummary {
-            path,
-            default_model: None,
-        });
-    }
-    let val: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("couldn't parse {}: {e}", path.display()))?;
-    let provider = val
-        .get("defaultProvider")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let model = val
-        .get("defaultModel")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let thinking_level = val
-        .get("defaultThinkingLevel")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    let default_model = if provider.is_some() || model.is_some() || thinking_level.is_some() {
-        Some(PiDefaultModelSummary {
-            provider,
-            model,
-            thinking_level,
-        })
-    } else {
-        None
-    };
-
-    Ok(PiSettingsSummary {
-        path,
-        default_model,
-    })
-}
-
 /// 从 `models.json` 和 Pi 的 `models-store.json` 拼一份可选模型目录。
 /// `models-store` 只收已经配了凭据或自定义过的 provider，缓存里的其它目录不进名单。
 pub fn list_pi_model_choices() -> Vec<PiModelChoice> {
@@ -106,8 +52,8 @@ pub fn list_pi_model_choices_at(agent_dir: &Path) -> Vec<PiModelChoice> {
     };
 
     let mut store_providers = std::collections::BTreeSet::new();
-    if let Ok(settings) = load_pi_model_settings_at(agent_dir) {
-        for provider in settings.custom_providers {
+    if let Ok(custom_providers) = load_pi_custom_providers_at(agent_dir) {
+        for provider in custom_providers {
             store_providers.insert(provider.id.clone());
             let provider_name = if provider.display_name.trim().is_empty() {
                 provider.id.clone()
@@ -128,16 +74,18 @@ pub fn list_pi_model_choices_at(agent_dir: &Path) -> Vec<PiModelChoice> {
                 });
             }
         }
-        let default = &settings.default_model;
-        if !default.provider.trim().is_empty() && !default.model.trim().is_empty() {
-            store_providers.insert(default.provider.clone());
-            push(PiModelChoice {
-                provider: default.provider.clone(),
-                provider_name: default.provider.clone(),
-                id: default.model.clone(),
-                name: default.model.clone(),
-            });
-        }
+    }
+    if let Some(default) = load_pi_model_settings_at(agent_dir)
+        .ok()
+        .and_then(|settings| settings.default_model)
+    {
+        store_providers.insert(default.provider.clone());
+        push(PiModelChoice {
+            provider: default.provider.clone(),
+            provider_name: default.provider,
+            id: default.model.clone(),
+            name: default.model,
+        });
     }
 
     let auth_path = agent_dir.join("auth.json");
@@ -205,171 +153,149 @@ pub fn list_pi_model_choices_at(agent_dir: &Path) -> Vec<PiModelChoice> {
     choices
 }
 
-/// 读取全部 Pi 模型设置，包含默认模型、凭据配置状态与自定义 Provider 列表。
+/// 读取 Pi 的模型设置：用户选的默认模型和推理强度、自定义 Provider、内置 Provider 的地址改写。
+///
+/// 没选过的就是没有：不替 Pi 编一个兜底模型。Pi 没有默认模型时自己从已登录的 provider
+/// 里挑，挑法随 Pi 版本变，这边照抄只会和它对不上。
 pub fn load_pi_model_settings() -> Result<PiModelSettings, String> {
     load_pi_model_settings_at(&pi_agent_dir())
 }
 
 pub fn load_pi_model_settings_at(agent_dir: &Path) -> Result<PiModelSettings, String> {
-    let settings_path = agent_dir.join("settings.json");
-    let models_path = agent_dir.join("models.json");
-    let auth_path = agent_dir.join("auth.json");
-
-    let settings_json: serde_json::Value = if settings_path.is_file() {
-        let raw = std::fs::read_to_string(&settings_path)
-            .map_err(|e| format!("couldn't read {}: {e}", settings_path.display()))?;
-        serde_json::from_str(&raw).unwrap_or(serde_json::Value::Object(Default::default()))
-    } else {
-        serde_json::Value::Object(Default::default())
+    let settings = read_settings_json(&agent_dir.join("settings.json"))?;
+    let text = |key: &str| {
+        settings
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
     };
-
-    let auth_json: serde_json::Value = if auth_path.is_file() {
-        let raw = std::fs::read_to_string(&auth_path)
-            .map_err(|e| format!("couldn't read {}: {e}", auth_path.display()))?;
-        serde_json::from_str(&raw).unwrap_or(serde_json::Value::Object(Default::default()))
-    } else {
-        serde_json::Value::Object(Default::default())
-    };
-
-    let models_json: serde_json::Value = if models_path.is_file() {
-        let raw = std::fs::read_to_string(&models_path)
-            .map_err(|e| format!("couldn't read {}: {e}", models_path.display()))?;
-        serde_json::from_str(&raw).unwrap_or(serde_json::Value::Object(Default::default()))
-    } else {
-        serde_json::Value::Object(Default::default())
-    };
-
-    let default_provider = settings_json
-        .get("defaultProvider")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("deepseek")
-        .to_string();
-
-    let default_model = settings_json
-        .get("defaultModel")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("deepseek-chat")
-        .to_string();
-
-    let default_thinking = settings_json
-        .get("defaultThinkingLevel")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("medium")
-        .to_string();
-
-    // 检查默认 Provider 是否已配置凭据
-    let mut credential_configured = auth_entry_configured(&auth_json, &default_provider);
-    // 环境变量兜底
-    if !credential_configured {
-        credential_configured = match default_provider.as_str() {
-            "deepseek" => std::env::var("DEEPSEEK_API_KEY").is_ok_and(|k| !k.trim().is_empty()),
-            "anthropic" => std::env::var("ANTHROPIC_API_KEY").is_ok_and(|k| !k.trim().is_empty()),
-            "openai" => std::env::var("OPENAI_API_KEY").is_ok_and(|k| !k.trim().is_empty()),
-            "google" => std::env::var("GEMINI_API_KEY").is_ok_and(|k| !k.trim().is_empty()),
-            _ => false,
-        };
-    }
-
-    // 从 models.json 提取默认 Provider 的 baseUrl（若有覆写）
-    let mut default_base_url = String::new();
-    if let Some(providers_obj) = models_json.get("providers").and_then(|p| p.as_object())
-        && let Some(provider_entry) = providers_obj.get(&default_provider)
-    {
-        if let Some(b) = provider_entry.get("baseUrl").and_then(|b| b.as_str()) {
-            default_base_url = b.to_string();
-        }
-        if !credential_configured
-            && let Some(k) = provider_entry.get("apiKey").and_then(|k| k.as_str())
-            && !k.trim().is_empty()
-        {
-            credential_configured = true;
-        }
-    }
-
-    // 从 models.json 提取自定义 Provider 列表
-    let mut custom_providers = Vec::new();
-    if let Some(providers_obj) = models_json.get("providers").and_then(|p| p.as_object()) {
-        for (provider_id, provider_val) in providers_obj {
-            let is_builtin = matches!(
-                provider_id.as_str(),
-                "deepseek" | "anthropic" | "openai" | "google"
-            );
-            let models_array = provider_val.get("models").and_then(|m| m.as_array());
-            if is_builtin && models_array.is_none() {
-                // 仅是对内置官方 provider 的 baseUrl 覆写，不作为自定义 provider 呈现
-                continue;
-            }
-            let display_name = provider_val
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or(provider_id.as_str())
-                .to_string();
-            let api = provider_val
-                .get("api")
-                .and_then(|a| a.as_str())
-                .unwrap_or("openai-completions")
-                .to_string();
-            let base_url = provider_val
-                .get("baseUrl")
-                .and_then(|b| b.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            let mut cred_configured = auth_entry_configured(&auth_json, provider_id);
-            if !cred_configured
-                && let Some(k) = provider_val.get("apiKey").and_then(|k| k.as_str())
-                && !k.trim().is_empty()
-            {
-                cred_configured = true;
-            }
-
-            let models = models_array
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|m| {
-                            let id = m.get("id")?.as_str()?.to_string();
-                            let name = m
-                                .get("name")
-                                .and_then(|n| n.as_str())
-                                .filter(|n| !n.trim().is_empty())
-                                .unwrap_or(&id)
-                                .to_string();
-                            let context_window = m.get("contextWindow").and_then(|c| c.as_u64());
-                            let max_tokens = m.get("maxTokens").and_then(|c| c.as_u64());
-                            Some(PiCustomModel {
-                                id,
-                                name,
-                                context_window,
-                                max_tokens,
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            custom_providers.push(PiCustomProvider {
-                id: provider_id.clone(),
-                display_name,
-                api,
-                base_url,
-                credential_configured: cred_configured,
-                models,
-            });
-        }
-    }
-
-    Ok(PiModelSettings {
-        default_model: PiDefaultModelConfig {
-            provider: default_provider,
-            model: default_model,
-            base_url: default_base_url,
-            thinking_level: default_thinking,
-        },
-        credential_configured,
+    let default_model = text("defaultProvider")
+        .zip(text("defaultModel"))
+        .map(|(provider, model)| PiModelRef { provider, model });
+    let thinking_level = text("defaultThinkingLevel");
+    let ProviderEntries {
         custom_providers,
+        endpoint_overrides,
+    } = load_provider_entries_at(agent_dir)?;
+    Ok(PiModelSettings {
+        default_model,
+        thinking_level,
+        custom_providers,
+        endpoint_overrides,
+    })
+}
+
+/// 只读 `models.json` 里的自定义 Provider（带凭据现状）。运行时拼模型目录、刷新自动目录只要
+/// 这份，不该因为 `settings.json` 写坏了连带读不到。
+pub fn load_pi_custom_providers_at(agent_dir: &Path) -> Result<Vec<PiCustomProvider>, String> {
+    load_provider_entries_at(agent_dir).map(|entries| entries.custom_providers)
+}
+
+pub fn load_pi_custom_providers() -> Result<Vec<PiCustomProvider>, String> {
+    load_pi_custom_providers_at(&pi_agent_dir())
+}
+
+/// `settings.json` 读成 JSON 对象。文件不在或是空的，等于什么都没设；内容坏了报错，
+/// 不当成「没设」——那样页面会显示「自动」，用户一改就把整份文件盖掉。
+fn read_settings_json(path: &Path) -> Result<serde_json::Value, String> {
+    let empty = || serde_json::Value::Object(Default::default());
+    if !path.is_file() {
+        return Ok(empty());
+    }
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
+    if raw.trim().is_empty() {
+        return Ok(empty());
+    }
+    serde_json::from_str(&raw).map_err(|e| format!("couldn't parse {}: {e}", path.display()))
+}
+
+struct ProviderEntries {
+    custom_providers: Vec<PiCustomProvider>,
+    endpoint_overrides: std::collections::BTreeMap<String, String>,
+}
+
+/// `models.json` 里的 provider 分两种：带 `models` 的是自定义 Provider；不带的是给 Pi 内置
+/// 那个改地址（Pi 自己也是这么认的）。
+fn load_provider_entries_at(agent_dir: &Path) -> Result<ProviderEntries, String> {
+    let read_lenient = |path: &Path| -> Result<serde_json::Value, String> {
+        if !path.is_file() {
+            return Ok(serde_json::Value::Object(Default::default()));
+        }
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
+        Ok(serde_json::from_str(&raw).unwrap_or(serde_json::Value::Object(Default::default())))
+    };
+    let auth_json = read_lenient(&agent_dir.join("auth.json"))?;
+    let models_json = read_lenient(&agent_dir.join("models.json"))?;
+
+    let mut custom_providers = Vec::new();
+    let mut endpoint_overrides = std::collections::BTreeMap::new();
+    let Some(providers_obj) = models_json.get("providers").and_then(|p| p.as_object()) else {
+        return Ok(ProviderEntries {
+            custom_providers,
+            endpoint_overrides,
+        });
+    };
+    for (provider_id, provider_val) in providers_obj {
+        let base_url = provider_val
+            .get("baseUrl")
+            .and_then(|b| b.as_str())
+            .unwrap_or("")
+            .to_string();
+        let Some(models_array) = provider_val.get("models").and_then(|m| m.as_array()) else {
+            if !base_url.trim().is_empty() {
+                endpoint_overrides.insert(provider_id.clone(), base_url);
+            }
+            continue;
+        };
+        let display_name = provider_val
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or(provider_id.as_str())
+            .to_string();
+        let api = provider_val
+            .get("api")
+            .and_then(|a| a.as_str())
+            .unwrap_or("openai-completions")
+            .to_string();
+        let credential_configured = auth_entry_configured(&auth_json, provider_id)
+            || provider_val
+                .get("apiKey")
+                .and_then(|k| k.as_str())
+                .is_some_and(|k| !k.trim().is_empty());
+        let models = models_array
+            .iter()
+            .filter_map(|m| {
+                let id = m.get("id")?.as_str()?.to_string();
+                let name = m
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or(&id)
+                    .to_string();
+                Some(PiCustomModel {
+                    id,
+                    name,
+                    context_window: m.get("contextWindow").and_then(|c| c.as_u64()),
+                    max_tokens: m.get("maxTokens").and_then(|c| c.as_u64()),
+                })
+            })
+            .collect();
+        custom_providers.push(PiCustomProvider {
+            id: provider_id.clone(),
+            display_name,
+            api,
+            base_url,
+            credential_configured,
+            models,
+        });
+    }
+    Ok(ProviderEntries {
+        custom_providers,
+        endpoint_overrides,
     })
 }
 
@@ -919,6 +845,48 @@ pub fn save_pi_default_model_at(
     Ok(())
 }
 
+/// 写新会话的推理强度，`settings.json` 里别的不动。
+pub fn save_pi_thinking_level(level: &str) -> Result<(), String> {
+    save_pi_thinking_level_at(&pi_agent_dir(), level)
+}
+
+pub fn save_pi_thinking_level_at(agent_dir: &Path, level: &str) -> Result<(), String> {
+    let level = level.trim();
+    if level.is_empty() {
+        return Err("reasoning effort is empty".into());
+    }
+    update_settings_json(agent_dir, |obj| {
+        obj.insert("defaultThinkingLevel".into(), serde_json::json!(level));
+    })
+}
+
+/// 去掉 `settings.json` 里的默认模型，Pi 开会话时自己从已登录的 provider 里挑。推理强度
+/// 是另一项设置，留着。
+pub fn clear_pi_default_model() -> Result<(), String> {
+    clear_pi_default_model_at(&pi_agent_dir())
+}
+
+pub fn clear_pi_default_model_at(agent_dir: &Path) -> Result<(), String> {
+    update_settings_json(agent_dir, |obj| {
+        obj.remove("defaultProvider");
+        obj.remove("defaultModel");
+    })
+}
+
+/// 改 `settings.json` 顶层的几项。内容坏了报错，不拿一个空对象盖掉用户的整份设置。
+fn update_settings_json(
+    agent_dir: &Path,
+    edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+) -> Result<(), String> {
+    let path = agent_dir.join("settings.json");
+    let mut settings = read_settings_json(&path)?;
+    let Some(obj) = settings.as_object_mut() else {
+        return Err(format!("{} isn't a JSON object", path.display()));
+    };
+    edit(obj);
+    write_json_file(&path, &settings, false)
+}
+
 /// 去掉一个 provider 的 `baseUrl` 覆写，其它字段不动。
 ///
 /// 设置页清空地址框是明确的删除。设默认模型不走这里。
@@ -1359,20 +1327,139 @@ mod tests {
     }
 
     #[test]
-    fn settings_report_oauth_logins_as_configured() {
+    fn custom_provider_with_oauth_login_counts_as_configured() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
-            temp.path().join("settings.json"),
-            r#"{"defaultProvider":"github-copilot","defaultModel":"gpt-5"}"#,
+            temp.path().join("models.json"),
+            r#"{"providers":{"gw":{"baseUrl":"https://gw.example/v1","models":[]}}}"#,
         )
         .unwrap();
         std::fs::write(
             temp.path().join("auth.json"),
-            r#"{"github-copilot":{"type":"oauth","refresh":"r","access":"a","expires":1}}"#,
+            r#"{"gw":{"type":"oauth","refresh":"r","access":"a","expires":1}}"#,
+        )
+        .unwrap();
+        let providers = load_pi_custom_providers_at(temp.path()).unwrap();
+        assert!(providers[0].credential_configured);
+    }
+
+    /// 没选过默认模型就是没有：不编一个兜底模型，Pi 开会话时自己挑。
+    #[test]
+    fn unset_default_model_is_none() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = load_pi_model_settings_at(temp.path()).unwrap();
+        assert_eq!(settings.default_model, None);
+        assert_eq!(settings.thinking_level, None);
+
+        std::fs::write(temp.path().join("settings.json"), "  \n").unwrap();
+        assert_eq!(
+            load_pi_model_settings_at(temp.path())
+                .unwrap()
+                .default_model,
+            None
+        );
+
+        // 只写了一半也是没选：Pi 要 provider 和模型都在才用。
+        std::fs::write(
+            temp.path().join("settings.json"),
+            r#"{"defaultProvider":"anthropic","defaultModel":"  "}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_pi_model_settings_at(temp.path())
+                .unwrap()
+                .default_model,
+            None
+        );
+    }
+
+    /// `settings.json` 坏了要报出来（否则页面显示「自动」，一改就盖掉整份文件），但运行时
+    /// 拼模型目录要的自定义 Provider 不受连累。
+    #[test]
+    fn broken_settings_json_is_reported_without_hiding_custom_providers() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("settings.json"), "{ not json").unwrap();
+        std::fs::write(
+            temp.path().join("models.json"),
+            r#"{"providers":{"gw":{"baseUrl":"https://gw.example/v1","models":[{"id":"m"}]}}}"#,
+        )
+        .unwrap();
+        assert!(load_pi_model_settings_at(temp.path()).is_err());
+        let providers = load_pi_custom_providers_at(temp.path()).unwrap();
+        assert_eq!(providers[0].id, "gw");
+        assert_eq!(
+            list_pi_model_choices_at(temp.path())
+                .into_iter()
+                .map(|choice| choice.id)
+                .collect::<Vec<_>>(),
+            ["m"]
+        );
+    }
+
+    /// 推理强度是 Pi 的全局设置：没选默认模型也能写；交回自动只去掉默认模型，别的设置不动。
+    #[test]
+    fn thinking_level_and_clearing_default_touch_only_their_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        save_pi_thinking_level_at(temp.path(), "xhigh").unwrap();
+        let settings = load_pi_model_settings_at(temp.path()).unwrap();
+        assert_eq!(settings.default_model, None);
+        assert_eq!(settings.thinking_level.as_deref(), Some("xhigh"));
+
+        std::fs::write(
+            temp.path().join("settings.json"),
+            r#"{"defaultProvider":"anthropic","defaultModel":"claude-x","defaultThinkingLevel":"low","theme":"dark"}"#,
+        )
+        .unwrap();
+        clear_pi_default_model_at(temp.path()).unwrap();
+        let raw: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(temp.path().join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            raw,
+            serde_json::json!({"defaultThinkingLevel": "low", "theme": "dark"})
+        );
+    }
+
+    /// 文件坏了不能当空对象写回去，那会把用户别的设置一起抹掉。
+    #[test]
+    fn broken_settings_json_is_not_overwritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        assert!(save_pi_thinking_level_at(temp.path(), "low").is_err());
+        assert!(clear_pi_default_model_at(temp.path()).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    }
+
+    /// 不带 `models` 的条目是给 Pi 内置 provider 改地址，不是一个没有模型的自定义 Provider。
+    #[test]
+    fn provider_entry_without_models_is_an_endpoint_override() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("models.json"),
+            r#"{"providers":{
+                "github-copilot":{"baseUrl":"https://proxy.example/copilot"},
+                "gw":{"baseUrl":"https://gw.example/v1","models":[]}
+            }}"#,
         )
         .unwrap();
         let settings = load_pi_model_settings_at(temp.path()).unwrap();
-        assert!(settings.credential_configured);
+        assert_eq!(
+            settings
+                .endpoint_overrides
+                .get("github-copilot")
+                .map(String::as_str),
+            Some("https://proxy.example/copilot")
+        );
+        assert_eq!(
+            settings
+                .custom_providers
+                .iter()
+                .map(|provider| provider.id.as_str())
+                .collect::<Vec<_>>(),
+            ["gw"]
+        );
     }
 
     fn discovered(id: &str) -> DiscoveredModel {
@@ -1601,27 +1688,8 @@ mod tests {
     }
 
     #[test]
-    fn summary_of_nonexistent_returns_none() {
+    fn saves_default_model() {
         let temp = tempfile::tempdir().unwrap();
-        let summary = pi_settings_summary_at(temp.path()).unwrap();
-        assert_eq!(summary.default_model, None);
-        assert_eq!(summary.path, temp.path().join("settings.json"));
-    }
-
-    #[test]
-    fn loads_defaults_and_saves_default_model() {
-        let temp = tempfile::tempdir().unwrap();
-        let settings = load_pi_model_settings_at(temp.path()).unwrap();
-        assert_eq!(settings.default_model.provider, "deepseek");
-        assert_eq!(settings.default_model.model, "deepseek-chat");
-        assert_eq!(settings.default_model.thinking_level, "medium");
-        let environment_credential_configured =
-            std::env::var("DEEPSEEK_API_KEY").is_ok_and(|key| !key.trim().is_empty());
-        assert_eq!(
-            settings.credential_configured,
-            environment_credential_configured
-        );
-
         let config = PiDefaultModelConfig {
             provider: "deepseek".to_string(),
             model: "deepseek-reasoner".to_string(),
@@ -1631,17 +1699,25 @@ mod tests {
         save_pi_default_model_at(temp.path(), &config, Some("sk-test-123456")).unwrap();
 
         let updated = load_pi_model_settings_at(temp.path()).unwrap();
-        assert_eq!(updated.default_model.provider, "deepseek");
-        assert_eq!(updated.default_model.model, "deepseek-reasoner");
-        assert_eq!(updated.default_model.base_url, "https://api.deepseek.com");
-        assert_eq!(updated.default_model.thinking_level, "high");
-        assert!(updated.credential_configured);
-
-        let summary = pi_settings_summary_at(temp.path()).unwrap();
-        let dm = summary.default_model.unwrap();
-        assert_eq!(dm.provider.as_deref(), Some("deepseek"));
-        assert_eq!(dm.model.as_deref(), Some("deepseek-reasoner"));
-        assert_eq!(dm.thinking_level.as_deref(), Some("high"));
+        assert_eq!(
+            updated.default_model,
+            Some(PiModelRef {
+                provider: "deepseek".into(),
+                model: "deepseek-reasoner".into(),
+            })
+        );
+        assert_eq!(updated.thinking_level.as_deref(), Some("high"));
+        assert_eq!(
+            updated
+                .endpoint_overrides
+                .get("deepseek")
+                .map(String::as_str),
+            Some("https://api.deepseek.com")
+        );
+        assert_eq!(
+            read_pi_provider_api_key_at(temp.path(), "deepseek").as_deref(),
+            Some("sk-test-123456")
+        );
     }
 
     #[test]
@@ -1672,8 +1748,13 @@ mod tests {
         save_pi_custom_provider_at(temp.path(), &provider, Some("key-gw-999"), true).unwrap();
 
         let loaded = load_pi_model_settings_at(temp.path()).unwrap();
-        assert_eq!(loaded.default_model.provider, "my-gateway");
-        assert_eq!(loaded.default_model.model, "model-a");
+        assert_eq!(
+            loaded.default_model,
+            Some(PiModelRef {
+                provider: "my-gateway".into(),
+                model: "model-a".into(),
+            })
+        );
         assert_eq!(loaded.custom_providers.len(), 1);
         let cp = &loaded.custom_providers[0];
         assert_eq!(cp.id, "my-gateway");
@@ -1802,14 +1883,38 @@ mod tests {
         assert!(validate_custom_provider_id("acme-").is_err());
         assert!(validate_custom_provider_id("acme--gw").is_err());
         assert!(validate_custom_provider_id("token x").is_err());
+
+        // 设置页按种类写字：空的和写错的是两种。
+        assert_eq!(
+            custom_provider_id_problem(""),
+            Some(ProviderInputProblem::IdRequired)
+        );
+        assert_eq!(
+            custom_provider_id_problem("acme_gateway"),
+            Some(ProviderInputProblem::IdInvalid)
+        );
+        assert_eq!(custom_provider_id_problem("Token-X"), None);
+    }
+
+    #[test]
+    fn api_base_url_must_be_a_full_http_url() {
+        assert_eq!(api_base_url_problem("https://api.example.com/v1"), None);
+        assert_eq!(api_base_url_problem("http://localhost:11434/v1"), None);
+        for bad in ["ftp://example.com", "not-a-url", "http://", ""] {
+            assert_eq!(
+                api_base_url_problem(bad),
+                Some(ProviderInputProblem::BaseUrlInvalid),
+                "{bad}"
+            );
+        }
     }
 }
 
 #[cfg(test)]
 mod pi_model_settings_integration_tests {
     use crate::pi_model_settings::{
-        PiCustomModel, PiCustomProvider, PiDefaultModelConfig, load_pi_model_settings_at,
-        pi_settings_summary_at, remove_pi_custom_provider_at, save_pi_custom_provider_at,
+        PiCustomModel, PiCustomProvider, PiDefaultModelConfig, PiModelRef,
+        load_pi_model_settings_at, remove_pi_custom_provider_at, save_pi_custom_provider_at,
         save_pi_default_model_at,
     };
     #[cfg(unix)]
@@ -1823,15 +1928,7 @@ mod pi_model_settings_integration_tests {
         let _ = std::fs::create_dir_all(&temp_dir);
         let temp = temp_dir.as_path();
         let initial = load_pi_model_settings_at(temp).expect("load initial");
-        assert_eq!(initial.default_model.provider, "deepseek");
-        assert_eq!(initial.default_model.model, "deepseek-chat");
-        assert_eq!(initial.default_model.thinking_level, "medium");
-        let environment_credential_configured =
-            std::env::var("DEEPSEEK_API_KEY").is_ok_and(|key| !key.trim().is_empty());
-        assert_eq!(
-            initial.credential_configured,
-            environment_credential_configured
-        );
+        assert_eq!(initial.default_model, None);
         assert!(initial.custom_providers.is_empty());
 
         let default_config = PiDefaultModelConfig {
@@ -1859,19 +1956,24 @@ mod pi_model_settings_integration_tests {
         save_pi_custom_provider_at(temp, &custom_provider, None, false).expect("save custom");
 
         let reloaded = load_pi_model_settings_at(temp).expect("reload");
-        assert_eq!(reloaded.default_model.provider, "deepseek");
-        assert_eq!(reloaded.default_model.base_url, "https://api.deepseek.com");
-        assert_eq!(reloaded.default_model.thinking_level, "low");
-        assert!(reloaded.credential_configured);
+        assert_eq!(
+            reloaded.default_model,
+            Some(PiModelRef {
+                provider: "deepseek".into(),
+                model: "deepseek-chat".into(),
+            })
+        );
+        assert_eq!(reloaded.thinking_level.as_deref(), Some("low"));
+        assert_eq!(
+            reloaded
+                .endpoint_overrides
+                .get("deepseek")
+                .map(String::as_str),
+            Some("https://api.deepseek.com")
+        );
         assert_eq!(reloaded.custom_providers.len(), 1);
         assert_eq!(reloaded.custom_providers[0].id, "local-vllm");
         assert_eq!(reloaded.custom_providers[0].models[0].id, "qwen-2.5-coder");
-
-        let summary = pi_settings_summary_at(temp).expect("summary");
-        let dm = summary.default_model.expect("default model in summary");
-        assert_eq!(dm.provider.as_deref(), Some("deepseek"));
-        assert_eq!(dm.model.as_deref(), Some("deepseek-chat"));
-        assert_eq!(dm.thinking_level.as_deref(), Some("low"));
 
         remove_pi_custom_provider_at(temp, "local-vllm").expect("remove custom");
         let after_removal = load_pi_model_settings_at(temp).expect("after remove");

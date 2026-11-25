@@ -23,6 +23,17 @@ use crate::quota_http::{QuotaEndpointError, is_unauthorized, quota_http_client};
 struct CodexUsageResponse {
     #[serde(default)]
     rate_limit: Option<CodexRateLimit>,
+    /// 单独计的模型（如 Spark），各有自己的一套窗口。
+    #[serde(default)]
+    additional_rate_limits: Option<Vec<CodexAdditionalRateLimit>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexAdditionalRateLimit {
+    #[serde(default)]
+    limit_name: Option<String>,
+    #[serde(default)]
+    rate_limit: Option<CodexRateLimit>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +62,36 @@ struct ClaudeUsageResponse {
     five_hour: Option<ClaudeUsagePeriod>,
     #[serde(default)]
     seven_day: Option<ClaudeUsagePeriod>,
+    #[serde(default)]
+    seven_day_opus: Option<ClaudeUsagePeriod>,
+    #[serde(default)]
+    seven_day_sonnet: Option<ClaudeUsagePeriod>,
+    /// 按模型单独计的周额度，新模型出现在这里。
+    #[serde(default)]
+    limits: Option<Vec<ClaudeScopedLimit>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeScopedLimit {
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    percent: Option<f64>,
+    #[serde(default)]
+    resets_at: Option<String>,
+    #[serde(default)]
+    scope: Option<ClaudeLimitScope>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeLimitScope {
+    #[serde(default)]
+    model: Option<ClaudeLimitModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeLimitModel {
+    display_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,9 +108,11 @@ const GROK_BILLING_ENDPOINT: &str = "https://cli-chat-proxy.grok.com/v1/billing?
 const CURSOR_USAGE_ENDPOINT: &str =
     "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
 
-/// 使用 Codex CLI 的 ChatGPT OAuth 凭据查询账户限额。
+/// 使用 Codex CLI 的 ChatGPT OAuth 凭据查询账户限额。没登录时是 `Ok(None)`。
 pub async fn fetch_codex_quota() -> anyhow::Result<Option<ProviderQuota>> {
-    let (token, account_id) = local_codex_credentials()?;
+    let Some((token, account_id)) = local_codex_credentials() else {
+        return Ok(None);
+    };
     fetch_codex_quota_with_token(&token, &account_id).await
 }
 
@@ -90,9 +133,11 @@ pub async fn fetch_codex_quota_with_token(
     let response = request.send().await?;
     let status = response.status();
     if !status.is_success() {
-        return Err(anyhow::anyhow!(
-            "Codex quota endpoint returned HTTP {status}"
-        ));
+        return Err(QuotaEndpointError {
+            provider: "Codex",
+            status,
+        }
+        .into());
     }
     parse_codex_quota(&response.text().await?)
 }
@@ -177,9 +222,11 @@ pub async fn fetch_grok_quota_with_token(token: &str) -> anyhow::Result<Option<P
         .await?;
     let status = response.status();
     if !status.is_success() {
-        return Err(anyhow::anyhow!(
-            "Grok quota endpoint returned HTTP {status}"
-        ));
+        return Err(QuotaEndpointError {
+            provider: "Grok",
+            status,
+        }
+        .into());
     }
     parse_grok_quota(&response.text().await?)
 }
@@ -248,23 +295,84 @@ pub fn parse_codex_quota(body: &str) -> anyhow::Result<Option<ProviderQuota>> {
     };
 
     let mut windows = Vec::new();
-    if let Some(window) = rate_limit.primary_window {
-        push_codex_window(&mut windows, "primary", window);
-    }
-    if let Some(window) = rate_limit.secondary_window {
-        push_codex_window(&mut windows, "secondary", window);
+    push_codex_rate_limit(&mut windows, rate_limit, None);
+    for extra in response.additional_rate_limits.into_iter().flatten() {
+        let Some(rate_limit) = extra.rate_limit else {
+            continue;
+        };
+        let scope = extra.limit_name.filter(|name| !name.trim().is_empty());
+        push_codex_rate_limit(&mut windows, rate_limit, scope);
     }
     Ok((!windows.is_empty()).then_some(ProviderQuota { windows }))
+}
+
+fn push_codex_rate_limit(
+    windows: &mut Vec<ProviderQuotaWindow>,
+    rate_limit: CodexRateLimit,
+    scope: Option<String>,
+) {
+    if let Some(window) = rate_limit.primary_window {
+        push_codex_window(windows, "primary", window, scope.clone());
+    }
+    if let Some(window) = rate_limit.secondary_window {
+        push_codex_window(windows, "secondary", window, scope);
+    }
 }
 
 pub fn parse_claude_quota(body: &str) -> anyhow::Result<Option<ProviderQuota>> {
     let response: ClaudeUsageResponse = serde_json::from_str(body)?;
     let mut windows = Vec::new();
-    if let Some(period) = response.five_hour {
-        push_claude_window(&mut windows, "5h", period);
+    let periods = [
+        (response.five_hour, "5h", None),
+        (response.seven_day, "7d", None),
+        (response.seven_day_opus, "7d", Some("Opus")),
+        (response.seven_day_sonnet, "7d", Some("Sonnet")),
+    ];
+    for (period, label, scope) in periods {
+        if let Some(period) = period {
+            push_claude_window(&mut windows, label, period, scope.map(str::to_string));
+        }
     }
-    if let Some(period) = response.seven_day {
-        push_claude_window(&mut windows, "7d", period);
+    // Pro、Enterprise 的 Sonnet 额度就是周额度本身（Claude Code 在这两档不单列它）：和整个账户
+    // 那份一模一样的模型额度不另列。
+    let weekly = windows
+        .iter()
+        .find(|window| window.scope.is_none() && window.label == "7d")
+        .map(|window| (window.used_percent, window.resets_at_ms));
+    windows.retain(|window| {
+        window.scope.is_none() || Some((window.used_percent, window.resets_at_ms)) != weekly
+    });
+    // 按模型的周额度：同一个模型上面已经有了就不重复列。
+    for limit in response.limits.into_iter().flatten() {
+        if limit.kind.as_deref() != Some("weekly_scoped") {
+            continue;
+        }
+        let Some(name) = limit
+            .scope
+            .and_then(|scope| scope.model)
+            .map(|model| model.display_name.trim().to_string())
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let listed = windows.iter().any(|window| {
+            window
+                .scope
+                .as_deref()
+                .is_some_and(|scope| scope.eq_ignore_ascii_case(&name))
+        });
+        if listed {
+            continue;
+        }
+        push_claude_window(
+            &mut windows,
+            "7d",
+            ClaudeUsagePeriod {
+                utilization: limit.percent,
+                resets_at: limit.resets_at,
+            },
+            Some(name),
+        );
     }
     Ok((!windows.is_empty()).then_some(ProviderQuota { windows }))
 }
@@ -334,6 +442,7 @@ pub fn parse_grok_quota(body: &str) -> anyhow::Result<Option<ProviderQuota>> {
             used_percent: used_percent.unwrap_or(0.0),
             resets_at_ms: resets_at,
             reset_after_seconds: None,
+            scope: None,
         }],
     }))
 }
@@ -430,6 +539,7 @@ pub fn parse_cursor_quota(body: &str) -> anyhow::Result<Option<ProviderQuota>> {
             used_percent: used_percent.unwrap_or(0.0),
             resets_at_ms,
             reset_after_seconds: None,
+            scope: None,
         }],
     }))
 }
@@ -488,6 +598,7 @@ fn push_codex_window(
     windows: &mut Vec<ProviderQuotaWindow>,
     fallback_label: &str,
     window: CodexRateLimitWindow,
+    scope: Option<String>,
 ) {
     let Some(used_percent) = finite_percent(window.used_percent) else {
         return;
@@ -501,6 +612,7 @@ fn push_codex_window(
         used_percent,
         resets_at_ms: window.reset_at.and_then(unix_seconds_to_ms),
         reset_after_seconds: window.reset_after_seconds,
+        scope,
     });
 }
 
@@ -508,6 +620,7 @@ fn push_claude_window(
     windows: &mut Vec<ProviderQuotaWindow>,
     label: &str,
     period: ClaudeUsagePeriod,
+    scope: Option<String>,
 ) {
     let Some(used_percent) = finite_percent(period.utilization) else {
         return;
@@ -517,6 +630,7 @@ fn push_claude_window(
         used_percent,
         resets_at_ms: period.resets_at.as_deref().and_then(parse_rfc3339_ms),
         reset_after_seconds: None,
+        scope,
     });
 }
 
@@ -552,9 +666,9 @@ fn format_window_seconds(seconds: u64) -> String {
     format!("{}s", seconds)
 }
 
-fn local_codex_credentials() -> anyhow::Result<(String, String)> {
+fn local_codex_credentials() -> Option<(String, String)> {
     if let Some(token) = non_empty_env("CODEX_ACCESS_TOKEN") {
-        return Ok((token, non_empty_env("CODEX_ACCOUNT_ID").unwrap_or_default()));
+        return Some((token, non_empty_env("CODEX_ACCOUNT_ID").unwrap_or_default()));
     }
 
     let mut paths = Vec::new();
@@ -582,9 +696,9 @@ fn local_codex_credentials() -> anyhow::Result<(String, String)> {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_string();
-        return Ok((token.to_string(), account_id));
+        return Some((token.to_string(), account_id));
     }
-    Err(anyhow::anyhow!("Codex local credentials were not found"))
+    None
 }
 
 fn local_grok_access_token() -> Option<String> {
@@ -777,28 +891,39 @@ fn cursor_state_db_paths() -> Vec<PathBuf> {
     paths
 }
 
-/// 只读打开 Cursor 的 VS Code 状态库，取出登录 accessToken。用系统
-/// `sqlite3`，避免给 smelt-core 再加一份 native sqlite 依赖。
+/// 只读打开 Cursor 的 VS Code 状态库，取出登录 accessToken。
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 fn read_cursor_token_from_db(path: &Path) -> Option<String> {
     if !path.is_file() {
         return None;
     }
-    let uri = format!("file:{}?mode=ro", path.display());
-    let output = Command::new("sqlite3")
-        .args([
-            "-batch",
-            "-noheader",
-            &uri,
-            "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken' LIMIT 1;",
-        ])
-        .output()
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    conn.busy_timeout(std::time::Duration::from_millis(250))
         .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let token = String::from_utf8(output.stdout).ok()?;
-    let token = token.trim();
+    let raw = conn
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken' LIMIT 1",
+            [],
+            |row| match row.get_ref(0)? {
+                rusqlite::types::ValueRef::Text(bytes) | rusqlite::types::ValueRef::Blob(bytes) => {
+                    Ok(std::str::from_utf8(bytes).ok().map(str::to_owned))
+                }
+                _ => Ok(None),
+            },
+        )
+        .ok()
+        .flatten()?;
+    let token = raw.trim();
     (!token.is_empty()).then(|| token.to_string())
+}
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+fn read_cursor_token_from_db(_path: &Path) -> Option<String> {
+    None
 }
 
 /// 从 Grok CLI 的 `auth.json` 里挑出 grok.com 会话 bearer。
@@ -1090,6 +1215,112 @@ mod tests {
     }
 
     #[test]
+    fn parses_claude_per_model_weekly_limits() {
+        let quota = parse_claude_quota(
+            r#"{
+              "five_hour": {"utilization": 9, "resets_at": "2026-08-09T12:50:00+00:00"},
+              "seven_day": {"utilization": 34, "resets_at": "2026-08-15T15:59:59+00:00"},
+              "seven_day_oauth_apps": null,
+              "seven_day_opus": null,
+              "seven_day_sonnet": {"utilization": 61, "resets_at": "2026-08-15T15:59:59+00:00"},
+              "extra_usage": {"is_enabled": false},
+              "limits": [
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 20, "resets_at": "2026-08-15T15:59:59+00:00",
+                 "severity": "normal", "is_active": true, "scope": {"model": {"display_name": "Fable"}}},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 61, "resets_at": null,
+                 "severity": "normal", "is_active": true, "scope": {"model": {"display_name": "sonnet"}}},
+                {"kind": "session", "group": "session", "percent": 9, "resets_at": null,
+                 "severity": "normal", "is_active": true, "scope": null}
+              ]
+            }"#,
+        )
+        .unwrap()
+        .unwrap();
+        let windows: Vec<(Option<&str>, &str, u32)> = quota
+            .windows
+            .iter()
+            .map(|window| {
+                (
+                    window.scope.as_deref(),
+                    window.label.as_str(),
+                    window.used_percent as u32,
+                )
+            })
+            .collect();
+        // Sonnet 在列表里又出现一次不重复列；不是按模型的那项不算。
+        assert_eq!(
+            windows,
+            [
+                (None, "5h", 9),
+                (None, "7d", 34),
+                (Some("Sonnet"), "7d", 61),
+                (Some("Fable"), "7d", 20),
+            ]
+        );
+    }
+
+    #[test]
+    fn drops_claude_model_limit_that_is_the_weekly_limit() {
+        let quota = parse_claude_quota(
+            r#"{
+              "seven_day": {"utilization": 34, "resets_at": "2026-08-15T15:59:59+00:00"},
+              "seven_day_sonnet": {"utilization": 34, "resets_at": "2026-08-15T15:59:59+00:00"}
+            }"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(quota.windows.len(), 1);
+        assert_eq!(quota.windows[0].scope, None);
+    }
+
+    #[test]
+    fn parses_codex_additional_model_limits() {
+        let quota = parse_codex_quota(
+            r#"{
+              "plan_type": "pro",
+              "rate_limit": {
+                "primary_window": {"used_percent": 11, "limit_window_seconds": 18000, "reset_after_seconds": 100, "reset_at": 1786847399},
+                "secondary_window": {"used_percent": 42, "limit_window_seconds": 604800, "reset_after_seconds": 200, "reset_at": 1786850000}
+              },
+              "additional_rate_limits": [
+                {
+                  "limit_name": "GPT-5.3-Codex-Spark",
+                  "metered_feature": "codex_bengalfox",
+                  "rate_limit": {
+                    "allowed": true,
+                    "limit_reached": false,
+                    "primary_window": {"used_percent": 70, "limit_window_seconds": 18000, "reset_after_seconds": 100, "reset_at": 1786847399},
+                    "secondary_window": null
+                  }
+                },
+                {"limit_name": "empty", "metered_feature": "x", "rate_limit": null}
+              ]
+            }"#,
+        )
+        .unwrap()
+        .unwrap();
+        let windows: Vec<(Option<&str>, &str, u32)> = quota
+            .windows
+            .iter()
+            .map(|window| {
+                (
+                    window.scope.as_deref(),
+                    window.label.as_str(),
+                    window.used_percent as u32,
+                )
+            })
+            .collect();
+        assert_eq!(
+            windows,
+            [
+                (None, "5h", 11),
+                (None, "7d", 42),
+                (Some("GPT-5.3-Codex-Spark"), "5h", 70),
+            ]
+        );
+    }
+
+    #[test]
     fn ignores_unknown_or_invalid_windows() {
         assert_eq!(parse_codex_quota(r#"{"rate_limit": null}"#).unwrap(), None);
         let quota = parse_claude_quota(
@@ -1252,5 +1483,50 @@ mod tests {
     fn ignores_cursor_payload_without_usage() {
         assert_eq!(parse_cursor_quota(r#"{}"#).unwrap(), None);
         assert_eq!(parse_cursor_quota(r#"{"planUsage":{}}"#).unwrap(), None);
+    }
+
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    #[test]
+    fn reads_cursor_token_from_db_even_with_query_char_in_path() {
+        // Windows 文件名不许有 `?`，换成同样会被当成 URI 分隔的 `#`。
+        let special = if cfg!(windows) { '#' } else { '?' };
+        let dir =
+            std::env::temp_dir().join(format!("smelt-cursor-db-{}{special}v1", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("state.vscdb");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB);
+             INSERT INTO ItemTable VALUES ('cursorAuth/accessToken', '  tok-123  ');",
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            read_cursor_token_from_db(&db).as_deref(),
+            Some("tok-123"),
+            "含 URI 分隔符的路径也应通过 rusqlite 正常只读取出 token"
+        );
+        // 兼容 BLOB 形式存储的 UTF-8 令牌
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE ItemTable SET value = X'626c6f622d746f6b' WHERE key = 'cursorAuth/accessToken'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(read_cursor_token_from_db(&db).as_deref(), Some("blob-tok"));
+        // 空值与不存在的库返回 None
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE ItemTable SET value = '   ' WHERE key = 'cursorAuth/accessToken'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(read_cursor_token_from_db(&db), None);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(read_cursor_token_from_db(&db), None);
     }
 }

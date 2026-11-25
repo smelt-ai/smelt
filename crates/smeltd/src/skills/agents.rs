@@ -1,0 +1,104 @@
+//! 各家 agent 的技能目录能力表。
+//!
+//! 只收主流 agent：smelt 已集成通知 hook 的那几家，加上 Gemini CLI。不在表里的 agent，它目录
+//! 下的技能不扫描、也不替它建兼容链接。
+
+/// 一家 agent 的技能目录。路径都相对用户主目录或项目根。
+#[derive(Debug, PartialEq, Eq)]
+pub struct Agent {
+    pub label: &'static str,
+    /// 配置目录：用户主目录里有它，这家 agent 就算在用。
+    pub home: &'static str,
+    pub user_dir: Option<&'static str>,
+    pub project_dir: Option<&'static str>,
+    pub reads_agents_dir: bool,
+}
+
+impl Agent {
+    /// 这一层级里它自己的技能目录；没有就是只读 `.agents/skills`。
+    pub fn dir(&self, project_scope: bool) -> Option<&'static str> {
+        if project_scope {
+            self.project_dir
+        } else {
+            self.user_dir
+        }
+    }
+}
+
+pub const AGENTS: &[Agent] = &[
+    Agent {
+        label: "Claude Code",
+        home: ".claude",
+        user_dir: Some(".claude/skills"),
+        project_dir: Some(".claude/skills"),
+        reads_agents_dir: false,
+    },
+    Agent {
+        label: "Codex",
+        home: ".codex",
+        user_dir: None,
+        project_dir: None,
+        reads_agents_dir: true,
+    },
+    Agent {
+        label: "Copilot",
+        home: ".copilot",
+        user_dir: Some(".copilot/skills"),
+        project_dir: Some(".github/skills"),
+        reads_agents_dir: true,
+    },
+    Agent {
+        label: "Cursor",
+        home: ".cursor",
+        user_dir: Some(".cursor/skills"),
+        project_dir: Some(".cursor/skills"),
+        reads_agents_dir: true,
+    },
+    Agent {
+        label: "Gemini CLI",
+        home: ".gemini",
+        user_dir: Some(".gemini/skills"),
+        project_dir: Some(".gemini/skills"),
+        reads_agents_dir: true,
+    },
+    Agent {
+        label: "Grok",
+        home: ".grok",
+        user_dir: None,
+        project_dir: None,
+        reads_agents_dir: true,
+    },
+    Agent {
+        label: "Antigravity",
+        home: ".gemini/config",
+        user_dir: Some(".gemini/config/skills"),
+        project_dir: None,
+        reads_agents_dir: true,
+    },
+    Agent {
+        label: "Kiro",
+        home: ".kiro",
+        user_dir: Some(".kiro/skills"),
+        project_dir: Some(".kiro/skills"),
+        reads_agents_dir: true,
+    },
+    Agent {
+        label: "OpenCode",
+        home: ".config/opencode",
+        user_dir: Some(".config/opencode/skills"),
+        project_dir: Some(".opencode/skills"),
+        reads_agents_dir: true,
+    },
+];
+
+pub fn find(label: &str) -> Option<&'static Agent> {
+    AGENTS.iter().find(|agent| agent.label == label)
+}
+
+/// 在表里的先后，排序用。
+pub fn rank(label: &str) -> usize {
+    AGENTS
+        .iter()
+        .position(|agent| agent.label == label)
+        .unwrap_or(AGENTS.len())
+}

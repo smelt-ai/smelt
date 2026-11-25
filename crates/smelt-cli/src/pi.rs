@@ -11,7 +11,7 @@ use smelt_model::control_api::{
     PiModelsSetThinkingLevel, PiPluginsImport, PiPluginsRemove,
 };
 use smelt_model::pi_mcp::{PI_MCP_PRESETS, find_preset};
-use smelt_model::pi_model_settings::PiDefaultModelConfig;
+use smelt_model::pi_model_settings::{PI_THINKING_LEVELS, PiDefaultModelConfig};
 use smelt_model::pi_plugin_catalog::PiPluginKind;
 use smelt_model::pi_service::{
     ImportPluginParams, McpEnabledParams, McpPresetParams, McpServerParams, PiConfig,
@@ -20,7 +20,6 @@ use smelt_model::pi_service::{
 use smelt_runtime_client::protocol::control::EmptyParams;
 
 /// Pi 认的推理强度。
-const THINKING_LEVELS: [&str; 6] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 
 fn config() -> Result<PiConfig, String> {
     control::<PiConfigGet>(EmptyParams::default())
@@ -184,7 +183,7 @@ pub(crate) fn run_model(args: &[String]) -> i32 {
             None => usage(&t!("model.default_usage")),
         },
         Some("thinking") => match id_arg(rest) {
-            Some(level) if THINKING_LEVELS.contains(&level) => respond(
+            Some(level) if PI_THINKING_LEVELS.contains(&level) => respond(
                 control::<PiModelsSetThinkingLevel>(ThinkingLevelParams {
                     level: level.to_string(),
                 })
@@ -192,7 +191,7 @@ pub(crate) fn run_model(args: &[String]) -> i32 {
             ),
             _ => usage(&format!(
                 "smelt model thinking {}",
-                THINKING_LEVELS.join("|")
+                PI_THINKING_LEVELS.join("|")
             )),
         },
         Some(command) => usage(&t!("unknown_subcommand", command = command)),
@@ -202,11 +201,12 @@ pub(crate) fn run_model(args: &[String]) -> i32 {
 
 /// 只给默认模型和可选模型，不带 provider 配置（里面可能有地址和凭据状态）。
 fn models_json(config: PiConfig) -> Result<serde_json::Value, String> {
-    let summary = config
-        .settings_summary
+    let settings = config
+        .model_settings
         .map_err(|error| t!("model.settings_unreadable", error = error).into_owned())?;
     Ok(serde_json::json!({
-        "default": summary.default_model,
+        "default": settings.default_model,
+        "thinking_level": settings.thinking_level,
         "models": config.model_choice_groups,
     }))
 }
@@ -230,18 +230,13 @@ fn set_default(value: &str) -> Result<serde_json::Value, String> {
     if !has_model(&current, provider, model) {
         return Err(t!("no_such_model", provider = provider, model = model).into_owned());
     }
-    let thinking_level = current
-        .settings_summary
-        .ok()
-        .and_then(|summary| summary.default_model)
-        .and_then(|model| model.thinking_level)
-        .unwrap_or_default();
+    // 推理强度是另一项设置，空着不动它。
     control::<PiModelsSaveDefault>(SaveDefaultModelParams {
         config: PiDefaultModelConfig {
             provider: provider.to_string(),
             model: model.to_string(),
             base_url: String::new(),
-            thinking_level,
+            thinking_level: String::new(),
         },
         api_key: None,
         reset_base_url: false,

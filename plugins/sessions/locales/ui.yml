@@ -1,0 +1,236 @@
+_version: 2
+action:
+  add_machine:
+    en: "add the remote machine"
+    zh-CN: "添加远程机器"
+  close_pane:
+    en: "close the pane"
+    zh-CN: "关分屏"
+  close_session:
+    en: "close the session"
+    zh-CN: "关会话"
+  split:
+    en: "split the view"
+    zh-CN: "分屏"
+close:
+  pane:
+    en: "Close Pane"
+    zh-CN: "关闭分屏"
+  pane_running:
+    en: "This pane is still running. Close it?"
+    zh-CN: "这个分屏还在运行，确定关闭吗？"
+  running_description:
+    en: "The turn running in “%{title}” will be stopped, and it can't be recovered after closing."
+    zh-CN: "「%{title}」正在跑的这一轮会被终止，关掉之后找不回来。"
+  session:
+    en: "Close Session"
+    zh-CN: "关闭会话"
+  session_running:
+    en: "This session is still running. Close it?"
+    zh-CN: "这个会话还在运行，确定关闭吗？"
+command:
+  activate:
+    en: "Jump to Session"
+    zh-CN: "跳到会话"
+  create_conversation:
+    en: "Create Session"
+    zh-CN: "新建会话"
+  close_pane:
+    en: "Close Current Pane or Session"
+    zh-CN: "关闭当前分屏或会话"
+  fork:
+    en: "Fork Conversation"
+    zh-CN: "分叉对话"
+  handoff:
+    en: "Hand Off to Another Agent"
+    zh-CN: "交接给另一个 agent"
+  next_pane:
+    en: "Next Pane"
+    zh-CN: "下一个分屏"
+  prev_pane:
+    en: "Previous Pane"
+    zh-CN: "上一个分屏"
+  resume:
+    en: "Resume Past Session"
+    zh-CN: "续接历史会话"
+  resume_in_terminal:
+    en: "Resume Past Session in Terminal"
+    zh-CN: "在终端里续接历史会话"
+  select_project:
+    en: "Select Project"
+    zh-CN: "选中项目"
+  selection:
+    en: "Current Selection"
+    zh-CN: "当前选中"
+  send_text:
+    en: "Fill Text into Session"
+    zh-CN: "往会话里填文字"
+  split_down:
+    en: "Split Down"
+    zh-CN: "上下分屏"
+  split_right:
+    en: "Split Right"
+    zh-CN: "左右分屏"
+  start_conversation:
+    en: "Start Conversation"
+    zh-CN: "开始对话"
+empty:
+  add_machine:
+    en: "Add Remote Machine"
+    zh-CN: "添加远程机器"
+  no_session:
+    en: "No open sessions"
+    zh-CN: "没有打开的会话"
+  title:
+    en: "Take a Break"
+    zh-CN: "休息一下"
+error:
+  agent_gone:
+    en: "The agent no longer exists"
+    zh-CN: "智能体已经不存在"
+  agent_settings_loading:
+    en: "Still reading that machine's agent settings. Try again shortly."
+    zh-CN: "正在读取那台机器的智能体配置，请稍后再试"
+  agent_settings_unavailable:
+    en: "That machine's agent settings are unavailable: %{reason}"
+    zh-CN: "那台机器的智能体配置不可用：%{reason}"
+  bad_open_args:
+    en: "Couldn't open the session: invalid arguments: %{error}"
+    zh-CN: "打开会话：参数不对：%{error}"
+  choose_engine:
+    en: "Choose an available engine"
+    zh-CN: "请选择一个可用的执行引擎"
+  custom_needs_profile:
+    en: "Generic ACP needs a custom agent"
+    zh-CN: "通用 ACP 要选一个自定义 Agent"
+  engine_not_available:
+    en: "%{engine} isn't available as an agent engine yet; use Pi instead"
+    zh-CN: "%{engine} 暂未开放为产品级智能体引擎，请改用 Pi"
+  failed:
+    en: "Couldn't %{what}: %{error}"
+    zh-CN: "%{what}失败：%{error}"
+  fork_only_conversation:
+    en: "Only conversations can be forked"
+    zh-CN: "只有对话能分叉"
+  fork_source_missing:
+    en: "Couldn't find the conversation to fork"
+    zh-CN: "找不到要分叉的那段对话"
+  handoff_unknown_agent:
+    en: "Unknown agent “%{agent}”; handoff cancelled"
+    zh-CN: "认不出 agent「%{agent}」，交接取消"
+  machine_removed:
+    en: "This machine has been removed"
+    zh-CN: "这台机器已经移除了"
+  no_acp_resume:
+    en: "“%{agent}” doesn't support ACP resume"
+    zh-CN: "「%{agent}」不支持 ACP 续接"
+  no_cli_resume:
+    en: "%{agent} has no CLI that can resume in a terminal"
+    zh-CN: "%{agent} 没有能在终端里续接的 CLI"
+  no_custom_agent:
+    en: "%{agent} has no custom agent"
+    zh-CN: "%{agent} 没有自定义 Agent"
+  no_open_session:
+    en: "No session is open yet"
+    zh-CN: "还没有打开会话"
+  no_project_dir:
+    en: "No project folder was given"
+    zh-CN: "没有给项目目录"
+  no_room:
+    en: "There's no room for the session view"
+    zh-CN: "会话视图放不下"
+  no_selection:
+    en: "No session is selected"
+    zh-CN: "没有选中的会话"
+  not_in_directory:
+    en: "This session is no longer in the directory"
+    zh-CN: "这段会话已经不在目录里了"
+  not_open:
+    en: "The session isn't open yet"
+    zh-CN: "会话还没打开"
+  profile_kind_mismatch:
+    en: "Custom agent “%{profile}” isn't for %{engine}"
+    zh-CN: "自定义 Agent「%{profile}」不是 %{engine} 的"
+  profile_missing:
+    en: "Couldn't find custom agent “%{id}”; it may have been deleted"
+    zh-CN: "找不到自定义 Agent「%{id}」，可能已经删了"
+  project_not_listed:
+    en: "The project isn't in the list"
+    zh-CN: "列表里没有这个项目"
+  send_no_session:
+    en: "Not sent: no session is open yet."
+    zh-CN: "没有发出去：还没有打开会话。"
+  session_gone:
+    en: "The session to open no longer exists"
+    zh-CN: "要打开的会话已经不在了"
+  title:
+    en: "Error"
+    zh-CN: "错误"
+  unknown_agent:
+    en: "Unknown agent “%{agent}”"
+    zh-CN: "认不出 agent「%{agent}」"
+  unknown_history_source:
+    en: "Unknown history source “%{source}”"
+    zh-CN: "认不出历史来源「%{source}」"
+kind:
+  conversation:
+    en: "Conversation"
+    zh-CN: "对话"
+  terminal:
+    en: "Terminal"
+    zh-CN: "终端"
+menu:
+  copy_session_id:
+    en: "Copy Session ID"
+    zh-CN: "复制会话 ID"
+split:
+  cancel:
+    en: "Cancel"
+    zh-CN: "取消"
+  conversation_missing:
+    en: "The conversation plugin isn't installed yet"
+    zh-CN: "对话插件还没装上"
+  dismiss_failure:
+    en: "Dismiss"
+    zh-CN: "关掉"
+terminal:
+  connect_error:
+    en: "Couldn't connect to the terminal: %{error}"
+    zh-CN: "连不上终端：%{error}"
+  connecting:
+    en: "Connecting to terminal…"
+    zh-CN: "正在连接终端…"
+  copy:
+    en: "Copy"
+    zh-CN: "复制"
+  input_overflow:
+    en: "Too much input was waiting while the terminal reconnected; the unsent part was cancelled"
+    zh-CN: "终端重连期间待发送的输入过多，未发送部分已取消"
+  input_reopened:
+    en: "The runtime restarted and the terminal was reopened; unsent input was cancelled"
+    zh-CN: "运行时重启过，终端已重新打开，未发送的输入已取消"
+  input_session_ended:
+    en: "The terminal session ended; unsent input was cancelled"
+    zh-CN: "终端会话已结束，未发送的输入已取消"
+  not_open:
+    en: "Terminal “%{session}” isn't open"
+    zh-CN: "终端「%{session}」没有开着"
+  paste:
+    en: "Paste"
+    zh-CN: "粘贴"
+  reconnecting:
+    en: "Lost connection to “%{runtime}”. Reconnecting… Input typed meanwhile will be sent once it's back."
+    zh-CN: "与「%{runtime}」的连接已断开，正在重连…期间的输入会在恢复后发出"
+  retry:
+    en: "Retry"
+    zh-CN: "重试"
+  search_none:
+    en: "No results"
+    zh-CN: "无结果"
+  search_placeholder:
+    en: "Find in terminal…"
+    zh-CN: "在终端中查找…"
+view:
+  session:
+    en: "Session"
+    zh-CN: "会话"

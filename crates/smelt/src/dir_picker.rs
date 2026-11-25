@@ -85,14 +85,12 @@ impl Workspace {
         };
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let listed = cx
-                .background_executor()
-                .spawn(async move {
-                    client
-                        .call::<WorkspaceBrowseDirsCall>(&params, smelt_plugin_api::CALL_TIMEOUT)
-                        .map_err(smelt_plugin_api::call_error_text)
-                })
-                .await;
+            let listed = smelt_sys::blocking::run(move || {
+                client
+                    .call::<WorkspaceBrowseDirsCall>(&params, smelt_plugin_api::CALL_TIMEOUT)
+                    .map_err(smelt_plugin_api::call_error_text)
+            })
+            .await;
             let _ = this.update(cx, |this, cx| {
                 let Some(picker) = this
                     .dir_picker

@@ -1,0 +1,7 @@
+{
+  "resolve": {
+    "alias": {
+      "smelt/sdk": "./sdk.tsx"
+    }
+  }
+}

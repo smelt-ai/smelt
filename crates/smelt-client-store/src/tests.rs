@@ -319,6 +319,55 @@ fn v13_drops_the_selected_agent_and_moves_the_new_conversation_key() {
     cleanup(&path);
 }
 
+/// v15 → v16：会话列表拆成了自己的插件。布局存档里的列表视图换成新 id，列表的命令改过的
+/// 键搬到新 id 上（新 id 已有记录的以新的为准），会话插件留下的命令不动。
+#[test]
+fn v15_moves_the_list_to_its_own_plugin() {
+    let (store, path) = temp_store();
+    drop(store);
+    let v15 = Connection::open(&path).unwrap();
+    v15.execute_batch(
+        "INSERT INTO workspace_layout_state VALUES ('default',
+           '{\"panes\":[{\"view\":\"smelt.sessions/list\"},{\"view\":\"smelt.sessions/session\"}]}');
+         INSERT INTO key_binding VALUES
+           ('smelt.sessions/focus-list', 'cmd-0'),
+           ('smelt.sessions/prev', NULL),
+           ('smelt.sessions/next', 'cmd-j'),
+           ('smelt.session-list/next', 'cmd-k'),
+           ('smelt.sessions/split-right', 'cmd-e');
+         PRAGMA user_version = 15;",
+    )
+    .unwrap();
+    drop(v15);
+
+    let store = ClientStore::open(&path).unwrap();
+    assert_eq!(
+        store
+            .workspace_layout_state("default")
+            .unwrap()
+            .map(|record| record.state)
+            .as_deref(),
+        Some(
+            "{\"panes\":[{\"view\":\"smelt.session-list/main\"},{\"view\":\"smelt.sessions/session\"}]}"
+        )
+    );
+    let record = |command: &str, keystroke: Option<&str>| KeyBindingRecord {
+        command: command.to_string(),
+        keystroke: keystroke.map(str::to_string),
+    };
+    assert_eq!(
+        store.key_bindings().unwrap(),
+        vec![
+            record("smelt.session-list/focus-list", Some("cmd-0")),
+            record("smelt.session-list/next", Some("cmd-k")),
+            record("smelt.session-list/prev", None),
+            record("smelt.sessions/split-right", Some("cmd-e")),
+        ]
+    );
+    drop(store);
+    cleanup(&path);
+}
+
 /// v14 → v15：会话列表、分屏的界面状态和终端字号归了插件，那些表和列删掉；外观里没人读的
 /// 三列删掉、`glass_style` 改名 `material`，路由列改名 `outlet`，远程机器的 `smelt_home` 删掉；
 /// 值、远程机器和布局存档留着。分屏的
@@ -381,8 +430,8 @@ fn v14_drops_the_session_ui_and_moves_the_pane_keys() {
         store.key_bindings().unwrap(),
         vec![
             record("smelt.palette/toggle", Some("cmd-j")),
+            record("smelt.session-list/focus-list", Some("cmd-0")),
             record("smelt.sessions/close-pane", Some("cmd-alt-w")),
-            record("smelt.sessions/focus-list", Some("cmd-0")),
             record("smelt.sessions/next-pane", None),
             record("smelt.sessions/prev-pane", Some("cmd-shift-[")),
             record("smelt.sessions/split-down", Some("cmd-shift-e")),

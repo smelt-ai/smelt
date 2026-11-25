@@ -30,30 +30,11 @@ members = [
     "crates/smelt-git",
     "crates/smeltd",
     "crates/smelt-ui",
+    "crates/smelt-desktop",
+    "crates/smelt-terminal",
+    "crates/smelt-acp",
     "crates/smelt-plugin-api",
-    "crates/plugins/agents",
-    "crates/plugins/archive",
-    "crates/plugins/automations",
-    "crates/plugins/buddies",
-    "crates/plugins/capabilities",
-    "crates/plugins/conversation",
-    "crates/plugins/desktop",
-    "crates/plugins/files",
-    "crates/plugins/git",
-    "crates/plugins/history",
-    "crates/plugins/ide",
-    "crates/plugins/language",
-    "crates/plugins/launcher",
-    "crates/plugins/layouts",
-    "crates/plugins/machines",
-    "crates/plugins/maintenance",
-    "crates/plugins/notifications",
-    "crates/plugins/resources",
-    "crates/plugins/sessions",
-    "crates/plugins/skills",
-    "crates/plugins/terminal",
-    "crates/plugins/themes",
-    "crates/plugins/updater",
+    "crates/smelt-nsh",
     "crates/smelt",
     "crates/smelt-iroh",
     "crates/smelt-mobile", # package 名是 smelt_mobile（cargokit 要求，见其 Cargo.toml）
@@ -74,7 +55,11 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+base64 = "0.23"
 clap = { version = "4", features = ["derive"] }
+dirs = "6"
+sha2 = "0.11"
+similar = "3"
 thiserror = "2"
 # 界面文案（docs/i18n.md）：插件、组件库、宿主各自带 locales/ui.yml。和 gpui-kit 同一套。
 rust-i18n = "4.2"
@@ -89,6 +74,32 @@ rust-i18n = "4.2"
 # netwatch 升到 netdev 0.47 后删掉这条，那时 cargo 会警告这条 patch 没用上。上游官方仓库，不是 fork。
 # libc 的上限另见 crates/smelt-mobile/Cargo.toml。
 netdev = { git = "https://github.com/shellrow/netdev", rev = "b3bfb0fb5595cd143bfa0b9f07d1ad6e0ef0c313" }
+
+# gpui-fast 用我们的 fork：源码长期单分支 `smelt/release`，发布态 Crate 工作区由
+# `bun script/prepare-release.ts --tag v0.1.19` 生成并推到 `smelt/crates` 分支。
+gpui-fast = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+gpui-fast-apple = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+gpui-fast-linux = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+gpui-fast-macos = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+gpui-fast-macros = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+gpui-fast-platform = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+gpui-fast-scheduler = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+gpui-fast-web = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+gpui-fast-wgpu = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+gpui-fast-windows = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+
+# NSH 用我们的 fork：长期单分支 `smelt/release`，不强推、不打标签；同步上游发版直接 merge
+# 对应 tag，这里十个包一起换到同一个 rev。
+nsh-base = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
+nsh-bundler = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
+nsh-core = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
+nsh-engine = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
+nsh-i18n = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
+nsh-js = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
+nsh-macros = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
+nsh-package = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
+nsh-platform-gpui = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
+nsh-updater = { git = "https://github.com/smelt-ai/nsh", rev = "589a153f470045d90e993a06d5c628f705841166" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow" }

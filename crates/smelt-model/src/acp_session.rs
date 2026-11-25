@@ -14,7 +14,17 @@ pub use smelt_event_protocol::{ConversationEndReason, SessionNote, SignInAgent, 
 
 /// ACP 连接结束的稳定分类。展示文案留在 `end_reason`，控制流只能依据
 /// 这里的结构化原因，避免改文案或本地化后悄悄改变重连/失败语义。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AcpEndKind {
     /// 兼容旧快照；未知原因按不可重试处理，避免把真实 provider 故障循环重连。
@@ -47,7 +57,9 @@ impl AcpEndKind {
 
 /// Provider 正在自动重试这一轮的模型请求（限流、过载这类临时错误）。重试结束
 /// （成功或放弃）、回合结束、开新一轮时清掉。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct ProviderRetryView {
     /// 第几次重试，从 1 数起。
     pub attempt: u32,
@@ -64,7 +76,9 @@ pub struct ProviderRetryView {
 
 /// 守护进程闸门后面排队、还没交给 agent 的一条消息。回合在跑时不支持中途插话的
 /// agent 收到的新消息都在这里，等当前回合结束再按序发出。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct PendingPromptView {
     /// 会话内稳定 id。撤回按它找，不按文本或下标。
     pub id: u64,
@@ -78,7 +92,9 @@ pub struct PendingPromptView {
 
 /// 给用户看的一次性提示（插话、压缩、改配置失败这类）。不是启动进度：
 /// 启动进度走 `status_line`。新回合开始、会话重启时清掉。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct AcpNoticeView {
     /// 单调递增，客户端按它记「这条已经关掉」，新提示不会被旧的关闭动作盖住。
     pub id: u64,
@@ -103,7 +119,9 @@ impl AcpNoticeView {
 }
 
 /// 运行时自己给对话发的一次性提示（不是智能体说的）。`detail` 是底层原话。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RuntimeNote {
     /// 智能体不支持运行中插入消息。
@@ -257,7 +275,9 @@ impl RuntimeNote {
 /// 这一轮里智能体写下或改过的记忆，显示在输入框上方，可以就地查看、采纳、删除。
 /// smeltd 在每次记忆写入落库时更新；用户开新一轮时收起。用户在任何一端采纳或删除，
 /// smeltd 同步改这里，所以各端看到的状态一致。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct MemoryChangesView {
     /// 每次内容变化都换一个更大的 id：客户端按它记「这张卡片已经关掉」，有新写入时重新出现。
     pub id: u64,
@@ -266,7 +286,9 @@ pub struct MemoryChangesView {
     pub entries: Vec<MemoryChangeView>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct MemoryChangeView {
     pub layer: crate::control_api::AgentMemoryLayer,
     pub file_name: String,
@@ -292,7 +314,17 @@ impl MemoryChangeView {
 
 /// 提示的来由。要据此动作的消费方（撤掉没生效的配置勾选、停止等待配置确认）
 /// 认类别，不认文案。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AcpNoticeKind {
     #[default]
@@ -304,7 +336,9 @@ pub enum AcpNoticeKind {
 /// ACP 回合终结原因的稳定投影。`DaemonPhase::Idle` 只描述当前没有运行中的回合，
 /// 不能同时承担“上一轮成功/取消/被拒绝”的结果语义；否则 daemon 只能把所有
 /// `TurnEnded` 猜成成功。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AcpTurnOutcome {
     Succeeded,
@@ -352,7 +386,9 @@ impl AcpTurnOutcome {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub enum PermissionOptionKindView {
     AllowOnce,
     AllowAlways,
@@ -373,14 +409,14 @@ impl PermissionOptionKindView {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct PermissionOptionView {
     pub option_id: String,
     pub name: String,
     pub kind: PermissionOptionKindView,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct PendingPermission {
     /// 请求身份，见 `LivePermission::id`。
     #[serde(default)]
@@ -392,7 +428,7 @@ pub struct PendingPermission {
     pub details: ApprovalDetailsView,
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ApprovalDetailsView {
     Command {
@@ -415,7 +451,7 @@ pub enum ApprovalDetailsView {
 /// `(字段下标, 选项下标)` 回选，真正的协议值只在 smeltd 自己持有的
 /// `AcpSessionState`（非快照那份）里，翻译成 `ElicitationContentValue` 是
 /// `submit_elicitation` 收到 `AcpUserAction::ElicitationSubmit` 时才做的事。
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ElicitOptionView {
     /// 智能体给的选项名；开关字段是运行时补的英文兜底。
     pub label: String,
@@ -438,7 +474,7 @@ impl ElicitOptionView {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub enum ElicitFieldKindView {
     Select(Vec<ElicitOptionView>),
     MultiSelect(Vec<ElicitOptionView>),
@@ -446,7 +482,7 @@ pub enum ElicitFieldKindView {
     ExternalUrl(String),
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ElicitFieldView {
     pub key: String,
     pub title: String,
@@ -465,7 +501,7 @@ fn elicitation_field_required_by_default() -> bool {
     true
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct PendingElicitation {
     /// 卡片身份，见 `LiveElicitation::id`。
     #[serde(default)]
@@ -490,7 +526,9 @@ pub fn pending_request_id(
         .or_else(|| elicitation.map(|id| format!("elicitation:{id}")))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub enum PlanEntryStatusView {
     Pending,
     InProgress,
@@ -507,19 +545,21 @@ impl PlanEntryStatusView {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct PlanEntryView {
     pub content: String,
     pub status: PlanEntryStatusView,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct PlanView {
     pub entries: Vec<PlanEntryView>,
 }
 
 /// Pi 后台任务的展示态。每次 widget 推送都是全量覆盖，输出只保留尾部。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundTaskView {
     pub id: String,
@@ -535,7 +575,9 @@ pub struct BackgroundTaskView {
     pub finished_at_ms: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum BackgroundTaskStatus {
     Running,
@@ -549,7 +591,9 @@ pub enum BackgroundTaskStatus {
 /// Pi 子智能体的展示态。一次 `subagent` 工具调用（派发）可以有几个：并行的每一个、
 /// 串联的每一步。会话宿主每次变化都推全量；只覆盖本次宿主生命期，重启后的状态从
 /// 父会话记录里恢复。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct SubagentView {
     pub id: String,
@@ -576,7 +620,9 @@ pub struct SubagentView {
     pub revision: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum SubagentStatus {
     Running,
@@ -615,7 +661,17 @@ impl SubagentStatus {
 }
 
 /// 另一个 Pi 对话发来的消息是哪一类。只是给对方看的标签，不改变投递方式。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum PeerMessageKind {
     #[default]
@@ -676,7 +732,9 @@ impl PeerMessageKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum PeerMessageStatus {
     /// 宿主收下了，还没进 Pi 的会话记录。
@@ -687,7 +745,9 @@ pub enum PeerMessageStatus {
 
 /// 会话宿主里一条别的 Pi 对话发来的消息：还没送到的，加最近送到的一批。
 /// 只在宿主内存里，宿主退出就没了；送到的那条本身在 Pi 的会话记录里。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerMessageView {
     /// 主 daemon 按（来源，`toolCallId`）算出的 `pm-` id。
@@ -702,7 +762,9 @@ pub struct PeerMessageView {
 }
 
 /// 主 daemon 交给目标会话宿主的一条消息。来源由 daemon 按发送方宿主的连接认定。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerDelivery {
     pub id: String,
@@ -754,7 +816,9 @@ fn cap_task_output(text: String) -> String {
 }
 
 /// 一次用户 prompt 对应的回合计时。旧快照没有这个字段。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct TurnTiming {
     pub user_index: usize,
     pub started_at_ms: u64,
@@ -770,7 +834,9 @@ impl TurnTiming {
 
 /// Provider 实际暴露的工具调试信息。它与聊天条目分离，避免普通消息模型承载
 /// 仅供审计的原始参数；按 tool call id 关联，旧历史缺失时不做反推。
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct ToolCallDebug {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -780,7 +846,9 @@ pub struct ToolCallDebug {
 
 /// Pi 在实际组装 system prompt 时一并报告的工具定义。只包含会送给模型的
 /// name/description/parameters 和来源，不包含 provider 请求头、凭据或环境变量。
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeDebugTool {
     pub name: String,
@@ -794,7 +862,9 @@ pub struct RuntimeDebugTool {
 
 /// Pi 在 provider 请求 hook 中暴露的模型身份。只记录 provider/model/api/effort，
 /// 不记录 base URL、认证配置或环境变量；headers 走独立脱敏 sidecar。
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeDebugModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -807,7 +877,9 @@ pub struct RuntimeDebugModel {
     pub thinking_level: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeDebugHeaderCapture {
     pub captured_at_ms: u64,
@@ -816,7 +888,9 @@ pub struct RuntimeDebugHeaderCapture {
     pub redacted_paths: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeDebugResponseMetadata {
     pub captured_at_ms: u64,
@@ -826,7 +900,9 @@ pub struct RuntimeDebugResponseMetadata {
     pub redacted_paths: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeDebugRequestConfig {
     #[serde(default)]
@@ -839,7 +915,9 @@ pub struct RuntimeDebugRequestConfig {
 /// 两层都会递归脱敏；Pi API 不暴露原始响应流。sequence 是本地顺序，不冒充 provider request id。
 /// turn 是 Pi 当前分支中从用户消息计数得到的序号；captured_at_ms 是扩展观察时间，
 /// 不代表 provider 端的时间戳。
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeDebugModelCall {
     #[serde(default)]
@@ -880,7 +958,9 @@ pub struct RuntimeDebugModelCall {
     pub redacted_paths: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeDebugCompactionMessage {
     pub segment: String,
@@ -891,7 +971,9 @@ pub struct RuntimeDebugCompactionMessage {
 
 /// Pi compaction 生命周期中实际可观察到的边界和摘要。来源消息保留完整文本；
 /// 图片二进制仍不进入轨迹。
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeDebugCompaction {
     pub sequence: u64,
@@ -940,7 +1022,9 @@ pub struct RuntimeDebugCompaction {
 /// 并记录明确上报的 compaction 生命周期。通用 ACP 没有等价能力时保持空值，不能从
 /// 聊天内容或当前会话配置反推。由于完整 prompt/payload 可能敏感，这些记录是运行时
 /// 调试 sidecar，不作为普通会话 transcript 持久化。
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeDebug {
     #[serde(default)]
@@ -1051,7 +1135,9 @@ fn is_false(value: &bool) -> bool {
 /// `acp_debug` 的回包：会话当前的工具参数表和 runtime debug。只有调试视图要，
 /// 由它按需来拉；桌面的会话链路不带（`include_debug: false`），省得每个工具调用都把
 /// 整张表重发一遍。
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct ConversationDebug {
     #[serde(default)]
     pub tool_debug: BTreeMap<String, ToolCallDebug>,
@@ -1063,7 +1149,7 @@ pub struct ConversationDebug {
 /// `apply_event` 有实质变化再发一份。entries 使用尾片增量；大体积 runtime debug
 /// sidecar 只在变更帧、显式全量恢复和初始 attach 时携带，避免完整模型历史随每个
 /// 流式 token 重复传输。
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(from = "ConversationSnapshotDe", into = "ConversationSnapshotDe")]
 pub struct ConversationSnapshot {
     /// `entries` 应替换本地历史的起始下标。0 表示完整快照；大于 0 表示增量尾片。
@@ -1216,9 +1302,71 @@ pub struct ConversationSnapshot {
 }
 
 impl ConversationSnapshot {
+    /// 信封字段序列化后的键名：运行时省略信封（`envelope_omitted`）的帧里它们是空值，
+    /// 接收方要沿用上一份。和 [`Self::keep_envelope`] 是同一张表，别处不再各列一份。
+    pub const ENVELOPE_KEYS: &[&str] = &[
+        "session_title",
+        "accepted_delivery_ids",
+        "active_delivery_id",
+        "completed_delivery_id",
+        "pending_permissions",
+        "pending_elicitation",
+        "status_line",
+        "available_commands",
+        "usage_breakdown",
+        "plan",
+        "background_tasks",
+        "subagents",
+        "peer_inbox",
+        "model",
+        "config_options",
+        "conversation_state",
+        "notice",
+        "memory_changes",
+        "pending_prompts",
+        "queued_steering",
+        "queued_follow_up",
+        "composer_restore_revision",
+        "composer_restore_texts",
+        "composer_restore_images",
+        "turn_started_at_ms",
+        "turn_timings",
+    ];
+
     /// 给人看的结束原因：有种类按当前语言说再接上细节，没有种类原样给 `end_reason`。
     pub fn end_text(&self) -> String {
         end_text(self.end_code.as_ref(), &self.end_reason)
+    }
+
+    /// 这帧省略了信封：信封字段（[`Self::ENVELOPE_KEYS`]）沿用 `previous` 的，其余用本帧的。
+    pub fn keep_envelope(&mut self, previous: Self) {
+        self.session_title = previous.session_title;
+        self.accepted_delivery_ids = previous.accepted_delivery_ids;
+        self.active_delivery_id = previous.active_delivery_id;
+        self.completed_delivery_id = previous.completed_delivery_id;
+        self.pending_permissions = previous.pending_permissions;
+        self.pending_elicitation = previous.pending_elicitation;
+        self.status_line = previous.status_line;
+        self.available_commands = previous.available_commands;
+        self.usage_breakdown = previous.usage_breakdown;
+        self.plan = previous.plan;
+        self.background_tasks = previous.background_tasks;
+        self.subagents = previous.subagents;
+        self.peer_inbox = previous.peer_inbox;
+        self.model = previous.model;
+        self.config_options = previous.config_options;
+        self.conversation_state = previous.conversation_state;
+        self.notice = previous.notice;
+        self.memory_changes = previous.memory_changes;
+        self.pending_prompts = previous.pending_prompts;
+        self.queued_steering = previous.queued_steering;
+        self.queued_follow_up = previous.queued_follow_up;
+        self.composer_restore_revision = previous.composer_restore_revision;
+        self.composer_restore_texts = previous.composer_restore_texts;
+        self.composer_restore_images = previous.composer_restore_images;
+        self.turn_started_at_ms = previous.turn_started_at_ms;
+        self.turn_timings = previous.turn_timings;
+        self.envelope_omitted = previous.envelope_omitted;
     }
 }
 
@@ -1230,7 +1378,7 @@ pub fn end_text(code: Option<&ConversationEndReason>, detail: &str) -> String {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ConversationSnapshotDe {
     #[serde(default)]
     pub entries_offset: usize,
@@ -1502,6 +1650,21 @@ impl serde::Serialize for SnapshotPhase {
     }
 }
 
+/// 线上就是 [`DaemonPhase`]。
+impl schemars::JsonSchema for SnapshotPhase {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SnapshotPhase".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        generator.subschema_for::<DaemonPhase>()
+    }
+}
+
 impl<'de> serde::Deserialize<'de> for SnapshotPhase {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         snapshot_phase_from_value(&serde_json::Value::deserialize(deserializer)?)
@@ -1512,7 +1675,7 @@ impl<'de> serde::Deserialize<'de> for SnapshotPhase {
 /// 随 `acp_open` 带来的首条消息。这次打开拉起了 runtime 时，守护等它就绪、初始配置
 /// 落定后发出，发出前对外报「思考中」；热 attach、守护还欠着一条、对话已有正文时都不读它，
 /// 同一条不会发两遍。旧守护不认识这个字段，会忽略它。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct AcpInitialPrompt {
     pub text: String,
     #[serde(default)]
@@ -1529,7 +1692,7 @@ pub struct AcpInitialPrompt {
 /// （同终端会话的 `kill`），不是"在一条打开的连接里发的一个动作"——GUI 断开
 /// `acp_open` 连接（切标签/关标签/退出 App）只是摘掉这条连接，会话照样在
 /// smeltd 里活着，这正是这一整层要解决的问题。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub enum AcpUserAction {
     /// 独立 session host 重连后请求 offset=0 的完整权威快照。普通 GUI 不需要
     /// 主动发送；即使发送也只是一次无副作用的状态刷新。

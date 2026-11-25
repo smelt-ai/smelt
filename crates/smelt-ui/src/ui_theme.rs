@@ -16,7 +16,6 @@ use std::sync::{Arc, LazyLock, RwLock};
 
 use gpui::{FontFeatures, Pixels, Rgba, px, rgb, rgba};
 
-use smelt_model::agent_status::AgentStatus;
 
 use crate::theme_catalog;
 use crate::theme_config::{Elevation, ThemeColors, ThemeMode};
@@ -89,10 +88,19 @@ pub struct Palette {
     /// 正文里的链接。`text_accent`。
     pub link: u32,
 
-    // ---- 状态色：只用在状态上 ----
-    /// 在跑。`info.fg`（蓝只表示在跑；信息图标色可以另配色相）。
-    pub run: u32,
-    /// 要你处理、需要留意的提醒。`warning.icon`。
+    // ---- 强调色：可交互、选中（不表示状态） ----
+    /// 开关打开、复选框和单选选中、未读点。`bg_accent`。
+    pub accent: u32,
+    /// 压在 `accent` 上的勾和圆点：`text_contrast` 和 `text_base` 里对比高的那个，配够 4.5:1。
+    pub on_accent: u32,
+    /// 关着的开关槽。`layer_04`。
+    pub track: u32,
+    /// 开关圆钮，关着、开着两档。`knob` / `knob_on`。
+    pub knob: u32,
+    pub knob_on: u32,
+
+    // ---- 状态色：只用在状态上。在跑不配色（转圈本身在动），彩色只留给要你、完成、出错 ----
+    /// 要你处理：等你的会话、要你动手才能继续的事。`warning.icon`。
     pub need: u32,
     /// 完成、通过、diff 新增。`success.icon`。
     pub ok: u32,
@@ -397,13 +405,17 @@ fn palette_from_tokens(c: &ThemeColors, text_backdrop: u32) -> Palette {
     let [submit_hover, submit_press] = state_fills(submit, [c.submit_hover, c.contrast_pressed]);
     let submit_fills = [submit, submit_hover, submit_press];
     let on_submit = on_fills(c.submit_icon, submit_fills);
+    // 压在彩色实底上的字：深浅两头里对比高的那个，再配够 4.5:1。
+    let on_fill = |fill: u32| {
+        [c.text_contrast, c.text_base]
+            .map(|fg| flatten(fg, fill))
+            .into_iter()
+            .max_by(|a, b| contrast_ratio(*a, fill).total_cmp(&contrast_ratio(*b, fill)))
+            .map(|fg| legible(fg, fill, TEXT_MUTED_MIN_CONTRAST))
+            .unwrap_or(text)
+    };
     let bad = on(c.danger.icon);
-    let on_bad = [c.text_contrast, c.text_base]
-        .map(|fg| flatten(fg, bad))
-        .into_iter()
-        .max_by(|a, b| contrast_ratio(*a, bad).total_cmp(&contrast_ratio(*b, bad)))
-        .map(|fg| legible(fg, bad, TEXT_MUTED_MIN_CONTRAST))
-        .unwrap_or(text);
+    let accent = on(c.bg_accent);
     let neutral = c.bg_button_neutral;
     Palette {
         bg,
@@ -434,12 +446,15 @@ fn palette_from_tokens(c: &ThemeColors, text_backdrop: u32) -> Palette {
         focus: c.border_focus,
         selection: c.selection,
         link: on(c.text_accent),
-        // 「在跑」是蓝（第 4 节），取信息色本身；信息图标色可以另配别的色相（默认主题是紫）。
-        run: on(c.info.fg),
+        accent,
+        on_accent: on_fill(accent),
+        track: on(c.layer_04),
+        knob: on(c.knob),
+        knob_on: on(c.knob_on),
         need: on(c.warning.icon),
         ok: on(c.success.icon),
         bad,
-        on_bad,
+        on_bad: on_fill(bad),
         popover_text: c.text_base,
         scrim: c.scrim,
         chart: c.chart.map(on),
@@ -660,7 +675,8 @@ slots!(u32 =>
     ink_hover,
     ink_press,
     on_ink,
-    run,
+    accent,
+    on_accent,
     need,
     ok,
     bad,
@@ -828,50 +844,26 @@ pub fn overlay(alpha: u8) -> Rgba {
     rgba((base << 8) | alpha as u32)
 }
 
-/// Agent 三态色：要你橙 > 运行蓝 > 空闲灰。
-pub fn agent_status_color(status: AgentStatus) -> Rgba {
-    rgb(agent_status_u32(status))
-}
+const GLOW_DARK_LIGHTNESS_GAIN: f32 = 0.08;
+const GLOW_LIGHT_LIGHTNESS_GAIN: f32 = 0.05;
 
-/// 同一套状态色的 `0xRRGGBB` 形态，给菜单栏这类不走 gpui 的地方用。
-pub fn agent_status_u32(status: AgentStatus) -> u32 {
-    role_for_status(&palette(), status)
-}
-
-fn role_for_status(palette: &Palette, status: AgentStatus) -> u32 {
-    match status {
-        AgentStatus::NeedsYou => palette.need,
-        AgentStatus::Running => palette.run,
-        AgentStatus::Idle => palette.faint,
-    }
-}
-
-/// 左侧会话 / pane 状态色。空闲是灰，不另画点。
-pub fn session_dot_color(status: AgentStatus) -> Rgba {
-    agent_status_color(status)
-}
-
-const RUNNING_GLOW_DARK_LIGHTNESS_GAIN: f32 = 0.08;
-const RUNNING_GLOW_LIGHT_LIGHTNESS_GAIN: f32 = 0.05;
-
-/// 运行中 agent 图标进入状态时的一次性提亮色。
+/// 图标亮一下时的颜色：从 `base` 提亮再回到 `base`。
 ///
-/// 桌面侧栏会话行用 `session_dot_color` 给 agent 图标上色：Running 是静态蓝。进入
-/// 状态时的短暂提亮只改变 HSL 亮度，不按比例放大 RGB，避免蓝通道先饱和后把图标
-/// 推成青色。主题判断也收在这里，调用方不再传容易反转的 light/dark 布尔值。
+/// 只抬 HSL 亮度，不按比例放大 RGB，避免某个通道先饱和把颜色推偏（蓝推成青）。主题判断
+/// 也收在这里，调用方不传容易反转的 light/dark 布尔值。
 ///
-/// `phase` 是 0.0..=1.0 的过渡进度；起点和终点都是基准蓝，中点最亮。浅色底的
-/// 增幅更小，避免在近白背景上失去对比度。终点回到静态蓝后不再预约动画帧。
-pub fn running_glow_color(phase: f32) -> Rgba {
+/// `phase` 是 0.0..=1.0 的过渡进度；起点和终点都是 `base`，中点最亮。浅色底的增幅更小，
+/// 避免在近白背景上失去对比度。
+pub fn glow_color(base: u32, phase: f32) -> Rgba {
     let lightness_gain = if is_light() {
-        RUNNING_GLOW_LIGHT_LIGHTNESS_GAIN
+        GLOW_LIGHT_LIGHTNESS_GAIN
     } else {
-        RUNNING_GLOW_DARK_LIGHTNESS_GAIN
+        GLOW_DARK_LIGHTNESS_GAIN
     };
-    running_glow_color_for(run(), phase, lightness_gain)
+    glow_color_for(base, phase, lightness_gain)
 }
 
-fn running_glow_color_for(base: u32, phase: f32, lightness_gain: f32) -> Rgba {
+fn glow_color_for(base: u32, phase: f32, lightness_gain: f32) -> Rgba {
     // 半个正弦周期保证起点/终点都回到基准色，不给稳态留下动画依赖。
     let wave = (phase.clamp(0.0, 1.0) * std::f32::consts::PI)
         .sin()
@@ -1070,7 +1062,7 @@ mod tests {
                 "text_contrast": "#171717", "bg_button_neutral": "#FFFFFF20",
                 "hover": "#FFFFFF10", "pressed": "#FFFFFF20",
                 "border_focus": "#6EA0FF8C", "selection": "#6EA0FF40", "text_accent": "#89B4FA",
-                "info.fg": "#3B82F6", "warning.icon": "#F08A55", "success.icon": "#16A34A",
+                "bg_accent": "#3B82F6", "layer_04": "#505050", "knob": "#F0F0F0", "knob_on": "#E8E8E8", "warning.icon": "#F08A55", "success.icon": "#16A34A",
                 "danger.icon": "#DC2626", "scrim": "#00000073",
                 "chart.1": "#000001", "chart.2": "#000002", "chart.3": "#000003",
                 "chart.4": "#000004", "chart.5": "#000005"
@@ -1107,7 +1099,10 @@ mod tests {
         assert_eq!(rgba_hex(palette.focus), 0x6ea0ff8c);
         assert_eq!(rgba_hex(palette.selection), 0x6ea0ff40);
         assert_eq!(palette.link, 0x89b4fa);
-        assert_eq!(palette.run, 0x3b82f6);
+        assert_eq!(palette.accent, 0x3b82f6);
+        assert_eq!(palette.track, 0x505050);
+        assert_eq!(palette.knob, 0xf0f0f0);
+        assert_eq!(palette.knob_on, 0xe8e8e8);
         assert_eq!(palette.need, 0xf08a55);
         assert_eq!(palette.ok, 0x16a34a);
         assert_eq!(palette.bad, 0xdc2626);
@@ -1248,62 +1243,48 @@ mod tests {
             assert!(contrast_ratio(palette.faint, palette.bg) >= TEXT_FAINT_MIN_CONTRAST);
             assert!(contrast_ratio(palette.on_ink, palette.ink) >= 4.5);
             assert!(contrast_ratio(palette.on_bad, palette.bad) >= 4.5);
-            let status = [palette.run, palette.need, palette.ok, palette.bad];
+            assert!(contrast_ratio(palette.on_accent, palette.accent) >= 4.5);
+            let status = [palette.need, palette.ok, palette.bad];
             for (i, a) in status.iter().enumerate() {
                 for b in &status[i + 1..] {
-                    assert_ne!(a, b, "四个状态色要分得开");
+                    assert_ne!(a, b, "三个状态色要分得开");
                 }
             }
         }
     }
 
     #[test]
-    fn agent_status_uses_three_colors() {
-        let palette = builtin_fallback(false);
-        assert_eq!(
-            role_for_status(&palette, AgentStatus::NeedsYou),
-            palette.need
-        );
-        assert_eq!(role_for_status(&palette, AgentStatus::Running), palette.run);
-        assert_eq!(role_for_status(&palette, AgentStatus::Idle), palette.faint);
-    }
-
-    #[test]
-    fn running_glow_preserves_hue_and_limits_the_light_theme_peak() {
+    fn glow_preserves_hue_and_limits_the_light_theme_peak() {
         let blue = 0x3b82f6;
         let dark_base: gpui::Hsla = rgb(blue).into();
-        let dark_start: gpui::Hsla =
-            running_glow_color_for(blue, 0.0, RUNNING_GLOW_DARK_LIGHTNESS_GAIN).into();
-        let dark_peak: gpui::Hsla =
-            running_glow_color_for(blue, 0.5, RUNNING_GLOW_DARK_LIGHTNESS_GAIN).into();
-        let dark_end: gpui::Hsla =
-            running_glow_color_for(blue, 1.0, RUNNING_GLOW_DARK_LIGHTNESS_GAIN).into();
+        let dark_start: gpui::Hsla = glow_color_for(blue, 0.0, GLOW_DARK_LIGHTNESS_GAIN).into();
+        let dark_peak: gpui::Hsla = glow_color_for(blue, 0.5, GLOW_DARK_LIGHTNESS_GAIN).into();
+        let dark_end: gpui::Hsla = glow_color_for(blue, 1.0, GLOW_DARK_LIGHTNESS_GAIN).into();
         let light_base: gpui::Hsla = rgb(blue).into();
-        let light_peak: gpui::Hsla =
-            running_glow_color_for(blue, 0.5, RUNNING_GLOW_LIGHT_LIGHTNESS_GAIN).into();
+        let light_peak: gpui::Hsla = glow_color_for(blue, 0.5, GLOW_LIGHT_LIGHTNESS_GAIN).into();
 
         let dark_hue_shift = (dark_peak.h - dark_base.h).abs();
         let light_hue_shift = (light_peak.h - light_base.h).abs();
         let dark_lightness_gain = dark_peak.l - dark_base.l;
         let light_lightness_gain = light_peak.l - light_base.l;
-        assert_eq!(dark_start, dark_base, "进入动画必须从静态运行色开始");
-        assert_eq!(dark_end, dark_base, "进入动画必须回到静态运行色结束");
+        assert_eq!(dark_start, dark_base, "亮一下必须从底色开始");
+        assert_eq!(dark_end, dark_base, "亮一下必须回到底色结束");
         assert!(
             dark_hue_shift < 0.001
                 && light_hue_shift < 0.001
                 && dark_lightness_gain > light_lightness_gain,
-            "状态提亮必须保持蓝色色相，且浅色主题更克制：dark hue={dark_hue_shift}, light hue={light_hue_shift}, dark gain={dark_lightness_gain}, light gain={light_lightness_gain}",
+            "提亮必须保持色相，且浅色主题更克制：dark hue={dark_hue_shift}, light hue={light_hue_shift}, dark gain={dark_lightness_gain}, light gain={light_lightness_gain}",
         );
     }
 
     /// 随 App 带的每份主题文件都合格式；投影出的字压在各自的底上都看得清：主按钮三档上的字、
-    /// 危险底上的字至少 4.5:1，次要字 4.5:1，最弱字 3:1，四个状态色分得开。浅色主题的正文
+    /// 危险底和强调色上的字至少 4.5:1，次要字 4.5:1，最弱字 3:1，三个状态色分得开。浅色主题的正文
     /// 偏浅时主按钮按下那档最容易不够（Ayu Light、Catppuccin Latte、Solarized Light），锁住。
     #[test]
     fn bundled_themes_parse_and_stay_legible() {
         let dirs = [
             concat!(env!("CARGO_MANIFEST_DIR"), "/themes"),
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../plugins/themes/themes"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugins/themes/themes"),
         ];
         let mut checked = 0;
         for dir in dirs {
@@ -1346,10 +1327,15 @@ mod tests {
                         contrast_ratio(p.faint, p.bg) >= TEXT_FAINT_MIN_CONTRAST - 0.01,
                         "{name}"
                     );
-                    let status = [p.run, p.need, p.ok, p.bad];
+                    let ratio = contrast_ratio(p.on_accent, p.accent);
+                    assert!(
+                        ratio >= TEXT_MUTED_MIN_CONTRAST,
+                        "{name} 强调色上的勾 {ratio:.2}"
+                    );
+                    let status = [p.need, p.ok, p.bad];
                     for (i, a) in status.iter().enumerate() {
                         for b in &status[i + 1..] {
-                            assert_ne!(a, b, "{name} 四个状态色要分得开");
+                            assert_ne!(a, b, "{name} 三个状态色要分得开");
                         }
                     }
                     checked += 1;

@@ -1,19 +1,17 @@
 //! 项目文件与文件查看器的运行时实现：`project.*`、`file.*` 控制方法背后的业务规则。
 //!
-//! 浏览、删除、搜索以项目为范围，越出项目根的路径一律拒绝；查看器按路径打开和
-//! 保存（见 `smelt_runtime_client::protocol::files`）。
+//! 搜索以项目为范围；查看器按路径打开和保存（见 `smelt_runtime_client::protocol::files`）。
+//! 列目录、删除是通用的 `fs.*`，见 [`crate::fs_ops`]。
 
-use std::path::{Component, Path};
+use std::path::Path;
 
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 use smelt_runtime_client::protocol::files::{
-    Base64Bytes, CompleteFilesResult, FileContent, ProjectEntry, ProjectSearchHit,
-    ProjectSearchResult, is_previewable_image,
+    Base64Bytes, CompleteFilesResult, FileContent, ProjectSearchHit, ProjectSearchResult,
+    is_previewable_image,
 };
-
-use crate::fs::LocalFs;
 
 /// 查看器能打开的最大文本文件。再大的多半是日志或数据，编辑器也扛不住。
 pub const FILE_OPEN_LIMIT: u64 = 8 * 1024 * 1024;
@@ -22,8 +20,6 @@ pub const IMAGE_OPEN_LIMIT: u64 = 20 * 1024 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ProjectFileError {
-    /// 路径不在项目根之内，或者不是规范的绝对路径。
-    OutsideProject(String),
     /// 保存时磁盘内容已经不是客户端打开时的那一版。
     Conflict,
     Io(String),
@@ -32,56 +28,10 @@ pub enum ProjectFileError {
 impl std::fmt::Display for ProjectFileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::OutsideProject(path) => write!(f, "{path} isn't in the project"),
             Self::Conflict => f.write_str("The file was changed elsewhere"),
             Self::Io(message) => f.write_str(message),
         }
     }
-}
-
-/// `path` 是否落在 `root` 之内（含 `root` 本身）。按路径组件比较，不跟随符号链接：
-/// 规则管的是客户端传来的路径长什么样，不是磁盘上指向哪里。
-fn within(root: &str, path: &str) -> bool {
-    let (root, path) = (Path::new(root), Path::new(path));
-    root.is_absolute()
-        && path.is_absolute()
-        && !path.components().any(|c| matches!(c, Component::ParentDir))
-        && path.starts_with(root)
-}
-
-fn require_within(root: &str, path: &str) -> Result<(), ProjectFileError> {
-    if within(root, path) {
-        Ok(())
-    } else {
-        Err(ProjectFileError::OutsideProject(path.to_string()))
-    }
-}
-
-/// 项目里一个目录的直接子项。排序和噪音过滤沿用 [`crate::fs::list_dir`]。
-pub fn tree(root: &str, dir: &str) -> Result<Vec<ProjectEntry>, ProjectFileError> {
-    require_within(root, dir)?;
-    Ok(crate::fs::list_dir(&LocalFs, Path::new(dir))
-        .into_iter()
-        .map(|entry| ProjectEntry {
-            name: entry.name,
-            is_dir: entry.is_dir,
-        })
-        .collect())
-}
-
-/// 删除项目里的一个文件或目录。目录连同内容一起删；指向目录的符号链接只删链接本身。
-pub fn delete_entry(root: &str, path: &str) -> Result<(), ProjectFileError> {
-    require_within(root, path)?;
-    if Path::new(path) == Path::new(root) {
-        return Err(ProjectFileError::OutsideProject(path.to_string()));
-    }
-    let meta = std::fs::symlink_metadata(path).map_err(|e| ProjectFileError::Io(e.to_string()))?;
-    let result = if meta.is_dir() {
-        std::fs::remove_dir_all(path)
-    } else {
-        std::fs::remove_file(path)
-    };
-    result.map_err(|e| ProjectFileError::Io(format!("couldn't delete {path}: {e}")))
 }
 
 fn content_version(bytes: &[u8]) -> String {
@@ -489,67 +439,6 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    #[test]
-    fn paths_outside_the_project_are_rejected() {
-        // Windows 上 `/repo` 不是绝对路径，用盘符路径测同一套规则。
-        let (root, child, cousin, escape, relative, outside) = if cfg!(windows) {
-            (
-                r"C:\repo",
-                r"C:\repo\src\main.rs",
-                r"C:\repository\x",
-                r"C:\repo\..\etc\passwd",
-                r"src\main.rs",
-                r"C:\etc",
-            )
-        } else {
-            (
-                "/repo",
-                "/repo/src/main.rs",
-                "/repository/x",
-                "/repo/../etc/passwd",
-                "src/main.rs",
-                "/etc",
-            )
-        };
-        assert!(within(root, root));
-        assert!(within(root, child));
-        assert!(!within(root, cousin), "前缀相同但不是子目录");
-        assert!(!within(root, escape));
-        assert!(!within(root, relative), "必须是绝对路径");
-        assert!(matches!(
-            tree(root, outside),
-            Err(ProjectFileError::OutsideProject(_))
-        ));
-    }
-
-    #[test]
-    fn deleting_the_project_root_itself_is_refused() {
-        let root = temp_dir("delete-root");
-        let r = root.to_str().unwrap();
-        assert!(matches!(
-            delete_entry(r, r),
-            Err(ProjectFileError::OutsideProject(_))
-        ));
-        assert!(root.exists());
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn delete_entry_removes_files_and_whole_directories() {
-        let root = temp_dir("delete");
-        std::fs::create_dir_all(root.join("dir/nested")).unwrap();
-        std::fs::write(root.join("dir/nested/a.txt"), "a").unwrap();
-        std::fs::write(root.join("b.txt"), "b").unwrap();
-        let r = root.to_str().unwrap();
-
-        delete_entry(r, root.join("b.txt").to_str().unwrap()).unwrap();
-        delete_entry(r, root.join("dir").to_str().unwrap()).unwrap();
-
-        assert!(!root.join("b.txt").exists());
-        assert!(!root.join("dir").exists());
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

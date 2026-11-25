@@ -1,0 +1,24 @@
+{
+  "id": "smelt.layouts",
+  "name": "Layouts",
+  "version": "1.0.0",
+  "pages": [
+    {
+      "name": "workbench",
+      "title_key": "page.workbench",
+      "home": true,
+      "index": "smelt.sessions/session"
+    }
+  ],
+  "layouts": [
+    {
+      "page": "smelt.layouts/workbench",
+      "name": "standard",
+      "title_key": "layout.standard",
+      "file": "layouts/standard.json",
+      "materials": {
+        "left": "sidebar"
+      }
+    }
+  ]
+}

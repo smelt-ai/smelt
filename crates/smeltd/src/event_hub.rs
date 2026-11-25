@@ -2,7 +2,10 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
@@ -11,13 +14,13 @@ use smelt_event_bus::{
 };
 use smelt_event_protocol::{
     AggregateRef, AttentionKind, CORE_SNAPSHOT_AGENT_HOST, CORE_SNAPSHOT_ATTENTION,
-    CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_SESSIONS, CORE_SNAPSHOT_WORKSPACE,
-    CORE_TOPIC_AGENT_HOST_CHANGED, CORE_TOPIC_AUTOMATIONS_CHANGED,
-    CORE_TOPIC_CONVERSATION_WAKE_REQUESTED, CORE_TOPIC_SESSION_REMOVED,
-    CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_WORKSPACE_CHANGED, Capability,
-    ConversationWakeRequested, CoreProjectionEvent, CoreSessionPhase, CorrelationId, EventEnvelope,
-    EventId, EventSource, PluginId, PublisherIdentity, SessionStateChanged, SessionStateRemoved,
-    SessionStatesSnapshot, SnapshotKind, SubscriptionId, Topic,
+    CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_NEW_SESSION_CATALOG, CORE_SNAPSHOT_SESSIONS,
+    CORE_SNAPSHOT_WORKSPACE, CORE_TOPIC_AGENT_HOST_CHANGED, CORE_TOPIC_AUTOMATIONS_CHANGED,
+    CORE_TOPIC_CONVERSATION_WAKE_REQUESTED, CORE_TOPIC_NEW_SESSION_CATALOG_CHANGED,
+    CORE_TOPIC_SESSION_REMOVED, CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_WORKSPACE_CHANGED,
+    Capability, ConversationWakeRequested, CoreProjectionEvent, CoreSessionPhase, CorrelationId,
+    EventEnvelope, EventId, EventSource, PluginId, PublisherIdentity, SessionStateChanged,
+    SessionStateRemoved, SessionStatesSnapshot, SnapshotKind, SubscriptionId, Topic,
 };
 
 use super::{
@@ -150,6 +153,146 @@ impl SnapshotProvider for AgentHostSnapshotProvider {
     }
 }
 
+#[derive(Default)]
+struct NewSessionCatalogState {
+    diagnostics: Option<smelt_core::acp_conn::AcpRuntimeDiagnostics>,
+    diagnostics_gen: u64,
+    catalog: Option<smelt_core::control_api::NewSessionCatalogResult>,
+}
+
+/// 进程级新建会话目录权威缓存：慢速 `locate_acp_runtime` CLI 探测在无锁下执行并带代际戳，
+/// `rebuild_lock` 只覆盖快速建目录与原子发布，防止冷启动探测卡住并发读/改配置。
+#[derive(Default)]
+struct NewSessionCatalogCache {
+    rebuild_lock: Mutex<()>,
+    probe_gen: AtomicU64,
+    state: Mutex<NewSessionCatalogState>,
+}
+
+impl NewSessionCatalogCache {
+    fn next_probe_gen(&self) -> u64 {
+        self.probe_gen.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn get_cached(&self) -> Option<smelt_core::control_api::NewSessionCatalogResult> {
+        self.state.lock().ok().and_then(|s| s.catalog.clone())
+    }
+
+    fn diagnostics(&self) -> Option<smelt_core::acp_conn::AcpRuntimeDiagnostics> {
+        self.state.lock().ok().and_then(|s| s.diagnostics.clone())
+    }
+
+    fn store_diagnostics_if_newer(
+        &self,
+        diag: smelt_core::acp_conn::AcpRuntimeDiagnostics,
+        probe_gen: u64,
+    ) -> (smelt_core::acp_conn::AcpRuntimeDiagnostics, bool) {
+        let mut guard = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if probe_gen >= guard.diagnostics_gen {
+            guard.diagnostics = Some(diag.clone());
+            guard.diagnostics_gen = probe_gen;
+            (diag, true)
+        } else {
+            (guard.diagnostics.clone().unwrap_or(diag), false)
+        }
+    }
+
+    fn store_if_changed(
+        &self,
+        next: smelt_core::control_api::NewSessionCatalogResult,
+    ) -> (smelt_core::control_api::NewSessionCatalogResult, bool) {
+        let mut guard = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changed = guard.catalog.as_ref() != Some(&next);
+        guard.catalog = Some(next.clone());
+        (next, changed)
+    }
+
+    fn rebuild(
+        &self,
+        reprobe_cli: bool,
+        override_diagnostics: Option<(smelt_core::acp_conn::AcpRuntimeDiagnostics, u64)>,
+        allow_fast_path: bool,
+    ) -> (smelt_core::control_api::NewSessionCatalogResult, bool) {
+        if allow_fast_path
+            && !reprobe_cli
+            && override_diagnostics.is_none()
+            && let Some(cached) = self.get_cached()
+        {
+            return (cached, false);
+        }
+
+        // 先在 rebuild_lock 之外完成可能阻塞数秒的 CLI/login shell 探测。
+        let probed = match override_diagnostics {
+            Some(pair) => Some(pair),
+            None if reprobe_cli => {
+                let probe_gen = self.next_probe_gen();
+                Some((smelt_core::acp_conn::locate_acp_runtime(), probe_gen))
+            }
+            None => match self.diagnostics() {
+                Some(_) => None,
+                None => {
+                    let probe_gen = self.next_probe_gen();
+                    Some((smelt_core::acp_conn::locate_acp_runtime(), probe_gen))
+                }
+            },
+        };
+
+        let Ok(_guard) = self.rebuild_lock.lock() else {
+            eprintln!("[event-hub] new_session_catalog rebuild lock poisoned");
+            let diag = probed
+                .map(|(d, _)| d)
+                .or_else(|| self.diagnostics())
+                .unwrap_or_else(smelt_core::acp_conn::locate_acp_runtime);
+            return (super::session_control::catalog_with(&diag), false);
+        };
+
+        if allow_fast_path
+            && !reprobe_cli
+            && probed.is_none()
+            && let Some(cached) = self.get_cached()
+        {
+            return (cached, false);
+        }
+
+        let effective_diag = match probed {
+            Some((diag, probe_gen)) => self.store_diagnostics_if_newer(diag, probe_gen).0,
+            None => match self.diagnostics() {
+                Some(existing) => existing,
+                None => {
+                    let probe_gen = self.next_probe_gen();
+                    let fresh = smelt_core::acp_conn::locate_acp_runtime();
+                    self.store_diagnostics_if_newer(fresh, probe_gen).0
+                }
+            },
+        };
+        let next = super::session_control::catalog_with(&effective_diag);
+        self.store_if_changed(next)
+    }
+}
+
+struct NewSessionCatalogSnapshotProvider {
+    cache: Arc<NewSessionCatalogCache>,
+}
+
+impl SnapshotProvider for NewSessionCatalogSnapshotProvider {
+    fn snapshot(&self, kind: &SnapshotKind, watermark: u64) -> Result<Snapshot, EventBusError> {
+        let (catalog, _) = self.cache.rebuild(false, None, true);
+        Ok(Snapshot {
+            kind: kind.clone(),
+            watermark,
+            revision: 0,
+            payload: serde_json::to_value(catalog)
+                .map_err(|error| EventBusError::new(error.to_string()))?,
+        })
+    }
+}
+
 fn projection_value(projection: &Option<CoreProjectionEvent>) -> (u64, serde_json::Value) {
     match projection {
         Some(projection) => (
@@ -179,6 +322,8 @@ pub(crate) struct DaemonEventHub {
     terminal_progress: Mutex<BTreeMap<String, (u64, smelt_event_protocol::TerminalProgress)>>,
     /// 推智能体配置时拿着：读库和发布在同一把锁里，见 [`Self::agent_host_changed`]。
     agent_host: Mutex<()>,
+    /// 新建会话目录权威内存投影：启动后后台预热、写偏好/智能体/CLI 探测后刷新并推送。
+    new_session_catalog: Arc<NewSessionCatalogCache>,
 }
 
 impl DaemonEventHub {
@@ -195,8 +340,15 @@ impl DaemonEventHub {
         let hub = Arc::new(EventHub::new(registry));
         let projection = Arc::new(Mutex::new(ProjectionState::default()));
         let attention = Arc::new(Mutex::new(AttentionLedger::default()));
-        register_snapshot_providers(&hub, &projection, &attention, workspace)
-            .map_err(|error| format!("register core snapshot provider: {error}"))?;
+        let new_session_catalog = Arc::new(NewSessionCatalogCache::default());
+        register_snapshot_providers(
+            &hub,
+            &projection,
+            &attention,
+            Arc::clone(&new_session_catalog),
+            workspace,
+        )
+        .map_err(|error| format!("register core snapshot provider: {error}"))?;
         Ok(Arc::new(Self {
             appearance_requests: Arc::default(),
             command_requests: Arc::default(),
@@ -205,6 +357,7 @@ impl DaemonEventHub {
             attention,
             terminal_progress: Mutex::new(BTreeMap::new()),
             agent_host: Mutex::new(()),
+            new_session_catalog,
         }))
     }
 
@@ -455,6 +608,35 @@ impl DaemonEventHub {
         Ok(())
     }
 
+    /// 一次目录占用统计的进度。没人订阅就不发。
+    pub(crate) fn publish_fs_usage_progress(
+        &self,
+        scan: &str,
+        files: u64,
+        bytes: u64,
+        done: bool,
+    ) -> Result<(), EventBusError> {
+        let topic = Topic::new(smelt_event_protocol::CORE_TOPIC_FS_USAGE_PROGRESS)
+            .expect("registered core topic is valid");
+        if !self.hub.has_subscriber(&topic)? {
+            return Ok(());
+        }
+        let payload = smelt_event_protocol::FsUsageProgressChanged {
+            scan: scan.to_string(),
+            files,
+            bytes,
+            done,
+        };
+        self.publish_core(
+            smelt_event_protocol::CORE_TOPIC_FS_USAGE_PROGRESS,
+            serde_json::to_value(payload).map_err(|error| {
+                EventBusError::new(format!("serialize fs usage progress: {error}"))
+            })?,
+            None,
+        )?;
+        Ok(())
+    }
+
     /// 智能体的记忆目录里有文件变了（`agent_id` 为 `None` 是用户全局记忆）。没人订阅就不发。
     pub(crate) fn publish_agent_memory_changed(
         &self,
@@ -519,26 +701,88 @@ impl DaemonEventHub {
     /// 拿到的总是新的那份。
     pub(crate) fn agent_host_changed(&self) {
         crate::session_names::agents_changed();
-        let Ok(_publishing) = self.agent_host.lock() else {
-            eprintln!("[event-hub] agent host lock poisoned");
-            return;
-        };
-        let topic =
-            Topic::new(CORE_TOPIC_AGENT_HOST_CHANGED).expect("registered core topic is valid");
-        if !self.hub.has_subscriber(&topic).unwrap_or(true) {
-            return;
+        {
+            let Ok(_publishing) = self.agent_host.lock() else {
+                eprintln!("[event-hub] agent host lock poisoned");
+                self.refresh_new_session_catalog(false);
+                return;
+            };
+            let topic =
+                Topic::new(CORE_TOPIC_AGENT_HOST_CHANGED).expect("registered core topic is valid");
+            if self.hub.has_subscriber(&topic).unwrap_or(true) {
+                let published = smelt_core::agent_host::load()
+                    .map_err(EventBusError::new)
+                    .and_then(|settings| {
+                        serde_json::to_value(settings).map_err(|error| {
+                            EventBusError::new(format!("serialize agent host settings: {error}"))
+                        })
+                    })
+                    .and_then(|payload| {
+                        self.publish_core(CORE_TOPIC_AGENT_HOST_CHANGED, payload, None)
+                    });
+                if let Err(error) = published {
+                    eprintln!("[event-hub] agent host publish failed: {error}");
+                }
+            }
         }
-        let published = smelt_core::agent_host::load()
-            .map_err(EventBusError::new)
-            .and_then(|settings| {
-                serde_json::to_value(settings).map_err(|error| {
-                    EventBusError::new(format!("serialize agent host settings: {error}"))
-                })
-            })
-            .and_then(|payload| self.publish_core(CORE_TOPIC_AGENT_HOST_CHANGED, payload, None));
-        if let Err(error) = published {
-            eprintln!("[event-hub] agent host publish failed: {error}");
+        self.refresh_new_session_catalog(false);
+    }
+
+    /// 读取新建会话目录；`refresh = false` 时直接走内存缓存，`true` 时强扫一遍 PATH。
+    pub(crate) fn new_session_catalog(
+        &self,
+        refresh: bool,
+    ) -> smelt_core::control_api::NewSessionCatalogResult {
+        if !refresh && let Some(cached) = self.new_session_catalog.get_cached() {
+            return cached;
         }
+        self.rebuild_new_session_catalog(refresh, None, refresh)
+    }
+
+    /// 偏好、智能体或启动项改过后刷新目录投影，并在结果确实变了且有人订阅时推给客户端。
+    pub(crate) fn refresh_new_session_catalog(&self, reprobe_cli: bool) {
+        let _ = self.rebuild_new_session_catalog(reprobe_cli, None, true);
+    }
+
+    /// 设置页刚完成 `agent.cli.inspect` / `install` 时顺便同步探测结果，不再重复扫 PATH。
+    pub(crate) fn update_runtime_diagnostics(
+        &self,
+        diagnostics: smelt_core::acp_conn::AcpRuntimeDiagnostics,
+    ) {
+        let probe_gen = self.new_session_catalog.next_probe_gen();
+        let _ = self.rebuild_new_session_catalog(false, Some((diagnostics, probe_gen)), true);
+    }
+
+    fn rebuild_new_session_catalog(
+        &self,
+        reprobe_cli: bool,
+        override_diagnostics: Option<(smelt_core::acp_conn::AcpRuntimeDiagnostics, u64)>,
+        publish_if_changed: bool,
+    ) -> smelt_core::control_api::NewSessionCatalogResult {
+        let (catalog, changed) = self.new_session_catalog.rebuild(
+            reprobe_cli,
+            override_diagnostics,
+            !publish_if_changed,
+        );
+        if publish_if_changed && changed {
+            let topic = Topic::new(CORE_TOPIC_NEW_SESSION_CATALOG_CHANGED)
+                .expect("registered core topic is valid");
+            if self.hub.has_subscriber(&topic).unwrap_or(true) {
+                match serde_json::to_value(&catalog) {
+                    Ok(payload) => {
+                        if let Err(error) =
+                            self.publish_core(CORE_TOPIC_NEW_SESSION_CATALOG_CHANGED, payload, None)
+                        {
+                            eprintln!("[event-hub] new_session_catalog publish failed: {error}");
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("[event-hub] serialize new_session_catalog failed: {error}");
+                    }
+                }
+            }
+        }
+        catalog
     }
 
     /// 经运行时改了历史存档。没人订阅就不发。
@@ -836,6 +1080,7 @@ fn register_snapshot_providers(
     hub: &EventHub,
     projection: &Arc<Mutex<ProjectionState>>,
     attention: &Arc<Mutex<AttentionLedger>>,
+    new_session_catalog: Arc<NewSessionCatalogCache>,
     workspace: WorkspaceDirectoryReader,
 ) -> Result<(), EventBusError> {
     hub.register_snapshot_provider(
@@ -847,6 +1092,12 @@ fn register_snapshot_providers(
     hub.register_snapshot_provider(
         SnapshotKind(CORE_SNAPSHOT_AGENT_HOST.to_string()),
         Arc::new(AgentHostSnapshotProvider),
+    )?;
+    hub.register_snapshot_provider(
+        SnapshotKind(CORE_SNAPSHOT_NEW_SESSION_CATALOG.to_string()),
+        Arc::new(NewSessionCatalogSnapshotProvider {
+            cache: new_session_catalog,
+        }),
     )?;
     let projection_provider: Arc<dyn SnapshotProvider> = Arc::new(ProjectionSnapshotProvider {
         projection: Arc::clone(projection),
@@ -1054,5 +1305,163 @@ mod tests {
         assert!(run["context"].get("trigger_payload").is_none());
         assert!(run["context"].get("agent_instructions").is_none());
         assert_eq!(run["context"]["prompt"], "Go");
+    }
+
+    #[test]
+    fn new_session_catalog_is_cached_and_publishes_updates_to_subscribers() {
+        use smelt_core::acp_conn::{AcpRuntimeDiagnostics, RuntimeExecutable};
+        use smelt_core::agent_kind::TerminalAgentKind;
+        use smelt_core::new_session::NewSessionTarget;
+
+        let event_hub = DaemonEventHub::new(WorkspaceDirectoryReader::unavailable()).unwrap();
+
+        let mut initial_diag = AcpRuntimeDiagnostics::default();
+        initial_diag.record_terminal(
+            TerminalAgentKind::Claude,
+            RuntimeExecutable {
+                program: "claude".into(),
+                path: Some("/usr/bin/claude".into()),
+                ..Default::default()
+            },
+        );
+        event_hub.update_runtime_diagnostics(initial_diag);
+
+        let cached = event_hub.new_session_catalog(false);
+        assert!(cached.sections.terminal.iter().any(|action| matches!(
+            &action.target,
+            NewSessionTarget::Terminal {
+                provider: Some(provider),
+                ..
+            } if provider == "claude"
+        )));
+
+        let sub = event_hub
+            .subscribe(
+                PluginId::new("test.desktop").unwrap(),
+                SubscriptionId::new("catalog").unwrap(),
+                BTreeSet::from([Topic::new(CORE_TOPIC_NEW_SESSION_CATALOG_CHANGED).unwrap()]),
+                &BTreeSet::from([Capability::new(
+                    smelt_event_protocol::CORE_CAPABILITY_WORKSPACE_READ,
+                )
+                .unwrap()]),
+            )
+            .unwrap();
+
+        let wire_expected: smelt_core::control_api::NewSessionCatalogResult =
+            serde_json::from_value(serde_json::to_value(&cached).unwrap()).unwrap();
+
+        match sub.recv().unwrap() {
+            Delivery::Snapshot(snapshot) => {
+                assert_eq!(snapshot.kind.0, CORE_SNAPSHOT_NEW_SESSION_CATALOG);
+                let decoded: smelt_core::control_api::NewSessionCatalogResult =
+                    serde_json::from_value(snapshot.payload).unwrap();
+                assert_eq!(decoded, wire_expected);
+            }
+            other => panic!("expected initial catalog snapshot, got {other:?}"),
+        }
+
+        let mut updated_diag = AcpRuntimeDiagnostics::default();
+        updated_diag.record_terminal(
+            TerminalAgentKind::Grok,
+            RuntimeExecutable {
+                program: "grok".into(),
+                path: Some("/usr/bin/grok".into()),
+                ..Default::default()
+            },
+        );
+        event_hub.update_runtime_diagnostics(updated_diag);
+
+        match sub.recv().unwrap() {
+            Delivery::Event(event) => {
+                assert_eq!(
+                    event.envelope.topic.as_str(),
+                    CORE_TOPIC_NEW_SESSION_CATALOG_CHANGED
+                );
+                let decoded: smelt_core::control_api::NewSessionCatalogResult =
+                    serde_json::from_value(event.envelope.payload.clone()).unwrap();
+                assert!(decoded.sections.terminal.iter().any(|action| matches!(
+                    &action.target,
+                    NewSessionTarget::Terminal {
+                        provider: Some(provider),
+                        ..
+                    } if provider == "grok"
+                )));
+                let current_wire: smelt_core::control_api::NewSessionCatalogResult =
+                    serde_json::from_value(
+                        serde_json::to_value(event_hub.new_session_catalog(false)).unwrap(),
+                    )
+                    .unwrap();
+                assert_eq!(current_wire, decoded);
+            }
+            other => panic!("expected live catalog update event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_host_changed_refreshes_catalog_and_ignores_stale_probes() {
+        use smelt_core::acp_conn::{AcpRuntimeDiagnostics, RuntimeExecutable};
+        use smelt_core::agent_kind::TerminalAgentKind;
+
+        let event_hub = DaemonEventHub::new(WorkspaceDirectoryReader::unavailable()).unwrap();
+        let mut stale_diag = AcpRuntimeDiagnostics::default();
+        stale_diag.record_terminal(
+            TerminalAgentKind::Claude,
+            RuntimeExecutable {
+                program: "claude".into(),
+                path: Some("/usr/bin/claude".into()),
+                ..Default::default()
+            },
+        );
+        let stale_gen = event_hub.new_session_catalog.next_probe_gen();
+
+        let mut newer_diag = AcpRuntimeDiagnostics::default();
+        newer_diag.record_terminal(
+            TerminalAgentKind::Grok,
+            RuntimeExecutable {
+                program: "grok".into(),
+                path: Some("/usr/bin/grok".into()),
+                ..Default::default()
+            },
+        );
+        // 模拟较新的探测/安装先落地，随后较老的 probe_gen 才返回：老探测不得覆盖新结果。
+        event_hub.update_runtime_diagnostics(newer_diag);
+        let _ = event_hub.rebuild_new_session_catalog(false, Some((stale_diag, stale_gen)), true);
+        let catalog = event_hub.new_session_catalog(false);
+        assert!(catalog.sections.terminal.iter().any(|action| {
+            matches!(
+                &action.target,
+                smelt_core::new_session::NewSessionTarget::Terminal {
+                    provider: Some(provider),
+                    ..
+                } if provider == "grok"
+            )
+        }));
+        assert!(!catalog.sections.terminal.iter().any(|action| {
+            matches!(
+                &action.target,
+                smelt_core::new_session::NewSessionTarget::Terminal {
+                    provider: Some(provider),
+                    ..
+                } if provider == "claude"
+            )
+        }));
+
+        // 没有任何 agent_host_changed 订阅者时，调用 agent_host_changed() 仍应保证缓存已建立。
+        let fresh_hub = DaemonEventHub::new(WorkspaceDirectoryReader::unavailable()).unwrap();
+        let mut diag = AcpRuntimeDiagnostics::default();
+        diag.record_terminal(
+            TerminalAgentKind::Grok,
+            RuntimeExecutable {
+                program: "grok".into(),
+                path: Some("/usr/bin/grok".into()),
+                ..Default::default()
+            },
+        );
+        let probe_gen = fresh_hub.new_session_catalog.next_probe_gen();
+        fresh_hub
+            .new_session_catalog
+            .store_diagnostics_if_newer(diag, probe_gen);
+        fresh_hub.agent_host_changed();
+        assert!(fresh_hub.new_session_catalog.get_cached().is_some());
     }
 }

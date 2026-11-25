@@ -357,7 +357,6 @@
   <ol>
     <li><a href="#s1">背景与目标</a></li>
     <li><a href="#s2">设计原则</a></li>
-    <li><a href="#s3">现状</a></li>
     <li><a href="#s4">与 PI / 业内对照</a></li>
     <li><a href="#s5">总体方案</a></li>
     <li><a href="#s-dir">对话目录与拉起</a></li>
@@ -385,7 +384,7 @@
   <div class="meta" style="margin-top:0.45rem">
     <strong>项目</strong>：
     <a href="https://github.com/smelt-ai/smelt" target="_blank" rel="noopener">smelt-ai/smelt</a>
-    （macOS AI coding cockpit · <code>smeltd</code> + Pi / Bun） ·
+    （AI coding cockpit · <code>smeltd</code> + Pi / Bun） ·
     <strong>依据调研</strong>：
     <code>2026-10-20-pi-and-industry-session-messaging.md</code> 等
   </div>
@@ -403,7 +402,7 @@
 
   <h3>1.1 为何要做</h3>
   <p>
-    smelt 是 macOS 上的 AI coding cockpit：侧栏里的 Pi 对话由 <code>smeltd</code>（Rust）托管，
+    smelt 的侧栏 Pi 对话由 <code>smeltd</code>（Rust）托管，
     对话里的 agent 是 Pi（Bun）。产品要让 Pi 对话之间<strong>自由通信</strong>：一个正在跑的 Pi 对话
     能给侧栏里另一个 Pi 对话发消息、交代任务、交回结果，对方在自己的回合里处理；
     也能<strong>起一个新的 Pi 对话</strong>，把一块独立的活交给它。
@@ -485,49 +484,6 @@
       subagent：后台、只报告、不进侧栏。peer：侧栏里的 Pi 对话之间。
     </li>
   </ol>
-</section>
-
-<!-- ========== 3 ========== -->
-<section id="s3">
-  <h2><span class="num">3.</span>现状（动工前）</h2>
-
-  <table>
-    <thead>
-      <tr><th>能力</th><th>现状</th><th>备注</th></tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>侧栏目录</td>
-        <td>已有</td>
-        <td>运行时自己的工作区目录（<code>workspace.changed</code>，对话的 ACP 会话 id、标题、cwd、agent）。daemon 自己建的对话起好后也写进这里</td>
-      </tr>
-      <tr>
-        <td>拉起没在跑的对话</td>
-        <td>有，但分散</td>
-        <td>手机旁观对没打开的对话请桌面打开（<code>wake_dormant_conversation</code>）；提交前唤醒挂起的（<code>wake_suspended_acp_session</code>）。两处各写各的，手机提交给没打开的对话直接报 <code>ACP session not found</code></td>
-      </tr>
-      <tr>
-        <td><code>subagent</code></td>
-        <td>已有</td>
-        <td>后台子进程；向父报告；不在侧栏</td>
-      </tr>
-      <tr>
-        <td>Pi→Pi 发消息、起新对话</td>
-        <td><strong>无</strong></td>
-        <td>这次要补的</td>
-      </tr>
-      <tr>
-        <td>schema-23 MCP peer 总线</td>
-        <td>已删除</td>
-        <td>明确不复活</td>
-      </tr>
-      <tr>
-        <td>同一会话里的 claim / ack</td>
-        <td>已有</td>
-        <td>后台任务结果在 <code>message_start</code> 时 ack，peer 直接复用</td>
-      </tr>
-    </tbody>
-  </table>
 </section>
 
 <!-- ========== 4 ========== -->
@@ -1259,7 +1215,7 @@ sequenceDiagram
   <ul>
     <li><strong>侧栏</strong>：新建的对话就是一条普通对话，点进去第一条就是「〈A〉发来任务」。</li>
     <li><strong>发送方 UI</strong>：P0 不做独立面板，agent 用工具完成。</li>
-    <li><strong>手机</strong>：先按自定义消息的通用样式出现，事件行之后再做。</li>
+    <li><strong>手机</strong>：已渲染折叠的 <code>TaskNoteKind::PeerMessage</code> 事件行（待补点按跳回来源对话与 <code>session_send</code> 专用行）。</li>
   </ul>
 </section>
 
@@ -1282,7 +1238,7 @@ sequenceDiagram
     <div class="phase-card p1">
       <h4>P1 · 后续</h4>
       <ul>
-        <li>手机端的事件行</li>
+        <li>手机端事件行补齐点按跳转来源对话与 <code>session_send</code> 专用行</li>
         <li>起出来的对话跨 daemon 重启仍认得「是谁起的」</li>
       </ul>
     </div>
@@ -1362,7 +1318,7 @@ sequenceDiagram
   <div class="callout danger">
     <div class="label">相对 SQL 账本的弱点</div>
     <ul style="margin:0.35rem 0 0;padding-left:1.2rem">
-      <li><strong>主 daemon 崩溃会丢信</strong>：发件队列只在内存里。崩溃时还在排队的信没了，发送方收不到退信；它 <code>session_list</code> 时会发现 <code>sent</code> 里没有这条。有序升级交接不受影响。</li>
+      <li><strong>主 daemon 重启或崩溃会丢信</strong>：发件队列只在内存里。崩溃或升级重启（<code>handoff_v2</code> 已移除）时还在排队的信没了，发送方收不到退信；它 <code>session_list</code> 时会发现 <code>sent</code> 里没有这条。</li>
       <li><strong>至少送一次，不是恰好一次</strong>：B 已经 ack、归约还没把 <code>peer_inbox</code> 对上发件队列，这一代 runtime 就退出，这条会再投一次，B 的 transcript 里出现两条同 id 的消息。</li>
       <li><strong>没打开的对话要靠桌面</strong>：启动规格归桌面，桌面没开就拉不起来，只能退信。</li>
       <li><strong>「谁起的」不跨重启</strong>：daemon 重启后，「起出来的不能再起」「最多 4 个」从零算。</li>

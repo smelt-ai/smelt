@@ -106,12 +106,12 @@ sudo ./deploy-iroh-relay.sh \
 免邮箱签证书，iroh-relay 以 `Manual` 模式读证书文件。以下是在一台全新 Debian 13 上的
 实际步骤（以 root 执行，域名以 `relay.example.com` 为例）。
 
-1. 编译 iroh-relay（版本与仓库锁定的一致）并签证书：
+1. 编译 iroh-relay（版本与 `Cargo.lock` 锁定的 iroh 1.x 一致，例如 1.4.1）并签证书：
 
    ```bash
    apt-get install -y build-essential pkg-config certbot
    curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal && . ~/.cargo/env
-   cargo install iroh-relay@1.2.0 --features server --locked
+   cargo install iroh-relay@1.4.1 --features server --locked
    install -m 755 ~/.cargo/bin/iroh-relay /usr/local/bin/iroh-relay
    certbot certonly --standalone -d relay.example.com \
      --register-unsafely-without-email --agree-tos -n

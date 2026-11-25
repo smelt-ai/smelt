@@ -1,0 +1,6 @@
+{
+  "id": "smelt.skills",
+  "name": "Skills",
+  "version": "1.0.0",
+  "entry": "nsh.tsx"
+}

@@ -57,6 +57,7 @@ impl Workspace {
             window.set_rem_size(px(ui_font_px as f32));
             self.applied_ui_font_px = Some(ui_font_px);
         }
+        self.sync_nsh_chrome(cx);
 
         self.appearance_sync_running = false;
     }

@@ -1,6 +1,6 @@
 # 状态与通知架构
 
-> 定位:当前实现(领域模型、出口规则、扩展约束)。设计动机与状态语义推导见 [`archive/agent-state-notification-design.md`](archive/agent-state-notification-design.md)。
+> 定位：当前实现（领域模型、出口规则、扩展约束）。
 
 ## 目标
 
@@ -23,8 +23,7 @@ OSC 9/99/777 / BEL（smeltd 扫）──────→ Informational AttentionI
 - `AgentStatus`：UI 三态（要你 / 运行中 / 空闲），由 `AgentStatus::from_daemon_phase` 压缩。未读不占一态。
 - `AttentionItem`：一次性关注事件，包含会话、标题、正文和 `AttentionKind`。
 - `AttentionKind`：审批、输入、成功、失败、响铃、普通提示。
-- `AttentionStore`：按 session id 保存当前事件、已读状态、行动项解决状态、投递队列
-  和 60 秒去重指纹。
+- `AttentionStore`：手机端投影（`crates/smelt-mobile/src/catalog/projection.rs`）按 session id 保存当前事件、已读状态、行动项解决状态、投递队列和 60 秒去重指纹；桌面端（`crates/plugins/notifications`）直接镜像运行时 `AttentionLedger` 的 `attention.changed` 推送。
 
 `AgentStatus` 不携带未读；`AttentionItem` 不充当持续状态。用户读过一条完成消息后，
 会话仍可处于 `Succeeded`，但不应继续显示未读。
@@ -82,7 +81,7 @@ shell、monitor、teammate 会一直挂着，不计入。用户在任务面板�
 provider 工具名只在适配层用于把原始 hook 判定为这些稳定语义之一，不进入 UI 的状态判断
 逻辑。
 
-结构化 hook/OSC 7501/ACP 通过 `apply_daemon_transition` 写入 store。终端 OSC 标题不进入
+结构化 hook/OSC 7501/ACP 由 smeltd 写入运行时提醒台账（手机端经 `apply_daemon_transition` 投影到 `AttentionStore`）。终端 OSC 标题不进入
 会话名；会话尚未收到有效结构化事件时，OSC 9/99/777 和 BEL 可以翻译成信息性
 `AttentionItem`，但绝不能改变 phase 或伪造完成。结构化事件一旦接通，低可信终端通知永久
 退出该会话的 agent 通知链路，避免重复投递。
@@ -96,19 +95,23 @@ keyframe 不经过这里，历史通知不会被当成新的再弹。这样通�
 `attention.changed` 的桌面留的。
 
 OSC 7501（[Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status)）
-在同一处扫。smeltd 回应 `OSC 7501 ; ?` 探测（在把这批输出交给客户端之前写回 PTY，保证
-先于客户端回应的 DA），Claude Code、Pi、Grok 据此开始上报；Codex 不探测、直接发。只认根
-记录，它直接改 phase：`working` → 思考中，`blocked` → 等批准（`kind=permission`）或等输入，
-`done` → 已完成，`error` → 失败，`idle` → 空闲。程序把后台子智能体、自动重试都算进了自己
-的状态：实测 Claude Code 派出后台子智能体后主回合马上 Stop，根记录却一直 `working`，等
-子智能体结束、主回合汇总完才 `done`。
+在 `feed_output` 里随普通字节片段单遍扫出（跳过 Kitty 图形 APC 载荷），`RIS`（`ESC c`）和
+`OSC 133 ; A`（shell 提示符起点）在同一条有序流里发出。smeltd 回应 `OSC 7501 ; ?` 探测（在
+把这批输出交给客户端之前写回 PTY，保证先于网格随后写入的 DA），Claude Code、Pi、Grok 据此开始
+上报；Codex 不探测、直接发。只认根记录，它直接改 phase：`working` → 思考中，`blocked` → 等批准
+（`kind=permission`）或等输入，`done` → 已完成，`error` → 失败，`idle` → 空闲；`working` /
+`blocked` 附带的 `progress` 交给 `ProgressTracker` 走 `terminal.progress`，并抑制同期的
+OSC 9;4 进度。程序把后台子智能体、自动重试都算进了自己的状态：实测 Claude Code 派出后台子智能
+体后主回合马上 Stop，根记录却一直 `working`，等子智能体结束、主回合汇总完才 `done`。
 
-会话报过一次 7501 根记录，相位就以它为准（`SessionState::program_status`），同一会话不让
+会话持有活跃的 7501 根记录时，相位以它为准（`SessionState::program_status`），同一会话不让
 hook 和 7501 两边各改一份：hook 的回合开始、等待、完成都不再改相位，只在 7501 报 `working`
 时把它细分成思考 / 执行工具（7501 不带工具名），以及在进程退出（`SessionEnded`）时置
-`Dead`。会话名、对话 id 照旧来自 hook，7501 不带对话 id。根记录被 `clear`（程序退出前会
-撤掉全部记录）或进程退出时，相位交还给 hook，`working` / `blocked` 作废。规范还要求新的
-shell 提示符（OSC 133 `A`）出现时作废，smelt 目前没有 shell 集成，靠 SessionEnd 兜底。
+`Dead`。会话名、对话 id 照旧来自 hook，7501 不带对话 id。根记录被 `clear`、终端 `RIS` 或进程
+退出清掉时，立即交还控制权并按 hook 基线还原 `structured_events` / `turn_events`（纯 7501
+CLI 退出后不永久屏蔽后续普通程序的终端通知，提醒台账同步清理已有待办并撤推送）。若用户的 shell
+发出 `OSC 133 ; A` 新提示符，`working` / `blocked` / `idle` 立即清理交还控制权；`done` /
+`error` 按规范跨提示符保留展示，同时解除对新起 hook 会话的拦截，等下一轮新提示符或 `RIS` 再清除。
 
 7501 是 PTY 里任何程序都能写的低可信来源，规范要求不能据此授权。它只决定显示的状态；
 `blocked` 会打开远程审批快捷操作（`action` 只在等待相位下写入），这个门闩只防在 agent
@@ -139,13 +142,15 @@ hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在�
 台账以快照 `core.attention.v1` + 事件 `attention.changed`（带 revision、该会话的新状态、
 要响的那条）发布，单独一条订阅：v7 运行时不认这个话题。没有订阅者时不编码事件。
 
-桌面上的出口全在内置插件 `crates/plugins/notifications`（`smelt.notifications`），宿主不认识
-会话提醒：
+桌面上宿主只镜像台账、给发通知的能力，何时发、写什么全在 JS 插件 `plugins/notifications`
+（`smelt.notifications`）：
 
-- 插件订阅各台机器的 `attention.changed`（宿主转成 `HostEvent::RuntimeTopic`），按机器
-  镜像台账（`attention.rs`）。快照整份换；比手里旧的变化丢掉；没收到快照的机器不拿「镜像里
-  没有」当「看过了」。宿主不再自己比较相位边沿、不再在本地扫 BEL。
-- 变化带 `alert` 时：设置里关了这类，或人正看着这段会话（主窗口在前台、舞台上露着、翻在
+- 宿主订阅各台机器的 `attention.changed`，按机器镜像台账（`crates/smelt/src/daemon_states.rs`，
+  和会话状态在一起）。快照整份换；比手里旧的变化丢掉；没收到快照的机器报 `null`，不拿「镜像里
+  没有」当「看过了」。插件经 `sessionAttention(machine)` / `machines()[].attention` 读，变了发
+  `sessions_changed`；会话列表的未读也读这一份。宿主不再自己比较相位边沿、不再在本地扫 BEL。
+- 变化带 `alert` 时宿主另发 `attention_alert`（带这段会话此刻的提醒、按当前语言写好的标题和
+  内容），发之前镜像已经推给插件。插件收到后：设置里关了这类，或人正看着这段会话（主窗口在前台、舞台上露着、翻在
   最新处，取自 `active_context` + `window_active`），不发，并撤掉这段会话之前那条；否则发
   系统通知。看着的会话有未读，插件调 `attention.mark_read` 告诉运行时，运行时清掉后推来
   变化，通知随之撤掉。
@@ -159,8 +164,8 @@ hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在�
   问过的给「请求授权」（`REQUEST_NOTIFICATION_PERMISSION`）；其余都给按钮执行
   `OPEN_NOTIFICATION_SETTINGS`，直接落到系统设置里本应用那一页。被禁止，或允许了但横幅（提醒
   样式是「无」）、Dock 角标被关掉的，写明是哪项；声音关了不算问题。
-- Dock 角标和菜单栏也由这个插件画：读镜像和 `session_states`、`workspace_directory`，用
-  `SET_DOCK_BADGE`、`set_status_menu` 交给宿主。宿主只提供菜单栏图标（每个插件一个）和 Dock
+- Dock 角标和菜单栏也由这个插件画：读镜像、工作区目录和宿主算好的会话事实（名字、状态、智能体
+  图标），用 `SET_DOCK_BADGE`、`setStatusMenu` 交给宿主。宿主只提供菜单栏图标（每个插件一个）和 Dock
   的机制，不知道菜单里是什么；菜单项点了执行插件给的命令。
 - 铃铛展示未读；Dock 数字统计未读或仍需行动的会话（每个会话计 1）。菜单栏图标右侧
   使用紧凑的 `N@·M`：N 是待关注会话数，M 是运行中会话数；为 0 的项省略。菜单里列出运行中、
@@ -197,12 +202,9 @@ hook 检测到且已在 `TerminalAgentKind` 注册的 provider 独立保存在�
 `Failed` / `Skipped` 走失败通知，用户主动 `Cancelled` 不提醒。首次连接的全量快照只建立
 基线，不补发历史结果；同一 `store_id` 断线重连时继续和内存中的旧投影比较，不能漏掉断线
 期间完成的 Run。Agent 自动化的隐藏 runtime 进入 `Succeeded` / `Failed` / `Dead` 时不再
-生产普通 session 完成通知，避免同一结果双投递。发不发只看这条自动化自己的「通知 App」（`notifies_app`），不受「通知」页的开关管。
+生产普通 session 完成通知，避免同一结果双投递。发不发只看这条自动化自己的 `AutomationNotify`（`Always` / `FailuresOnly` / `Never`，由 `Automation::sinks` 派生），不受「通知」页的开关管。
 
-macOS request 使用独立的 `smelt.automation.run.<run-id>` identifier，并以 automation id
-作为 thread identifier。点击事件同时携带 `automation_id + run_id`，直接打开自动化 Run
-详情；runtime session 随后被回收不会破坏通知目标。session 已读/删除与自动化历史裁剪分别
-只清理自己的 identifier namespace。
+桌面经 `smelt.app/notify` 投递，插件 id 为 `smelt.automations/<local|remote:<id>>/<run_id>`，对应 macOS identifier `smelt.notify.smelt.automations/<machine>/<run_id>` 与 `thread_identifier = smelt.automations/<machine>/<run_id>`。点击事件同时携带 `automation_id + run_id`，直接打开自动化 Run 详情；runtime session 随后被回收不会破坏通知目标。session 已读/删除与自动化历史裁剪分别只清理自己的 identifier namespace。
 
 关闭主窗口不会退出菜单栏中的 Smelt，系统通知仍可正常投递。用户用 Cmd-Q 显式结束整个
 Smelt 进程后，smeltd 虽会继续执行自动化，但应用的 UserNotifications bridge 已不存在；
@@ -216,9 +218,7 @@ Smelt 进程后，smeltd 虽会继续执行自动化，但应用的 UserNotifica
 `smelt notify` 命令（Control API `notify.send`，不属于任何会话）发一条，内容由它写
 （`crates/smeltd/src/agent_notify.rs`）。
 
-- **桌面**：经 `terminal.notification` 带 `title` 发给连着的客户端，和终端 OSC 通知进同一个
-  关注队列（`Notice`，总是开着）。自动化运行的会话不在侧栏、命令行发的没有会话，没处标已读：
-  GUI 直接弹应用通知，不记未读。
+- **桌面**：经运行时提醒台账推送 `attention.changed` 给当前桌面（`terminal.notification` 仅保留给旧桌面）；自动化运行的会话不在侧栏、命令行发的没有会话，没处标已读，GUI 直接弹应用通知，不记未读。
 - **手机**：`PushKind::Message`，正文放 `aps.alert.body` 原样显示，不走 loc-key，所以旧版
   App 也显示得了，不升载荷版本。不看人在不在 Mac 前、立刻发；每条在 outbox 里各占一个位置，
   不被同一会话的提醒替换，会话结束、被删也不撤。登记里的 `message` 开关（库里
@@ -276,13 +276,9 @@ smeltd 自己产生，不依赖手机连着，也不依赖桌面 GUI 在线；AP
 
 ### 应用内浮层
 
-插件 `WKWebView` 为隔离快捷键、IME 和 first responder 使用独立的 AppKit child window，
-因此主 GPUI 内容树里的元素无法盖住插件。确认框、命令面板和图片预览都留在主窗口 GPUI
-树中；出现这些浮层、菜单或拖拽预览时，宿主暂时隐藏插件 WebView，并把 first responder
-交回 GPUI。不为浮层再开透明 NSWindow。
+远程桌面（`crates/plugins/desktop`）的 `WebView` 为隔离快捷键、IME 和 first responder 使用独立原生子窗口，主 GPUI 内容树里的元素无法盖住它；出现确认框、命令面板、菜单或拖拽预览时，宿主暂时隐藏该 WebView 并把 first responder 交回 GPUI，不为浮层再开透明 NSWindow。
 
-会话关注、自动化提醒和操作结果一律走 macOS 系统通知。仅为消除
-WebView child window 而 fork GPUI 不属于当前方案。
+会话关注、自动化提醒和操作结果一律走系统通知。
 
 `AgentStatus` 的 session/pane 映射统一由 `AgentStatus::from_daemon_phase` 处理，且只接受
 带回合级结构化来源的 daemon phase。`Succeeded` 仍是 `DaemonPhase`，不映射成 UI 态；

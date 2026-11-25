@@ -43,7 +43,8 @@ pub enum StatusMenuItem {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusIcon {
     pub png: StatusImage,
-    /// `0xRRGGBB`。
+    /// `0xRRGGBB`；线上写成 `#rrggbb`（[`crate::parse_hex_color`]），脚本直接给主题色。
+    #[serde(with = "crate::color::hex")]
     pub color: u32,
 }
 
@@ -172,6 +173,7 @@ mod tests {
         assert_eq!(value["icon"], "plugin-assets/example/1/bar.png");
         assert_eq!(value["items"][0]["type"], "action");
         assert_eq!(value["items"][0]["icon"]["png"], serde_json::json!([1, 2]));
+        assert_eq!(value["items"][0]["icon"]["color"], "#112233");
         assert_eq!(
             value["items"][1],
             serde_json::json!({ "type": "separator" })

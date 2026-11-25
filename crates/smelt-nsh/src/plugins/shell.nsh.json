@@ -1,0 +1,8 @@
+{
+  "resolve": {
+    "alias": {
+      "smelt/slots": "./slots.tsx",
+      "smelt/sdk": "./sdk.tsx"
+    }
+  }
+}

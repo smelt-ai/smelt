@@ -4,8 +4,8 @@
 
 插件（第一个用户是开源工作台）要能起一段对话、往里发话、准确知道某一轮结束了以及结果，
 并且对无人值守的轮次限制工具。对话本身就是普通对话：进工作区目录、在侧栏里、能被人看和
-插手；插件把它嵌进自己的页面（`SmeltViewInstance("smelt.conversation/conversation")`，
-参数 `{machine, session_id}`）是显示上的事，不影响它存在哪。
+插手；插件把它嵌进自己的页面（从 `"smelt/conversation"` 导入 `<SmeltConversation>`，
+参数 `machine` / `sessionId` / `directoryAcp` 或 `spec`）是显示上的事，不影响它存在哪。
 
 ## 原则
 

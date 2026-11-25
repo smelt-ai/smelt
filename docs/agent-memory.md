@@ -8,8 +8,7 @@
 工作上的事实、外部资源在哪。同一个智能体不管在自己的目录、自动化目录还是用户项目里
 运行，读写的都是同一份记忆。
 
-非目标（第一阶段不做）：后台自动提炼与合并、团队共享记忆、git 版本记录、
-手机端编辑。向量检索已做成可选的 embeddings 服务，见 5.2。
+非目标（第一阶段不做）：后台自动提炼与合并、团队共享记忆、git 版本记录。向量检索已做成可选的 embeddings 服务，见 5.2。
 
 ## 2. 调研结论
 
@@ -142,7 +141,7 @@ project: /Users/me/work/smelt   # 可选
 
 缓存按前缀命中：改系统提示开头，后面整段对话都要重新计费；在末尾追加，只多付追加部分。
 
-Pi 1.1 的系统提示是按名字分节的。每轮把当前分节和对话记录里已有的比对：
+Pi 的系统提示是按名字分节的。每轮把当前分节和对话记录里已有的比对：
 
 - **记忆没变**：不发任何系统消息，缓存前缀照常命中。
 - **记忆变了**（别的会话、自动化、用户在界面上改的，或本会话自己写的）：Pi 在对话末尾追加
@@ -368,11 +367,10 @@ Pi 进程不链接 `smelt-store`、不直接打开数据库。对话的驱动线
 配置页只留一行摘要（`render_agent_memory_summary`）：开关、两层条数、待确认条数、"管理"入口。
 条目不在这里列，记忆再多也只占一行。
 
-记忆页签（`render_agent_memory_card`），数据由 `smelt_core::agent_memory` 读取。不在渲染里扫，
-以下时机重扫：
+记忆页签（`crates/plugins/agents/src/editor.rs`），通过 Control API `agent.memory.list` 拉取数据并调用 `agent.memory.watch` 订阅变化（同时支持本机与远程运行时），不在渲染里扫，以下时机重取：
 
 - 打开编辑器、点刷新、删除或采纳后；
-- 两层记忆目录有变化（编辑器持有 `notify` 监听，关掉编辑器就停）：智能体或外部编辑器改了文件；
+- 运行时推送 `agent_memory.changed` 事件（两层记忆目录文件变化）；
 - 有会话停在两步之间（不在连接、思考或跑工具）：使用次数和待确认状态是写完文件后才落库的，
   只靠目录监听会漏掉。
 
@@ -387,7 +385,7 @@ Pi 进程不链接 `smelt-store`、不直接打开数据库。对话的驱动线
 - 用系统文本编辑器打开、打开记忆文件夹；删除前弹确认（全局记忆会说明所有智能体都受影响）；
 - 规则正文超出常驻预算时显示警告。
 
-手机端只读展示，放到后续。
+手机端已实现两层列表与采纳/删除（`mobile/lib/features/agents/agent_memory_page.dart`）以及对话内记忆变更卡片（`mobile/lib/features/conversation/memory_changes_card.dart`）。
 
 ## 8. 存储
 
@@ -406,60 +404,38 @@ Pi 进程不链接 `smelt-store`、不直接打开数据库。对话的驱动线
   输入框上方的记忆卡片列出这一轮写下的记忆，可就地查看、采纳、删除（5.4 节）。
 - 反复验证有用的 `feedback` 记忆可一键升级为智能体说明或 skill。
 
-## 10. 影响面
+## 10. 涉及模块
 
-| 位置 | 改动 |
+| 位置 | 职责 |
 |---|---|
-| `smelt-core/src/agent_kind/mod.rs` | 新增两个环境变量常量 |
-| `smelt-core/src/agent_definition_store.rs` | `prepare_agent_definition_launch` 设置记忆目录；新增 `agent_memory_dir` / `user_memory_dir` |
-| `smelt-acp-view/src/acp_view.rs` | 设置刷新时保留 `SMELT_AGENT_LAUNCH_IDENTITY_ENVS`（说明 + 两个记忆目录） |
-| `smelt-core/src/agent_memory.rs` | 新增：列出、删除记忆，供桌面端卡片使用 |
-| `agent/src/agent-memory.ts` | 新增：消费并规范化记忆目录 |
-| `agent/src/memory-files.ts` | 新增：路径解析、内容与预算校验、分层渲染记忆段落 |
-| `agent/src/memory-extension.ts` | 新增：分节注入、第一轮召回、使用统计、写入校验、edit 回滚、免审批判定、超限提示 |
-| `agent/src/memory-host.ts` | 新增：`agent.memory.*` 控制方法的客户端 |
-| `agent/src/memory-recall.ts` | 新增：中文分词、BM25、RRF、模型重排、重排模型选择 |
-| `agent/src/memory-embedding.ts` | 新增：向量服务客户端、缓存、余弦相似度 |
-| `smelt-core/src/memory_settings.rs` | 向量检索配置。存在运行时库 `memory_settings` 表（`crates/smelt-store/src/schema.rs`），不是 kv。键名在 `smelt-model/src/memory_settings.rs` |
-| `smelt-store`（schema v13） | 新增 `agent_memory_usage`、`agent_memory_provenance` 及仓储方法 |
-| `smelt-model` 的 `control_api`（`smelt-core` 再导出；没有 `smelt-core/src/control_api.rs`） | `agent.memory.*`。方法名在 `crates/smelt-runtime-client/src/protocol/control.rs` 的 `define_control_methods!` |
-| `smeltd/src/agent_memory_control.rs` | 新增：认证会话并代 Pi 读写记忆元数据 |
-| `smeltd/src/automation_runtime.rs` | 自动化启动带 `SMELT_AGENT_UNATTENDED=1` |
-| `smelt-store`（schema v14） | `agent_definition.memory_enabled` |
-| `smelt-cli/src/agent.rs` | `smelt agent create/update --memory on\|off` |
+| `crates/smelt-model/src/agent_kind/mod.rs` | 记忆目录环境变量常量（`SMELT_AGENT_LAUNCH_IDENTITY_ENVS`） |
+| `crates/smelt-core/src/agent_definition_store.rs` | `prepare_agent_definition_launch` 设置记忆目录；`agent_memory_dir` / `user_memory_dir` |
+| `crates/plugins/conversation/` | 设置刷新时保留 `SMELT_AGENT_LAUNCH_IDENTITY_ENVS` 与对话内记忆变更卡片 |
+| `crates/smelt-core/src/agent_memory.rs` | 列出、删除、采纳记忆 |
+| `agent/src/agent-memory.ts` | 消费并规范化记忆目录 |
+| `agent/src/memory-files.ts` | 路径解析、内容与预算校验、分层渲染记忆段落 |
+| `agent/src/memory-extension.ts` | 分节注入、第一轮召回、使用统计、写入校验、edit 回滚、免审批判定、超限提示 |
+| `agent/src/memory-host.ts` | `agent.memory.*` 控制方法的客户端 |
+| `agent/src/memory-recall.ts` | 中文分词、BM25、RRF、模型重排、重排模型选择 |
+| `agent/src/memory-embedding.ts` | 向量服务客户端、缓存、余弦相似度 |
+| `crates/smelt-core/src/memory_settings.rs` | 向量检索配置，存于运行时库 `memory_settings` 表（`crates/smelt-store/src/schema.rs`），键名在 `crates/smelt-model/src/memory_settings.rs` |
+| `crates/smelt-store/` | `agent_memory_usage`、`agent_memory_provenance`、`agent_definition.memory_enabled` 及仓储方法 |
+| `crates/smelt-model/src/control_api.rs` | `agent.memory.*` 参数与结果类型；方法名在 `crates/smelt-runtime-client/src/protocol/control.rs` |
+| `crates/smeltd/src/agent_memory_control.rs` | 认证会话并代 Pi 读写记忆元数据 |
+| `crates/smeltd/src/automation_runtime.rs` | 自动化启动带 `SMELT_AGENT_UNATTENDED=1` |
+| `crates/smelt-cli/src/agent.rs` | `smelt agent create/update --memory on\|off` |
 | `agent/src/runtime-extensions.ts` | 注册 `smelt-memory`，位于 `smelt-permission` 之前 |
 | `agent/src/smelt-permission.ts` | 合法记忆写入免审批 |
-| `smelt/src/agents/` | 配置页"记忆"卡片；删除智能体的提示改为"删除智能体和它的记忆" |
+| `crates/plugins/agents/` | 桌面智能体编辑页「记忆」页签与卡片 |
+| `mobile/lib/features/agents/agent_memory_page.dart` | 手机端记忆列表、采纳与删除（对话卡片在 `memory_changes_card.dart`） |
 
-## 11. 测试
-
-先写失败用例：
-
-- 启动器：变量被消费并删除；只给一半或记忆根是符号链接时不启用。
-- 渲染：规则正文常驻、事实只列一行；别的项目的事实被过滤；手改超限按新优先截断并提示；
-  格式坏的文件不注入；空记忆只有简短的写入约定。
-- 注入：记忆在 `smelt_memory` 分节里；文件不变时逐字节不变；别处增删记忆后下一轮更新；
-  真跑会话时记忆变更只追加一条单分节系统消息、开头不变；普通会话不注入。
-- 恢复：升级前保存的会话按智能体 id 补上记忆变量。
-- 召回：中文评测集上 BM25 直说全对、每轮门槛无误召回；首轮经模型重排找回换说法的记忆；
-  其它轮只召回有把握的、不重复；`memory_search` 免审批；向量服务配置后能找到换说法的记忆、
-  失败时退回关键词并只提示一次；重排回复格式不对或超时时退回检索排序。
-- 统计：内建 read 读记忆计一次，失败的 read 和记忆目录外的不计；坏掉的统计库不抛错；
-  界面能读到次数，长期未用的事实被标出，规则类不标。
-- 扩展：符号链接、`..`、记忆目录外的路径不放行；frontmatter 缺失或 `type` 非法被拦；
-  全局层写 `project` 被拦；规则超预算被拦；凭据被拦；合法写入免审批；
-  非内建同名工具不放行；`bypassPermissions` 下校验仍生效。
-- Rust：产品智能体对话与自动化启动都带两个变量；普通 Pi 会话不带；
-  设置刷新后变量保留。
-- 子智能体进程拿不到记忆变量。
-
-## 12. 已定
+## 11. 已定
 
 1. 删除智能体时一并删除它的记忆目录 `~/.smelt/agents/<id>/memory/`（只删记忆，
    智能体目录里的其他工作产物不动），删除菜单的提示里说明。
 2. 目前没有复制智能体的功能。以后加时不复制记忆。
 
-## 13. 待办（暂停）
+## 12. 待办（暂停）
 
 以下 2026-10 暂停，恢复时从这里接着做。
 
@@ -472,7 +448,6 @@ Pi 进程不链接 `smelt-store`、不直接打开数据库。对话的驱动线
 
 - 删除记忆后 `agent_memory_usage` / `agent_memory_provenance` 已清理；向量缓存有进程内上限
   （512 条，LRU），进程结束仍会释放。持久化向量缓存仍是后续项。
-- 手机端看不到记忆。
 
 **召回**
 

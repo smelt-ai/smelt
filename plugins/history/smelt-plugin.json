@@ -1,0 +1,6 @@
+{
+  "id": "smelt.history",
+  "name": "History",
+  "version": "1.0.0",
+  "entry": "nsh.tsx"
+}

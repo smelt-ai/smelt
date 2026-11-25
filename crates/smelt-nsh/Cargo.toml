@@ -1,0 +1,67 @@
+# Smelt 的 NSH（longbridge/nsh）A2 主窗口外壳与插件运行时。
+# 主壳 `shell/MainShell.tsx` 与 `plugins/`、用户插件目录均在运行时打包热重载。
+[package]
+name = "smelt-nsh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gpui = { package = "gpui-fast", version = "=0.1.19" }
+smelt-ui = { path = "../smelt-ui" }
+smelt-desktop = { path = "../smelt-desktop" }
+smelt-terminal = { path = "../smelt-terminal" }
+smelt-acp = { path = "../smelt-acp" }
+smelt-plugin-api = { path = "../smelt-plugin-api" }
+# 跑 JS + SVG + 一等文本/代码/差异视图（`Editor`、`DiffView`、`TextView` + `syntect` 语法高亮）。
+nsh-platform-gpui = { version = "=0.7.0", default-features = false, features = ["js", "svg", "editor", "highlight"] }
+nsh-core = { version = "=0.7.0", features = ["svg", "declarations"] }
+# 离线插件类型声明与 QuickJS 字节码编译校验（关掉 zlib/crypto，和引擎特性一致）。
+nsh-js = { version = "=0.7.0", default-features = false }
+# `Policy`：平台 crate 没有再导出。
+nsh-engine = { version = "=0.7.0", default-features = false, features = ["js-core"] }
+nsh-base = { version = "=0.7.0", default-features = false, features = ["editor", "highlight"] }
+# NSH 带进 gpui-fast-platform；和 smelt 一样开 runtime_shaders，单独编这个 crate 时也不用装完整 Xcode。
+gpui_platform = { package = "gpui-fast-platform", version = "=0.1.19", default-features = false, features = ["runtime_shaders"] }
+# 运行时打包插件（`src/plugins.rs`）：用户装、改插件不用重编 App。
+nsh-bundler = { version = "=0.7.0", features = ["bundle"] }
+# 只读校验打包产物里剩下的外部 import 与未声明自由标识符（`src/plugins.rs`），不做改写；和 nsh-bundler 用同一版解析器。
+oxc = { version = "=0.153.0", features = ["semantic"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Windows 上 canonicalize 给 `\\?\D:\…`，打包器、notify 报的是 `D:\…`；dunce 换回后者，前缀对比才对得上。
+dunce = "1"
+# 盯插件目录热重载（`src/manifest.rs`），和宿主同一版。
+notify = "8"
+# 插件目录里 locales/ 的文案，和 smelt-plugin-api 用同一个加载函数读。
+rust-i18n-support = { version = "4.2", features = ["codegen"] }
+tokio = { version = "1", default-features = false, features = ["sync"] }
+uuid = { version = "1", features = ["v4"] }
+# 给插件按文本生成二维码矩阵（纯算法、不带图像编码依赖）。
+qrcode = { version = "0.14", default-features = false }
+# 跨平台在 PATH（含 Windows PATHEXT）中定位可执行文件（`os_apps.rs`）。
+which = "8"
+# 拖进来的 `file://` 按本机规则解成路径（Windows 盘符、百分号转义）。
+url = "2"
+
+# macOS：通过 Launch Services 探测本机 `.app` 并读取应用图标（`os_apps.rs`）。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+
+[build-dependencies]
+# `bench/` 入口照 `nsh build` 打包、编成字节码给 `examples/bench/`，见 build.rs。
+nsh-bundler = { version = "=0.7.0", features = ["bundle"] }
+nsh-core = "=0.7.0"
+nsh-js = "=0.7.0"
+nsh-base = { version = "=0.7.0", default-features = false }
+
+[dev-dependencies]
+# tests/*.rs：在测试平台的窗口里跑真引擎；`profiler` 给 `examples/bench/` 采集逐帧与分阶段耗时。
+gpui = { package = "gpui-fast", version = "=0.1.19", features = ["test-support", "profiler"] }
+# examples/bench/：量 CPU 时间、接 NSH 的帧统计日志。
+libc = "0.2"
+log = "0.4"

@@ -53,7 +53,9 @@ const COPILOT_QUOTA_ENDPOINT: &str = "https://api.github.com/copilot_internal/us
 /// 的系统钥匙串），不读取通用 GitHub 环境变量，避免运行 Smelt 的宿主环境把无
 /// Copilot 权限的 token 混进来。
 pub async fn fetch_copilot_quota(access: CredentialAccess) -> anyhow::Result<Option<CopilotQuota>> {
-    let credential = local_copilot_credential(access)?;
+    let Some(credential) = local_copilot_credential(access)? else {
+        return Ok(None);
+    };
     let result = fetch_copilot_quota_with_token(&credential.token).await;
     match (result, credential.keychain_account) {
         // 缓存的令牌失效了：可能重新登录过，重读一次。
@@ -161,7 +163,8 @@ struct CopilotCredential {
     keychain_account: Option<String>,
 }
 
-fn local_copilot_credential(access: CredentialAccess) -> anyhow::Result<CopilotCredential> {
+/// 没登录时是 `Ok(None)`；钥匙串被拒绝或正在等授权时报错。
+fn local_copilot_credential(access: CredentialAccess) -> anyhow::Result<Option<CopilotCredential>> {
     for path in copilot_apps_paths() {
         let Ok(body) = fs::read_to_string(&path) else {
             continue;
@@ -170,10 +173,10 @@ fn local_copilot_credential(access: CredentialAccess) -> anyhow::Result<CopilotC
             continue;
         };
         if let Some(token) = find_apps_json_token(&value) {
-            return Ok(CopilotCredential {
+            return Ok(Some(CopilotCredential {
                 token,
                 keychain_account: None,
-            });
+            }));
         }
     }
 
@@ -187,7 +190,9 @@ const COPILOT_CLI_KEYCHAIN_SERVICE: &str = "copilot-cli";
 /// 钥匙串熔断状态用的账户 id，和 `QuotaTarget::id()` 一致。
 pub(crate) const COPILOT_QUOTA_PROVIDER: &str = "copilot";
 
-fn copilot_cli_keychain_credential(access: CredentialAccess) -> anyhow::Result<CopilotCredential> {
+fn copilot_cli_keychain_credential(
+    access: CredentialAccess,
+) -> anyhow::Result<Option<CopilotCredential>> {
     let accounts = if cfg!(target_os = "macos") {
         dirs::home_dir()
             .and_then(|home| fs::read_to_string(home.join(".copilot/config.json")).ok())
@@ -207,20 +212,20 @@ fn copilot_cli_keychain_credential(access: CredentialAccess) -> anyhow::Result<C
 fn first_copilot_keychain_credential(
     accounts: &[String],
     mut lookup: impl FnMut(&str) -> KeychainLookup,
-) -> anyhow::Result<CopilotCredential> {
+) -> anyhow::Result<Option<CopilotCredential>> {
     for account in accounts {
         let result = lookup(account);
         if let KeychainLookup::Token(token) = result {
-            return Ok(CopilotCredential {
+            return Ok(Some(CopilotCredential {
                 token,
                 keychain_account: Some(account.clone()),
-            });
+            }));
         }
         if let Some(error) = result.blocked_error() {
             return Err(error);
         }
     }
-    Err(anyhow::anyhow!("Copilot local credentials were not found"))
+    Ok(None)
 }
 
 /// 从 Copilot CLI 的 `config.json` 推出钥匙串 account，最近登录的用户排第一。
@@ -345,21 +350,18 @@ mod tests {
                 KeychainLookup::NotFound
             }
         });
-        let Ok(credential) = result else {
+        let Ok(Some(credential)) = result else {
             panic!("第二个用户有令牌");
         };
         assert_eq!(credential.token, "t2");
         assert_eq!(credential.keychain_account.as_deref(), Some("host:second"));
     }
 
+    /// 没登录不是查询失败：没有凭据就是这家不适用。
     #[test]
-    fn no_keychain_item_reports_missing_credentials() {
-        let Err(error) =
-            first_copilot_keychain_credential(&accounts(), |_| KeychainLookup::NotFound)
-        else {
-            panic!("没有令牌");
-        };
-        assert!(error.to_string().contains("not found"));
+    fn no_keychain_item_means_no_credential() {
+        let result = first_copilot_keychain_credential(&accounts(), |_| KeychainLookup::NotFound);
+        assert!(matches!(result, Ok(None)));
     }
 
     #[test]

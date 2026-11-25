@@ -17,7 +17,7 @@ pub fn section_label(index: usize) -> String {
 /// 项目行「+」下拉菜单里的一条可配置启动项：显示名 + shell 启动命令。
 /// `provider` 标识这条启动项属于哪个 agent 协议族（如 "claude"/"codex"），
 /// 供插件任务按 agent provider 匹配执行通道；用户自定义项可为空。
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct LaunchEntry {
     pub label: String,
     pub command: String,
@@ -76,7 +76,9 @@ pub fn launch_entry_detected(command: &str, diagnostics: Option<&AcpRuntimeDiagn
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum NewSessionActionKind {
     Terminal,
@@ -96,7 +98,7 @@ impl NewSessionActionKind {
 
 /// 动作要启动的东西。移动端只认 `agentOptionId` / `key`，命令行永远在这台机器上
 /// 拼；`command` 只是给桌面直接复用，手机不会把它回传当参数用。
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(tag = "target", rename_all = "camelCase")]
 pub enum NewSessionTarget {
     #[serde(rename_all = "camelCase")]
@@ -114,7 +116,7 @@ pub enum NewSessionTarget {
 }
 
 /// 新建选择器里的一行。
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionAction {
     /// Pin 与跨端引用的稳定标识。终端项用 provider + 命令（改名后 Pin 仍有效）。
@@ -139,7 +141,9 @@ impl NewSessionAction {
 }
 
 /// 三个分组。常用不额外占一层，和终端 / 对话同级。
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct NewSessionSections {
     pub common: Vec<NewSessionAction>,
     pub terminal: Vec<NewSessionAction>,
@@ -158,7 +162,9 @@ impl NewSessionSections {
 
 /// 新建菜单的用户偏好单独存档，直接写入 SQLite；不读取旧 JSON，也不做旧格式迁移。
 /// 也经控制接口回给客户端，所以宽容读取。
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct NewSessionPreferences {
     pub pinned: Vec<String>,
 }
@@ -173,7 +179,9 @@ impl NewSessionPreferences {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct PinParams {
     pub key: String,
 }

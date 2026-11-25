@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::control::{ControlCall, ControlMethod, EmptyParams};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DesktopAttachReply {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -21,7 +21,7 @@ pub struct DesktopAttachReply {
 /// 一次最多注入的字符数：注入是逐字模拟按键，太长会让人等很久，也防误贴一大段。
 pub const MAX_TYPE_TEXT_CHARS: usize = 4000;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DesktopTypeTextParams {
     pub text: String,
 }

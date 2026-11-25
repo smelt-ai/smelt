@@ -8,8 +8,7 @@
 Control API 是 smeltd 的**版本化短请求协议**，不是 HTTP 服务，也不取代 ACP。
 当前 `CONTROL_API_VERSION = 3`，`CONTROL_API_MIN_SUPPORTED_VERSION = 3`
 （`crates/smelt-runtime-client/src/protocol/control.rs`）。
-它复用 `~/.smelt/smeltd.sock` 的首帧分流，供桌面、Mobile、MCP、CLI 和未来的进程外
-插件共享同一份控制契约。
+它复用 `~/.smelt/smeltd.sock` 的首帧分流，供桌面（含 NSH 插件经宿主桥接）、Mobile、MCP 和 CLI 共享同一份控制契约。
 
 ## 边界
 
@@ -144,12 +143,13 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 | 远程与设备 | `remote.config.get` / `remote.config.set` / `remote.status` / `remote.status.wait`（状态和 `known` 不同就回，最多挂 20 秒）；`device.pair_begin` / `device.pair` / `device.list` / `device.revoke` |
 | 对端节点 | `peer.list` / `peer.pair` / `peer.update` / `peer.remove` / `peer.link` / `peer.reset`（只收本机，写方法拒绝智能体会话进程树）；本机活跃 ACP 会话跨对话协作兜底 `peer.session_list` / `peer.session_read` / `peer.session_send` / `peer.session_spawn`（只收本机，来源按调用进程树认定，见 `docs/cross-agent-messaging.md`）；节点之间的 `node.pair`（未配对的连接可调）/ `node.unpair`，跨机器会话消息 `node.peer_deliver` / `node.peer_list` / `node.peer_read`（只收对端节点）。另有长连接 op `forward`：经本机运行时转发到一个对端，见 `docs/cross-machine.md` |
 | 提醒与通知 | `attention.mark_read`（`{session_id}`：清这个会话的未读，等批准、等输入、失败这类要处理的不清；变化经 `attention.changed` 推给各端）；`notify.send`（`smelt notify`）；`push.register` / `push.unregister` |
-| 会话生命周期 | `new_session.catalog`、`session.create`（对话可带 `cwd`、`title`、`disallowed_tools`，见下面「插件驱动对话」）、`session.delete`（删完进程顺带把它从工作区目录摘掉：终端摘这一格，最后一格或 ACP 会话删整段对话）、`session.agent_bindings`、`session.launch.prepare`、`session.loaded_skills`、`conversation.create_for_agent`、`conversation.image`、`conversation.prompt_index`（每一问一行摘要，给提问导航；挂起的对话先唤醒）、`conversation.prompt` / `conversation.turn_result`、`subagent.transcript` |
-| 工作区与文件 | `workspace.conversation.create` / `update` / `delete`、`workspace.project.open` / `close`、`workspace.rename`（改名的唯一入口，名字写在哪由运行时定，在跑的对话同步给 agent）、`workspace.directory`（只读整份目录；目录只经前面几条单条改动写，改了就推 `workspace.changed` 整份目录；关对话时运行时顺带收掉它的终端和 ACP 会话）；`workspace.browse_dirs`；`project.tree` / `project.search` / `project.delete_entry` / `project.watch`；`file.open` / `file.save` |
+| 会话生命周期 | `new_session.catalog`、`session.create`（对话可带 `cwd`、`title`、`disallowed_tools`，见下面「插件驱动对话」）、`session.delete`（删完进程顺带把它从工作区目录摘掉：终端摘这一格，最后一格或 ACP 会话删整段对话）、`session.complete_files`、`session.agent_bindings`、`session.launch.prepare`、`session.loaded_skills`、`conversation.create_for_agent`、`conversation.image`、`conversation.prompt_index`（每一问一行摘要，给提问导航；挂起的对话先唤醒）、`conversation.fork_cut`（从某一条分叉的切点，同文本提问的序号按整段对话数）、`conversation.prompt` / `conversation.turn_result`、`subagent.transcript` |
+| 工作区与文件 | `workspace.conversation.create` / `update` / `delete` / `archive`、`workspace.project.open` / `close`、`workspace.project.repository.action`、`workspace.workset.create_with_branch` / `rename_preserving_branch` / `inspect` / `finish`、`workspace.rename`（改名的唯一入口，名字写在哪由运行时定，在跑的对话同步给 agent）、`workspace.directory`（只读整份目录；目录只经前面几条单条改动写，改了就推 `workspace.changed` 整份目录；关对话时运行时顺带收掉它的终端和 ACP 会话）；`workspace.browse_dirs`；`project.search` / `project.watch`；`file.open` / `file.save` |
+| 文件系统 | `fs.stat`、`fs.read_dir`（一层原样列出，不过滤不排序；读不了报错，不当空目录）、`fs.delete`（`trash: true` 移到废纸篓；带 `expect` 时路径上已不是那个文件就报 `conflict`）、`fs.volume`（所在卷的容量和可用空间）、`fs.known_dirs`（主目录、缓存、临时目录、废纸篓这些位置）、`fs.read` / `fs.write`（字节或 UTF-8，可分段读；写可只新建、追加）、`fs.create_dir`、`fs.rename` / `fs.copy`（目标已存在报 `conflict`，除非 `overwrite`）；`fs.usage.scan` / `fs.usage.children` / `fs.usage.release`（后台统计一个目录下的占用，进度推 `fs.usage.progress`）。路径都要绝对路径，不限在项目里；占用按实际占的块算，硬链接只算一次，不跟符号链接、不跨卷 |
 | Git | `git.discover`、`git.repo_info`、`git.status`、`git.diff.*`、`git.commit` 等。没有 `git.worktree.*`、`git.is_dirty`。会话目录的当前分支不用查：运行时监听 HEAD，写在会话状态的 `branch` 里推送 |
 | 智能体记忆 | 见下面的 `agent.memory.*` 表。另有 `memory.test_embedding` |
 | Pi / 额度 | `pi.config.*`、`pi.models.*`、`pi.providers.*`、`pi.mcp.*`、`pi.plugins.*`、`pi.auth.*`（`pi.plugins.remove`、`pi.mcp.remove` 同时清掉这台机器上各智能体对它的勾选；改了配置的调用成功后运行时推 `pi_config.changed`，这个话题只在单独的一条订阅里，见 `smelt-event-protocol` 模块文档）；`quota.get` / `quota.refresh` / `quota.settings.get` / `quota.set_enabled` |
-| 其它 | `resource.usage`（守护进程和各会话进程树的 CPU、内存）、`agent.hooks.*`、`agent.cli.inspect` / `agent.cli.install`、`agent.host.get` / `agent.host.apply_edit`、`launch.get` / `launch.replace`、`new_session.pins.*`、`terminal_theme.publish`、`terminal.stage_image`（将客户端图片暂存到运行时临时目录供终端会话引用，返回绝对路径）、`history.*`（`history.delete` 和守护命令 `history_rename` 成功后运行时推 `history.changed`，同 `pi_config.changed` 单独一条订阅；agent 自己写进存档的新会话不推）、`desktop.type_text`、`automation.run_detail` |
+| 其它 | `app.command.list` / `app.command.run`、`agent.space.ensure`、`resource.usage`（守护进程和各会话进程树的 CPU、内存）、`agent.hooks.*`、`agent.cli.inspect` / `agent.cli.install`、`agent.host.get` / `agent.host.apply_edit`、`launch.get` / `launch.replace`、`new_session.pins.*`、`terminal_theme.publish`、`terminal.stage_image`（将客户端图片暂存到运行时临时目录供终端会话引用，返回绝对路径）、`history.*`（`history.delete` 和守护命令 `history_rename` 成功后运行时推 `history.changed`，同 `pi_config.changed` 单独一条订阅；agent 自己写进存档的新会话不推）、`desktop.type_text`、`automation.run_detail` |
 
 ### 插件驱动对话
 
@@ -181,7 +181,7 @@ smeltd 现有连接有三种不同生命周期，不能为了表面统一塞进�
 | `agent.memory.watch` | 关注某个智能体的两层记忆：之后目录里有文件变化，运行时推 `agent_memory.changed`（`agent_id` 为空是用户全局层），客户端据此重取列表。幂等，监听保持到运行时退出 |
 | `memory.test_embedding` | 试一次向量检索服务。`api_key` 省略时用已存密钥，响应不回密钥本身 |
 
-CLI：`smelt agent` / `smelt conversation` / `smelt automation` / `smelt mcp` / `smelt plugin` / `smelt model` / `smelt quota` / `smelt settings`（无这些子命令时 `smelt` 仍是 GUI），全部经 Control API 或 smeltd 的 op，不碰库。教模型用这组 CLI 的技能（`agent/skills/smelt`）随 smelt-agent 发布，产品智能体勾选了才传给 Pi，不写进 `~/.agents/skills`。无头机器上的安装、配对、中继和 MCP 预设是 `smeltd install` / `smeltd pair` / `smeltd devices` / `smeltd relay` / `smeltd mcp`，不是这组 CLI。
+CLI：`smelt-cli` 提供 `agent` / `app` / `conversation` / `project` / `worktree` / `history` / `automation` / `mcp` / `pi` / `model` / `quota` / `engine` / `hooks` / `settings` / `notify`（无子命令时桌面 `smelt` 启动 GUI），全部经 Control API 或 smeltd 的 op，不碰库；`smelt plugin`（`check` / `status`）只在桌面 `smelt` 二进制里本地执行，用于检查 NSH 插件。教模型用这组 CLI 的技能（`agent/skills/smelt`）随 smelt-agent 发布，产品智能体勾选了才传给 Pi，不写进 `~/.agents/skills`。无头机器上的安装、配对、中继和 MCP 预设是 `smeltd install` / `smeltd pair` / `smeltd devices` / `smeltd relay` / `smeltd mcp`，不是这组 CLI。
 
 ## 版本与重试
 
@@ -205,7 +205,5 @@ CLI：`smelt agent` / `smelt conversation` / `smelt automation` / `smelt mcp` / 
   生成能力清单和服务端穷举分发用的 enum，不能另建平行字符串清单。领域逻辑
   必须是可独立测试的函数，由 Control API 直接调用，禁止复制实现。
 - 流式能力：继续走独立 op/连接，不伪装成短 RPC。
-- 插件能力：后续由进程外插件 manifest 声明 action/event/capability，经受限适配器调用
-  Control API；不要把每个第三方插件名硬编码成新的核心 method，也不要让插件直接进入
-  smeltd 进程或绕过 capability 校验。
+- 插件调用：桌面 JS/TSX 插件经宿主桥接调用已有核心 method，不为某个插件硬编码专用核心 method。
 - 在没有第二个真实调用方前，不引入动态 handler registry、IDL 编译器或新的网络服务。

@@ -122,6 +122,16 @@ pub const CORE_TOPIC_AGENT_HOST_CHANGED: &str = "agent_host.changed";
 /// 终端里的程序用 OSC 9;4（ConEmu 进度）报的进度变了。运行时变了就发，进度条还在时
 /// 每 5 秒重发一次（后连上的客户端据此补齐），15 秒没新报告就清掉。不进会话投影。
 pub const CORE_TOPIC_TERMINAL_PROGRESS: &str = "terminal.progress";
+/// 一次目录占用统计（`fs.usage.scan`）的进度，载荷 [`FsUsageProgressChanged`]。扫的过程中
+/// 隔一会儿发一次，扫完或被 `fs.usage.release` 停下时再发一次。没有快照：错过了就用
+/// `fs.usage.children` 问。不进核心订阅，同 [`CORE_TOPIC_ATTENTION_CHANGED`]。
+pub const CORE_TOPIC_FS_USAGE_PROGRESS: &str = "fs.usage.progress";
+/// 「新建会话」目录（智能体选项、分组动作、Pin 与 CLI 探测）在运行时更新了，载荷为
+/// `smelt_model::control_api::NewSessionCatalogResult`，带快照 [`CORE_SNAPSHOT_NEW_SESSION_CATALOG`]。
+///
+/// 加在事件协议 v7 之后、没有升版本，同 [`CORE_TOPIC_AGENT_HOST_CHANGED`] 只放在单独的一条
+/// 订阅里；不认识该话题的旧运行时只会拒掉那一条。
+pub const CORE_TOPIC_NEW_SESSION_CATALOG_CHANGED: &str = "new_session.catalog_changed";
 
 pub const CORE_CAPABILITY_SESSION_READ: &str = "session.read";
 pub const CORE_CAPABILITY_WORKSPACE_READ: &str = "workspace.read";
@@ -139,12 +149,15 @@ pub const CORE_SNAPSHOT_WORKSPACE: &str = "core.workspace.v1";
 pub const CORE_SNAPSHOT_AUTOMATIONS: &str = "core.automations.v1";
 pub const CORE_SNAPSHOT_ATTENTION: &str = "core.attention.v1";
 pub const CORE_SNAPSHOT_AGENT_HOST: &str = "core.agent_host.v1";
+pub const CORE_SNAPSHOT_NEW_SESSION_CATALOG: &str = "core.new_session_catalog.v1";
 
 pub const FIRST_PARTY_DESKTOP_PLUGIN_ID: &str = "core.desktop";
 
 macro_rules! string_id {
     ($name:ident) => {
-        #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+        #[derive(
+            Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, schemars::JsonSchema,
+        )]
         #[serde(transparent)]
         pub struct $name(String);
 
@@ -232,7 +245,7 @@ fn validate_identifier(label: &str, value: &str) -> Result<(), ValidationError> 
     Ok(())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct Topic(String);
 
@@ -309,7 +322,7 @@ fn validate_topic(value: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct Capability(String);
 
@@ -354,7 +367,7 @@ impl fmt::Display for Capability {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AggregateRef {
     pub kind: String,
     pub id: String,
@@ -370,7 +383,7 @@ impl AggregateRef {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventSource {
     Core,
@@ -394,7 +407,7 @@ impl PublisherIdentity {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EventEnvelope<P> {
     pub event_id: EventId,
     pub topic: Topic,
@@ -409,7 +422,7 @@ pub struct EventEnvelope<P> {
     pub payload: P,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DataSensitivity {
     Public,
@@ -417,11 +430,13 @@ pub enum DataSensitivity {
     Sensitive,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(transparent)]
 pub struct SnapshotKind(pub String);
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TopicDescriptor {
     pub topic: Topic,
     pub schema_version: u16,
@@ -434,7 +449,9 @@ pub struct TopicDescriptor {
 
 /// Stable session phase vocabulary. Daemon-internal reducers may evolve independently.
 /// 不设兜底值：相位决定客户端怎么判断会话在不在忙，所以加值要升协议版本。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum CoreSessionPhase {
     Connecting,
@@ -451,7 +468,7 @@ pub enum CoreSessionPhase {
 
 /// Public session projection. Runtime locks, blocker identities, and capability tokens are
 /// intentionally absent.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionStateChanged {
     #[serde(rename = "id")]
     pub session_id: String,
@@ -512,7 +529,7 @@ pub struct SessionStateChanged {
     pub runtime: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionStateRemoved {
     pub session_id: String,
     pub generation: u64,
@@ -520,7 +537,7 @@ pub struct SessionStateRemoved {
     pub removed_at_ms: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionStatesSnapshot {
     pub revision: u64,
     pub sessions: Vec<SessionStateChanged>,
@@ -528,24 +545,24 @@ pub struct SessionStatesSnapshot {
 
 /// Escape hatch for projections whose complete domain DTO is not yet stabilized.
 /// `data` is the projection snapshot, never a provider hook or command envelope.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CoreProjectionEvent {
     pub revision: u64,
     pub data: serde_json::Value,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ConversationWakeRequested {
     pub session_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProjectChanged {
     /// 关注时传入的项目根目录（运行时那台机器上的路径）。
     pub root: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentMemoryChanged {
     /// 哪个智能体自己的记忆变了。`None` 是用户全局记忆，所有智能体都读它。
     pub agent_id: Option<String>,
@@ -558,7 +575,7 @@ pub struct AgentMemoryChanged {
 ///
 /// 这个话题加在事件协议 v7 之后、没有升版本，所以只放在单独的一条订阅里，v7 的运行时会拒掉
 /// 那一条。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PiConfigChanged {}
 
 /// 对端节点变了。没有字段：读的一方重取 `peer.list`。
@@ -569,10 +586,10 @@ pub struct PeersChanged {}
 /// 写新会话不在内（运行时不盯存档目录）。没有字段：读的一方重取自己在看的那几份列表。
 ///
 /// 加在事件协议 v7 之后、没有升版本，所以单独占一条订阅，旧运行时只会拒掉那一条。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistoryChanged {}
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TerminalNotification {
     pub session_id: String,
     /// 智能体主动发的通知（`notify_user` 工具）带的标题。终端程序的 OSC 通知没有。
@@ -583,7 +600,7 @@ pub struct TerminalNotification {
 }
 
 /// 要告诉用户的一件事是什么。会增长：认不出的值读成 [`Self::Unknown`]。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AttentionKind {
     /// 等你批准。
@@ -631,7 +648,7 @@ impl AttentionKind {
 }
 
 /// 一条提醒。给人看用 [`AttentionItem::title_text`]、[`AttentionItem::message_text`]。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AttentionItem {
     pub kind: AttentionKind,
     /// 短标题：等批准、等输入、完成、失败这几种是运行时按英文说的种类名（客户端按种类自己说），
@@ -661,7 +678,7 @@ impl AttentionItem {
 }
 
 /// 一段会话此刻的提醒。两样都没有的会话不在快照里。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionAttention {
     pub session_id: String,
     /// 等你处理的事（等批准、等输入、失败）。看过也留着，会话往下走了才清掉。
@@ -681,14 +698,14 @@ impl SessionAttention {
 
 /// [`CORE_SNAPSHOT_ATTENTION`] 的载荷：所有有提醒的会话。只在内存里：运行时重启后从空开始，
 /// 重启前的提醒不补。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AttentionSnapshot {
     pub revision: u64,
     pub sessions: Vec<SessionAttention>,
 }
 
 /// [`CORE_TOPIC_ATTENTION_CHANGED`] 的载荷。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AttentionChanged {
     pub revision: u64,
     /// 这段会话现在的提醒，整份替换。空的就是没有了（看过、处理掉、会话删了）。
@@ -700,7 +717,7 @@ pub struct AttentionChanged {
 }
 
 /// 会增长：认不出的值读成 [`Self::Unknown`]。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalProgressState {
     Normal,
@@ -712,14 +729,25 @@ pub enum TerminalProgressState {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TerminalProgress {
     pub state: TerminalProgressState,
     /// 0..=100。不确定进度（indeterminate）时没有。
     pub percent: Option<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FsUsageProgressChanged {
+    /// `fs.usage.scan` 给的扫描 id。
+    pub scan: String,
+    /// 到目前为止数过的文件数和字节数。
+    pub files: u64,
+    pub bytes: u64,
+    /// 扫完了，或者被停下了。
+    pub done: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TerminalProgressChanged {
     pub session_id: String,
     /// `None`：进度条清掉了。
@@ -727,20 +755,20 @@ pub struct TerminalProgressChanged {
 }
 
 /// v7 话题 [`CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED`] 的载荷，形状不能动。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AppearanceChangeRequested {
     /// 已由运行时按可脚本目录校验过的外观键值。
     pub settings: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 /// 单播给本机桌面的外观修改（独立订阅）；请求 id 用来关联回执。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AppearanceApplyRequested {
     pub request_id: String,
     pub settings: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum AppearanceApplyOutcome {
     Applied,
@@ -748,20 +776,20 @@ pub enum AppearanceApplyOutcome {
     Failed { message: String },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AppearanceApplyReceipt {
     pub request_id: String,
     pub outcome: AppearanceApplyOutcome,
 }
 
 /// 单播给本机桌面的 App 命令请求（独立订阅）；请求 id 用来关联回执。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AppCommandRequested {
     pub request_id: String,
     pub request: AppCommandRequest,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AppCommandRequest {
     /// 列出开给命令行的命令。
@@ -774,7 +802,7 @@ pub enum AppCommandRequest {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum AppCommandOutcome {
     /// 做完了。列出时是命令表，执行时是命令交回的值（没有就是 `null`）。
@@ -783,7 +811,7 @@ pub enum AppCommandOutcome {
     Failed { message: String },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AppCommandReceipt {
     pub request_id: String,
     pub outcome: AppCommandOutcome,
@@ -899,6 +927,12 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
             None,
             4 * 1024,
         )?,
+        descriptor(
+            CORE_TOPIC_FS_USAGE_PROGRESS,
+            CORE_CAPABILITY_WORKSPACE_READ,
+            None,
+            1024,
+        )?,
         // 两条提醒，各自的正文最多 4096 字节（扫描器上限），JSON 转义后可能翻倍。
         descriptor(
             CORE_TOPIC_ATTENTION_CHANGED,
@@ -913,6 +947,13 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
             Some(CORE_SNAPSHOT_AGENT_HOST),
             1024 * 1024,
         )?,
+        // 新建会话目录包含智能体选项与分组启动项。
+        descriptor(
+            CORE_TOPIC_NEW_SESSION_CATALOG_CHANGED,
+            CORE_CAPABILITY_WORKSPACE_READ,
+            Some(CORE_SNAPSHOT_NEW_SESSION_CATALOG),
+            512 * 1024,
+        )?,
     ])
 }
 
@@ -924,19 +965,19 @@ pub fn core_topic_schema_version(topic: &str) -> u16 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FirstPartyClientKind {
     Desktop,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EventClientAuth {
     FirstParty { kind: FirstPartyClientKind },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProtocolRange {
     pub min: u16,
@@ -949,21 +990,21 @@ impl ProtocolRange {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SubscriptionDeclaration {
     pub id: SubscriptionId,
     pub topics: Vec<Topic>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SubscribeRequest {
     pub protocol: ProtocolRange,
     pub subscription: SubscriptionDeclaration,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EventSubscribeRequest {
     pub auth: EventClientAuth,
@@ -971,7 +1012,7 @@ pub struct EventSubscribeRequest {
 }
 
 /// 会增长：认不出的值读成 [`Self::Unknown`]。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SubscribeErrorCode {
     Rejected,
@@ -981,7 +1022,7 @@ pub enum SubscribeErrorCode {
     Unknown,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SubscribeMessage<P = serde_json::Value> {
     Snapshot {
@@ -1211,6 +1252,7 @@ mod tests {
             (CORE_TOPIC_PEERS_CHANGED, None, 1),
             (CORE_TOPIC_TERMINAL_NOTIFICATION, None, 1),
             (CORE_TOPIC_TERMINAL_PROGRESS, None, 1),
+            (CORE_TOPIC_FS_USAGE_PROGRESS, None, 1),
             (
                 CORE_TOPIC_ATTENTION_CHANGED,
                 Some(CORE_SNAPSHOT_ATTENTION),
@@ -1219,6 +1261,11 @@ mod tests {
             (
                 CORE_TOPIC_AGENT_HOST_CHANGED,
                 Some(CORE_SNAPSHOT_AGENT_HOST),
+                1,
+            ),
+            (
+                CORE_TOPIC_NEW_SESSION_CATALOG_CHANGED,
+                Some(CORE_SNAPSHOT_NEW_SESSION_CATALOG),
                 1,
             ),
         ];

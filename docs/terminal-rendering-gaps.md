@@ -1,7 +1,6 @@
 # 终端：与 Zed 对照的差距清单
 
-对着 Zed 的终端实现逐条核对（GPUI 快照是 `gpui-pre` 0.3.9，对应 zed@279fe07；旧核对用的是 `e0931d5`，
-我们依赖的 gpui 就是这个 commit）。本文档**只记现状与未完成项**——已落地的条目放在
+对着 Zed 的终端实现逐条核对（当前桌面依赖 `gpui-fast` 0.1.17）。本文档**只记现状与未完成项**——已落地的条目放在
 「已完成」归档区，避免再被当成待办。
 
 对照文件：
@@ -27,7 +26,7 @@
 |------|------|
 | VTE / 网格（alacritty 0.26） | 同源，够用 |
 | 渲染（样式 / 光标 / 链接 / 选区 / 像素吸附） | **主链路已对齐** |
-| 输入 / 协议（粘贴、修饰键、鼠标 motion） | **仍有真 gap** |
+| 输入 / 协议（粘贴、修饰键、鼠标 motion） | **主清单已对齐** |
 | 会话持久化（smeltd） | smelt 独有，比 Zed 强 |
 
 ---
@@ -53,11 +52,11 @@
 | App cursor / alt scroll / 滚轮 | DECCKM 方向键；MOUSE_MODE / 备用屏丢 mouse → SGR 滚轮；**主屏永远本地 history**（勿用默认 ALTERNATE_SCROLL 发方向键） | `scroll_wheel` / `scroll_wheel_plan`，`app_cursor_mode` |
 | 鼠标单击转发 | 无非空选区时 mouse_up 发 press+release；Shift 旁路 | `mouse_button` |
 | PtyWrite / ColorRequest | EventProxy 写回守护帧 | `EventListener` |
-| damage 节流 | `take_damage` 滤掉「仅静止光标格」 | `take_damage` + 定时刷新 |
+| damage 节流 | `take_damage` 滤掉「仅静止光标格」，事件驱动重绘 | `take_damage` + `RedrawReceiver` |
 | IME | preedit、行内拼音、`bounds_for_range` | `EntityInputHandler` |
 | 程序改色（OSC 4 / 10 / 11 / 12 及 104 / 110–112 复位） | 渲染和守护的颜色查询应答都优先用 `Term` 记下的覆盖色；关键帧先复位再写回覆盖色（alacritty 的 RIS 不复位颜色），重连、热交接不丢 | `terminal.rs` `resolve`，`terminal_snapshot.rs` `append_color_overrides`，`smeltd` `write_terminal_replies` |
 | OSC 9;4 进度 | smeltd 扫，变了就推 `terminal.progress`，进度条还在时每 5 秒重发、15 秒没新报告就清（同 Ghostty）。桌面原来在侧栏会话行底部画 2px 细条；2026-11-17 会话列表搬进插件时没接上，桌面不再订这个话题，要显示由会话插件自己订 | `smeltd/src/terminal_progress.rs` |
-| kitty 图形（桌面） | smeltd 是唯一解析程序图形命令的地方，照 Ghostty 语义处理（传输 d/f/t、PNG/RGB/RGBA、zlib、分块；放置后移光标；删除；应答），转成带 `k=1` 的转发命令发给 `open` 时声明 `graphics=kitty` 的客户端。直接放置只在左上角那格挂零宽锚点标记、图片作浮层（Pi 在 Ghostty 下逐行 `CUP+EL` 重绘，每格写占位符会被擦掉）；Unicode 占位符按格画图块。手机旁观和没声明的客户端收去掉锚点的版本，网格布局一致。关键帧补发画面里用得到的图。同一个 id 内容一模一样的重传不换图、不再转发，只照常删掉旧放置（Pi 滚动重绘时每帧整张重传，换图会让桌面每帧重新解码、换纹理）；守护收到新图、因流控补关键帧时各记一行 app.log，反复出现就是卡顿的来源。程序问格子像素（`CSI 16 t`，Pi 没答复就按 9×18 算行数，图会变形）vte 不认，也由切分器挑出来，smeltd 用排版图片的同一份格子尺寸回答 | `smelt-model/src/kitty_graphics.rs`，`smeltd/src/terminal_graphics.rs`，`plugins/terminal/src/terminal_images.rs`，`terminal.rs` `image_paints`，`terminal_view.rs` `paint_images` |
+| kitty 图形（桌面） | smeltd 是唯一解析程序图形命令的地方，照 Ghostty 语义处理（传输 d/f/t、PNG/RGB/RGBA、zlib、分块；放置后移光标；删除；应答），转成带 `k=1` 的转发命令发给 `open` 时声明 `graphics=kitty` 的客户端。直接放置只在左上角那格挂零宽锚点标记、图片作浮层（Pi 在 Ghostty 下逐行 `CUP+EL` 重绘，每格写占位符会被擦掉）；Unicode 占位符按格画图块。手机旁观和没声明的客户端收去掉锚点的版本，网格布局一致。关键帧补发画面里用得到的图。同一个 id 内容一模一样的重传不换图、不再转发，只照常删掉旧放置（Pi 滚动重绘时每帧整张重传，换图会让桌面每帧重新解码、换纹理）；守护收到新图、因流控补关键帧时各记一行 app.log，反复出现就是卡顿的来源。程序问格子像素（`CSI 16 t`，Pi 没答复就按 9×18 算行数，图会变形）vte 不认，也由切分器挑出来，smeltd 用排版图片的同一份格子尺寸回答 | `smelt-model/src/kitty_graphics.rs`，`smeltd/src/terminal_graphics.rs`，`crates/plugins/terminal/src/terminal_images.rs`，`terminal.rs` `image_paints`，`terminal_view.rs` `paint_images` |
 
 **渲染侧相对 Zed 的主清单可以收工。** 下文只列仍开放的差距。
 

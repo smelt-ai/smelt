@@ -27,6 +27,7 @@ use smelt_core::kitty_graphics::{
     PlacementCursor, PlacementKey, Relay, SizeQuery, anchors_in, direct_layout,
     encode_image_relay, placement_bytes, png_dimensions, virtual_layout,
 };
+use smelt_core::osc::{OscEvent, OscScan, program_status_reply};
 
 /// 程序分块发的 base64 有的带填充有的不带，拼起来解码时两种都认。
 const LENIENT_BASE64: GeneralPurpose = GeneralPurpose::new(
@@ -42,6 +43,13 @@ const GC_MIN_PLACEMENTS: usize = 64;
 
 type CommandResult<T> = Result<T, &'static str>;
 
+/// 扫出的一条按流顺序发生的终端控制事件（OSC 事件或 `ESC c` 复位）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TerminalStreamEvent {
+    Osc(OscEvent),
+    Reset,
+}
+
 /// 一段 PTY 输出处理完的结果。
 #[derive(Default)]
 pub(crate) struct FedOutput {
@@ -53,6 +61,8 @@ pub(crate) struct FedOutput {
     pub(crate) reply: Vec<u8>,
     /// 程序问了几次格子像素（`CSI 16 t`）。格子尺寸可能还不知道，由泵按 `Ctl` 答或记下。
     pub(crate) cell_size_queries: usize,
+    /// 这段输出里按字节序扫出的 OSC 事件与 `RIS` 复位（已避开图形 APC 载荷）。
+    pub(crate) events: Vec<TerminalStreamEvent>,
 }
 
 /// 推进守护网格。普通字节原样推进、原样转发；图形命令交给 `graphics`，它产生的网格字节也推进
@@ -61,9 +71,11 @@ pub(crate) struct FedOutput {
 /// 处理命令前先结束 vte 的同步更新：Pi 把整帧包在 `CSI ? 2026 h … l` 里，vte 会把前面的
 /// 光标定位攒着不执行，这时读到的光标是旧的。守护的网格不给人看，提前结束同步更新没有画面上的
 /// 代价；转发给客户端的字节不变，客户端照常按同步更新处理。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn feed_output<T: EventListener>(
     chunk: &[u8],
     splitter: &mut GraphicsSplitter,
+    osc_scan: &mut OscScan,
     parser: &mut Processor,
     term: &mut Term<T>,
     graphics: &mut TerminalGraphics,
@@ -72,11 +84,26 @@ pub(crate) fn feed_output<T: EventListener>(
 ) {
     splitter.feed(chunk, |piece| match piece {
         Piece::Bytes(bytes) => {
+            for &byte in bytes {
+                if let Some(event) = osc_scan.feed(byte) {
+                    match event {
+                        // 在这批输出推进网格之前就回应：Pi 把探测和 DA 查询一起发，
+                        // 拿 DA 的回应当探测结束；DA 由守护网格在这批输出处理完后才
+                        // 写回，一定在这之后。
+                        OscEvent::ProgramStatusQuery(terminator) => {
+                            out.reply
+                                .extend_from_slice(&program_status_reply(terminator));
+                        }
+                        other => out.events.push(TerminalStreamEvent::Osc(other)),
+                    }
+                }
+            }
             parser.advance(term, bytes);
             out.graphics.extend_from_slice(bytes);
             out.plain.extend_from_slice(bytes);
         }
         Piece::Command(body) => {
+            osc_scan.reset();
             if parser.sync_timeout().sync_timeout().is_some() {
                 parser.stop_sync(term);
             }
@@ -87,7 +114,11 @@ pub(crate) fn feed_output<T: EventListener>(
             out.plain.extend_from_slice(&outcome.plain_grid);
             out.reply.extend_from_slice(&outcome.reply);
         }
-        Piece::Reset => out.graphics.extend(graphics.reset()),
+        Piece::Reset => {
+            osc_scan.reset();
+            out.graphics.extend(graphics.reset());
+            out.events.push(TerminalStreamEvent::Reset);
+        }
         Piece::SizeQuery(SizeQuery::Cell) => out.cell_size_queries += 1,
         Piece::SizeQuery(SizeQuery::Screen) => {
             let _ = write!(
@@ -758,6 +789,7 @@ mod tests {
         term: Term<VoidListener>,
         parser: Processor,
         splitter: GraphicsSplitter,
+        osc_scan: OscScan,
         graphics: TerminalGraphics,
     }
 
@@ -767,6 +799,7 @@ mod tests {
                 term: new_daemon_term(ROWS, COLS, VoidListener),
                 parser: Processor::new(),
                 splitter: GraphicsSplitter::default(),
+                osc_scan: OscScan::default(),
                 graphics: TerminalGraphics::default(),
             }
         }
@@ -776,6 +809,7 @@ mod tests {
             feed_output(
                 bytes,
                 &mut self.splitter,
+                &mut self.osc_scan,
                 &mut self.parser,
                 &mut self.term,
                 &mut self.graphics,
@@ -1110,5 +1144,73 @@ mod tests {
             out.reply,
             b"\x1b_Gi=6;EINVAL: pixel data does not match s and v\x1b\\"
         );
+    }
+
+    #[test]
+    fn osc_scan_skips_kitty_apc_and_preserves_reset_order() {
+        use smelt_core::osc::{ProgramState, ProgramStatus};
+
+        let mut h = Harness::new();
+        // Kitty APC 载荷即使带普通文本/BEL 也不经 `osc_scan`，也不会让未闭合的前置 OSC 跨过它。
+        let mut fake_apc = b"\x1b]7501;state=working\x1b_Ga=t,q=2;".to_vec();
+        fake_apc.extend_from_slice(b"7501;state=done\x07");
+        fake_apc.extend_from_slice(b"\x1b\\\x07");
+        assert!(h.feed(&fake_apc).events.is_empty());
+
+        let chunk = b"\x1b]7501;state=working\x07\x1bc\x1b]7501;state=done\x07";
+        let out = h.feed(chunk);
+        assert_eq!(
+            out.events,
+            vec![
+                TerminalStreamEvent::Osc(OscEvent::ProgramStatus(ProgramStatus {
+                    state: ProgramState::Working,
+                    kind: None,
+                    progress: None,
+                    message: None,
+                })),
+                TerminalStreamEvent::Reset,
+                TerminalStreamEvent::Osc(OscEvent::ProgramStatus(ProgramStatus {
+                    state: ProgramState::Done,
+                    kind: None,
+                    progress: None,
+                    message: None,
+                })),
+            ]
+        );
+    }
+
+    #[test]
+    fn program_status_query_reply_precedes_da_reply() {
+        use std::sync::{Arc, Mutex};
+
+        struct CaptureListener(Arc<Mutex<Vec<String>>>);
+        impl EventListener for CaptureListener {
+            fn send_event(&self, event: alacritty_terminal::event::Event) {
+                if let alacritty_terminal::event::Event::PtyWrite(text) = event {
+                    self.0.lock().unwrap().push(text);
+                }
+            }
+        }
+
+        let da_replies = Arc::new(Mutex::new(Vec::new()));
+        let mut term = new_daemon_term(ROWS, COLS, CaptureListener(Arc::clone(&da_replies)));
+        let mut parser = Processor::new();
+        let mut splitter = GraphicsSplitter::default();
+        let mut osc_scan = OscScan::default();
+        let mut graphics = TerminalGraphics::default();
+        let mut out = FedOutput::default();
+
+        feed_output(
+            b"\x1b]7501;?\x1b\\\x1b[c",
+            &mut splitter,
+            &mut osc_scan,
+            &mut parser,
+            &mut term,
+            &mut graphics,
+            CELL,
+            &mut out,
+        );
+        assert_eq!(out.reply, b"\x1b]7501;?\x1b\\");
+        assert_eq!(da_replies.lock().unwrap().len(), 1);
     }
 }

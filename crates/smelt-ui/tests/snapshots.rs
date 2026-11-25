@@ -27,7 +27,6 @@ use gpui::{
 use gpui_base::{Root, StyledExt as _};
 use smelt_model::theme_index::{DEFAULT_DARK, DEFAULT_LIGHT};
 use smelt_ui::IconName;
-use smelt_ui::code_editor::{CodeEditor, EditorState};
 use smelt_ui::field::{InputState, TextareaState};
 use smelt_ui::kit::{ControlSize, TYPE, TypeStyled as _};
 use smelt_ui::{
@@ -100,21 +99,6 @@ const SNAPSHOTS: &[Snapshot] = &[
         setup: fields,
     },
     Snapshot {
-        name: "code_editor",
-        size: (640., 340.),
-        setup: code_editor,
-    },
-    Snapshot {
-        name: "code_editor-reveal",
-        size: (640., 340.),
-        setup: code_editor_reveal,
-    },
-    Snapshot {
-        name: "diff",
-        size: (720., 360.),
-        setup: diffs,
-    },
-    Snapshot {
         name: "dialog",
         size: (600., 360.),
         setup: dialogs,
@@ -141,7 +125,7 @@ const SNAPSHOTS: &[Snapshot] = &[
     },
     Snapshot {
         name: "settings",
-        size: (640., 760.),
+        size: (640., 860.),
         setup: settings_page,
     },
     Snapshot {
@@ -1095,11 +1079,7 @@ fn sample_menu() -> smelt_ui::menu::Menu {
         .separator()
         .label("危险操作")
         .item(MenuItem::new("归档").disabled(true))
-        .item(
-            MenuItem::new("删除")
-                .icon(smelt_ui::trash_icon())
-                .danger(),
-        )
+        .item(MenuItem::new("删除").icon(smelt_ui::trash_icon()).danger())
 }
 
 /// 触发按钮放在左上角固定的地方。
@@ -1310,104 +1290,6 @@ fn fields(window: &mut Window, cx: &mut App) -> Draw {
     })
 }
 
-/// 代码编辑器：Rust 语法高亮、行号、当前行、折叠箭头，搜索栏开在替换模式、有查询词和匹配。
-/// 匹配的底色只在窗口激活时画，离屏窗口不激活，图上看不到。应用内嵌的等宽字体这里没装，
-/// 换成系统自带的 Menlo。
-fn code_editor(window: &mut Window, cx: &mut App) -> Draw {
-    smelt_model::font_config::set_font_family("Menlo");
-    let source = "fn main() {\n    let value = compute(41);\n    println!(\"{value}\");\n}\n\nfn compute(input: u32) -> u32 {\n    // 加一\n    input + 1\n}\n";
-    let state = cx.new(|cx| {
-        let mut state = EditorState::new(window, cx)
-            .language("rust")
-            .line_number(true)
-            .searchable(true)
-            .soft_wrap(false);
-        state.set_highlighter_factory(smelt_ui::syntax::highlighter_factory(), cx);
-        state.set_value(source, window, cx);
-        state
-    });
-    state.update(cx, |state, cx| {
-        state.open_search(true, cx);
-        state.set_search_query("value", true, cx);
-    });
-    Box::new(move |_, _| {
-        div()
-            .h(px(290.))
-            .rounded(px(8.))
-            .overflow_hidden()
-            .border_1()
-            .border_color(ui_theme::hair())
-            .child(CodeEditor::new(&state))
-            .into_any_element()
-    })
-}
-
-/// 代码编辑器跳行：还没画过就灌进 200 行并跳到第 120 行，图上第 120 行在当前行、上面留
-/// 五行（115 起）。对话里的文件链接带行号打开文件就是这个时机，排版还没跟上新内容。
-fn code_editor_reveal(window: &mut Window, cx: &mut App) -> Draw {
-    smelt_model::font_config::set_font_family("Menlo");
-    let source: String = (1..=200)
-        .map(|n| format!("let line_{n} = {n};\n"))
-        .collect();
-    let state = cx.new(|cx| {
-        let mut state = EditorState::new(window, cx)
-            .language("rust")
-            .line_number(true)
-            .soft_wrap(false);
-        state.set_highlighter_factory(smelt_ui::syntax::highlighter_factory(), cx);
-        state.set_value(source, window, cx);
-        smelt_ui::code_editor::reveal_line(&mut state, 120, window, cx);
-        state
-    });
-    Box::new(move |_, _| {
-        div()
-            .h(px(290.))
-            .rounded(px(8.))
-            .overflow_hidden()
-            .border_1()
-            .border_color(ui_theme::hair())
-            .child(CodeEditor::new(&state))
-            .into_any_element()
-    })
-}
-
-/// 差异视图：分栏，一处行内改动、一行新增，Rust 语法高亮，第 2 行有一条批注。
-fn diffs(_: &mut Window, cx: &mut App) -> Draw {
-    use smelt_ui::diff::{
-        Diff, DiffAnnotation, DiffFile, DiffLinePosition, DiffMode, DiffSide, DiffState,
-    };
-
-    smelt_model::font_config::set_font_family("Menlo");
-    let patch = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,5 +1,6 @@\n fn main() {\n-    let value = compute(41);\n+    let value = compute(42);\n+    // 打出来看看\n     println!(\"{value}\");\n }\n \n";
-    let files = DiffFile::parse(patch).expect("合法的补丁");
-    let state = cx.new(|cx| DiffState::new(files, cx).with_mode(DiffMode::Split));
-    Box::new(move |_, _| {
-        let note = DiffAnnotation::line(
-            "note",
-            DiffLinePosition::new("src/main.rs", DiffSide::Modified, 2),
-        );
-        div()
-            .h(px(300.))
-            .rounded(px(8.))
-            .overflow_hidden()
-            .border_1()
-            .border_color(ui_theme::hair())
-            .child(
-                Diff::new(&state)
-                    .size_full()
-                    .annotations([note])
-                    .render_annotation(|_, _, _| {
-                        div()
-                            .px_3()
-                            .py_1()
-                            .child("改成 42 是对的")
-                            .into_any_element()
-                    }),
-            )
-            .into_any_element()
-    })
-}
-
 /// 设置页里出现的几种行：下拉、按钮组、开关、多行说明、输入框，和不是行的自由块。
 fn settings_page(window: &mut Window, cx: &mut App) -> Draw {
     use smelt_ui::{Select, SettingsPage, SettingsRow, SettingsSection};
@@ -1481,6 +1363,14 @@ fn settings_page(window: &mut Window, cx: &mut App) -> Draw {
                         .clamp_description("long-description", 2)
                         .note("~/.agents/skills/example · 示例智能体 在用\n附注第二行不受收起影响。")
                         .child(Button::new("delete").quiet().small().label("删除")),
+                ).child(
+                    SettingsRow::new("会话列表")
+                        .description("smelt.session-list · 0.1.0\n~/.smelt/plugins/session-list")
+                        .error(
+                            "你的版本没装上，正在用自带版本。插件用到了这版 Smelt 没有的 SDK 接口\
+                             （SmeltContextMenu、SmeltMenu），需要更新 Smelt",
+                        )
+                        .child(Button::new("restore-default").quiet().small().label("恢复默认…")),
                 ),
             )
             .into_any_element()

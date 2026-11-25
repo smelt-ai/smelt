@@ -544,7 +544,6 @@ mod tests {
     fn bindings_must_exist_on_the_runtime() {
         let config = PiConfig {
             model_settings: Err(String::new()),
-            settings_summary: Err(String::new()),
             mcp_servers: Ok(vec![smelt_model::pi_mcp::PiMcpServer {
                 name: "figma".into(),
                 transport: smelt_model::pi_mcp::PiMcpTransport::Unknown,

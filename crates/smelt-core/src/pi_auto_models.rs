@@ -105,8 +105,8 @@ pub fn refresh_auto_model_catalogs_at(agent_dir: &std::path::Path) -> Vec<AutoRe
     if marked.is_empty() {
         return Vec::new();
     }
-    let configured = match crate::pi_model_settings::load_pi_model_settings_at(agent_dir) {
-        Ok(settings) => settings.custom_providers,
+    let configured = match crate::pi_model_settings::load_pi_custom_providers_at(agent_dir) {
+        Ok(providers) => providers,
         Err(reason) => {
             return marked
                 .into_iter()
