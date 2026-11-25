@@ -125,7 +125,7 @@ const SNAPSHOTS: &[Snapshot] = &[
     },
     Snapshot {
         name: "settings",
-        size: (640., 760.),
+        size: (640., 860.),
         setup: settings_page,
     },
     Snapshot {
@@ -1079,11 +1079,7 @@ fn sample_menu() -> smelt_ui::menu::Menu {
         .separator()
         .label("危险操作")
         .item(MenuItem::new("归档").disabled(true))
-        .item(
-            MenuItem::new("删除")
-                .icon(smelt_ui::trash_icon())
-                .danger(),
-        )
+        .item(MenuItem::new("删除").icon(smelt_ui::trash_icon()).danger())
 }
 
 /// 触发按钮放在左上角固定的地方。
@@ -1367,6 +1363,14 @@ fn settings_page(window: &mut Window, cx: &mut App) -> Draw {
                         .clamp_description("long-description", 2)
                         .note("~/.agents/skills/example · 示例智能体 在用\n附注第二行不受收起影响。")
                         .child(Button::new("delete").quiet().small().label("删除")),
+                ).child(
+                    SettingsRow::new("会话列表")
+                        .description("smelt.session-list · 0.1.0\n~/.smelt/plugins/session-list")
+                        .error(
+                            "你的版本没装上，正在用自带版本。插件用到了这版 Smelt 没有的 SDK 接口\
+                             （SmeltContextMenu、SmeltMenu），需要更新 Smelt",
+                        )
+                        .child(Button::new("restore-default").quiet().small().label("恢复默认…")),
                 ),
             )
             .into_any_element()

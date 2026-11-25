@@ -512,8 +512,8 @@ plugins:
     en: "Overrides built-in plugin (delete to restore default)"
     zh-CN: "正在覆写自带插件（删除即恢复默认）"
   override_fallback:
-    en: "Override failed — automatically fell back to the built-in plugin"
-    zh-CN: "覆写版加载失败，已自动回退到自带版本"
+    en: "Your version didn't load; using the built-in one. %{error}"
+    zh-CN: "你的版本没装上，正在用自带版本。%{error}"
   restore_default:
     en: "Restore Default…"
     zh-CN: "恢复默认…"

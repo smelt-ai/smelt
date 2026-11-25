@@ -230,19 +230,18 @@ impl PanelPluginsPage {
             .into_owned()
         }];
         detail.push(plugin.root.display().to_string());
-        if plugin.overrides_builtin {
-            let status_key = if plugin.fallback_to_builtin {
-                "plugins.override_fallback"
-            } else {
-                "plugins.override_builtin"
-            };
-            detail.push(t!(status_key).into_owned());
-        }
-        if let Some(error) = &plugin.error {
-            detail.push(t!("plugins.load_failed", error = error).into_owned());
+        if plugin.overrides_builtin && !plugin.fallback_to_builtin {
+            detail.push(t!("plugins.override_builtin").into_owned());
         }
 
-        let row = Row::new(plugin.name.clone()).description(detail.join("\n"));
+        let mut row = Row::new(plugin.name.clone()).description(detail.join("\n"));
+        if let Some(error) = &plugin.error {
+            row = row.error(if plugin.fallback_to_builtin {
+                t!("plugins.override_fallback", error = error)
+            } else {
+                t!("plugins.load_failed", error = error)
+            });
+        }
         if pending {
             let confirm_id = id.clone();
             let confirm_label = if plugin.overrides_builtin {

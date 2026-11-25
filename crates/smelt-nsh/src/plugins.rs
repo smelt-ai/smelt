@@ -1478,7 +1478,50 @@ fn bundle(
         ui_sets: ui_sets.to_vec(),
         ..Default::default()
     })
-    .map_err(|error| error.plain)
+    .map_err(|error| {
+        // 带代码框的全文只进日志；插件页、`smelt plugin status` 拿摘要。
+        eprintln!(
+            "[smelt-nsh] 打包 {} 失败：\n{}",
+            entry.display(),
+            error.plain
+        );
+        let sdk = entry.with_file_name("sdk.tsx");
+        summarize_bundle_error(&error.problems, &sdk)
+    })
+}
+
+/// 打包失败的摘要，几行：缺 SDK 导出的合成一句（插件比这个 App 新，最常见），其余每条一行。
+fn summarize_bundle_error(problems: &[nsh_bundler::BundleProblem], sdk: &Path) -> String {
+    const SHOWN: usize = 3;
+    let sdk = sdk.canonicalize().ok();
+    let mut missing_sdk: Vec<&str> = Vec::new();
+    let mut lines: Vec<String> = Vec::new();
+    for problem in problems {
+        match &problem.missing_export {
+            Some((exporter, name)) if sdk.is_some() && exporter.canonicalize().ok() == sdk => {
+                if !missing_sdk.contains(&name.as_str()) {
+                    missing_sdk.push(name);
+                }
+            }
+            _ if !lines.contains(&problem.message) => lines.push(problem.message.clone()),
+            _ => {}
+        }
+    }
+    if !missing_sdk.is_empty() {
+        lines.insert(
+            0,
+            format!(
+                "插件用到了这版 Smelt 没有的 SDK 接口（{}），需要更新 Smelt",
+                missing_sdk.join("、")
+            ),
+        );
+    }
+    let hidden = lines.len().saturating_sub(SHOWN);
+    lines.truncate(SHOWN);
+    if hidden > 0 {
+        lines.push(format!("还有 {hidden} 条，完整报错见日志"));
+    }
+    lines.join("\n")
 }
 
 /// 插件能 import 的宿主模块。

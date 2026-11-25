@@ -3094,6 +3094,59 @@ export function Main() {
         );
     }
 
+    /// 插件比 App 新（用了这版 SDK 没有的导出）：报错是一句能看懂的话，不是打包器的代码框。
+    #[test]
+    fn a_plugin_newer_than_the_sdk_says_so_in_one_line() {
+        let root = TempDir::new("smelt-nsh-newer-sdk");
+        let builtin = root.0.join("builtin");
+        let user = root.0.join("user");
+        fs::create_dir_all(&builtin).unwrap();
+        write_plugin(
+            &user.join("gamma"),
+            "gamma",
+            "main.tsx",
+            r#"
+import { Text } from "nsh";
+import { SmeltFromTheFuture, SmeltIcon } from "smelt/sdk";
+export function Main() { return <Text>{String(SmeltFromTheFuture ?? SmeltIcon)}</Text>; }
+"#,
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (sync_tx, sync_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            while let Some(update) = rx.blocking_recv() {
+                if sync_tx.send(update).is_err() {
+                    break;
+                }
+            }
+        });
+        let _live = ShellLive::start(
+            vec![
+                SourceDir {
+                    path: builtin,
+                    source: PluginSource::Builtin,
+                    watch: false,
+                },
+                SourceDir {
+                    path: user,
+                    source: PluginSource::User,
+                    watch: false,
+                },
+            ],
+            root.0.join("stage"),
+            ShellSource::Source("export function Shell() { return null; }"),
+            crate::ui_sets(),
+            tx,
+        );
+        let initial = wait_update(&sync_rx, "首发", |u| u.initial_scripts.is_some());
+        let gamma = initial.loaded.iter().find(|p| p.id == "gamma").unwrap();
+        assert_eq!(
+            gamma.error.as_deref(),
+            Some("插件用到了这版 Smelt 没有的 SDK 接口（SmeltFromTheFuture），需要更新 Smelt")
+        );
+    }
+
     #[test]
     fn user_override_shadows_builtin_and_automatically_falls_back_on_failure() {
         let root = TempDir::new("smelt-nsh-override-fallback");

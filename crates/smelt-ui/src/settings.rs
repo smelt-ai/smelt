@@ -218,6 +218,7 @@ pub struct SettingsRow {
     description: Option<SharedString>,
     clamp: Option<(ElementId, usize)>,
     note: Option<SharedString>,
+    error: Option<SharedString>,
     style: StyleRefinement,
     children: Vec<AnyElement>,
 }
@@ -229,6 +230,7 @@ impl SettingsRow {
             description: None,
             clamp: None,
             note: None,
+            error: None,
             style: StyleRefinement::default(),
             children: Vec::new(),
         }
@@ -248,6 +250,12 @@ impl SettingsRow {
     /// 说明下面的附注（来源、谁在用、失效原因），换行照原样分行，不受收起影响。
     pub fn note(mut self, note: impl Into<SharedString>) -> Self {
         self.note = Some(note.into());
+        self
+    }
+
+    /// 这一项出了什么错，红字放在最下面；换行照原样分行。失败就地报在出错的那一项上。
+    pub fn error(mut self, error: impl Into<SharedString>) -> Self {
+        self.error = Some(error.into());
         self
     }
 }
@@ -305,6 +313,14 @@ impl RenderOnce for SettingsRow {
                         .type_style(TYPE.text_small)
                         .text_color(rgb(ui_theme::muted()))
                         .child(note),
+                )
+            })
+            .when_some(self.error, |this, error| {
+                this.child(
+                    div()
+                        .type_style(TYPE.text_small)
+                        .text_color(rgb(ui_theme::bad()))
+                        .child(error),
                 )
             });
         div()
