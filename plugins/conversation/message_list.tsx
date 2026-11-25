@@ -674,6 +674,8 @@ export function MessageList(props: {
   loadingOlder: () => boolean;
   atLatest: () => boolean;
   turnActive: () => boolean;
+  /** 连上且没在跑：分叉、编辑重发、重试这些动历史的操作只在这时可用。 */
+  settled: () => boolean;
   streamingGlobalIndex: () => number | null;
   streamingText: () => string;
   latestUserGlobalIndex: () => number | null;
@@ -881,7 +883,7 @@ export function MessageList(props: {
                         entry()?.UserWithImages?.images ?? [];
                       const interrupted = () => isInterruptMarker(userText());
                       const isLatestUser = () =>
-                        props.latestUserGlobalIndex() === r().globalIndex && !props.turnActive();
+                        props.latestUserGlobalIndex() === r().globalIndex && props.settled();
                       return (
                         <If
                           when={!interrupted()}
@@ -902,7 +904,7 @@ export function MessageList(props: {
                               copyText={userText}
                               canFork={() =>
                                 props.canFork() &&
-                                !props.turnActive() &&
+                                props.settled() &&
                                 Boolean(props.supportsRewind()) &&
                                 !isLatestUser()
                               }
@@ -1027,7 +1029,7 @@ export function MessageList(props: {
                             role="assistant"
                             globalIndex={() => r().globalIndex}
                             copyText={bodyText}
-                            canFork={() => props.canFork() && !props.turnActive()}
+                            canFork={() => props.canFork() && props.settled()}
                             canEditResend={() => false}
                             onFork={() => props.onForkAt(r().globalIndex, "assistant")}
                             onEditResend={() => {}}
@@ -1061,7 +1063,7 @@ export function MessageList(props: {
                                       tooltip={copiedKey() === r().key ? ct("action.copied") : ct("action.copy")}
                                       onPress={() => copyAnswer(r().key, bodyText())}
                                     />
-                                    <If when={props.canFork() && !props.turnActive()}>
+                                    <If when={props.canFork() && props.settled()}>
                                       <SmeltButton
                                         quiet
                                         small
@@ -1146,7 +1148,7 @@ export function MessageList(props: {
                             <If
                               when={
                                 props.supportsRewind() &&
-                                !props.turnActive() &&
+                                props.settled() &&
                                 r().globalIndex > (props.latestUserGlobalIndex() ?? -1)
                               }
                             >

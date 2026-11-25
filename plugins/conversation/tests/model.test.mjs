@@ -10,6 +10,9 @@ import {
   colorWithAlpha,
   compactTokenCount,
   stopRingMode,
+  showsEmptyWelcome,
+  launchBringsContent,
+  isTurnActive,
   computePromptRailWindow,
   consumeComposerRestore,
   detectCompletionTrigger,
@@ -397,5 +400,62 @@ describe("ACP launch & fork wire contract", () => {
       provider_retry: { attempt: 1, delay_ms: 500 },
     });
     expect(isStreamingMetaUnchanged(base, changedRetry)).toBe(false);
+  });
+});
+
+describe("isTurnActive", () => {
+  test("starting the agent is not a running turn", () => {
+    expect(isTurnActive("connecting")).toBe(false);
+    expect(isTurnActive("idle")).toBe(false);
+    expect(isTurnActive("dead")).toBe(false);
+    for (const p of ["thinking", "executing_tool", "awaiting_approval", "waiting_for_user"]) {
+      expect(isTurnActive(p)).toBe(true);
+    }
+  });
+});
+
+describe("launchBringsContent", () => {
+  test("resume, fork and a first prompt bring content; a prefill does not", () => {
+    expect(launchBringsContent({ dirAcp: null, start: null })).toBe(false);
+    expect(launchBringsContent({ dirAcp: {}, start: { prefill: "hi" } })).toBe(false);
+    expect(launchBringsContent({ dirAcp: { pending_prompt: "  " }, start: null })).toBe(false);
+    expect(launchBringsContent({ dirAcp: { history_session_id: "h" }, start: null })).toBe(true);
+    expect(launchBringsContent({ dirAcp: {}, start: { fork: { provider_session_id: "p" } } })).toBe(true);
+    expect(launchBringsContent({ dirAcp: { pending_prompt: "go" }, start: null })).toBe(true);
+  });
+});
+
+describe("showsEmptyWelcome", () => {
+  const base = {
+    embedded: false,
+    phase: "connecting",
+    replayingHistory: false,
+    bringsContent: false,
+    connectFailed: false,
+    loadingOlder: false,
+    entryCount: 0,
+    loadedOffset: 0,
+  };
+  const shows = (o) => showsEmptyWelcome({ ...base, ...o });
+
+  test("an empty launch is centered from the first frame through connecting to idle", () => {
+    expect(shows({})).toBe(true);
+    expect(shows({ phase: "idle" })).toBe(true);
+  });
+
+  test("a launch that brings content is not centered until it has connected and replayed", () => {
+    expect(shows({ bringsContent: true })).toBe(false);
+    expect(shows({ bringsContent: true, phase: "idle", replayingHistory: true })).toBe(false);
+    expect(shows({ bringsContent: true, phase: "idle" })).toBe(true);
+  });
+
+  test("a running turn, an end, an error or any content leaves the center", () => {
+    expect(shows({ phase: "thinking" })).toBe(false);
+    expect(shows({ phase: "dead" })).toBe(false);
+    expect(shows({ connectFailed: true })).toBe(false);
+    expect(shows({ embedded: true })).toBe(false);
+    expect(shows({ loadingOlder: true })).toBe(false);
+    expect(shows({ phase: "idle", entryCount: 1 })).toBe(false);
+    expect(shows({ phase: "idle", loadedOffset: 3 })).toBe(false);
   });
 });

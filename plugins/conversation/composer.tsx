@@ -813,7 +813,6 @@ export function Composer(props: {
               model={props.model}
               configs={props.configs}
               fallbackLabel={props.fallbackModelLabel}
-              turnActive={props.turnActive}
               hasPendingNotice={hasPendingConfig}
               onSelectConfig={props.onSelectConfig}
             />

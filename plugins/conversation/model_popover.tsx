@@ -18,7 +18,6 @@ export function ModelConfigPopover(props: {
   model: () => any | null;
   configs: () => any[];
   fallbackLabel: () => string;
-  turnActive: () => boolean;
   hasPendingNotice?: () => boolean;
   onSelectConfig: (configId: string, valueId: string, boolVal?: boolean) => void;
 }) {

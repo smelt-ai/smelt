@@ -1,6 +1,6 @@
 // 通用 `<SmeltConversation>` 能力组件（通过 `import { SmeltConversation } from "smelt/sdk"` 供所有插件直接嵌入）。
 // 零跨 VM 插槽跳转，零 Rust UI 视图；直接对接宿主纯非 UI ACP 订阅中心 `acp.*` 与 `mermaid.render`。
-import { cleanup, computed, effect, Image, signal, Text, View } from "nsh";
+import { cleanup, computed, effect, Image, LayoutAnimation, signal, Text, View } from "nsh";
 import {
   acpAction,
   acpHistory,
@@ -36,14 +36,16 @@ import {
   confirmedConfigValue,
   consumeComposerRestore,
   entryUserText,
-  isPhaseActive,
   isStreamingMetaUnchanged,
+  isTurnActive,
   isUserEntry,
+  launchBringsContent,
   mergeEnvelope,
   mergeSnapshotEntries,
   overlayModelState,
   overlaySessionConfigs,
   reconcilePendingConfigValues,
+  showsEmptyWelcome,
   turnTimingsEqual,
 } from "./model.js";
 import { diffPartStats, MessageList } from "./message_list.tsx";
@@ -144,6 +146,14 @@ function agentShortLabel(agentId: string): string {
   return agentMeta(agentId).label;
 }
 
+/** 空对话居中与消息流互换的过渡：位置先快后慢，不回弹；离开的先淡出，新出现的稍后淡入。 */
+const WELCOME_LAYOUT_TRANSITION = {
+  duration: 260,
+  update: { type: "easeInEaseOut" },
+  delete: { type: "easeIn", property: "opacity", duration: 140 },
+  create: { type: "easeOut", property: "opacity", delay: 80, duration: 220 },
+};
+
 export function SmeltConversation(props: SmeltConversationProps) {
   const look = theme;
 
@@ -215,7 +225,9 @@ export function SmeltConversation(props: SmeltConversationProps) {
   });
 
   const phase = computed(() => String(snapshot()?.phase ?? "connecting"));
-  const turnActive = computed(() => isPhaseActive(phase()));
+  const connecting = computed(() => phase() === "connecting");
+  const turnActive = computed(() => isTurnActive(phase()));
+  const settled = computed(() => !connecting() && !turnActive());
   const dead = computed(() => phase() === "dead");
   const capabilitiesByAgent = computed(() => Boolean(props.directoryAcp?.agent_definition_id));
 
@@ -299,7 +311,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
 
     // 热路径优化：若仅最后一条活跃 Assistant 正文增长，只写细粒度 `streamingText` 信号，
     // 跳过无变化的 `snapshot.set(merged)`，不触发 `layout` / `displayRows` 重建。
-    const active = isPhaseActive(String(merged.phase ?? ""));
+    const active = isTurnActive(String(merged.phase ?? ""));
     const prevLast = prevEs.entries[prevEs.entries.length - 1];
     const nextLast = nextEs.entries[nextEs.entries.length - 1];
     const sameShapeTailOnly =
@@ -713,23 +725,34 @@ export function SmeltConversation(props: SmeltConversationProps) {
     }
     return best ? pathFileName(style, best) : null;
   });
-  // 新对话：没有可续接的 provider 对话，也不是带历史起的。还没连上时就按空对话排，
-  // 免得输入框连上后从底部跳到中间。
-  const freshConversation = computed(
-    () => props.start == null && !props.directoryAcp?.history_session_id,
+  const bringsContent = computed(() =>
+    launchBringsContent({ dirAcp: props.directoryAcp, start: props.start }),
   );
   // 空对话：输入框移到中间，上面是标题。
-  const showEmptyWelcome = computed(
-    () =>
-      !props.embedded &&
-      !dead() &&
-      !turnActive() &&
-      connectError() == null &&
-      (snapshot() != null ? !snapshot()?.replaying_history : freshConversation()) &&
-      !loadingOlder() &&
-      entriesState().entries.length === 0 &&
-      entriesState().loadedOffset === 0,
+  const showEmptyWelcome = computed(() =>
+    showsEmptyWelcome({
+      embedded: Boolean(props.embedded),
+      phase: phase(),
+      replayingHistory: Boolean(snapshot()?.replaying_history),
+      bringsContent: bringsContent(),
+      connectFailed: connectError() != null,
+      loadingOlder: loadingOlder(),
+      entryCount: entriesState().entries.length,
+      loadedOffset: entriesState().loadedOffset,
+    }),
   );
+  // 居中和消息流之间切换（发出第一条、续接回来是空的、连接失败）不跳：输入框滑到新位置、
+  // 收成一行。换会话是直接切，不过渡；减弱动态时 NSH 直接落位。
+  let lastWelcome: { key: string; shown: boolean } | null = null;
+  effect(() => {
+    const shown = showEmptyWelcome();
+    const key = `${props.machine ?? ""}\0${props.sessionId}`;
+    const prev = lastWelcome;
+    lastWelcome = { key, shown };
+    if (prev?.key === key && prev.shown !== shown) {
+      LayoutAnimation.configureNext(WELCOME_LAYOUT_TRANSITION);
+    }
+  });
   const showEndedEmpty = computed(
     () => dead() && entriesState().entries.length === 0 && entriesState().loadedOffset === 0,
   );
@@ -936,6 +959,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
                 loadingOlder={loadingOlder}
                 atLatest={atLatest}
                 turnActive={turnActive}
+                settled={settled}
                 streamingGlobalIndex={streamingGlobalIndex}
                 streamingText={streamingText}
                 latestUserGlobalIndex={latestUserGlobalIndex}
@@ -1003,7 +1027,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
         />
 
         {/* 状态横幅（启动进度 / Provider 重试 / 一次性 Notice / 断连重启） */}
-        <If when={Boolean(snapshot()?.status_line) && turnActive()}>
+        <If when={Boolean(snapshot()?.status_line) && (connecting() || turnActive())}>
           <View style={{ width: "100%", alignItems: "center", paddingHorizontal: 16, paddingBottom: 6 }}>
             <View style={{ width: "100%", maxWidth: 768, paddingHorizontal: 6, flexDirection: "row", alignItems: "center", gap: 6 }}>
               <SmeltIcon spin size={12} color={look().palette.muted} />

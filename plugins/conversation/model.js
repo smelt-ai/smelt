@@ -10,9 +10,9 @@ export function isNewConversationCommand(text) {
   return typeof text === "string" && text.trim().toLowerCase() === "/clear";
 }
 
-export function isPhaseActive(phase) {
+/** 回合在跑。`connecting` 是智能体还在启动，不是回合：这时发的提问运行时会排队，连上再送。 */
+export function isTurnActive(phase) {
   return (
-    phase === "connecting" ||
     phase === "thinking" ||
     phase === "executing_tool" ||
     phase === "awaiting_approval" ||
@@ -1057,6 +1057,36 @@ export function selectedConfigIndex(cfg) {
   if (opts.length === 0) return 0;
   const ix = opts.findIndex(([, name]) => name === cfg?.current_name);
   return ix >= 0 ? ix : 0;
+}
+
+// ---- 空对话布局 ----
+
+/** 这次启动会带来正文：续接历史、分叉，或带着首条提问。 */
+export function launchBringsContent({ dirAcp, start }) {
+  return Boolean(
+    dirAcp?.history_session_id ||
+      start?.fork?.provider_session_id ||
+      buildInitialPrompt(dirAcp?.pending_prompt),
+  );
+}
+
+/**
+ * 空对话：输入框放中间。会带来正文的启动，连上并重放完之前不知道空不空，按有内容排；
+ * 其余启动从第一帧起就是空的。
+ */
+export function showsEmptyWelcome({
+  embedded,
+  phase,
+  replayingHistory,
+  bringsContent,
+  connectFailed,
+  loadingOlder,
+  entryCount,
+  loadedOffset,
+}) {
+  if (embedded || connectFailed || loadingOlder || entryCount > 0 || loadedOffset > 0) return false;
+  if (phase === "dead" || isTurnActive(phase)) return false;
+  return !(bringsContent && (phase === "connecting" || replayingHistory));
 }
 
 // ---- 输入框运行态顶边扫光模式与颜色透明度（composer.tsx 与 model.test.mjs 共用） ----
