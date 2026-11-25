@@ -37,7 +37,6 @@ export function ModelConfigPopover(props: {
   const thinkingConfig = computed(
     () => (props.configs() ?? []).find((c) => isThinkingConfig(c)) ?? null,
   );
-  const otherConfigs = computed(() => (props.configs() ?? []).filter((c) => !isThinkingConfig(c)));
 
   const thinkingMeta = computed(() => {
     const cfg = thinkingConfig();
@@ -53,7 +52,10 @@ export function ModelConfigPopover(props: {
       open={open()}
       onOpenChange={({ open: next }: any) => {
         open.set(Boolean(next));
-        if (!next) query.set("");
+        if (!next) {
+          query.set("");
+          activeProvider.set(null);
+        }
       }}
       placement="top"
       align="start"
@@ -135,10 +137,11 @@ export function ModelConfigPopover(props: {
             <If when={providerGroups().length > 1 && !query().trim()}>
               <Scroll horizontal style={{ maxHeight: 36 }}>
                 <View
+                  role="tablist"
                   style={{
                     flexDirection: "row",
                     alignItems: "center",
-                    gap: 4,
+                    gap: 2,
                     paddingHorizontal: 10,
                     paddingTop: 8,
                     paddingBottom: 2,
@@ -147,30 +150,47 @@ export function ModelConfigPopover(props: {
                   <Each of={providerGroups()}>
                     {(group) => {
                       const active = computed(() => currentGroupId() === group().id);
+                      // 当前模型在这家：切到别家看时也认得出在用哪家的。
+                      const holdsCurrent = computed(() =>
+                        (group().options ?? []).some(([value]: any) => value === props.model()?.current_value),
+                      );
                       return (
                         <View
                           onPress={() => activeProvider.set(group().id)}
                           class={active() ? undefined : "hover:bg-accent"}
+                          role="tab"
+                          accessibilityState={{ selected: active() }}
                           style={{
                             height: 24,
                             paddingHorizontal: 10,
                             borderRadius: 99,
+                            flexDirection: "row",
                             justifyContent: "center",
                             alignItems: "center",
-                            backgroundColor: active()
-                              ? look().palette.ink
-                              : look().palette.row_hover,
+                            gap: 6,
+                            backgroundColor: active() ? look().palette.row_selected : "transparent",
                           }}
                         >
                           <Text
                             style={{
                               fontSize: look().type.small_medium.size,
-                              fontWeight: look().type.small_medium.weight,
-                              color: active() ? look().palette.on_ink : look().palette.muted,
+                              fontWeight: active() ? look().type.small_medium.weight : look().type.small.weight,
+                              color: active() ? look().palette.text : look().palette.muted,
+                              numberOfLines: 1,
                             }}
                           >
                             {group().name}
                           </Text>
+                          <If when={holdsCurrent()}>
+                            <View
+                              style={{
+                                width: 5,
+                                height: 5,
+                                borderRadius: 3,
+                                backgroundColor: active() ? look().palette.text : look().palette.muted,
+                              }}
+                            />
+                          </If>
                         </View>
                       );
                     }}
@@ -180,8 +200,8 @@ export function ModelConfigPopover(props: {
             </If>
 
             {/* 3. 模型列表 */}
-            <Scroll style={{ maxHeight: 192 }}>
-              <View style={{ padding: 6, gap: 2 }}>
+            <Scroll style={{ maxHeight: 216 }}>
+              <View role="listbox" accessibilityLabel={label()} style={{ padding: 6, gap: 2 }}>
                 <If
                   when={visibleModels().length > 0}
                   else={
@@ -208,6 +228,9 @@ export function ModelConfigPopover(props: {
                             props.onSelectConfig(cfgId, item().value);
                           }}
                           class="hover:bg-accent"
+                          role="option"
+                          accessibilityLabel={item().label}
+                          accessibilityState={{ selected: selected() }}
                           style={{
                             height: 30,
                             paddingHorizontal: 10,
@@ -215,9 +238,6 @@ export function ModelConfigPopover(props: {
                             flexDirection: "row",
                             alignItems: "center",
                             gap: 8,
-                            backgroundColor: selected()
-                              ? look().palette.row_selected
-                              : "transparent",
                           }}
                         >
                           <Text
@@ -257,99 +277,23 @@ export function ModelConfigPopover(props: {
           </View>
         </If>
 
-        {/* 4. 推理强度：和下面的配置项同一种分段控件，标题旁带「下轮生效」 */}
-        <If when={thinkingConfig() != null}>
+        {/* 4. 会话设置：按智能体给的顺序一行一项，名字在左、控件在右；放不下时控件折到下一行。 */}
+        <If when={(props.configs() ?? []).length > 0}>
           <View
             style={{
-              paddingHorizontal: 12,
-              paddingTop: 10,
-              paddingBottom: 12,
-              borderTopWidth: 1,
+              paddingHorizontal: 6,
+              paddingVertical: 4,
+              borderTopWidth: props.model() != null ? 1 : 0,
               borderTopColor: look().palette.hair,
-              gap: 8,
             }}
           >
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-              <Text
-                style={{
-                  fontSize: look().type.text_xsmall_medium.size,
-                  fontWeight: look().type.text_xsmall_medium.weight,
-                  color: look().palette.muted,
-                }}
-              >
-                {thinkingConfig()?.name || ct("model.thinking")}
-              </Text>
-              <If when={pendingNotice()}>
-                <Text
-                  style={{
-                    fontSize: look().type.small_medium.size,
-                    color: look().palette.muted,
-                  }}
-                >
-                  · {ct("model.next_turn")}
-                </Text>
-              </If>
-            </View>
-            <ConfigSegments
-              options={() => thinkingConfig()?.options ?? []}
-              current={() => thinkingConfig()?.current_name}
-              onSelect={(value) => {
-                const cfg = thinkingConfig();
-                if (cfg) props.onSelectConfig(cfg.config_id, value);
-              }}
-            />
-          </View>
-        </If>
-
-        {/* 5. 其余会话配置（权限模式分段控件 / 布尔开关） */}
-        <If when={otherConfigs().length > 0}>
-          <View
-            style={{
-              paddingHorizontal: 12,
-              paddingTop: 10,
-              paddingBottom: 12,
-              borderTopWidth: 1,
-              borderTopColor: look().palette.hair,
-              gap: 10,
-            }}
-          >
-            <Each of={otherConfigs()}>
+            <Each of={props.configs() ?? []}>
               {(cfg) => (
-                <If
-                  when={cfg().boolean != null}
-                  else={
-                    <View style={{ gap: 6 }}>
-                      <Text
-                        style={{
-                          fontSize: look().type.text_xsmall_medium.size,
-                          fontWeight: look().type.text_xsmall_medium.weight,
-                          color: look().palette.muted,
-                        }}
-                      >
-                        {cfg().name || cfg().config_id}
-                      </Text>
-                      <ConfigSegments
-                        options={() => cfg().options ?? []}
-                        current={() => cfg().current_name}
-                        onSelect={(value) => props.onSelectConfig(cfg().config_id, value)}
-                      />
-                    </View>
-                  }
-                >
-                  <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-                    <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
-                      {cfg().name || cfg().config_id}
-                    </Text>
-                    <SmeltSwitch
-                      checked={Boolean(cfg().boolean)}
-                      accessibilityLabel={cfg().name || cfg().config_id}
-                      onChange={(checked: boolean) => {
-                        const val = Boolean(checked);
-                        props.onSelectConfig(cfg().config_id, val ? "true" : "false", val);
-                      }}
-                    />
-                  </View>
-                </If>
+                <ConfigRow
+                  cfg={cfg}
+                  pending={() => pendingNotice() && isThinkingConfig(cfg())}
+                  onSelectConfig={props.onSelectConfig}
+                />
               )}
             </Each>
           </View>
@@ -360,8 +304,93 @@ export function ModelConfigPopover(props: {
 }
 
 
-/** 配置项的档位：分段控件，选中的那段浮起（`surface` 底、`hair_strong` 边），其余悬停变底。 */
+/** 一项会话设置：布尔给开关；两档以上给分段；只有一档没得选，直接写值。 */
+function ConfigRow(props: {
+  cfg: () => any;
+  pending: () => boolean;
+  onSelectConfig: (configId: string, valueId: string, boolVal?: boolean) => void;
+}) {
+  const look = theme;
+  const name = () => props.cfg().name || props.cfg().config_id;
+  const options = (): any[] => props.cfg().options ?? [];
+  const currentName = () => {
+    const cfg = props.cfg();
+    return cfg.current_name ?? options()[selectedConfigIndex(cfg)]?.[1] ?? "";
+  };
+  return (
+    <View
+      style={{
+        minHeight: 34,
+        paddingLeft: 10,
+        paddingRight: 4,
+        paddingVertical: 4,
+        flexDirection: "row",
+        flexWrap: "wrap",
+        alignItems: "center",
+        justifyContent: "space-between",
+        columnGap: 12,
+        rowGap: 4,
+      }}
+    >
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1, minWidth: 0 }}>
+        <Text
+          style={{
+            fontSize: look().type.text_xsmall.size,
+            color: look().palette.muted,
+            numberOfLines: 1,
+          }}
+        >
+          {name()}
+        </Text>
+        <If when={props.pending()}>
+          <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.faint, numberOfLines: 1 }}>
+            · {ct("model.next_turn")}
+          </Text>
+        </If>
+      </View>
+      <If
+        when={props.cfg().boolean != null}
+        else={
+          <If
+            when={options().length > 1}
+            else={
+              <Text
+                style={{
+                  paddingRight: 6,
+                  fontSize: look().type.text_xsmall.size,
+                  color: look().palette.faint,
+                  numberOfLines: 1,
+                }}
+              >
+                {currentName()}
+              </Text>
+            }
+          >
+            <ConfigSegments
+              label={name()}
+              options={options}
+              current={currentName}
+              onSelect={(value) => props.onSelectConfig(props.cfg().config_id, value)}
+            />
+          </If>
+        }
+      >
+        <SmeltSwitch
+          checked={Boolean(props.cfg().boolean)}
+          accessibilityLabel={name()}
+          onChange={(checked: boolean) => {
+            const val = Boolean(checked);
+            props.onSelectConfig(props.cfg().config_id, val ? "true" : "false", val);
+          }}
+        />
+      </If>
+    </View>
+  );
+}
+
+/** 配置项的档位：紧凑分段控件，选中的那段浮起（`surface` 底、`hair_strong` 边），其余悬停变底。 */
 function ConfigSegments(props: {
+  label: string;
   options: () => any[];
   current: () => string | null | undefined;
   onSelect: (value: string) => void;
@@ -369,12 +398,15 @@ function ConfigSegments(props: {
   const look = theme;
   return (
     <View
+      role="radiogroup"
+      accessibilityLabel={props.label}
       style={{
         flexDirection: "row",
         flexWrap: "wrap",
-        gap: 3,
-        padding: 3,
-        borderRadius: 9,
+        maxWidth: "100%",
+        gap: 2,
+        padding: 2,
+        borderRadius: 8,
         backgroundColor: look().palette.bg,
         borderWidth: 1,
         borderColor: look().palette.hair,
@@ -387,10 +419,12 @@ function ConfigSegments(props: {
             <View
               onPress={() => props.onSelect(opt()[0])}
               class={active() ? undefined : "hover:bg-accent"}
+              role="radio"
+              accessibilityLabel={opt()[1]}
+              accessibilityState={{ checked: active() }}
               style={{
-                flexGrow: 1,
-                height: 26,
-                paddingHorizontal: 8,
+                height: 22,
+                paddingHorizontal: 9,
                 borderRadius: 6,
                 alignItems: "center",
                 justifyContent: "center",
@@ -470,29 +504,10 @@ export function CapabilitiesPopover(props: {
           }
         >
           <Scroll style={{ maxHeight: 340 }}>
-            <View style={{ padding: 8, gap: 4 }}>
-              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 8, paddingTop: 2, paddingBottom: 2 }}>
-                <Text
-                  style={{
-                    fontSize: look().type.small_medium.size,
-                    fontWeight: look().type.small_medium.weight,
-                    color: look().palette.faint,
-                  }}
-                >
-                  {ct("capabilities.skills")}
-                </Text>
-                <Text style={{ fontSize: look().type.small.size, color: look().palette.faint }}>
-                  {props.skills().length}
-                </Text>
-              </View>
-              <If
-                when={(props.skills()?.length ?? 0) > 0}
-                else={
-                  <Text style={{ paddingHorizontal: 8, paddingVertical: 4, fontSize: look().type.text_xsmall.size, color: look().palette.faint }}>
-                    {ct("capabilities.empty_group")}
-                  </Text>
-                }
-              >
+            <View style={{ padding: 6 }}>
+              {/* 技能：点了把 /技能名 插进输入框，悬停时右边写出来 */}
+              <If when={props.skills().length > 0}>
+                <CapabilityHeader icon="icons/sparkles.svg" label={ct("capabilities.skills")} count={props.skills().length} />
                 <Each of={props.skills()}>
                   {(skill) => (
                     <View
@@ -500,61 +515,71 @@ export function CapabilitiesPopover(props: {
                         open.set(false);
                         props.onUseSkill(skill().name);
                       }}
-                      class="hover:bg-accent"
-                      style={{ paddingHorizontal: 8, paddingVertical: 6, borderRadius: 6, gap: 2 }}
+                      class="group/row hover:bg-accent"
+                      role="button"
+                      accessibilityLabel={skill().name}
+                      accessibilityHint={ct("capabilities.insert")}
+                      style={{
+                        flexDirection: "row",
+                        alignItems: "center",
+                        gap: 10,
+                        paddingHorizontal: 8,
+                        paddingVertical: 6,
+                        borderRadius: look().radius.row,
+                      }}
                     >
-                      <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
-                        {skill().name}
-                      </Text>
-                      <If when={Boolean(skill().description)}>
-                        <Text
-                          style={{
-                            fontSize: look().type.text_xsmall.size,
-                            color: look().palette.muted,
-                            numberOfLines: 1,
-                          }}
-                        >
-                          {String(skill().description).replace(/\s+/g, " ").trim()}
+                      <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+                        <Text style={{ fontSize: look().type.ui.size, color: look().palette.text, numberOfLines: 1 }}>
+                          {skill().name}
                         </Text>
-                      </If>
+                        <If when={Boolean(skill().description)}>
+                          <Text
+                            style={{
+                              fontSize: look().type.text_xsmall.size,
+                              color: look().palette.faint,
+                              numberOfLines: 1,
+                            }}
+                          >
+                            {String(skill().description).replace(/\s+/g, " ").trim()}
+                          </Text>
+                        </If>
+                      </View>
+                      <Text
+                        class="opacity-0 group-hover/row:opacity-100"
+                        style={{ fontSize: look().type.small.size, color: look().palette.muted, numberOfLines: 1 }}
+                      >
+                        {ct("capabilities.insert")}
+                      </Text>
                     </View>
                   )}
                 </Each>
               </If>
 
-              <View style={{ height: 1, backgroundColor: look().palette.hair, marginVertical: 4 }} />
+              <If when={props.skills().length > 0 && props.mcpServers().length > 0}>
+                <View style={{ height: 1, backgroundColor: look().palette.hair, marginVertical: 6, marginHorizontal: 2 }} />
+              </If>
 
-              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 8, paddingBottom: 2 }}>
-                <Text
-                  style={{
-                    fontSize: look().type.small_medium.size,
-                    fontWeight: look().type.small_medium.weight,
-                    color: look().palette.faint,
-                  }}
-                >
-                  {ct("capabilities.mcp")}
-                </Text>
-                <Text style={{ fontSize: look().type.small.size, color: look().palette.faint }}>
-                  {props.mcpServers().length}
-                </Text>
-              </View>
-              <If
-                when={(props.mcpServers()?.length ?? 0) > 0}
-                else={
-                  <Text style={{ paddingHorizontal: 8, paddingVertical: 4, fontSize: look().type.text_xsmall.size, color: look().palette.faint }}>
-                    {ct("capabilities.empty_group")}
-                  </Text>
-                }
-              >
-                <Each of={props.mcpServers()}>
-                  {(srv) => (
-                    <View style={{ paddingHorizontal: 8, paddingVertical: 5 }}>
-                      <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
+              {/* MCP：只列出来、点不了，所以不给悬停底色 */}
+              <If when={props.mcpServers().length > 0}>
+                <CapabilityHeader icon="icons/wrench.svg" label={ct("capabilities.mcp")} count={props.mcpServers().length} />
+                <View style={{ paddingBottom: 2 }}>
+                  <Each of={props.mcpServers()}>
+                    {(srv) => (
+                      <Text
+                        style={{
+                          height: 26,
+                          paddingHorizontal: 8,
+                          fontSize: look().type.ui.size,
+                          lineHeight: 26,
+                          color: look().palette.text,
+                          numberOfLines: 1,
+                        }}
+                      >
                         {srv().name}
                       </Text>
-                    </View>
-                  )}
-                </Each>
+                    )}
+                  </Each>
+                </View>
               </If>
             </View>
           </Scroll>
@@ -565,7 +590,8 @@ export function CapabilitiesPopover(props: {
             style={{
               borderTopWidth: 1,
               borderTopColor: look().palette.hair,
-              paddingHorizontal: 10,
+              paddingLeft: 14,
+              paddingRight: 6,
               paddingVertical: 6,
               flexDirection: "row",
               alignItems: "center",
@@ -579,6 +605,7 @@ export function CapabilitiesPopover(props: {
             <SmeltButton
               quiet
               small
+              trailingIcon="icons/arrow-right.svg"
               label={props.byAgent() ? ct("capabilities.edit_agent") : ct("capabilities.manage_library")}
               onPress={() => {
                 open.set(false);
@@ -589,6 +616,27 @@ export function CapabilitiesPopover(props: {
         </If>
       </View>
     </SmeltPopover>
+  );
+}
+
+/** 能力弹层的分组标题：图标、名字，数量靠右。 */
+function CapabilityHeader(props: { icon: string; label: string; count: number }) {
+  const look = theme;
+  return (
+    <View style={{ height: 26, paddingHorizontal: 8, flexDirection: "row", alignItems: "center", gap: 6 }}>
+      <SmeltIcon path={props.icon} size={12} color={look().palette.faint} />
+      <Text
+        style={{
+          flex: 1,
+          fontSize: look().type.small_medium.size,
+          fontWeight: look().type.small_medium.weight,
+          color: look().palette.faint,
+        }}
+      >
+        {props.label}
+      </Text>
+      <Text style={{ fontSize: look().type.small.size, color: look().palette.faint }}>{props.count}</Text>
+    </View>
   );
 }
 
