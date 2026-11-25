@@ -5,9 +5,8 @@
 
 /** 画布边长。 */
 export const CANVAS = 36;
-/** 眼睛（竖着的椭圆）横、竖半径。 */
-export const EYE_RX = 1.6;
-export const EYE_RY = 2.2;
+/** 眼睛半径。 */
+export const EYE_R = 2.5;
 
 /** 字符串 → 32 位种子（FNV-1a）。 */
 export function hash(text) {
@@ -101,23 +100,12 @@ export function shapeOf(seed) {
   return { path, eyes: [CANVAS / 2 - half, CANVAS / 2 + half, eyeY] };
 }
 
-/** `#rrggbb` 往白（`to` 为 255）或黑（0）混 `t`（0..1）。 */
-export function mix(hex, to, t) {
-  let out = "#";
-  for (let i = 1; i < 7; i += 2) {
-    const v = parseInt(hex.slice(i, i + 2), 16);
-    out += Math.round(v + (to - v) * t)
-      .toString(16)
-      .padStart(2, "0");
-  }
-  return out;
-}
-
-/** 外形 → 头像身子的 SVG：浅色填充、细彩边。 */
-export function bodySvg(path, fill, stroke) {
+/** 外形 → 头像身子的 SVG：先描一圈彩边，再填深色身子。 */
+export function bodySvg(path, tint, fill) {
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${CANVAS} ${CANVAS}">` +
-    `<path d="${path}" fill="${fill}" stroke="${stroke}" stroke-width="1.8" stroke-linejoin="round"/>` +
+    `<path d="${path}" fill="none" stroke="${tint}" stroke-width="4.2" stroke-linejoin="round"/>` +
+    `<path d="${path}" fill="${fill}" stroke="${fill}" stroke-width="1.2" stroke-linejoin="round"/>` +
     `</svg>`
   );
 }
