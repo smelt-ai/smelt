@@ -80,10 +80,8 @@ pub struct TextDocument {
 }
 
 impl TextDocument {
-    pub(crate) fn new(document: crate::highlight::Document) -> Self {
-        Self {
-            inner: Arc::new(document),
-        }
+    pub(crate) fn from_arc(inner: Arc<crate::highlight::Document>) -> Self {
+        Self { inner }
     }
 
     #[frb(sync, getter)]
