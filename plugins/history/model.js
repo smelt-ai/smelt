@@ -158,22 +158,24 @@ export function tabsWithSessions(tabs, current, hasSessions) {
 }
 
 /**
- * 当前选中的来源已经读完且是空的时，挑第一个有会话的来源顶上，免得打开历史页一直停在空的
- * 默认标签上（比如没装 Claude、只用 Antigravity 的项目）。当前来源还没读完时不切，防止别的
- * 来源先回来抢走选中。
+ * 默认选中的来源已经读完且是空的时，挑第一个有会话的来源顶上，免得打开历史页一直停在空的
+ * 默认标签上（比如没装 Claude、只用 Antigravity 的项目）。用户自己点的标签空着也不换；
+ * 选中的来源已经不在标签里（配置删了）时照样换。当前来源还没读完时不切，防止别的来源先回来
+ * 抢走选中。
  * @param {Array<{ kind: string, profile_id: string | null, label: string }>} tabs
  * @param {{ kind: string, profile_id: string | null }} current
  * @param {boolean} currentLoaded
+ * @param {boolean} pickedByUser 当前来源是用户点标签选的
  * @param {(tab: { kind: string, profile_id: string | null, label: string }) => boolean} hasSessions
  * @returns {{ kind: string, profile_id: string | null } | null}
  */
-export function fallbackSource(tabs, current, currentLoaded, hasSessions) {
+export function fallbackSource(tabs, current, currentLoaded, pickedByUser, hasSessions) {
   if (!currentLoaded) return null;
   const currentTab = tabs.find(
     (tab) =>
       tab.kind === current.kind && (tab.profile_id ?? null) === (current.profile_id ?? null),
   );
-  if (currentTab && hasSessions(currentTab)) return null;
+  if (currentTab && (pickedByUser || hasSessions(currentTab))) return null;
   const next = tabs.find((tab) => hasSessions(tab));
   return next ? { kind: next.kind, profile_id: next.profile_id ?? null } : null;
 }
