@@ -1411,7 +1411,10 @@ fn app_fingerprint(app: &Path) -> anyhow::Result<String> {
 /// `<App>.app/Contents/MacOS/smelt` 往上 3 层就是 `<App>.app`。
 /// 非 `.app` 环境（比如 `cargo run`）直接报错，不做任何文件操作。
 pub(crate) fn current_app_bundle() -> anyhow::Result<PathBuf> {
-    let exe = std::env::current_exe()?;
+    app_bundle_for_exe(&smelt_paths::current_exe()?)
+}
+
+fn app_bundle_for_exe(exe: &Path) -> anyhow::Result<PathBuf> {
     let bundle = exe
         .parent()
         .and_then(Path::parent)
@@ -2053,15 +2056,44 @@ mod tests {
         ApplyingRecoveryState, BundleUseState, CheckOutcome, GithubRelease, InstalledRelease,
         InstallerAttempt, StagedUpdate, StagedUpdatePhase, UpdateCandidate, UpdateFailure,
         UpdateState, UpdateStatus, acquire_app_runtime_lease_at,
-        acquire_installer_runtime_lease_at, app_fingerprint, begin_staged_update_in_state,
-        classify_applying_recovery, classify_bundle_use_output, clear_installer_attempt_in_state,
-        clear_preparing_update_in_state, decide_staged_update_check, discard_staged_update_locked,
-        installer_attempt_from_state, is_valid_update_id, load_update_state_locked,
-        promote_staged_update_in_state, quiesce_app_target_with, reconcile_update_state_locked,
-        record_installer_failure_in_state, resolve_installed_release, safe_component, same_update,
-        save_update_state_locked, staged_update_to_replace, update_asset,
+        acquire_installer_runtime_lease_at, app_bundle_for_exe, app_fingerprint,
+        begin_staged_update_in_state, classify_applying_recovery, classify_bundle_use_output,
+        clear_installer_attempt_in_state, clear_preparing_update_in_state,
+        decide_staged_update_check, discard_staged_update_locked, installer_attempt_from_state,
+        is_valid_update_id, load_update_state_locked, promote_staged_update_in_state,
+        quiesce_app_target_with, reconcile_update_state_locked, record_installer_failure_in_state,
+        resolve_installed_release, safe_component, same_update, save_update_state_locked,
+        staged_update_to_replace, update_asset,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn app_bundle_resolves_only_after_following_symlinks() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("smelt-macos-bundle-{}-{stamp}", std::process::id()));
+        let app_bundle = root.join("Smelt.app");
+        let app_exe = app_bundle.join("Contents/MacOS/smelt");
+        let managed = root.join("managed/smelt");
+        let system = root.join("system/smelt");
+        std::fs::create_dir_all(app_exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(system.parent().unwrap()).unwrap();
+        std::fs::write(&app_exe, "").unwrap();
+        std::os::unix::fs::symlink(&app_exe, &managed).unwrap();
+        std::os::unix::fs::symlink(&managed, &system).unwrap();
+
+        assert!(app_bundle_for_exe(&system).is_err());
+        let resolved = std::fs::canonicalize(&system).unwrap();
+        assert_eq!(
+            app_bundle_for_exe(&resolved).unwrap(),
+            std::fs::canonicalize(&app_bundle).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn quiesce_stops_daemon_before_probing_its_app_holder() {

@@ -10876,6 +10876,7 @@ dependencies = [
  "serde_json",
  "smelt-client",
  "smelt-model",
+ "smelt-paths",
  "smelt-runtime-client",
  "smelt-version",
  "sys-locale",
@@ -11188,6 +11189,7 @@ name = "smelt-paths"
 version = "0.0.0"
 dependencies = [
  "dirs 5.0.1",
+ "dunce",
  "libc",
  "windows-sys 0.61.2",
 ]

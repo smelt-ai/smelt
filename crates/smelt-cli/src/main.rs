@@ -24,7 +24,7 @@ fn main() {
 /// 不认识的参数原样交给 GUI，由它决定怎么处理。
 #[cfg(windows)]
 fn without_subcommand() -> i32 {
-    let gui = match std::env::current_exe() {
+    let gui = match smelt_paths::current_exe() {
         Ok(exe) => exe.with_file_name("smelt.exe"),
         Err(error) => {
             eprintln!("{}", t!("main.exe_dir_missing", error = error));
