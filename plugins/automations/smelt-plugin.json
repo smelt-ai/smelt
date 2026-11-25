@@ -2,5 +2,8 @@
   "id": "smelt.automations",
   "name": "Automations",
   "version": "1.0.0",
-  "entry": "nsh/main.tsx"
+  "entry": "nsh/main.tsx",
+  "requires": [
+    "smelt/conversation"
+  ]
 }

@@ -494,7 +494,7 @@ pub fn run_boot_compile_probe() -> BootCompileResult {
         }
         let pt0 = Instant::now();
         plugins
-            .install_entry(&manifest.id, &root, &manifest.entry)
+            .install_entry(&manifest.id, &root, &manifest.entry, &manifest.requires)
             .expect("编译内置插件");
         per_plugin.push((manifest.id, pt0.elapsed().as_secs_f64() * 1000.0));
     }

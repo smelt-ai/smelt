@@ -66,7 +66,7 @@ pub(super) fn start_override(plugins: &Path, id: &str) -> Result<(), String> {
 pub(crate) fn uninstall(root: &Path) -> Result<(), String> {
     let plugins = user_plugin_dir().ok_or_else(|| t!("plugins.no_data_dir").into_owned())?;
     let trash = trash_dir().ok_or_else(|| t!("plugins.no_data_dir").into_owned())?;
-    uninstall_into(root, &plugins, &trash).map(|_| ())
+    uninstall_into(root, &plugins, super::builtin::dir(), &trash).map(|_| ())
 }
 
 fn import_into(source: &Path, plugins: &Path) -> Result<PluginManifest, String> {
@@ -171,10 +171,19 @@ fn copy_tree_filtered(from: &Path, to: &Path, root: bool, fork_mode: bool) -> io
 }
 
 /// 返回插件在回收目录里的新位置。
-fn uninstall_into(root: &Path, plugins: &Path, trash: &Path) -> Result<PathBuf, String> {
+fn uninstall_into(
+    root: &Path,
+    plugins: &Path,
+    builtin: Option<&Path>,
+    trash: &Path,
+) -> Result<PathBuf, String> {
     // 只认用户插件目录的直接子项：App 自带的、仓库里的插件都不能从这里删。
     if root.parent() != Some(plugins) {
         return Err(t!("plugins.only_user").into_owned());
+    }
+    let dependents = dependents_of(root, plugins, builtin);
+    if !dependents.is_empty() {
+        return Err(t!("plugins.still_required", plugins = dependents.join(", ")).into_owned());
     }
     let name = root
         .file_name()
@@ -192,6 +201,51 @@ fn uninstall_into(root: &Path, plugins: &Path, trash: &Path) -> Result<PathBuf, 
     fs::rename(root, &target)
         .map_err(|error| t!("plugins.delete_failed", error = error).into_owned())?;
     Ok(target)
+}
+
+/// 删掉 `root` 这个共享模块插件后会编不过的插件（名字）：清单 `requires` 列着它的模块名的。
+/// 它覆写的是同一模块名的自带插件时，删了回到自带版，没人受影响。不是共享模块、清单读不了的，
+/// 也没人依赖。用户插件顶替了同 id 的自带插件时，只看用户那份。
+fn dependents_of(root: &Path, plugins: &Path, builtin: Option<&Path>) -> Vec<String> {
+    let Ok(manifest) = PluginManifest::read(root) else {
+        return Vec::new();
+    };
+    let Some(spec) = manifest.module else {
+        return Vec::new();
+    };
+    let manifests_in = |dir: &Path| -> Vec<(PathBuf, PluginManifest)> {
+        fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                !path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+            })
+            .filter_map(|path| {
+                PluginManifest::read(&path)
+                    .ok()
+                    .map(|manifest| (path, manifest))
+            })
+            .collect()
+    };
+    let user = manifests_in(plugins);
+    let builtin = builtin.map(manifests_in).unwrap_or_default();
+    let restores_builtin = builtin
+        .iter()
+        .any(|(_, other)| other.id == manifest.id && other.module.as_ref() == Some(&spec));
+    if restores_builtin {
+        return Vec::new();
+    }
+    let shadowed = |id: &str| user.iter().any(|(_, other)| other.id == id);
+    user.iter()
+        .filter(|(path, _)| path != root)
+        .chain(builtin.iter().filter(|(_, other)| !shadowed(&other.id)))
+        .filter(|(_, other)| other.requires.contains(&spec))
+        .map(|(_, other)| other.name.clone())
+        .collect()
 }
 
 #[cfg(test)]
@@ -364,8 +418,13 @@ mod tests {
         let scratch = Scratch::new();
         let root = scratch.plugin("plugins/demo", "com.example.demo");
 
-        let moved =
-            uninstall_into(&root, &scratch.path("plugins"), &scratch.path("trash")).unwrap();
+        let moved = uninstall_into(
+            &root,
+            &scratch.path("plugins"),
+            None,
+            &scratch.path("trash"),
+        )
+        .unwrap();
 
         assert!(!root.exists());
         assert!(moved.starts_with(scratch.path("trash")));
@@ -381,7 +440,13 @@ mod tests {
         let link = scratch.path("plugins/demo");
         std::os::unix::fs::symlink(&checkout, &link).unwrap();
 
-        uninstall_into(&link, &scratch.path("plugins"), &scratch.path("trash")).unwrap();
+        uninstall_into(
+            &link,
+            &scratch.path("plugins"),
+            None,
+            &scratch.path("trash"),
+        )
+        .unwrap();
 
         assert!(fs::symlink_metadata(&link).is_err());
         assert!(checkout.join(MANIFEST_FILE).is_file(), "开发目录原样不动");
@@ -394,10 +459,85 @@ mod tests {
         let nested = scratch.plugin("plugins/demo/inner", "com.example.inner");
 
         for root in [elsewhere, nested] {
-            let error = uninstall_into(&root, &scratch.path("plugins"), &scratch.path("trash"))
-                .unwrap_err();
+            let error = uninstall_into(
+                &root,
+                &scratch.path("plugins"),
+                None,
+                &scratch.path("trash"),
+            )
+            .unwrap_err();
             assert!(error.contains("Only plugins you installed"), "{error}");
             assert!(root.join(MANIFEST_FILE).is_file());
         }
+    }
+
+    #[test]
+    fn uninstall_refuses_a_module_others_still_require() {
+        let scratch = Scratch::new();
+        scratch.write(
+            &format!("plugins/widgets/{MANIFEST_FILE}"),
+            r#"{"id":"com.example.widgets","name":"Widgets","module":"example/widgets","entry":"index.tsx"}"#,
+        );
+        scratch.write(
+            &format!("plugins/dash/{MANIFEST_FILE}"),
+            r#"{"id":"com.example.dash","name":"Dash","entry":"nsh.tsx","requires":["example/widgets"]}"#,
+        );
+        let widgets = scratch.path("plugins/widgets");
+
+        let error = uninstall_into(
+            &widgets,
+            &scratch.path("plugins"),
+            None,
+            &scratch.path("trash"),
+        )
+        .unwrap_err();
+        assert!(error.contains("Dash"), "{error}");
+        assert!(widgets.join(MANIFEST_FILE).is_file());
+
+        // 自带插件里也有同名模块：删掉覆写回到自带版，照删。
+        scratch.write(
+            &format!("builtin/widgets/{MANIFEST_FILE}"),
+            r#"{"id":"com.example.widgets","name":"Widgets","module":"example/widgets","entry":"index.tsx"}"#,
+        );
+        uninstall_into(
+            &widgets,
+            &scratch.path("plugins"),
+            Some(&scratch.path("builtin")),
+            &scratch.path("trash"),
+        )
+        .unwrap();
+        assert!(!widgets.exists());
+
+        // 依赖它的走了，模块就能删。
+        scratch.write(
+            &format!("plugins/lone/{MANIFEST_FILE}"),
+            r#"{"id":"com.example.lone","name":"Lone","module":"example/lone","entry":"index.tsx"}"#,
+        );
+        scratch.write(
+            &format!("plugins/user/{MANIFEST_FILE}"),
+            r#"{"id":"com.example.user","name":"User","entry":"nsh.tsx","requires":["example/lone"]}"#,
+        );
+        let error = uninstall_into(
+            &scratch.path("plugins/lone"),
+            &scratch.path("plugins"),
+            None,
+            &scratch.path("trash"),
+        )
+        .unwrap_err();
+        assert!(error.contains("User"), "{error}");
+        uninstall_into(
+            &scratch.path("plugins/user"),
+            &scratch.path("plugins"),
+            None,
+            &scratch.path("trash"),
+        )
+        .unwrap();
+        uninstall_into(
+            &scratch.path("plugins/lone"),
+            &scratch.path("plugins"),
+            None,
+            &scratch.path("trash"),
+        )
+        .unwrap();
     }
 }

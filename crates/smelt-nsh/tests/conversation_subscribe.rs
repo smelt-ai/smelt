@@ -208,7 +208,14 @@ fn conversation_subscribe_wire_contract(cx: &mut TestAppContext) {
     let plugin_dir = root.join("sources/probe");
     fs::create_dir_all(&plugin_dir).unwrap();
     fs::write(plugin_dir.join("main.tsx"), PLUGIN).unwrap();
-    plugins.install("probe", &plugin_dir).unwrap();
+    plugins
+        .install_entry(
+            "probe",
+            &plugin_dir,
+            "main.tsx",
+            &["smelt/conversation".to_owned()],
+        )
+        .unwrap();
 
     let start = plugins.start();
     view.update(cx, |view, _| host.apply(view, start));

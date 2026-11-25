@@ -39,6 +39,7 @@ com.example.counter/
 | `entry` | `string` | 见下 | 入口，插件目录里的相对路径。以 `.json` 结尾时是主题插件 |
 | `module` | `string` | 否 | 把这个插件开成共享模块，值是别人 import 用的名字，如 `"smelt/conversation"`。见[插件之间](plugin-interop.md#共享模块) |
 | `types` | `string` | 否 | 共享模块的类型声明，插件目录里的 `.d.ts` 相对路径 |
+| `requires` | `string[]` | 否 | 用到的共享模块，写 import 用的名字，如 `["smelt/conversation"]`。import 了就得列。见[插件之间](plugin-interop.md#共享模块) |
 | `pages` | `PageEntry[]` | 见下 | 布局插件登记的页 |
 | `layouts` | `LayoutEntry[]` | 见下 | 布局插件登记的布局 |
 
@@ -49,7 +50,7 @@ com.example.counter/
 | 种类 | 清单写法 | 跑不跑 JS | 例子 |
 | --- | --- | --- | --- |
 | 脚本插件 | `entry` 指向 `.tsx`/`.ts`/`.js` | 跑，自己一个 VM | `smelt.quota`、`smelt.files` |
-| 共享模块 | `entry` + `module` | 不单独跑，打包进 import 它的插件 | `smelt.conversation` |
+| 共享模块 | `entry` + `module` | 不单独跑，打包进 import 它的插件 | `smelt.conversation`、`smelt.avatar` |
 | 主题插件 | `entry` 指向 `.json` | 不跑 | `smelt.themes` |
 | 布局插件 | `pages` + `layouts`，没有 `entry` | 不跑 | `smelt.layouts` |
 

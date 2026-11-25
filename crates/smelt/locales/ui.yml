@@ -508,6 +508,9 @@ plugins:
   only_user:
     en: "Only plugins you installed can be deleted"
     zh-CN: "只能删除自己装的插件"
+  still_required:
+    en: "Still used by %{plugins}. Delete those first, or remove this module from their requires"
+    zh-CN: "%{plugins} 还在用它。先删掉它们，或者从它们的 requires 里去掉这个模块"
   open_dir:
     en: "Open Plugin Folder"
     zh-CN: "打开插件目录"

@@ -79,18 +79,30 @@ const reply = await run("smelt.session-list/reveal-in-list", { machine, session_
 }
 ```
 
+别的插件在清单 `requires` 里列出它，再 import：
+
+```json
+{
+  "id": "com.example.dashboard",
+  "name": "Dashboard",
+  "entry": "main.tsx",
+  "requires": ["example/widgets"]
+}
+```
+
 ```ts
-// 别的插件里
 import { Sparkline } from "example/widgets";
 ```
 
 - `module` 至少两段，用 `/` 分开，每段的字符规则和插件 id 一样。`nsh`、`nsh/*`、`smelt/sdk`、`smelt/host`、`smelt/slots` 是保留的。两个插件声明同一个 `module` 算错。
+- 用到的共享模块都要列进 `requires`：import 了没列，编译报错；列了的没装或加载失败，也编译报错，错误里写着缺哪个。共享模块自己 import 别的共享模块，同样在它的清单里列。
+- 还有插件列着某个共享模块时，删不掉它：删除失败，错误里列出还在用它的插件，先删它们或改掉依赖。删的是覆写内置模块的那份不受限，删了回到内置版。
 - `types` 是给编辑器用的类型声明，`smelt plugin types` 会把找到的共享模块的声明都生成出来。
 - 共享模块不自己跑：它被**打包进每个 import 它的插件**，在那个插件的 VM 里执行。所以模块里的顶层变量不在插件之间共享，每个插件各有一份。要共享状态，用命令或广播。
 - 模块里可以 import `smelt/sdk`，调用算作 import 它的那个插件发的。`t()` 查的也是那个插件的 `locales/`，所以模块的文案要自己带：按 `locale()` 从模块里的一张表取，像 [`plugins/conversation/i18n.ts`](../../plugins/conversation/i18n.ts) 那样。
 - 改了模块，宿主重编所有 import 它的插件。模块编不过，import 它的插件跟着失败；内置模块被覆写坏了，回退到内置版。
 
-内置的共享模块有 `smelt/conversation`（对话界面）。它跟着内置插件变，没有单独的版本约定。
+内置的共享模块有 `smelt/conversation`（对话界面）和 `smelt/avatar`（会话头像 `<Avatar>`）。它们跟着内置插件变，没有单独的版本约定。
 
 ## 覆写和 fork 内置插件
 

@@ -53,7 +53,7 @@ smelt-plugin.json + nsh.tsx + 同目录模块
 | `nsh/desktop`、`nsh/i18n` | 桌面原语、国际化工具 |
 | `smelt/sdk` | Smelt 宿主的一切：状态、事件、命令、运行时、存储、Smelt 组件。见[参考](reference/sdk.md) |
 | `smelt/host` | 宿主的原生矢量图标 `<Icon>`、`<Vector>`；一般用 SDK 包好的 `SmeltIcon`、`SmeltVector` |
-| 共享模块 | 别的插件用清单 `module` 字段开出来的，比如 `smelt/conversation`。见[插件之间](plugin-interop.md) |
+| 共享模块 | 别的插件用清单 `module` 字段开出来的，比如 `smelt/conversation`。要先列进自己清单的 `requires`。见[插件之间](plugin-interop.md) |
 | 相对路径 | 插件目录里的 `.ts`、`.tsx`、`.js`、`.json`，不能 `../` 出目录 |
 
 npm 包和 Node 内置模块都不行。打包后还剩不认识的 import，或者用了没声明的全局变量，`smelt plugin check` 会拦下。

@@ -62,10 +62,16 @@ pub(super) fn run(dir: &Path) -> i32 {
                 "themes": report.themes,
                 "exports": report.exports,
             });
-            if let Some(module) = report.manifest.module
-                && let Some(obj) = out.as_object_mut()
-            {
-                obj.insert("module".to_owned(), serde_json::Value::String(module));
+            if let Some(obj) = out.as_object_mut() {
+                if let Some(module) = report.manifest.module {
+                    obj.insert("module".to_owned(), serde_json::Value::String(module));
+                }
+                if !report.manifest.requires.is_empty() {
+                    obj.insert(
+                        "requires".to_owned(),
+                        serde_json::json!(report.manifest.requires),
+                    );
+                }
             }
             println!("{out:#}");
             0

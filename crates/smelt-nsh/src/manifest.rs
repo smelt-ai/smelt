@@ -124,6 +124,8 @@ pub struct PluginManifest {
     pub entry: String,
     pub module: Option<String>,
     pub types: Option<String>,
+    /// 用到的共享模块（import 用的名字）。import 了就得列，编译只把这些（连同它们各自列的）打包进来。
+    pub requires: Vec<String>,
     pub pages: Vec<DeclarativePageSpec>,
     pub layouts: Vec<DeclarativeLayoutSpec>,
 }
@@ -183,6 +185,29 @@ impl PluginManifest {
                 Some(s.to_owned())
             }
             Some(_) => return Err(format!("{} 的 types 必须是字符串", path.display())),
+        };
+        let requires = match obj.get("requires") {
+            None | Some(serde_json::Value::Null) => Vec::new(),
+            Some(serde_json::Value::Array(items)) => {
+                let mut parsed: Vec<String> = Vec::with_capacity(items.len());
+                for item in items {
+                    let spec = item
+                        .as_str()
+                        .filter(|s| crate::plugins::valid_module_specifier(s))
+                        .ok_or_else(|| {
+                            format!("{} 的 requires 里有不合法的模块名：{item}", path.display())
+                        })?;
+                    if module.as_deref() == Some(spec) {
+                        return Err(format!("{} 的 requires 列了自己：{spec}", path.display()));
+                    }
+                    if parsed.iter().any(|seen| seen == spec) {
+                        return Err(format!("{} 的 requires 重复列了 {spec}", path.display()));
+                    }
+                    parsed.push(spec.to_owned());
+                }
+                parsed
+            }
+            Some(_) => return Err(format!("{} 的 requires 必须是数组", path.display())),
         };
         let pages = match obj.get("pages") {
             None | Some(serde_json::Value::Null) => Vec::new(),
@@ -321,6 +346,7 @@ impl PluginManifest {
             entry,
             module,
             types,
+            requires,
             pages,
             layouts,
         };
@@ -408,6 +434,7 @@ fn module_package_from_parts(
     Ok(Some(ModulePackage {
         id: manifest.id.clone(),
         specifier: spec.clone(),
+        requires: manifest.requires.clone(),
         root: root.to_path_buf(),
         entry: manifest.entry.clone(),
         types: manifest.types.clone(),
@@ -600,6 +627,7 @@ pub fn check_plugin_with_sources(
         &ui_sets,
         &modules,
         &manifest.id,
+        &manifest.requires,
         root,
         &manifest.entry,
         mode,
@@ -801,6 +829,7 @@ pub fn stage_builtin_plugins(src_root: &Path, dst_root: &Path) -> Result<StageRe
                 &ui_sets,
                 &module_packages,
                 id,
+                &item.manifest.requires,
                 &item.root,
                 &item.manifest.entry,
                 CompileMode::Module {
@@ -825,6 +854,7 @@ pub fn stage_builtin_plugins(src_root: &Path, dst_root: &Path) -> Result<StageRe
                 id: &item.manifest.id,
                 root: &item.root,
                 entry_rel: &item.manifest.entry,
+                requires: &item.manifest.requires,
             })
             .collect();
         let mut compiled = Plugins::compile_builtins_to_js(
@@ -1106,6 +1136,7 @@ struct DesiredBuiltin {
     slot_ix: usize,
     root: PathBuf,
     entry: String,
+    requires: Vec<String>,
     source: PluginSource,
     watch: bool,
     texts: serde_json::Value,
@@ -1320,6 +1351,7 @@ struct CompileJob {
     id: String,
     root: PathBuf,
     entry: String,
+    requires: Vec<String>,
     /// 用户覆写自带插件（数据另存一份，见 [`Compiled::overriding_builtin`]）。
     overrides_builtin: bool,
 }
@@ -1347,6 +1379,7 @@ fn compile_jobs_parallel(
             ui_sets,
             modules,
             &job.id,
+            &job.requires,
             &job.root,
             &job.entry,
             CompileMode::Plugin,
@@ -1372,6 +1405,7 @@ fn validate_module_source(
     root: &Path,
     entry: &str,
     specifier: &str,
+    requires: &[String],
 ) -> Result<(), String> {
     let stage_dir = plugins.stage();
     let plugins_stage = stage_dir.join("plugins");
@@ -1383,6 +1417,7 @@ fn validate_module_source(
         ui_sets,
         &[],
         id,
+        requires,
         root,
         entry,
         CompileMode::Module {
@@ -1644,6 +1679,7 @@ impl Worker {
                                             &primary.root,
                                             &primary.manifest.entry,
                                             &pkg.specifier,
+                                            &primary.manifest.requires,
                                         )?;
                                     }
                                     Ok(pkg)
@@ -2112,6 +2148,7 @@ impl Worker {
                         id,
                         root: primary.root.clone(),
                         entry: primary.manifest.entry.clone(),
+                        requires: primary.manifest.requires.clone(),
                         overrides_builtin: fallback.is_some(),
                     });
                     stages[slot_ix] = Some(SlotStage::WaitingUserCompile {
@@ -2308,7 +2345,8 @@ impl Worker {
 
         for cand in builtin_candidates {
             let split_to_standalone = Plugins::plugin_uses_any_module(
-                &cand.discovered.root,
+                &cand.id,
+                &cand.discovered.manifest.requires,
                 &active_module_list,
                 &user_module_specs,
             );
@@ -2370,6 +2408,7 @@ impl Worker {
                             id: job_id,
                             root,
                             entry,
+                            requires: cand.discovered.manifest.requires.clone(),
                             // 拆出来单跑的是自带版本身（它引用的共享模块被覆写了），数据还是它的。
                             overrides_builtin: false,
                         });
@@ -2435,6 +2474,7 @@ impl Worker {
                         slot_ix: cand.slot_ix,
                         root: cand.discovered.root,
                         entry: cand.discovered.manifest.entry,
+                        requires: cand.discovered.manifest.requires,
                         source: cand.discovered.source,
                         watch: cand.discovered.watch,
                         texts,
@@ -2606,6 +2646,7 @@ impl Worker {
                             id,
                             root: &item.root,
                             entry_rel: &item.entry,
+                            requires: &item.requires,
                         })
                         .collect();
                     let member_ids: Vec<String> = desired_builtins.keys().cloned().collect();
@@ -2704,6 +2745,7 @@ impl Worker {
                                 ui_sets,
                                 &active_module_list,
                                 id,
+                                &item.requires,
                                 &item.root,
                                 &item.entry,
                                 CompileMode::Plugin,
@@ -2955,6 +2997,15 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// 给 `write_plugin` 写好的插件清单加上 `requires`。
+    fn require_modules(dir: &Path, specs: &[&str]) {
+        let path = dir.join(MANIFEST_FILE);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        manifest["requires"] = serde_json::json!(specs);
+        fs::write(path, manifest.to_string()).unwrap();
     }
 
     fn write_plugin(dir: &Path, id: &str, entry: &str, body: &str) {
@@ -3655,6 +3706,7 @@ export function Main() { return <View><Text>alpha</Text></View>; }
             "nsh.tsx",
             "import { View } from \"nsh\";\nimport { Widget } from \"demo/ui\";\nexport function Main() { return <View><Widget /></View>; }\n",
         );
+        require_modules(&src.join("app"), &["demo/ui"]);
         write_plugin(
             &src.join("other"),
             "demo.other",
@@ -3849,6 +3901,86 @@ export function Main() { return <View><Text>alpha</Text></View>; }
             })
         });
         assert!(restored.changes.is_empty());
+    }
+
+    #[test]
+    fn shared_modules_are_bundled_only_when_listed_in_requires() {
+        let root = TempDir::new("smelt-nsh-module-requires");
+        let ui = root.0.join("ui");
+        fs::create_dir_all(&ui).unwrap();
+        fs::write(
+            ui.join(MANIFEST_FILE),
+            r#"{"id":"demo.ui","name":"Demo UI","module":"demo/ui","entry":"index.tsx"}"#,
+        )
+        .unwrap();
+        fs::write(
+            ui.join("index.tsx"),
+            "import { Text } from \"nsh\";\nexport function Widget() { return <Text>ui</Text>; }\n",
+        )
+        .unwrap();
+        let body = "import { View } from \"nsh\";\nimport { Widget } from \"demo/ui\";\nexport function Main() { return <View><Widget /></View>; }\n";
+
+        let listed = root.0.join("listed");
+        write_plugin(&listed, "demo.listed", "nsh.tsx", body);
+        require_modules(&listed, &["demo/ui"]);
+        let report = crate::check_plugin(&listed).unwrap();
+        assert_eq!(report.manifest.requires, ["demo/ui"]);
+
+        let unlisted = root.0.join("unlisted");
+        write_plugin(&unlisted, "demo.unlisted", "nsh.tsx", body);
+        let err = crate::check_plugin(&unlisted).unwrap_err();
+        assert!(err.contains("demo/ui") && err.contains("requires"), "{err}");
+
+        let missing = root.0.join("missing");
+        write_plugin(&missing, "demo.missing", "nsh.tsx", body);
+        require_modules(&missing, &["demo/ui", "demo/gone"]);
+        let err = crate::check_plugin(&missing).unwrap_err();
+        assert!(
+            err.contains("demo.missing") && err.contains("demo/gone"),
+            "{err}"
+        );
+
+        // 模块列的模块跟着打包进来；模块列了自己、重复列、列保留名都是清单错误。
+        let chained = root.0.join("chained");
+        fs::create_dir_all(&chained).unwrap();
+        fs::write(
+            chained.join(MANIFEST_FILE),
+            r#"{"id":"demo.chained","name":"Chained","module":"demo/chained","entry":"index.tsx","requires":["demo/ui"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            chained.join("index.tsx"),
+            "export { Widget as Chained } from \"demo/ui\";\n",
+        )
+        .unwrap();
+        let outer = root.0.join("outer");
+        write_plugin(
+            &outer,
+            "demo.outer",
+            "nsh.tsx",
+            "import { Chained } from \"demo/chained\";\nexport function Main() { return <Chained />; }\n",
+        );
+        require_modules(&outer, &["demo/chained"]);
+        crate::check_plugin(&outer).unwrap();
+
+        for (requires, expected) in [
+            (r#"["demo/self"]"#, "列了自己"),
+            (r#"["demo/ui","demo/ui"]"#, "重复"),
+            (r#"["smelt/sdk"]"#, "不合法"),
+            (r#""demo/ui""#, "必须是数组"),
+        ] {
+            let bad = root.0.join("bad");
+            fs::create_dir_all(&bad).unwrap();
+            fs::write(
+                bad.join(MANIFEST_FILE),
+                format!(
+                    r#"{{"id":"demo.self","name":"Self","module":"demo/self","entry":"index.tsx","requires":{requires}}}"#
+                ),
+            )
+            .unwrap();
+            let err = PluginManifest::read(&bad).unwrap_err();
+            assert!(err.contains(expected), "{requires}: {err}");
+        }
     }
 
     #[test]

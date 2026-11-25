@@ -174,6 +174,8 @@ pub(crate) fn is_ignored_plugin_entry(name: &str, is_dir: bool) -> bool {
 pub struct ModulePackage {
     pub id: String,
     pub specifier: String,
+    /// 这个模块自己清单里列的共享模块。
+    pub requires: Vec<String>,
     pub root: PathBuf,
     pub entry: String,
     pub types: Option<String>,
@@ -196,6 +198,8 @@ pub(crate) struct BuiltinCompileInput<'a> {
     pub id: &'a str,
     pub root: &'a Path,
     pub entry_rel: &'a str,
+    /// 清单 `requires`。
+    pub requires: &'a [String],
 }
 
 pub(crate) struct CompiledBuiltinsSource {
@@ -355,19 +359,21 @@ impl Plugins {
         }
     }
 
-    /// 装一个插件，或者它的文件变了。打不过包就什么都不变，它上一份照常跑。
+    /// 装一个插件，或者它的文件变了。打不过包就什么都不变，它上一份照常跑。不用共享模块。
     pub fn install(&mut self, id: &str, dir: &Path) -> Result<Change, String> {
-        self.install_entry(id, dir, ENTRY)
+        self.install_entry(id, dir, ENTRY, &[])
     }
 
-    /// 装一个指定入口文件（相对插件目录）的插件。
+    /// 装一个指定入口文件（相对插件目录）的插件。这一层不读清单：用到的共享模块由调用方按清单
+    /// `requires` 给，从 [`Self::set_modules`] 设的那批里挑。
     pub fn install_entry(
         &mut self,
         id: &str,
         dir: &Path,
         entry_rel: &str,
+        requires: &[String],
     ) -> Result<Change, String> {
-        let compiled = self.compile(id, dir, entry_rel)?;
+        let compiled = self.compile(id, dir, entry_rel, requires)?;
         Ok(self.insert_compiled(compiled))
     }
 
@@ -387,19 +393,17 @@ impl Plugins {
         Change::Remove(id.to_owned())
     }
 
-    /// 检查单插件是否声明/引用了 `specs` 中的任一共享模块。
+    /// 插件（按清单 `requires`，连同模块各自列的）是否用到 `specs` 中的任一共享模块。
     pub(crate) fn plugin_uses_any_module(
-        root: &Path,
+        id: &str,
+        requires: &[String],
         modules: &[ModulePackage],
         specs: &BTreeSet<String>,
     ) -> bool {
         if specs.is_empty() {
             return false;
         }
-        let Ok(files) = read_dir(root) else {
-            return false;
-        };
-        let Ok(selected) = select_candidate_modules(&files, modules, None) else {
+        let Ok(selected) = select_candidate_modules(id, requires, modules, None) else {
             return false;
         };
         selected
@@ -413,6 +417,7 @@ impl Plugins {
         ui_sets: &[SetDescription],
         modules: &[ModulePackage],
         id: &str,
+        requires: &[String],
         source: &Path,
         entry_rel: &str,
         mode: CompileMode<'_>,
@@ -446,7 +451,7 @@ impl Plugins {
             CompileMode::Plugin => None,
             CompileMode::Module { self_specifier } => Some(self_specifier),
         };
-        let selected = select_candidate_modules(&files, modules, self_specifier)?;
+        let selected = select_candidate_modules(id, requires, modules, self_specifier)?;
         let nsh_config_bytes = build_plugin_nsh_config(&selected, true, id)?;
 
         let mut staged: Vec<(PathBuf, &[u8])> = files
@@ -530,7 +535,7 @@ impl Plugins {
                 return Err(format!("{} 没有 {}", item.id, item.entry_rel));
             }
             let import_rel = normalized_entry.to_string_lossy().replace('\\', "/");
-            let selected = select_candidate_modules(&files, modules, None)?;
+            let selected = select_candidate_modules(item.id, item.requires, modules, None)?;
             let mut candidate_mod_ids = Vec::with_capacity(selected.len());
             for m in selected {
                 candidate_mod_ids.push(m.package.id.clone());
@@ -626,12 +631,19 @@ impl Plugins {
     }
 
     /// 拷一份到自己的目录里再打包：插件目录里不落生成的文件，import 也出不了这个目录。
-    fn compile(&self, id: &str, source: &Path, entry_rel: &str) -> Result<Compiled, String> {
+    fn compile(
+        &self,
+        id: &str,
+        source: &Path,
+        entry_rel: &str,
+        requires: &[String],
+    ) -> Result<Compiled, String> {
         let compiled = Self::compile_source_to_js(
             &self.stage,
             &self.ui_sets,
             &self.modules,
             id,
+            requires,
             source,
             entry_rel,
             CompileMode::Plugin,
@@ -767,45 +779,31 @@ fn normalize_rel_path(owner: &str, entry_rel: &str) -> Result<PathBuf, String> {
         .collect())
 }
 
-fn is_source_file(path: &Path) -> bool {
-    const EXTS: &[&str] = &["ts", "tsx", "js", "jsx", "mjs", "cjs"];
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|ext| EXTS.iter().any(|allowed| ext.eq_ignore_ascii_case(allowed)))
-}
-
-fn contains_specifier(files: &BTreeMap<PathBuf, Vec<u8>>, specifier: &str) -> bool {
-    let needle = specifier.as_bytes();
-    !needle.is_empty()
-        && files
-            .iter()
-            .filter(|(path, _)| is_source_file(path))
-            .any(|(_, bytes)| bytes.windows(needle.len()).any(|w| w == needle))
-}
-
+/// 按清单 `requires` 挑出要打包进来的共享模块，连同它们各自列的（`self_specifier` 是正在编的
+/// 模块自己，不打包自己）。列了却没找到（没装、加载失败）就报错，指出是谁列的。
 fn select_candidate_modules<'a>(
-    root_files: &BTreeMap<PathBuf, Vec<u8>>,
+    owner: &str,
+    requires: &[String],
     modules: &'a [ModulePackage],
     self_specifier: Option<&str>,
 ) -> Result<Vec<SelectedModule<'a>>, String> {
-    if modules.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut selected_indices = BTreeSet::new();
-    let mut queue = Vec::new();
-    for (ix, m) in modules.iter().enumerate() {
-        if Some(m.specifier.as_str()) != self_specifier
-            && contains_specifier(root_files, &m.specifier)
-        {
-            selected_indices.insert(ix);
-            queue.push(ix);
+    let mut seen: BTreeSet<&str> = self_specifier.into_iter().collect();
+    let mut queue: Vec<(&str, &str)> = Vec::new();
+    for spec in requires {
+        if seen.insert(spec) {
+            queue.push((owner, spec));
         }
     }
     let mut selected = Vec::with_capacity(queue.len());
     let mut head = 0usize;
-    while let Some(&ix) = queue.get(head) {
+    while let Some(&(by, spec)) = queue.get(head) {
         head += 1;
-        let pkg = &modules[ix];
+        let pkg = modules
+            .iter()
+            .find(|m| m.specifier == spec)
+            .ok_or_else(|| {
+                format!("{by} 的清单 requires 列了共享模块 {spec}，但没找到：没装，或者它加载失败")
+            })?;
         let m_files =
             read_dir(&pkg.root).map_err(|error| format!("{}: {error}", pkg.root.display()))?;
         let m_entry = normalize_rel_path(&pkg.id, &pkg.entry)?;
@@ -813,13 +811,9 @@ fn select_candidate_modules<'a>(
             return Err(format!("模块插件 {} 缺少入口 {}", pkg.id, pkg.entry));
         }
         let entry_rel = m_entry.to_string_lossy().replace('\\', "/");
-        for (other_ix, other) in modules.iter().enumerate() {
-            if !selected_indices.contains(&other_ix)
-                && Some(other.specifier.as_str()) != self_specifier
-                && contains_specifier(&m_files, &other.specifier)
-            {
-                selected_indices.insert(other_ix);
-                queue.push(other_ix);
+        for next in &pkg.requires {
+            if seen.insert(next) {
+                queue.push((&pkg.id, next));
             }
         }
         selected.push(SelectedModule {
@@ -1706,6 +1700,12 @@ fn validate_imports(id: &str, code: &str, served: &[String]) -> Result<(), Strin
         // 不在那张表里。
         let source = import.source.value.as_str();
         if !served.iter().any(|name| name == source) {
+            // 共享模块只按清单 requires 打包，没列的就留成了这里认不得的外部 import。
+            if valid_module_specifier(source) {
+                return Err(format!(
+                    "{id} 引了 {source}，但清单 requires 里没列：共享模块要列进 requires 才会打包进来"
+                ));
+            }
             return Err(format!("{id} 引了宿主没给的模块：{source}"));
         }
     }

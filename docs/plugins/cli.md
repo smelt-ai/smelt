@@ -63,7 +63,7 @@
 }
 ```
 
-共享模块还会带 `module` 字段。`check` 不过就不算写完。
+共享模块还会带 `module` 字段，用了共享模块的带 `requires`。`check` 不过就不算写完。
 
 ### `status`
 

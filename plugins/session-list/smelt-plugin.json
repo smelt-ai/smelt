@@ -2,5 +2,8 @@
   "id": "smelt.session-list",
   "name": "Session List",
   "version": "0.1.0",
-  "entry": "nsh/main.tsx"
+  "entry": "nsh/main.tsx",
+  "requires": [
+    "smelt/avatar"
+  ]
 }

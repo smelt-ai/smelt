@@ -21,14 +21,14 @@
 
 - `id`：ASCII 字母、数字、`.-_`，不以 `.` 开头。视图、命令、页、布局、事件 id 都是 `<插件 id>/<name>`。
 - `version`：只用来显示，宿主不比较。
-- 四种插件：脚本（`entry` 指 `.tsx`/`.ts`/`.js`）；共享模块（再加 `module: "a/b"` 和可选 `types`，打包进 import 它的插件，各插件各有一份顶层变量）；主题（`entry` 指 `.json`，不跑 JS）；布局（`pages` + `layouts`，没有 `entry`，不跑 JS）。`entry` 和 `pages`/`layouts` 二选一。
+- 四种插件：脚本（`entry` 指 `.tsx`/`.ts`/`.js`）；共享模块（再加 `module: "a/b"` 和可选 `types`，打包进 import 它的插件，各插件各有一份顶层变量；用它的插件要在清单 `requires` 里列出模块名，没列编译报错，还有人列着时删不掉它）；主题（`entry` 指 `.json`，不跑 JS）；布局（`pages` + `layouts`，没有 `entry`，不跑 JS）。`entry` 和 `pages`/`layouts` 二选一。
 - 布局插件清单：`pages: [{ name, title_key, home?, index? }]`，`layouts: [{ page, name, title_key, file, materials? }]`，`title_key` 取 `locales/ui.yml`。
 - 加载时忽略：点开头的、`node_modules/`、`tsconfig.json`、`tests/`、带 `.test.` 的。
 - 和内置插件同 id 是**覆写**：失败自动回退内置版；数据是从内置版复制出来的一份（`~/.smelt/plugin-data/.overrides/<id>/`），各改各的，再 fork 一次重新复制。
 
 ## 2. 能 import 什么，能做什么
 
-- 模块：`nsh`、`nsh/base`、`nsh/desktop`、`nsh/i18n`、`smelt/sdk`、共享模块（如 `smelt/conversation`）、同目录相对文件。`smelt/host` 是底层绑定，用 `smelt/sdk`。`smelt/slots` 不对插件开放。
+- 模块：`nsh`、`nsh/base`、`nsh/desktop`、`nsh/i18n`、`smelt/sdk`、共享模块（如 `smelt/conversation`、`smelt/avatar`，先列进清单 `requires`）、同目录相对文件。`smelt/host` 是底层绑定，用 `smelt/sdk`。`smelt/slots` 不对插件开放。
 - 全局只有 Web 标准的：`fetch`、`setTimeout`、`requestAnimationFrame`、`console`、`crypto`、`URL`、`TextEncoder` 等。**没有** Node 的 `fs`、`path`、`process`、`Buffer`、`require`。
 - 插件**没有文件系统接口**。数据存 `store`（SQLite）；远程或本机项目文件经运行时（`call(machine, "file.open" …)`）。插件目录里的图片宿主不加载，图形用自带图标或 `SmeltVector`。
 - 不按权限隔离：任何插件都能调运行时、发通知、启动本机应用。只装可信的。
