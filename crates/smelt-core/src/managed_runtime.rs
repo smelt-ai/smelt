@@ -328,11 +328,10 @@ mod tests {
                 .and_then(|(_, value)| value)
                 .map(|value| value.to_string_lossy().into_owned())
         };
-        assert_eq!(
-            env("PATH").as_deref(),
-            Some(crate::login_env::login_path())
-        );
-        for (name, value) in crate::login_env::login_environment() {
+        let login_path = crate::login_env::login_path();
+        assert_eq!(env("PATH").as_deref(), Some(&*login_path));
+        let login_env = crate::login_env::login_environment();
+        for (name, value) in login_env.iter() {
             if name == "PATH" || name == PI_PROTOCOL_ENV || name == "NPM_CONFIG_REGISTRY" {
                 continue;
             }

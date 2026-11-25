@@ -17,7 +17,8 @@ fn resolve_program(program: &str) -> std::path::PathBuf {
     if program.contains('/') {
         return program.into();
     }
-    std::env::split_paths(crate::login_env::login_path())
+    let path = crate::login_env::login_path();
+    std::env::split_paths(&*path)
         .map(|dir| dir.join(program))
         .find(|path| path.is_file())
         .unwrap_or_else(|| program.into())
@@ -94,11 +95,12 @@ pub fn grant_codex_hook_trust(
     if expected_commands.is_empty() {
         return Err("no Codex hooks to trust".into());
     }
+    let login_path = crate::login_env::login_path();
     let mut command = Command::new(resolve_program("codex"));
     command
         .arg("app-server")
         .current_dir(cwd)
-        .env("PATH", crate::login_env::login_path())
+        .env("PATH", &*login_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

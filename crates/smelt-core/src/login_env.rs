@@ -1,59 +1,61 @@
-//! 交互式 login shell 环境探测：GUI 是 Finder/Dock 拉起的进程，读不到用户
-//! `.zshrc` 里 `export` 的值——不止 PATH（nvm/homebrew 装的 CLI 找不到），
-//! 各家 agent 自定义 workspace 目录的环境变量也是同一个坑：
+//! 登录环境探测：
 //!
-//! - Claude：`CLAUDE_CONFIG_DIR`（非官方文档但实测生效，默认 `~/.claude`）
-//! - Codex：`CODEX_HOME`（官方文档，默认 `~/.codex`）
-//! - Grok：`GROK_HOME`（写在 Grok CLI 自带的用户手册里，默认 `~/.grok`）
-//! - Copilot：`COPILOT_HOME`（官方推荐用法，优先于遗留的 `--config-dir`）或
-//!   `XDG_CONFIG_HOME`（改成 `$XDG_CONFIG_HOME/copilot`），默认 `~/.copilot`
-//!
-//! 一次 `zsh -ilc` 探测把**整个环境**导出来（`env -0`），不为每个变量单开一次
-//! 慢 shell（`-ilc` 要跑一遍 `.zshrc`，有感知延迟）。
-//!
-//! 为什么是整个环境而不是一张具名变量白名单：Node 工具链的定位方式因人而异，
-//! 而**只补 PATH 只对"把 bin 目录塞进 PATH"式的管理器（nvm、homebrew）成立**。
-//! shim 式的管理器把版本决策放在环境变量里，PATH 里那个可执行文件只是个转发器：
-//!
-//! - volta：shim 靠 `VOLTA_HOME` 找工具链；pnpm 支持还要 `VOLTA_FEATURE_PNPM=1`
-//! - asdf / mise：`ASDF_DIR`、`ASDF_DATA_DIR`、`MISE_*`
-//! - fnm：`FNM_DIR`、`FNM_MULTISHELL_PATH`
-//! - pnpm 自身：`PNPM_HOME`；corepack：`COREPACK_*`
-//!
-//! 还有一类与管理器无关但同样致命的：`HTTPS_PROXY` / `NO_PROXY` /
-//! `npm_config_registry`。丢了它们，`pnpm add` 不会报错，而是**静默重试到超时**
-//! ——用户看到的就是"卡住"。
-//!
-//! 枚举这些变量名等于把每一个新出现的管理器都变成一次改代码，所以这里不枚举：
-//! 整体快照 login shell 的环境。所有管理器的共同契约就是"在 shell rc 里初始化
-//! 自己"，快照天然覆盖已有和未来的实现。
+//! - macOS / Linux：GUI 是 Finder/Dock 拉起的进程，读不到用户 `.zshrc` 里 `export` 的值。
+//!   一次 `zsh -ilc` 探测把**整个环境**导出来（`env -0`），不止补 PATH（nvm/homebrew），
+//!   还带上 `VOLTA_HOME`、`FNM_*`、`HTTPS_PROXY` 等变量和各家 agent 的覆盖目录
+//!   （`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GROK_HOME` / `COPILOT_HOME` /
+//!   `XDG_CONFIG_HOME`）。
+//! - Windows：GUI / `smeltd` 从桌面拉起时只继承父进程（如 `explorer.exe`）的环境块快照，
+//!   修改系统/用户环境变量后不会自动刷新。这里每次现读注册表
+//!   `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment` 与
+//!   `HKCU\Environment`，展开 `REG_EXPAND_SZ` 里的 `%VAR%` 并合并 `PATH`。
 
+use std::borrow::Cow;
 use std::collections::HashMap;
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(any(not(windows), test))]
+use std::process::Stdio;
+#[cfg(not(windows))]
 use std::sync::OnceLock;
+#[cfg(not(windows))]
 use std::time::Duration;
 
+#[cfg(not(windows))]
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// 环境块的 marker 名。整个 `env -0` 输出被包在这一对标记之间。
+#[cfg(any(not(windows), test))]
 const ENV_MARKER: &str = "ENV";
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct LoginEnv {
     /// PATH 单独留一份：它是唯一保证有值的（进程自身 PATH 兜底），
-    /// 且 `login_path()` 要返回 `&'static str`。
+    /// 且 `login_path()` 要返回切片/引用。
     path: String,
     vars: HashMap<String, String>,
 }
 
-fn login_env() -> &'static LoginEnv {
+#[cfg(not(windows))]
+fn cached_login_env() -> &'static LoginEnv {
     static ENV: OnceLock<LoginEnv> = OnceLock::new();
     ENV.get_or_init(probe)
+}
+
+fn current_login_env() -> Cow<'static, LoginEnv> {
+    #[cfg(windows)]
+    {
+        Cow::Owned(windows_env::probe_windows_env())
+    }
+    #[cfg(not(windows))]
+    {
+        Cow::Borrowed(cached_login_env())
+    }
 }
 
 /// 权威探测用户的默认登录 Shell：优先从 `$SHELL` 环境变量取，
 /// 其次通过 `libc::getpwuid` 从系统目录服务获取，最后回退 `/bin/zsh`。
 /// Windows 没有这套目录服务，用 `COMSPEC`（通常是 `cmd.exe`）。
+#[cfg(any(not(windows), test))]
 fn detect_user_shell() -> String {
     if let Some(shell) = std::env::var("SHELL").ok().filter(|s| !s.trim().is_empty())
         && std::path::Path::new(&shell).is_file()
@@ -73,7 +75,7 @@ fn detect_user_shell() -> String {
             return s.to_string();
         }
     }
-    #[cfg(windows)]
+    #[cfg(all(windows, test))]
     if let Some(shell) = windows_command_shell() {
         return shell;
     }
@@ -81,6 +83,7 @@ fn detect_user_shell() -> String {
 }
 
 /// `cmd.exe` 跑不了 `zsh -ilc` 那条探测脚本。只有名字像 Unix shell 时才去探。
+#[cfg(not(windows))]
 fn unix_login_shell(shell: &str) -> bool {
     let name = std::path::Path::new(shell)
         .file_name()
@@ -97,7 +100,7 @@ fn unix_login_shell(shell: &str) -> bool {
     )
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 fn windows_command_shell() -> Option<String> {
     if let Some(shell) = std::env::var("COMSPEC")
         .ok()
@@ -110,6 +113,7 @@ fn windows_command_shell() -> Option<String> {
     cmd.is_file().then(|| cmd.to_string_lossy().into_owned())
 }
 
+#[cfg(any(not(windows), test))]
 fn build_probe_command(shell: &str) -> Command {
     // 用绝对路径调 env：rc 里把 PATH 覆盖坏的机器上，裸 `env` 会连带失败，
     // 而这个探测正是用来救 PATH 的，不能反过来依赖它。
@@ -136,6 +140,7 @@ fn build_probe_command(shell: &str) -> Command {
     cmd
 }
 
+#[cfg(not(windows))]
 fn run_probe_with_timeout(shell: &str) -> Option<String> {
     let child = build_probe_command(shell).spawn().ok()?;
     let pid = child.id();
@@ -169,6 +174,7 @@ fn run_probe_with_timeout(shell: &str) -> Option<String> {
     }
 }
 
+#[cfg(not(windows))]
 fn probe() -> LoginEnv {
     let shell = detect_user_shell();
     // Windows 上的 `cmd.exe` 不是 login shell。硬跑 `-ilc` 既拿不到环境，
@@ -219,6 +225,7 @@ fn with_smelt_bin(path: &str, bin: Option<&std::path::Path>) -> String {
 /// 会有多行值）。但个别 shell 会在管道里把 NUL 吞掉，那时退回按行解析——多行值
 /// 的续行还原不了，只能丢弃，可单行值（PATH、代理、各管理器的 HOME）仍能拿到，
 /// 比整块放弃强。
+#[cfg(any(not(windows), test))]
 fn parse_env_block(block: &str) -> HashMap<String, String> {
     if block.contains('\0') {
         block.split('\0').filter_map(split_env_entry).collect()
@@ -229,6 +236,7 @@ fn parse_env_block(block: &str) -> HashMap<String, String> {
 
 /// 拆 `KEY=VALUE`。只认合法的 shell 变量名，借此丢掉按行解析时混进来的多行值
 /// 续行（那些行不是 `合法名=` 开头）。
+#[cfg(any(not(windows), test))]
 fn split_env_entry(entry: &str) -> Option<(String, String)> {
     let (key, value) = entry.split_once('=')?;
     let key = key.trim();
@@ -245,6 +253,7 @@ fn split_env_entry(entry: &str) -> Option<(String, String)> {
 /// shell 启动时 shell-integration 打的 OSC 转义噪音（形如
 /// `\e]1337;…;shell=zsh`，会粘在第一个变量前面，见 acp_conn.rs 历史踩坑记录）。
 /// 找不到标记（shell 没跑起来 / 输出被截断）返回 None。
+#[cfg(any(not(windows), test))]
 fn extract_marked(raw: &str, name: &str) -> Option<String> {
     let begin = format!("__V_{name}_B__");
     let end = format!("__V_{name}_E__");
@@ -254,28 +263,294 @@ fn extract_marked(raw: &str, name: &str) -> Option<String> {
     Some(rest[..stop].trim().to_string())
 }
 
-/// login shell 里的 PATH（进程存活期只探一次）。终端会话不需要这个——那边
-/// shell 由 smeltd 起，自带 login 环境；ACP 子进程是 GUI 直接 spawn 的，得
-/// 自己补上 nvm/homebrew 这些用户级 PATH，不然 `npx`/`bunx` 直接 ENOENT。
-pub fn login_path() -> &'static str {
-    &login_env().path
+#[cfg(any(windows, test))]
+mod windows_env {
+    use std::collections::{HashMap, HashSet};
+
+    #[derive(Clone, Debug)]
+    pub(super) struct WindowsRegEntry {
+        pub(super) name: String,
+        pub(super) value: String,
+        pub(super) expand: bool,
+    }
+
+    pub(super) fn get_ci<'a>(map: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
+        map.iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    fn lookup_ci<'a>(vars: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        vars.iter()
+            .rev()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    fn is_machine_session_var(name: &str) -> bool {
+        name.eq_ignore_ascii_case("USERNAME")
+            || name.eq_ignore_ascii_case("TEMP")
+            || name.eq_ignore_ascii_case("TMP")
+    }
+
+    /// 展开 Windows `REG_EXPAND_SZ` 里的 `%VAR%` 占位符；找不到、空 `%%` 或未闭合的 `%` 原样保留。
+    pub(super) fn expand_windows_env_vars(
+        input: &str,
+        lookup: &impl Fn(&str) -> Option<String>,
+    ) -> String {
+        let mut out = String::with_capacity(input.len());
+        let mut rest = input;
+        while let Some(start) = rest.find('%') {
+            out.push_str(&rest[..start]);
+            let after_open = &rest[start + 1..];
+            let Some(end) = after_open.find('%') else {
+                out.push('%');
+                rest = after_open;
+                break;
+            };
+            let var = &after_open[..end];
+            if var.is_empty() {
+                out.push('%');
+                rest = after_open;
+            } else if let Some(value) = lookup(var) {
+                out.push_str(&value);
+                rest = &after_open[end + 1..];
+            } else {
+                out.push('%');
+                out.push_str(var);
+                out.push('%');
+                rest = &after_open[end + 1..];
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    fn windows_path_dedup_key(segment: &str) -> String {
+        let trimmed = segment.trim();
+        let unquoted = trimmed
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(trimmed);
+        let mut normalized = unquoted.replace('/', "\\");
+        while normalized.ends_with('\\') {
+            let bytes = normalized.as_bytes();
+            let is_drive_root =
+                bytes.len() == 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+            if normalized.len() == 1 || is_drive_root {
+                break;
+            }
+            normalized.pop();
+        }
+        normalized.to_ascii_lowercase()
+    }
+
+    /// 合并 Windows `PATH`：`Machine` → `User` → 当前进程残留，按大小写和尾斜杠去重。
+    pub(super) fn merge_windows_path(
+        machine: Option<&str>,
+        user: Option<&str>,
+        process: Option<&str>,
+    ) -> String {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        for source in [machine, user, process].into_iter().flatten() {
+            for part in source.split(';') {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                let key = windows_path_dedup_key(part);
+                if key.is_empty() || !seen.insert(key) {
+                    continue;
+                }
+                out.push(part);
+            }
+        }
+        out.join(";")
+    }
+
+    /// 从注册表系统/用户条目与当前进程环境组装 Windows 登录环境。
+    pub(super) fn build_windows_login_env(
+        machine: &[WindowsRegEntry],
+        user: &[WindowsRegEntry],
+        process_vars: &[(String, String)],
+    ) -> super::LoginEnv {
+        struct Pending {
+            name: String,
+            value: String,
+            expand: bool,
+        }
+
+        let mut merged: HashMap<String, Pending> = HashMap::new();
+        for entry in machine {
+            let name = entry.name.trim();
+            if name.is_empty()
+                || name.eq_ignore_ascii_case("PATH")
+                || is_machine_session_var(name)
+            {
+                continue;
+            }
+            merged.insert(
+                name.to_ascii_lowercase(),
+                Pending {
+                    name: name.to_string(),
+                    value: entry.value.clone(),
+                    expand: entry.expand,
+                },
+            );
+        }
+        for entry in user {
+            let name = entry.name.trim();
+            if name.is_empty() || name.eq_ignore_ascii_case("PATH") {
+                continue;
+            }
+            merged.insert(
+                name.to_ascii_lowercase(),
+                Pending {
+                    name: name.to_string(),
+                    value: entry.value.clone(),
+                    expand: entry.expand,
+                },
+            );
+        }
+
+        // 两轮展开 `REG_EXPAND_SZ`：与注册表枚举顺序无关，且允许最多两级 `%VAR%` 引用。
+        let mut values: HashMap<String, String> = merged
+            .iter()
+            .map(|(lower, entry)| (lower.clone(), entry.value.clone()))
+            .collect();
+        for _ in 0..2 {
+            let mut next = values.clone();
+            for (lower, entry) in &merged {
+                if !entry.expand {
+                    continue;
+                }
+                let current = values.get(lower).map(String::as_str).unwrap_or("");
+                let expanded = expand_windows_env_vars(current, &|var| {
+                    let var_lower = var.to_ascii_lowercase();
+                    if var_lower == *lower {
+                        return lookup_ci(process_vars, var).map(str::to_string);
+                    }
+                    values
+                        .get(&var_lower)
+                        .map(String::as_str)
+                        .or_else(|| lookup_ci(process_vars, var))
+                        .map(str::to_string)
+                });
+                next.insert(lower.clone(), expanded);
+            }
+            values = next;
+        }
+
+        let mut vars = HashMap::with_capacity(merged.len() + 1);
+        for (lower, entry) in merged {
+            if let Some(value) = values.remove(&lower) {
+                vars.insert(entry.name, value);
+            }
+        }
+
+        let expand_path = |entry: &WindowsRegEntry| -> String {
+            if !entry.expand {
+                return entry.value.clone();
+            }
+            expand_windows_env_vars(&entry.value, &|var| {
+                if var.eq_ignore_ascii_case("PATH") {
+                    return None;
+                }
+                get_ci(&vars, var)
+                    .or_else(|| lookup_ci(process_vars, var))
+                    .map(str::to_string)
+            })
+        };
+        let machine_path = machine
+            .iter()
+            .rfind(|entry| entry.name.trim().eq_ignore_ascii_case("PATH"))
+            .map(expand_path);
+        let user_path = user
+            .iter()
+            .rfind(|entry| entry.name.trim().eq_ignore_ascii_case("PATH"))
+            .map(expand_path);
+        let path = merge_windows_path(
+            machine_path.as_deref(),
+            user_path.as_deref(),
+            lookup_ci(process_vars, "PATH"),
+        );
+        vars.insert("PATH".to_string(), path.clone());
+        super::LoginEnv { path, vars }
+    }
+
+    #[cfg(windows)]
+    fn read_registry_key(root: &windows_registry::Key, subkey: &str) -> Vec<WindowsRegEntry> {
+        let Ok(key) = root.open(subkey) else {
+            return Vec::new();
+        };
+        let Ok(values) = key.values() else {
+            return Vec::new();
+        };
+        let mut entries = Vec::new();
+        for (name, value) in values {
+            let expand = matches!(value.ty(), windows_registry::Type::ExpandString);
+            if let Ok(text) = String::try_from(value) {
+                entries.push(WindowsRegEntry {
+                    name,
+                    value: text,
+                    expand,
+                });
+            }
+        }
+        entries
+    }
+
+    #[cfg(windows)]
+    pub(super) fn probe_windows_env() -> super::LoginEnv {
+        let machine = read_registry_key(
+            windows_registry::LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        );
+        let user = read_registry_key(windows_registry::CURRENT_USER, "Environment");
+        let process_vars: Vec<(String, String)> = std::env::vars().collect();
+        let mut env = build_windows_login_env(&machine, &user, &process_vars);
+        let bin = smelt_paths::smelt_home().map(|home| home.join("bin"));
+        env.path = super::with_smelt_bin(&env.path, bin.as_deref());
+        env.vars.insert("PATH".to_string(), env.path.clone());
+        env
+    }
 }
 
-/// login shell 的完整环境快照。
+/// 用户登录环境的 PATH：Unix 缓存一次 login shell；Windows 每次现读注册表合并最新结果。
+pub fn login_path() -> Cow<'static, str> {
+    #[cfg(windows)]
+    {
+        Cow::Owned(windows_env::probe_windows_env().path)
+    }
+    #[cfg(not(windows))]
+    {
+        Cow::Borrowed(&cached_login_env().path)
+    }
+}
+
+/// 用户登录环境的完整变量快照（Windows 为最新注册表系统 + 用户变量）。
 ///
 /// 给"要跑用户 Node 工具链"的子进程用。**只设 PATH 是不够的**：volta 一类的
 /// shim 靠 `VOLTA_HOME` 找工具链，代理设置决定 registry 能不能连上——两者缺失
 /// 的表现都不是干净的报错，而是挂起或静默重试，见模块头注释。
-pub fn login_environment() -> &'static HashMap<String, String> {
-    &login_env().vars
+pub fn login_environment() -> Cow<'static, HashMap<String, String>> {
+    #[cfg(windows)]
+    {
+        Cow::Owned(windows_env::probe_windows_env().vars)
+    }
+    #[cfg(not(windows))]
+    {
+        Cow::Borrowed(&cached_login_env().vars)
+    }
 }
 
 /// 把 login shell 环境整体铺到子进程上。
 ///
 /// 保留（而不是 `env_clear`）父进程环境：GUI 自身注入的那些变量（临时目录、
-/// 沙盒标识）子进程照样需要。同名的以 login shell 为准——用户在 rc 里写的才是
-/// 他真正在用的那套工具链。npm 官方源连不上、用户又没配源时补上国内镜像，
-/// 见 `mirrors`。
+/// 沙盒标识）子进程照样需要。同名的以 login shell / 注册表为准——用户在 rc 或
+/// 系统设置里写的才是他真正在用的那套工具链。npm 官方源连不上、用户又没配源时
+/// 补上国内镜像，见 `mirrors`。
 ///
 /// 顺序是「login 环境 → 调用方覆盖 `overrides`（启动配置、ACP 规格里的 env，含 PATH）→
 /// 用户只在系统设置里配了代理时补 `HTTP(S)_PROXY` / `NO_PROXY`」，见 `system_proxy`。
@@ -293,13 +568,14 @@ fn apply_environment<'a>(
     overrides: impl IntoIterator<Item = (&'a str, &'a str)>,
     read_system_proxy: impl FnOnce() -> Option<crate::system_proxy::SystemProxy>,
 ) -> &mut Command {
-    for (key, value) in login_environment() {
+    let login = current_login_env();
+    for (key, value) in &login.vars {
         command.env(key, value);
     }
     if let Some(registry) = crate::mirrors::npm_registry_fallback() {
         command.env("NPM_CONFIG_REGISTRY", registry);
     }
-    command.env("PATH", login_path());
+    command.env("PATH", &login.path);
     for (key, value) in overrides {
         command.env(key, value);
     }
@@ -308,29 +584,18 @@ fn apply_environment<'a>(
 }
 
 /// 四个 workspace 覆盖变量的读取顺序：**先查当前进程自己的环境**，查不到再
-/// 退回登录 shell 探测出来的缓存值。
-///
-/// 为什么不直接只用探测缓存：探测结果在整个进程生命周期只算一次
-/// （`OnceLock`），但从终端 `cargo run`/`cargo test` 启动时，进程其实已经
-/// 原样继承了当前 shell 的完整环境（包含用户在 `.zshrc` 里 export 的这些
-/// 变量）——这种情况下直接查进程自身环境更快、更准，不用等一次 `zsh -ilc`；
-/// 只有 Finder/Dock 拉起的 GUI 才会出现"进程环境里没有，得靠探测补"的落差
-/// （跟 PATH 是同一个原理，但 PATH 那份要跟安装目录兜底合并成一条完整搜索
-/// 路径，逻辑不同，没法共用这个直查优先的简单版本）。
-/// 副作用：测试可以直接 `std::env::set_var`/`remove_var` 这几个变量来控制
-/// 行为，不受 `OnceLock` 探测缓存污染——这也是选直查优先的实际原因，本仓库
-/// 就真的踩过"开发机全局设了 CLAUDE_CONFIG_DIR，historia 测试假 HOME 沙盒
-/// 被越过"这个坑。
+/// 退回登录环境探测出来的缓存值/注册表值。
 fn resolve_override(var: &str) -> Option<String> {
     std::env::var(var)
         .ok()
         .filter(|s| !s.is_empty())
         .or_else(|| {
-            login_env()
-                .vars
-                .get(var)
-                .filter(|value| !value.is_empty())
-                .cloned()
+            let env = current_login_env();
+            #[cfg(windows)]
+            let value = windows_env::get_ci(&env.vars, var).map(str::to_string);
+            #[cfg(not(windows))]
+            let value = env.vars.get(var).cloned();
+            value.filter(|value| !value.is_empty())
         })
 }
 
@@ -627,6 +892,124 @@ mod tests {
             assert!(
                 script.contains("/usr/bin/env -0"),
                 "{shell} 的探测脚本要用绝对路径 env：{script}"
+            );
+        }
+    }
+
+    mod windows_registry_env {
+        use super::super::windows_env::{
+            WindowsRegEntry, build_windows_login_env, expand_windows_env_vars, get_ci,
+        };
+
+        fn reg(name: &str, value: &str, expand: bool) -> WindowsRegEntry {
+            WindowsRegEntry {
+                name: name.to_string(),
+                value: value.to_string(),
+                expand,
+            }
+        }
+
+        #[test]
+        fn expand_windows_env_vars_handles_known_unknown_and_edge_cases() {
+            let lookup = |name: &str| match name.to_ascii_uppercase().as_str() {
+                "SYSTEMROOT" => Some(r"C:\WINDOWS".to_string()),
+                "A" => Some("alpha".to_string()),
+                "B" => Some("beta".to_string()),
+                "TEMP" => Some(r"C:\Temp".to_string()),
+                _ => None,
+            };
+            assert_eq!(
+                expand_windows_env_vars(r"%systemroot%\system32", &lookup),
+                r"C:\WINDOWS\system32"
+            );
+            assert_eq!(expand_windows_env_vars("%A%%B%", &lookup), "alphabeta");
+            assert_eq!(
+                expand_windows_env_vars("%MISSING%%TEMP%", &lookup),
+                r"%MISSING%C:\Temp"
+            );
+            assert_eq!(
+                expand_windows_env_vars("%MISSING%B%TEMP%", &lookup),
+                r"%MISSING%BC:\Temp"
+            );
+            assert_eq!(expand_windows_env_vars("%% 100%", &lookup), "%% 100%");
+        }
+
+        #[test]
+        fn build_windows_login_env_merges_and_expands_registry_without_session_clobber() {
+            let machine = [
+                reg("USERNAME", "SYSTEM", false),
+                reg("TEMP", r"%SystemRoot%\TEMP", true),
+                reg("TMP", r"%SystemRoot%\TEMP", true),
+                reg("OS", "Windows_NT", false),
+                reg("custom_upper", "from_machine", false),
+                reg("LITERAL_SZ", r"%USERPROFILE%\literal", false),
+            ];
+            let user = [
+                reg("TEMP", r"%USERPROFILE%\AppData\Local\Temp", true),
+                reg("CUSTOM_UPPER", "from_user", false),
+                reg("LEVEL_TWO", r"%LEVEL_ONE%\sub", true),
+                reg("LEVEL_ONE", r"%USERPROFILE%\tools", true),
+            ];
+            let process_vars = vec![
+                ("SystemRoot".to_string(), r"C:\WINDOWS".to_string()),
+                ("USERPROFILE".to_string(), r"C:\Users\alice".to_string()),
+                ("USERNAME".to_string(), "alice".to_string()),
+            ];
+
+            let env = build_windows_login_env(&machine, &user, &process_vars);
+            assert_eq!(get_ci(&env.vars, "USERNAME"), None);
+            assert_eq!(get_ci(&env.vars, "TMP"), None);
+            assert_eq!(
+                get_ci(&env.vars, "TEMP"),
+                Some(r"C:\Users\alice\AppData\Local\Temp")
+            );
+            assert_eq!(get_ci(&env.vars, "OS"), Some("Windows_NT"));
+            assert_eq!(get_ci(&env.vars, "custom_upper"), Some("from_user"));
+            assert_eq!(
+                env.vars
+                    .keys()
+                    .filter(|k| k.eq_ignore_ascii_case("CUSTOM_UPPER"))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                get_ci(&env.vars, "LITERAL_SZ"),
+                Some(r"%USERPROFILE%\literal")
+            );
+            assert_eq!(
+                get_ci(&env.vars, "LEVEL_TWO"),
+                Some(r"C:\Users\alice\tools\sub")
+            );
+        }
+
+        #[test]
+        fn build_windows_login_env_merges_and_deduplicates_paths() {
+            let machine = [reg("Path", r"%SystemRoot%\system32;E:\Tools\", true)];
+            let user = [
+                reg("USER_BIN", r"%USERPROFILE%\bin", true),
+                reg("Path", r"%USER_BIN%;E:/tools;E:\AI\tools\gh\bin;;C:\", true),
+            ];
+            let process_vars = vec![
+                ("SystemRoot".to_string(), r"C:\WINDOWS".to_string()),
+                ("USERPROFILE".to_string(), r"C:\Users\alice".to_string()),
+                (
+                    "Path".to_string(),
+                    r"C:\WINDOWS\System32;E:\AI\tools\gh\bin\;C:/;D:\extra".to_string(),
+                ),
+            ];
+
+            let env = build_windows_login_env(&machine, &user, &process_vars);
+            assert_eq!(
+                env.path,
+                r"C:\WINDOWS\system32;E:\Tools\;C:\Users\alice\bin;E:\AI\tools\gh\bin;C:\;D:\extra"
+            );
+            assert_eq!(env.vars.get("PATH").map(String::as_str), Some(env.path.as_str()));
+            assert_eq!(
+                env.vars
+                    .keys()
+                    .filter(|k| k.eq_ignore_ascii_case("PATH"))
+                    .count(),
+                1
             );
         }
     }
