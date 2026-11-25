@@ -14,11 +14,15 @@ import {
   isInterruptMarker,
   newSessionId,
   onAcpEvent,
+  pathFileName,
+  pathStartsWith,
+  pathStyle,
   SmeltButton,
   SmeltDialog,
   SmeltIcon,
   SmeltNativeWindowDrag,
   theme,
+  workspaceDirectory,
 } from "smelt/sdk";
 import { MemoryChangesCard } from "./cards.tsx";
 import { type AttachedImage, Composer } from "./composer.tsx";
@@ -29,7 +33,6 @@ import {
   buildAcpLaunchPayload,
   buildConversationLayout,
   buildDisplayRows,
-  compactPathLeaf,
   confirmedConfigValue,
   consumeComposerRestore,
   entryUserText,
@@ -700,17 +703,33 @@ export function SmeltConversation(props: SmeltConversationProps) {
   const showTitlePill = computed(() => !props.embedded && Boolean(props.title));
   const titleBarTopPad = computed(() => (showTitlePill() || props.safeArea?.title_bar ? 48 : 16));
   const currentAgentMeta = computed(() => agentMeta(agentId()));
-  const workspaceLeaf = computed(() => {
+  // 对话所在的项目名：cwd 落在打开的某个项目里（含它的工作树）才算，取最深的那个根。
+  // 智能体自己的目录、工作台对话的托管目录都不是项目，不显示。
+  const projectName = computed(() => {
     const dir = cwd();
-    return dir ? compactPathLeaf(dir) : null;
+    if (!dir) return null;
+    const style = pathStyle(props.machine);
+    const roots: string[] = workspaceDirectory(props.machine)?.projects ?? [];
+    let best: string | null = null;
+    for (const root of roots) {
+      if (!pathStartsWith(style, dir, root)) continue;
+      if (best == null || root.length > best.length) best = root;
+    }
+    return best ? pathFileName(style, best) : null;
   });
+  // 新对话：没有可续接的 provider 对话，也不是带历史起的。还没连上时就按空对话排，
+  // 免得输入框连上后从底部跳到中间。
+  const freshConversation = computed(
+    () => props.start == null && !props.directoryAcp?.history_session_id,
+  );
+  // 空对话：输入框移到中间，上面是标题，下面是建议。
   const showEmptyWelcome = computed(
     () =>
       !props.embedded &&
       !dead() &&
       !turnActive() &&
-      snapshot() != null &&
-      !snapshot()?.replaying_history &&
+      connectError() == null &&
+      (snapshot() != null ? !snapshot()?.replaying_history : freshConversation()) &&
       !loadingOlder() &&
       entriesState().entries.length === 0 &&
       entriesState().loadedOffset === 0,
@@ -718,12 +737,34 @@ export function SmeltConversation(props: SmeltConversationProps) {
   const showEndedEmpty = computed(
     () => dead() && entriesState().entries.length === 0 && entriesState().loadedOffset === 0,
   );
+  // 这几条都是对着代码仓库说的，只在项目里给。
   const quickPrompts = computed(() => [
-    { id: "understand", title: ct("empty.quick.understand.title"), prompt: ct("empty.quick.understand.prompt") },
-    { id: "review", title: ct("empty.quick.review.title"), prompt: ct("empty.quick.review.prompt") },
-    { id: "debug", title: ct("empty.quick.debug.title"), prompt: ct("empty.quick.debug.prompt") },
-    { id: "test", title: ct("empty.quick.test.title"), prompt: ct("empty.quick.test.prompt") },
+    {
+      id: "understand",
+      icon: "icons/folder-tree.svg",
+      title: ct("empty.quick.understand.title"),
+      prompt: ct("empty.quick.understand.prompt"),
+    },
+    {
+      id: "review",
+      icon: "icons/git-branch.svg",
+      title: ct("empty.quick.review.title"),
+      prompt: ct("empty.quick.review.prompt"),
+    },
+    {
+      id: "debug",
+      icon: "icons/search.svg",
+      title: ct("empty.quick.debug.title"),
+      prompt: ct("empty.quick.debug.prompt"),
+    },
+    {
+      id: "test",
+      icon: "icons/circle-check.svg",
+      title: ct("empty.quick.test.title"),
+      prompt: ct("empty.quick.test.prompt"),
+    },
   ]);
+  const showQuickPrompts = computed(() => !props.readOnly && projectName() != null);
 
   return (
     <View
@@ -803,233 +844,185 @@ export function SmeltConversation(props: SmeltConversationProps) {
           </View>
         </If>
 
-        {/* 消息流主体或启动 / 结束 / 空对话欢迎态 */}
-        <If
-          when={(entriesState().entries.length > 0 || snapshot() != null) && !showEndedEmpty()}
-          else={
-            <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 12, padding: 24 }}>
-              <If
-                when={showEndedEmpty()}
-                else={
-                  <If
-                    when={connectError() == null}
-                    else={
-                      <View style={{ alignItems: "center", gap: 12, maxWidth: 420 }}>
-                        <View class="w-11 h-11 rounded-full items-center justify-center bg-bad/12 border border-bad">
-                          <SmeltIcon path="icons/circle-x.svg" size={20} color={look().palette.bad} />
-                        </View>
-                        <Text
-                          style={{
-                            fontSize: look().type.ui.size,
-                            color: look().palette.muted,
-                            textAlign: "center",
-                          }}
-                        >
-                          {connectError() ?? ""}
-                        </Text>
-                        <SmeltButton
-                          primary
-                          small
-                          label={ct("action.retry")}
-                          onPress={() => reconnectSeq.set(reconnectSeq() + 1)}
-                        />
-                      </View>
-                    }
-                  >
-                    <SmeltIcon spin size={16} color={look().palette.muted} />
-                    <Text style={{ fontSize: look().type.ui.size, color: look().palette.muted }}>
-                      {props.placeholder || ct("status.opening")}
-                    </Text>
-                  </If>
-                }
-              >
-                <View style={{ alignItems: "center", gap: 12, maxWidth: 420 }}>
-                  <View class="w-12 h-12 rounded-full items-center justify-center bg-bad/12 border border-bad">
-                    <SmeltIcon path="icons/circle-x.svg" size={22} color={look().palette.bad} />
-                  </View>
-                  <Text
-                    style={{
-                      fontSize: 18,
-                      fontWeight: 600,
-                      color: look().palette.text,
-                      textAlign: "center",
-                    }}
-                  >
-                    {ct("ended.title")}
-                  </Text>
-                  <Text
-                    style={{
-                      fontSize: look().type.ui.size,
-                      color: look().palette.muted,
-                      textAlign: "center",
-                    }}
-                  >
-                    {snapshot()?.end_reason || ct("status.disconnected")}
-                  </Text>
-                  <SmeltButton
-                    primary
-                    label={snapshot()?.history_session_id ? ct("ended.resume") : ct("ended.new")}
-                    onPress={() => {
-                      acpRestart(props.machine ?? null, props.sessionId)
-                        .catch(() => {})
-                        .finally(() => reconnectSeq.set(reconnectSeq() + 1));
-                    }}
-                  />
-                </View>
+        {/* 空对话：输入框移到中间，标题贴在它上面（下面的建议在输入框后面） */}
+        <If when={showEmptyWelcome()}>
+          <View
+            style={{
+              flexGrow: 1,
+              flexBasis: 0,
+              minHeight: 0,
+              alignItems: "center",
+              justifyContent: "flex-end",
+              paddingTop: titleBarTopPad(),
+              paddingHorizontal: 32,
+              paddingBottom: 20,
+            }}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 12, maxWidth: 736 }}>
+              <If when={Boolean(currentAgentMeta().icon)}>
+                <SmeltIcon path={currentAgentMeta().icon!} size={26} color={look().palette.text} />
               </If>
-            </View>
-          }
-        >
-          <View style={{ position: "relative", flex: 1, width: "100%", minHeight: 0 }}>
-            <MessageList
-              rows={displayRows}
-              machine={() => props.machine ?? null}
-              sessionId={() => props.sessionId}
-              cwd={cwd}
-              hasOlderHistory={() => entriesState().loadedOffset > 0}
-              loadingOlder={loadingOlder}
-              atLatest={atLatest}
-              turnActive={turnActive}
-              streamingGlobalIndex={streamingGlobalIndex}
-              streamingText={streamingText}
-              latestUserGlobalIndex={latestUserGlobalIndex}
-              canFork={canFork}
-              supportsRewind={() => Boolean(snapshot()?.supports_rewind)}
-              liveSubagents={() => snapshot()?.subagents ?? []}
-              topPadding={titleBarTopPad}
-              listRef={(api) => {
-                listApi = api;
-              }}
-              onLoadOlder={() => void handleLoadOlder()}
-              onViewableRange={handleViewableRange}
-              onScrollAtLatestChange={updateAtLatest}
-              onToggleTurnFold={(key) => {
-                const next = new Set(expandedTurnFolds());
-                if (!next.delete(key)) next.add(key);
-                expandedTurnFolds.set(next);
-              }}
-              onToggleProcessGroup={(key) => {
-                const next = new Set(expandedProcessGroups());
-                if (!next.delete(key)) next.add(key);
-                expandedProcessGroups.set(next);
-              }}
-              onOpenDiff={(d) => diffDialog.set(d)}
-              onPreviewImage={handlePreviewImage}
-              onForkAt={(globalIndex, role) => {
-                const acpId = snapshot()?.acp_session_id;
-                const onFork = props.onFork;
-                if (!acpId || !onFork) return;
-                const editing = role === "user";
-                if (editing && (!snapshot()?.supports_rewind || latestUserGlobalIndex() === globalIndex)) {
-                  return;
-                }
-                // 同文本提问的序号要数整段对话，手里只有最近几页，切点让运行时算。
-                void call(props.machine ?? null, "conversation.fork_cut", {
-                  session_id: props.sessionId,
-                  entry_index: globalIndex,
-                  side: editing ? "before" : "after",
-                })
-                  .then((res: any) => {
-                    const cut = res?.cut ?? null;
-                    if (editing && !cut) return;
-                    onFork({ provider_session_id: acpId, cut, prompt: editing ? cut.text : "" });
-                  })
-                  .catch((err) => console.error("[conversation] 算分叉切点失败：", err));
-              }}
-              onEditResendAt={(globalIndex, _text) => {
-                sendAction({ RewindToMessage: { entry_index: globalIndex } });
-              }}
-              onRetryTurn={() => sendAction("RetryLastTurn")}
-              onInspectSubagent={(sub) => inspectedSubagent.set(sub)}
-              onOpenConversation={props.onOpenConversation}
-            />
-
-            {/* 新对话安静欢迎态（大标题 + 工作区胶囊 + 快捷提问胶囊） */}
-            <If when={showEmptyWelcome()}>
-              <View
+              <Text
                 style={{
-                  position: "absolute",
-                  top: titleBarTopPad(),
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  alignItems: "center",
-                  justifyContent: "center",
-                  paddingHorizontal: 24,
-                  paddingBottom: 40,
+                  numberOfLines: 1,
+                  flexShrink: 1,
+                  fontSize: 26,
+                  lineHeight: 34,
+                  fontWeight: 500,
+                  color: look().palette.text,
                 }}
               >
-                <View style={{ width: "100%", maxWidth: 560, alignItems: "center", gap: 14 }}>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-                    <If when={Boolean(currentAgentMeta().icon)}>
-                      <SmeltIcon
-                        path={currentAgentMeta().icon!}
-                        size={26}
-                        color={look().palette.text}
-                      />
+                {projectName()
+                  ? ct("empty.heading_in", { name: projectName() ?? "" })
+                  : ct("empty.heading")}
+              </Text>
+            </View>
+          </View>
+        </If>
+
+        {/* 消息流主体或启动 / 结束 */}
+        <If when={!showEmptyWelcome()}>
+          <If
+            when={(entriesState().entries.length > 0 || snapshot() != null) && !showEndedEmpty()}
+            else={
+              <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 12, padding: 24 }}>
+                <If
+                  when={showEndedEmpty()}
+                  else={
+                    <If
+                      when={connectError() == null}
+                      else={
+                        <View style={{ alignItems: "center", gap: 12, maxWidth: 420 }}>
+                          <View class="w-11 h-11 rounded-full items-center justify-center bg-bad/12 border border-bad">
+                            <SmeltIcon path="icons/circle-x.svg" size={20} color={look().palette.bad} />
+                          </View>
+                          <Text
+                            style={{
+                              fontSize: look().type.ui.size,
+                              color: look().palette.muted,
+                              textAlign: "center",
+                            }}
+                          >
+                            {connectError() ?? ""}
+                          </Text>
+                          <SmeltButton
+                            primary
+                            small
+                            label={ct("action.retry")}
+                            onPress={() => reconnectSeq.set(reconnectSeq() + 1)}
+                          />
+                        </View>
+                      }
+                    >
+                      <SmeltIcon spin size={16} color={look().palette.muted} />
+                      <Text style={{ fontSize: look().type.ui.size, color: look().palette.muted }}>
+                        {props.placeholder || ct("status.opening")}
+                      </Text>
                     </If>
+                  }
+                >
+                  <View style={{ alignItems: "center", gap: 12, maxWidth: 420 }}>
+                    <View class="w-12 h-12 rounded-full items-center justify-center bg-bad/12 border border-bad">
+                      <SmeltIcon path="icons/circle-x.svg" size={22} color={look().palette.bad} />
+                    </View>
                     <Text
                       style={{
-                        fontSize: 26,
-                        lineHeight: 32,
+                        fontSize: 18,
                         fontWeight: 600,
                         color: look().palette.text,
+                        textAlign: "center",
                       }}
                     >
-                      {currentAgentMeta().label}
+                      {ct("ended.title")}
                     </Text>
-                  </View>
-
-                  <Text
-                    style={{
-                      fontSize: look().type.ui.size,
-                      lineHeight: look().type.ui.line_height,
-                      color: look().palette.muted,
-                      textAlign: "center",
-                    }}
-                  >
-                    {ct("empty.subtitle")}
-                  </Text>
-
-                  <If when={Boolean(workspaceLeaf())}>
-                    <View class="flex-row items-center gap-1.5 px-2.5 py-1 rounded-full bg-foreground/[0.08]">
-                      <SmeltIcon path="icons/folder.svg" size={12} color={look().palette.muted} />
-                      <Text
-                        style={{
-                          fontSize: look().type.text_xsmall.size,
-                          color: look().palette.muted,
-                        }}
-                      >
-                        {workspaceLeaf() ?? ""}
-                      </Text>
-                    </View>
-                  </If>
-
-                  <If when={!props.readOnly}>
-                    <View
+                    <Text
                       style={{
-                        flexDirection: "row",
-                        flexWrap: "wrap",
-                        justifyContent: "center",
-                        gap: 8,
-                        paddingTop: 6,
+                        fontSize: look().type.ui.size,
+                        color: look().palette.muted,
+                        textAlign: "center",
                       }}
                     >
-                      <Each of={quickPrompts()}>
-                        {(chip) => (
-                          <SmeltButton
-                            label={chip().title}
-                            style={{ borderRadius: 999 }}
-                            onPress={() => insertPromptIntoComposer(chip().prompt)}
-                          />
-                        )}
-                      </Each>
-                    </View>
-                  </If>
-                </View>
+                      {snapshot()?.end_reason || ct("status.disconnected")}
+                    </Text>
+                    <SmeltButton
+                      primary
+                      label={snapshot()?.history_session_id ? ct("ended.resume") : ct("ended.new")}
+                      onPress={() => {
+                        acpRestart(props.machine ?? null, props.sessionId)
+                          .catch(() => {})
+                          .finally(() => reconnectSeq.set(reconnectSeq() + 1));
+                      }}
+                    />
+                  </View>
+                </If>
               </View>
-            </If>
-          </View>
+            }
+          >
+            <View style={{ position: "relative", flex: 1, width: "100%", minHeight: 0 }}>
+              <MessageList
+                rows={displayRows}
+                machine={() => props.machine ?? null}
+                sessionId={() => props.sessionId}
+                cwd={cwd}
+                hasOlderHistory={() => entriesState().loadedOffset > 0}
+                loadingOlder={loadingOlder}
+                atLatest={atLatest}
+                turnActive={turnActive}
+                streamingGlobalIndex={streamingGlobalIndex}
+                streamingText={streamingText}
+                latestUserGlobalIndex={latestUserGlobalIndex}
+                canFork={canFork}
+                supportsRewind={() => Boolean(snapshot()?.supports_rewind)}
+                liveSubagents={() => snapshot()?.subagents ?? []}
+                topPadding={titleBarTopPad}
+                listRef={(api) => {
+                  listApi = api;
+                }}
+                onLoadOlder={() => void handleLoadOlder()}
+                onViewableRange={handleViewableRange}
+                onScrollAtLatestChange={updateAtLatest}
+                onToggleTurnFold={(key) => {
+                  const next = new Set(expandedTurnFolds());
+                  if (!next.delete(key)) next.add(key);
+                  expandedTurnFolds.set(next);
+                }}
+                onToggleProcessGroup={(key) => {
+                  const next = new Set(expandedProcessGroups());
+                  if (!next.delete(key)) next.add(key);
+                  expandedProcessGroups.set(next);
+                }}
+                onOpenDiff={(d) => diffDialog.set(d)}
+                onPreviewImage={handlePreviewImage}
+                onForkAt={(globalIndex, role) => {
+                  const acpId = snapshot()?.acp_session_id;
+                  const onFork = props.onFork;
+                  if (!acpId || !onFork) return;
+                  const editing = role === "user";
+                  if (editing && (!snapshot()?.supports_rewind || latestUserGlobalIndex() === globalIndex)) {
+                    return;
+                  }
+                  // 同文本提问的序号要数整段对话，手里只有最近几页，切点让运行时算。
+                  void call(props.machine ?? null, "conversation.fork_cut", {
+                    session_id: props.sessionId,
+                    entry_index: globalIndex,
+                    side: editing ? "before" : "after",
+                  })
+                    .then((res: any) => {
+                      const cut = res?.cut ?? null;
+                      if (editing && !cut) return;
+                      onFork({ provider_session_id: acpId, cut, prompt: editing ? cut.text : "" });
+                    })
+                    .catch((err) => console.error("[conversation] 算分叉切点失败：", err));
+                }}
+                onEditResendAt={(globalIndex, _text) => {
+                  sendAction({ RewindToMessage: { entry_index: globalIndex } });
+                }}
+                onRetryTurn={() => sendAction("RetryLastTurn")}
+                onInspectSubagent={(sub) => inspectedSubagent.set(sub)}
+                onOpenConversation={props.onOpenConversation}
+              />
+            </View>
+          </If>
         </If>
 
         {/* 左侧提问导航刻度列 */}
@@ -1197,6 +1190,37 @@ export function SmeltConversation(props: SmeltConversationProps) {
           onPreviewAttachment={(att) => handlePreviewImage(att)}
           onFocusIn={props.onFocusIn}
         />
+
+        {/* 空对话的建议：和输入框同宽，点一下填进输入框 */}
+        <If when={showEmptyWelcome()}>
+          <View style={{ flexGrow: 1, flexBasis: 0, minHeight: 0, alignItems: "center", paddingHorizontal: 16 }}>
+            <If when={showQuickPrompts()}>
+              <View
+                style={{
+                  width: "100%",
+                  maxWidth: 768,
+                  flexDirection: "row",
+                  flexWrap: "wrap",
+                  justifyContent: "center",
+                  gap: 8,
+                }}
+              >
+                <Each of={quickPrompts()}>
+                  {(chip) => (
+                    <SmeltButton
+                      quiet
+                      icon={chip().icon}
+                      label={chip().title}
+                      class="border border-border"
+                      style={{ borderRadius: 999, paddingHorizontal: 14 }}
+                      onPress={() => insertPromptIntoComposer(chip().prompt)}
+                    />
+                  )}
+                </Each>
+              </View>
+            </If>
+          </View>
+        </If>
       </View>
 
       {/* 子智能体详情侧抽屉 */}
