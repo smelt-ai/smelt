@@ -1,4 +1,4 @@
-// 会话头像：外形按会话 id 算（../avatar_shape.js），深色身子、按会话变色的描边、白色圆点眼睛。纯 JS。
+// 会话头像：外形按会话 id 算（../avatar_shape.js），深色身子、按会话 id 算的渐变描边、白色圆点眼睛。纯 JS。
 //
 // 演哪一出、从什么时候起照用会话列表的 avatar_stage.js（act/since），这里只管怎么演。
 // 身子是一张静态 SVG，只在第一次显示时算；动的是叠在上面的眼睛和整个身子，全用关键帧交给 NSH
@@ -9,13 +9,11 @@
 import { cleanup, createMotion, Easing, effect, lifecycle, reduceMotion, View } from "nsh";
 import { SmeltVector } from "smelt/sdk";
 
-import { bodySvg, CANVAS, EYE_R, hash, shapeOf } from "../avatar_shape.js";
+import { bodySvg, CANVAS, EYE_R, hash, shapeOf, tintOf } from "../avatar_shape.js";
 import { ONE_SHOT_MS } from "../avatar_stage.js";
 /** 动作的帧率上限：每动一帧整窗重画，眼睛小、动得慢，20 帧看不出顿。 */
 const FPS = 20;
 
-/** 描边颜色，按种子挑一个。 */
-const TINTS = ["#4FC3F7", "#81C784", "#4DB6AC", "#FFB74D", "#BA68C8", "#F06292", "#9FA8DA", "#E57373"];
 const BODY = "#141B24";
 const EYE = "#F4F8FF";
 const EYE_CALL = "#FFC24A";
@@ -106,7 +104,7 @@ export function Avatar(props: AvatarProps) {
   const eyes = createMotion();
   const seed = hash(props.seed);
   const shape = shapeOf(seed);
-  const markup = bodySvg(shape.path, TINTS[seed % TINTS.length], BODY);
+  const markup = bodySvg(shape.path, tintOf(seed), BODY);
   // 性格：一拍多长、动作幅度、第一拍晚多久起。
   const beat = 700 + dice(seed, 0) * 600;
   const reach = 0.75 + dice(seed, 1) * 0.5;

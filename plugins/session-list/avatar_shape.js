@@ -111,11 +111,69 @@ export function shapeOf(seed) {
   return { path, eyes: [CANVAS / 2 - half, CANVAS / 2 + half, eyeY] };
 }
 
-/** 外形 → 头像身子的 SVG：先描一圈彩边，再填深色身子。 */
+/** OKLCH → 线性 sRGB 三分量（可能越界）。 */
+function oklchToLinear(l, c, hue) {
+  const a = c * Math.cos(hue);
+  const b = c * Math.sin(hue);
+  const l_ = (l + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m_ = (l - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s_ = (l - 0.0894841775 * a - 1.291485548 * b) ** 3;
+  return [
+    4.0767416621 * l_ - 3.3077115913 * m_ + 0.2309699292 * s_,
+    -1.2684380046 * l_ + 2.6097574011 * m_ - 0.3413193965 * s_,
+    -0.0041960863 * l_ - 0.7034186147 * m_ + 1.707614701 * s_,
+  ];
+}
+
+/** OKLCH（色相用度）→ `#rrggbb`；sRGB 给不出这么艳就降彩度到刚好能显示。 */
+function oklchHex(l, c, hueDeg) {
+  const hue = (hueDeg * Math.PI) / 180;
+  let rgb = oklchToLinear(l, c, hue);
+  while (rgb.some((v) => v < 0 || v > 1)) {
+    c = Math.max(0, c - 0.005);
+    rgb = oklchToLinear(l, c, hue);
+  }
+  const channel = (v) => {
+    const s = v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055;
+    return Math.round(Math.min(1, Math.max(0, s)) * 255)
+      .toString(16)
+      .padStart(2, "0");
+  };
+  return `#${rgb.map(channel).join("")}`;
+}
+
+/**
+ * 种子 → 描边渐变 `{ from, to, angle }`：两端颜色和渐变方向（度，0 是从左到右）。
+ * 色相整圈随便取，另一端错开 40°～120°（再远中段会发灰）；两端亮度、彩度各取各的，故意不齐，
+ * 有的艳有的淡。用单独一串随机数，外形不受影响；新加随机量同样只能接在最后取。
+ */
+export function tintOf(seed) {
+  const r = rng(seed ^ 0x5bd1e995);
+  const hue = r() * 360;
+  const spread = lerp(40, 120, r()) * (r() < 0.5 ? -1 : 1);
+  const end = () => [lerp(0.64, 0.88, r()), lerp(0.07, 0.19, r())];
+  const [l1, c1] = end();
+  const [l2, c2] = end();
+  return {
+    from: oklchHex(l1, c1, hue),
+    to: oklchHex(l2, c2, hue + spread),
+    angle: Math.round(r() * 360),
+  };
+}
+
+/** 外形 → 头像身子的 SVG：先描一圈渐变彩边（`tintOf` 的结果），再填深色身子。 */
 export function bodySvg(path, tint, fill) {
+  // 渐变沿 angle 方向穿过外接框中心，两端落在框边上。
+  const rad = (tint.angle * Math.PI) / 180;
+  const at = (v) => (0.5 + v).toFixed(3);
+  const dx = Math.cos(rad) / 2;
+  const dy = Math.sin(rad) / 2;
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${CANVAS} ${CANVAS}">` +
-    `<path d="${path}" fill="none" stroke="${tint}" stroke-width="4.2" stroke-linejoin="round"/>` +
+    `<defs><linearGradient id="t" x1="${at(-dx)}" y1="${at(-dy)}" x2="${at(dx)}" y2="${at(dy)}">` +
+    `<stop offset="0" stop-color="${tint.from}"/><stop offset="1" stop-color="${tint.to}"/>` +
+    `</linearGradient></defs>` +
+    `<path d="${path}" fill="none" stroke="url(#t)" stroke-width="4.2" stroke-linejoin="round"/>` +
     `<path d="${path}" fill="${fill}" stroke="${fill}" stroke-width="1.2" stroke-linejoin="round"/>` +
     `</svg>`
   );

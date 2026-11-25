@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { CANVAS, EYE_R, hash, shapeOf } from "../avatar_shape.js";
+import { bodySvg, CANVAS, EYE_R, hash, shapeOf, tintOf } from "../avatar_shape.js";
 
 /** 路径里所有坐标点（每对数是一个点）。 */
 function points(path) {
@@ -56,4 +56,30 @@ test("一排看下来大小差不多：外接框长边都在 23 到 26.5 之间"
     expect(long).toBeGreaterThan(23);
     expect(long).toBeLessThan(26.5);
   }
+});
+
+test("描边渐变：同一个种子同一组颜色，两端都是合法颜色、色相错开", () => {
+  expect(tintOf(hash("conv-a"))).toEqual(tintOf(hash("conv-a")));
+  expect(tintOf(hash("conv-a"))).not.toEqual(tintOf(hash("conv-b")));
+  for (const seed of seeds) {
+    const { from, to, angle } = tintOf(seed);
+    expect(from).toMatch(/^#[0-9a-f]{6}$/);
+    expect(to).toMatch(/^#[0-9a-f]{6}$/);
+    expect(from).not.toBe(to);
+    expect(angle).toBeGreaterThanOrEqual(0);
+    expect(angle).toBeLessThanOrEqual(360);
+  }
+});
+
+test("描边颜色不扎堆：300 个会话的起点色几乎各不相同", () => {
+  const starts = new Set(seeds.map((seed) => tintOf(seed).from));
+  expect(starts.size).toBeGreaterThan(290);
+});
+
+test("身子 SVG 带渐变描边，坐标没有 NaN", () => {
+  const seed = hash("conv-a");
+  const svg = bodySvg(shapeOf(seed).path, tintOf(seed), "#141B24");
+  expect(svg).toContain('stroke="url(#t)"');
+  expect(svg).toContain(tintOf(seed).from);
+  expect(svg).not.toContain("NaN");
 });
