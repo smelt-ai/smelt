@@ -69,7 +69,8 @@ export function PromptRail(props: {
                         borderRadius: 1,
                         backgroundColor: lit() ? look().palette.text : look().palette.faint,
                         opacity: opacity(),
-                        transitionProperty: "width, opacity, backgroundColor",
+                        // 宽度是布局，NSH 不按样式过渡它；整串里有一个认不出整串作废，所以只写能过渡的。
+                        transitionProperty: "opacity, backgroundColor",
                         transitionDuration: 150,
                       }}
                     />

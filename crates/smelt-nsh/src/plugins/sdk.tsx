@@ -1672,8 +1672,9 @@ export const TOOLTIP_CLASS = "rounded-(--radius) bg-soft px-2 py-1 shadow-floati
 
 // 浮层进出（docs/ui-design-language.md「动效」overlay 档）：入场 240ms、ease_snap 曲线；出场 120ms
 // 淡出，比入场短，关掉的东西不该拖着。进出是浮层组件自己的行为，调用处只管样子。
+// NSH 不认 `transition-[…]` 任意值，用 `transition`（色、透明度、投影、变换）：进出时只有透明度和位移在变。
 const OVERLAY_TRANSITION =
-  "transition-[opacity,transform] duration-[240ms] ease-[cubic-bezier(0.32,0.72,0,1)]";
+  "transition duration-[240ms] ease-[cubic-bezier(0.32,0.72,0,1)]";
 const OVERLAY_EXIT = "opacity-0 duration-[120ms] ease-in";
 // 从触发点那一侧挪 4px 到位：按浮层实际落下的那一侧（NSH 的 `data-side`，第一帧前就定了），翻边也对。
 const FROM_TRIGGER =
