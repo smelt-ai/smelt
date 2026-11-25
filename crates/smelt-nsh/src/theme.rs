@@ -4,9 +4,11 @@
 
 use gpui::{BoxShadow, Rgba};
 use nsh_platform_gpui::{AdaptiveColor, Appearance, Color, Theme};
+use serde_json::{Map, Value, json};
 use smelt_ui::button::{ButtonShadow, resting_shadows};
-use smelt_ui::kit::{RADIUS, elevation};
-use smelt_ui::ui_theme;
+use smelt_ui::kit::{RADIUS, Radius, TYPE, TextStyle, Type, elevation};
+use smelt_ui::theme_config::{Elevation, StateColors, ThemeColors};
+use smelt_ui::ui_theme::{self, Palette};
 
 /// 不画的投影：主题这一档没写层时给它，类名照样认得。
 const NO_SHADOW: &str = "0 0 #00000000";
@@ -39,29 +41,60 @@ fn shadow_css(layers: &[BoxShadow]) -> String {
     }
 }
 
-/// 交给 NSH 的投影令牌（类名就是令牌名，`shadow-floating`）：主题 `elevation` 里组件直接取的几档，
-/// 和按钮实际画的那几组（[`resting_shadows`]，已按底色透不透换过）。按钮不给原始的
-/// `button_neutral`：半透明底上画外投影会透出一圈灰，要不要换内细圈归宿主定。开关的槽
-/// （关、开两档内细圈）和圆钮也给，SDK 的开关照它画。
-fn shadows() -> [(&'static str, Vec<BoxShadow>); 10] {
-    let e = elevation::current();
-    [
-        ("shadow-raised", e.raised.clone()),
-        ("shadow-floating", e.floating.clone()),
-        ("shadow-md", e.md.clone()),
-        ("shadow-overlay", e.overlay.clone()),
-        ("shadow-button", resting_shadows(ButtonShadow::Neutral)),
+/// 交给 NSH 的投影令牌（类名就是令牌名，`shadow-floating`）：主题 `elevation` 的每一档都给，类名是
+/// `shadow-` 加主题键（下划线换连字符），见 [`elevation_levels`]；另加按钮实际画的那几组
+/// （[`resting_shadows`]，已按底色透不透换过）。原始的 `button_neutral` 也在，但半透明底上画外投影
+/// 会透出一圈灰，按钮请用 `shadow-button`。
+fn shadows() -> Vec<(String, Vec<BoxShadow>)> {
+    let mut out: Vec<(String, Vec<BoxShadow>)> = elevation_levels(&elevation::current())
+        .into_iter()
+        .map(|(key, layers)| (format!("shadow-{}", key.replace('_', "-")), layers))
+        .collect();
+    out.extend([
         (
-            "shadow-button-primary",
+            "shadow-button".to_owned(),
+            resting_shadows(ButtonShadow::Neutral),
+        ),
+        (
+            "shadow-button-primary".to_owned(),
             resting_shadows(ButtonShadow::Primary),
         ),
         (
-            "shadow-button-floating",
+            "shadow-button-floating".to_owned(),
             resting_shadows(ButtonShadow::Floating),
         ),
-        ("shadow-switch-off", e.switch_off.clone()),
-        ("shadow-switch-on", e.switch_on.clone()),
-        ("shadow-knob", e.elements.clone()),
+    ]);
+    out
+}
+
+/// 主题的每一档投影和它在主题文件里的键。整个解构不留 `..`：主题加一档，这里编译不过，插件就
+/// 不会漏拿。
+fn elevation_levels(e: &Elevation) -> Vec<(&'static str, Vec<BoxShadow>)> {
+    let Elevation {
+        raised,
+        floating,
+        overlay,
+        button_neutral,
+        button_contrast,
+        elements,
+        switch_off,
+        switch_on,
+        md,
+        knob,
+        input,
+    } = e;
+    vec![
+        ("raised", raised.clone()),
+        ("floating", floating.clone()),
+        ("overlay", overlay.clone()),
+        ("button_neutral", button_neutral.clone()),
+        ("button_contrast", button_contrast.clone()),
+        ("elements", elements.clone()),
+        ("switch_off", switch_off.clone()),
+        ("switch_on", switch_on.clone()),
+        ("md", md.clone()),
+        ("knob", knob.clone()),
+        ("input", input.clone()),
     ]
 }
 
@@ -139,7 +172,7 @@ pub(crate) fn nsh_theme() -> Theme {
     }
     for (name, layers) in shadows() {
         let css = shadow_css(&layers);
-        let set = theme.set_shadow(name, &css, &css);
+        let set = theme.set_shadow(&name, &css, &css);
         debug_assert!(set, "{name}: {css}");
     }
     theme.set_number("radius", RADIUS.md);
@@ -148,6 +181,353 @@ pub(crate) fn nsh_theme() -> Theme {
         smelt_plugin_api::model::font_config::font_family(),
     );
     theme
+}
+
+// ---- 插件的 `theme()` ----
+
+/// 局部变量按名字装进对象：键就是变量名（也就是结构的字段名、主题文件的键）。
+macro_rules! fields {
+    ($($name:ident),* $(,)?) => {{
+        let mut map = Map::new();
+        $(map.insert(stringify!($name).to_owned(), Css::css($name));)*
+        Value::Object(map)
+    }};
+}
+
+/// 一个主题值写成插件拿到的样子：不透明色 `#rrggbb`，带透明度的 `rgba(…)`，成组的给数组或对象。
+trait Css {
+    fn css(&self) -> Value;
+}
+
+impl Css for u32 {
+    fn css(&self) -> Value {
+        smelt_plugin_api::hex_color(*self).into()
+    }
+}
+
+impl Css for Rgba {
+    fn css(&self) -> Value {
+        let channel = |value: f32| (value.clamp(0., 1.) * 255.).round() as u8;
+        format!(
+            "rgba({}, {}, {}, {:.3})",
+            channel(self.r),
+            channel(self.g),
+            channel(self.b),
+            self.a.clamp(0., 1.)
+        )
+        .into()
+    }
+}
+
+impl<T: Css, const N: usize> Css for [T; N] {
+    fn css(&self) -> Value {
+        Value::Array(self.iter().map(Css::css).collect())
+    }
+}
+
+impl Css for StateColors {
+    fn css(&self) -> Value {
+        let StateColors {
+            bg,
+            fg,
+            border,
+            icon,
+        } = self;
+        fields!(bg, fg, border, icon)
+    }
+}
+
+/// 一档投影写成 NSH 样式的 `boxShadow` 数组，插件可以直接放进 `style`。
+impl Css for Vec<BoxShadow> {
+    fn css(&self) -> Value {
+        Value::Array(
+            self.iter()
+                .map(|layer| {
+                    json!({
+                        "x": f32::from(layer.offset.x),
+                        "y": f32::from(layer.offset.y),
+                        "blur": f32::from(layer.blur_radius),
+                        "spread": f32::from(layer.spread_radius),
+                        "color": Rgba::from(layer.color).css(),
+                        "inset": layer.inset,
+                    })
+                })
+                .collect(),
+        )
+    }
+}
+
+/// 插件 `theme()` 拿到的整份主题，换主题、换深浅、改界面字号时整份重给：
+///
+/// - `palette`：语义色板（[`Palette`]），画界面先用它；
+/// - `colors`：主题文件里的每个颜色键（[`ThemeColors`]），色板没有的位从这里取；
+/// - `elevation`：每一档投影，`boxShadow` 数组；同一档也有类名 `shadow-<键>`；
+/// - `type`：每一档字，字号、行高按这扇窗口的 rem 换成点；`radius`：每一档圆角；`fonts`。
+///
+/// 每个结构都整个解构、不留 `..`：smelt-ui 的主题加一个位，这里编译不过，插件就不会漏拿，也
+/// 不用等哪个插件要了再来补。
+pub(crate) fn plugin_theme(rem: f32) -> Value {
+    json!({
+        "rem": rem,
+        "palette": palette_json(&ui_theme::palette()),
+        "colors": colors_json(&ui_theme::colors()),
+        "elevation": Value::Object(
+            elevation_levels(&elevation::current())
+                .into_iter()
+                .map(|(key, layers)| (key.to_owned(), layers.css()))
+                .collect(),
+        ),
+        "type": type_json(&TYPE, rem),
+        "radius": radius_json(&RADIUS),
+        "fonts": {
+            "mono": smelt_plugin_api::model::font_config::font_family(),
+        },
+    })
+}
+
+fn palette_json(p: &Palette) -> Value {
+    let Palette {
+        bg,
+        side,
+        surface,
+        soft,
+        soft_hover,
+        soft_press,
+        row_hover,
+        row_selected,
+        hair,
+        hair_strong,
+        text,
+        muted,
+        faint,
+        muted_selected,
+        faint_selected,
+        ink,
+        ink_hover,
+        ink_press,
+        on_ink,
+        button_primary,
+        button_primary_foreground,
+        button_submit,
+        button_submit_foreground,
+        button_secondary,
+        button_secondary_foreground,
+        focus,
+        selection,
+        link,
+        accent,
+        on_accent,
+        track,
+        knob,
+        knob_on,
+        need,
+        ok,
+        bad,
+        on_bad,
+        popover_text,
+        scrim,
+        chart,
+    } = p;
+    fields!(
+        bg,
+        side,
+        surface,
+        soft,
+        soft_hover,
+        soft_press,
+        row_hover,
+        row_selected,
+        hair,
+        hair_strong,
+        text,
+        muted,
+        faint,
+        muted_selected,
+        faint_selected,
+        ink,
+        ink_hover,
+        ink_press,
+        on_ink,
+        button_primary,
+        button_primary_foreground,
+        button_submit,
+        button_submit_foreground,
+        button_secondary,
+        button_secondary_foreground,
+        focus,
+        selection,
+        link,
+        accent,
+        on_accent,
+        track,
+        knob,
+        knob_on,
+        need,
+        ok,
+        bad,
+        on_bad,
+        popover_text,
+        scrim,
+        chart,
+    )
+}
+
+fn colors_json(c: &ThemeColors) -> Value {
+    let ThemeColors {
+        page,
+        bg_base,
+        bg_deep,
+        layer_01,
+        layer_02,
+        layer_03,
+        layer_04,
+        bg_inverse,
+        bg_contrast,
+        bg_button_neutral,
+        bg_icon_button_contrast,
+        bg_accent,
+        submit_highlight,
+        submit_hover,
+        submit_fg,
+        submit_icon,
+        text_base,
+        text_muted,
+        text_faint,
+        text_inverse,
+        text_contrast,
+        text_accent,
+        icon_base,
+        icon_muted,
+        icon_faint,
+        icon_inverse,
+        icon_contrast,
+        icon_accent,
+        border_muted,
+        border_base,
+        border_strong,
+        border_focus,
+        hover,
+        pressed,
+        contrast_hover,
+        contrast_pressed,
+        scrim,
+        depth_top,
+        depth_bottom,
+        white,
+        black,
+        knob,
+        knob_on,
+        success,
+        warning,
+        danger,
+        info,
+        surface_raised,
+        selection,
+        chart,
+    } = c;
+    fields!(
+        page,
+        bg_base,
+        bg_deep,
+        layer_01,
+        layer_02,
+        layer_03,
+        layer_04,
+        bg_inverse,
+        bg_contrast,
+        bg_button_neutral,
+        bg_icon_button_contrast,
+        bg_accent,
+        submit_highlight,
+        submit_hover,
+        submit_fg,
+        submit_icon,
+        text_base,
+        text_muted,
+        text_faint,
+        text_inverse,
+        text_contrast,
+        text_accent,
+        icon_base,
+        icon_muted,
+        icon_faint,
+        icon_inverse,
+        icon_contrast,
+        icon_accent,
+        border_muted,
+        border_base,
+        border_strong,
+        border_focus,
+        hover,
+        pressed,
+        contrast_hover,
+        contrast_pressed,
+        scrim,
+        depth_top,
+        depth_bottom,
+        white,
+        black,
+        knob,
+        knob_on,
+        success,
+        warning,
+        danger,
+        info,
+        surface_raised,
+        selection,
+        chart,
+    )
+}
+
+fn type_json(t: &Type, rem: f32) -> Value {
+    let Type {
+        ui,
+        ui_medium,
+        ui_compact,
+        small,
+        small_medium,
+        body,
+        body_medium,
+        text_small,
+        text_small_medium,
+        text_xsmall,
+        text_xsmall_medium,
+        mono,
+    } = t;
+    let text = |style: &TextStyle| {
+        json!({
+            "size": style.size / 16. * rem,
+            "line_height": style.line_height / 16. * rem,
+            "weight": style.weight.0,
+        })
+    };
+    json!({
+        "ui": text(ui),
+        "ui_medium": text(ui_medium),
+        "ui_compact": text(ui_compact),
+        "small": text(small),
+        "small_medium": text(small_medium),
+        "body": text(body),
+        "body_medium": text(body_medium),
+        "text_small": text(text_small),
+        "text_small_medium": text(text_small_medium),
+        "text_xsmall": text(text_xsmall),
+        "text_xsmall_medium": text(text_xsmall_medium),
+        "mono": text(mono),
+    })
+}
+
+fn radius_json(r: &Radius) -> Value {
+    let Radius { xs, sm, md, lg, xl } = *r;
+    json!({
+        "xs": xs,
+        "sm": sm,
+        "md": md,
+        "lg": lg,
+        "xl": xl,
+        // 列表行的圆角（`ui_theme::row_radius`），不在 `RADIUS` 那几档里。
+        "row": f32::from(ui_theme::row_radius()),
+    })
 }
 
 /// 打包配置（`nsh.json`）里的 `"theme"`：只为让打包器认得 smelt 的令牌类名（`bg-scrim`、
@@ -182,6 +562,23 @@ mod tests {
             a: 0.5,
         };
         assert_eq!(Color::from(alpha(half).dark), Color(0xff000080));
+    }
+
+    /// 插件拿到的每一档投影都有同名类名，`style` 里写和 `class` 里写是同一个东西。
+    #[test]
+    fn every_elevation_level_is_both_json_and_class() {
+        let theme = plugin_theme(16.);
+        let levels = theme["elevation"].as_object().unwrap();
+        assert_eq!(levels.len(), elevation_levels(&elevation::current()).len());
+        let classes: Vec<String> = shadows().into_iter().map(|(name, _)| name).collect();
+        for key in levels.keys() {
+            let class = format!("shadow-{}", key.replace('_', "-"));
+            assert!(classes.contains(&class), "{class}");
+        }
+        assert!(theme["colors"]["success"]["bg"].is_string());
+        assert_eq!(theme["colors"]["chart"].as_array().unwrap().len(), 5);
+        assert!(theme["palette"]["button_primary"][2].is_string());
+        assert!(theme["type"]["mono"]["size"].is_number());
     }
 
     #[test]
@@ -224,7 +621,7 @@ mod tests {
         assert_eq!(shadow_css(&[]), NO_SHADOW);
         let theme = nsh_theme();
         for (name, _) in shadows() {
-            assert!(theme.tokens().shadow(name).is_some(), "{name}");
+            assert!(theme.tokens().shadow(&name).is_some(), "{name}");
         }
     }
 

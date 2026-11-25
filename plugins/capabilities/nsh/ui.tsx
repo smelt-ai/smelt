@@ -508,7 +508,7 @@ export function DropdownMenuButton(props: {
   const fg = () => {
     const p = look().palette;
     if (props.quiet) return open() ? p.text : p.muted;
-    return p.button_secondary_fg;
+    return p.button_secondary_foreground;
   };
 
   const renderTrigger = () =>
@@ -693,7 +693,7 @@ export function UsesPopover(props: {
                 fontSize: look().type.small_medium.size,
                 lineHeight: look().type.small_medium.line_height,
                 fontWeight: look().type.small_medium.weight,
-                color: look().palette.button_secondary_fg,
+                color: look().palette.button_secondary_foreground,
                 numberOfLines: 1,
               }}
             >

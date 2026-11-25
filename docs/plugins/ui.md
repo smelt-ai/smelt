@@ -224,7 +224,7 @@ const open = signal(false);
 
 写法和 Tailwind 一样：`bg-background`、`text-muted-foreground`、`border-border`、`text-bad`、`bg-row-selected`。完整清单在插件的 `.nsh/types/nsh/tokens.d.ts`。
 
-阴影用 `shadow-raised`、`shadow-floating`、`shadow-overlay`，跟主题走。
+阴影用 `shadow-<档>`，跟主题走：主题 `elevation` 的每一档都有类名（键里的下划线换连字符，`shadow-raised`、`shadow-floating`、`shadow-overlay`、`shadow-md`、`shadow-switch-on`……）；按钮另用 `shadow-button` / `shadow-button-primary` / `shadow-button-floating`，宿主已按底色透不透换好。
 
 > [!IMPORTANT]
 > 不要写死颜色（`#3a6ee1`、`text-blue-500`）。写死的颜色在别的主题、深色模式下会对不上，内置插件也一律不写。
@@ -235,17 +235,24 @@ const open = signal(false);
 
 ```ts
 const t = theme();
-t.palette.text;          // "#1a1a18"
-t.palette.row_selected;  // "rgba(...)"
-t.type.ui.size;          // 正文字号
-t.radius.md;             // 圆角
+t.palette.text;              // "#1a1a18"
+t.palette.row_selected;      // "rgba(...)"
+t.colors.depth_top;          // 主题文件里的任意颜色键
+t.colors.success.bg;         // 状态色四件套 bg / fg / border / icon
+t.elevation.floating;        // [{ x, y, blur, spread, color, inset }]
+t.type.ui.size;              // 正文字号
+t.radius.md;                 // 圆角
 ```
+
+主题有的，`theme()` 里全有：宿主按 smelt-ui 的主题结构整份导出，不挑字段，主题加一个位插件就能读到，不用改宿主。
 
 | 字段 | 内容 |
 | --- | --- |
-| `palette` | 色板：`bg`、`side`、`surface`、`soft`、`soft_hover`、`text`、`muted`、`muted_selected`、`faint`、`faint_selected`、`ink`、`on_ink`、`link`、`run`、`need`、`ok`、`bad`、`on_bad`、`hair`、`hair_strong`、`row_hover`、`row_selected`、`focus`、`scrim`、`chart[5]`，以及按钮的三态 `button_primary`、`button_secondary`、`button_submit`（`[常态, 悬停, 按下]`）和它们的字色 `*_fg` |
-| `type` | 字号档：`ui`、`ui_medium`、`small`、`small_medium`、`text_xsmall`、`text_xsmall_medium`，每档 `{ size, line_height, weight }`，已经按窗口缩放算好 |
-| `radius` | 圆角：`sm`、`md`、`lg`、`row` |
+| `palette` | 语义色板，画界面先用它：底色（`bg`、`side`、`surface`、`soft*`）、字（`text`、`muted`、`faint`，选中行上的 `*_selected`）、行与线（`row_hover`、`row_selected`、`hair`、`hair_strong`、`focus`、`selection`）、主色（`ink*`、`on_ink`、`accent`、`on_accent`、`link`）、状态（`need`、`ok`、`bad`、`on_bad`）、开关（`track`、`knob`、`knob_on`）、`popover_text`、`scrim`、`chart[5]`，按钮三态 `button_primary` / `button_secondary` / `button_submit`（`[常态, 悬停, 按下]`）和字色 `*_foreground` |
+| `colors` | 主题文件里的每个颜色键，键名同[主题](themes.md)：色板没有的位从这里取（`depth_top`、`layer_01`、`border_strong`……）；`success` / `warning` / `danger` / `info` 是 `{ bg, fg, border, icon }` |
+| `elevation` | 每一档投影，`boxShadow` 数组，可直接放进 `style`；同一档也有 `shadow-<档>` 类名 |
+| `type` | 每一档字：`ui`、`ui_medium`、`ui_compact`、`small`、`small_medium`、`body`、`body_medium`、`text_small`、`text_small_medium`、`text_xsmall`、`text_xsmall_medium`、`mono`，每档 `{ size, line_height, weight }`，已按窗口缩放算好 |
+| `radius` | 圆角：`xs`、`sm`、`md`、`lg`、`xl`，列表行 `row` |
 | `fonts.mono` | 等宽字体 |
 | `rem` | 当前的 1rem 是多少像素 |
 

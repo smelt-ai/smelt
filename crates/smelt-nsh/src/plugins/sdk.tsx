@@ -1542,7 +1542,7 @@ export function SmeltSwitch(props: {
       class={`shrink-0 rounded-full disabled:opacity-50 ${FOCUS_RING}`}
       trackClass={`relative rounded-full shadow-switch-off checked:shadow-switch-on transition-colors ${CONTROL_TRANSITION}`}
       trackStyle={{ width: 36, height: 16, backgroundColor: props.checked ? p().accent : p().track }}
-      thumbClass={`absolute rounded-full shadow-knob origin-left checked:origin-right checked:translate-x-[13px] active:scale-x-125 transition-transform ${CONTROL_TRANSITION}`}
+      thumbClass={`absolute rounded-full shadow-elements origin-left checked:origin-right checked:translate-x-[13px] active:scale-x-125 transition-transform ${CONTROL_TRANSITION}`}
       thumbStyle={{
         top: 1,
         left: 1,
@@ -1779,9 +1779,9 @@ export function SmeltButton(props: SmeltButtonProps) {
   const colors = computed(() => {
     const p = look().palette;
     const primary = iconOnly() ? p.button_submit : p.button_primary;
-    const primaryFg = iconOnly() ? p.button_submit_fg : p.button_primary_fg;
+    const primaryFg = iconOnly() ? p.button_submit_foreground : p.button_primary_foreground;
     const neutral = p.button_secondary;
-    const neutralFg = p.button_secondary_fg;
+    const neutralFg = p.button_secondary_foreground;
 
     if (props.dismiss) {
       return {

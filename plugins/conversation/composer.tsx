@@ -368,10 +368,10 @@ export function Composer(props: {
 
   // 材质：光从上面来。高光取主题的 `depth_top`（开关圆钮上沿同一色）压透明度；浅色主题里面就是白的，自然看不出。
   const cardSheen = computed(
-    () => `linear-gradient(90deg, transparent, ${colorWithAlpha(look().palette.depth_top, 0.12)}, transparent)`,
+    () => `linear-gradient(90deg, transparent, ${colorWithAlpha(look().colors.depth_top, 0.12)}, transparent)`,
   );
   const cardWash = computed(
-    () => `linear-gradient(180deg, ${colorWithAlpha(look().palette.depth_top, 0.025)} 0%, transparent 40%)`,
+    () => `linear-gradient(180deg, ${colorWithAlpha(look().colors.depth_top, 0.025)} 0%, transparent 40%)`,
   );
 
   // 输入框几乎一直有焦点，不另画焦点环；边框只表示等你。

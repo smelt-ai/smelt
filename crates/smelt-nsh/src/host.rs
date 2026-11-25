@@ -29,11 +29,7 @@ use smelt_plugin_api::{
     Placement, PluginView, RuntimeKey, SettingsEntry, SettingsGroup, Text, TopicMessage,
     ViewHandle, ViewSpec,
     client::protocol::control::ControlMethod,
-    model::{agent_status::AgentStatus, font_config, runtime_path::PathStyle},
-};
-use smelt_ui::{
-    kit::{RADIUS, TYPE, TextStyle},
-    ui_theme,
+    model::{agent_status::AgentStatus, runtime_path::PathStyle},
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -3020,104 +3016,13 @@ fn snapshot_slices(
         out.insert("bar_insets".into(), json!({}));
     }
     if mask.contains(SliceMask::THEME) {
-        out.insert("theme".into(), theme(rem));
+        out.insert("theme".into(), crate::theme::plugin_theme(rem));
     }
     out
 }
 
 fn machine_value(machine: &RuntimeKey) -> Value {
     api::machine_to_json(machine)
-}
-
-fn rgba_css(color: gpui::Rgba) -> String {
-    let r = (color.r.clamp(0., 1.) * 255.).round() as u8;
-    let g = (color.g.clamp(0., 1.) * 255.).round() as u8;
-    let b = (color.b.clamp(0., 1.) * 255.).round() as u8;
-    format!("rgba({r}, {g}, {b}, {:.3})", color.a.clamp(0., 1.))
-}
-
-/// 插件自己画时要的几档色、字、圆角；字按这扇窗口的 rem 换成点。
-pub(crate) fn theme(rem: f32) -> Value {
-    let p = ui_theme::palette();
-    let c = ui_theme::colors();
-    let text = |style: TextStyle| {
-        json!({
-            "size": style.size / 16. * rem,
-            "line_height": style.line_height / 16. * rem,
-            "weight": style.weight.0,
-        })
-    };
-    json!({
-        "rem": rem,
-        "palette": {
-            "bg": api::hex_color(p.bg),
-            "side": api::hex_color(p.side),
-            "surface": api::hex_color(p.surface),
-            "soft": api::hex_color(p.soft),
-            "soft_hover": api::hex_color(p.soft_hover),
-            "text": api::hex_color(p.text),
-            "muted": api::hex_color(p.muted),
-            "muted_selected": api::hex_color(p.muted_selected),
-            "faint": api::hex_color(p.faint),
-            "faint_selected": api::hex_color(p.faint_selected),
-            "ink": api::hex_color(p.ink),
-            "on_ink": api::hex_color(p.on_ink),
-            "link": api::hex_color(p.link),
-            "accent": api::hex_color(p.accent),
-            "on_accent": api::hex_color(p.on_accent),
-            "track": api::hex_color(p.track),
-            "knob": api::hex_color(p.knob),
-            "knob_on": api::hex_color(p.knob_on),
-            "need": api::hex_color(p.need),
-            "ok": api::hex_color(p.ok),
-            "bad": api::hex_color(p.bad),
-            "on_bad": api::hex_color(p.on_bad),
-            "hair": rgba_css(p.hair),
-            "hair_strong": rgba_css(p.hair_strong),
-            "row_hover": rgba_css(p.row_hover),
-            "row_selected": rgba_css(p.row_selected),
-            "focus": rgba_css(p.focus),
-            // 立体高光的上端（开关圆钮的上沿同一色）：插件画面上沿受光时取它再压透明度。
-            "depth_top": rgba_css(c.depth_top),
-            "button_primary": [
-                rgba_css(p.button_primary[0]),
-                rgba_css(p.button_primary[1]),
-                rgba_css(p.button_primary[2]),
-            ],
-            "button_primary_fg": api::hex_color(p.button_primary_foreground),
-            "button_secondary": [
-                rgba_css(p.button_secondary[0]),
-                rgba_css(p.button_secondary[1]),
-                rgba_css(p.button_secondary[2]),
-            ],
-            "button_secondary_fg": api::hex_color(p.button_secondary_foreground),
-            "button_submit": [
-                rgba_css(p.button_submit[0]),
-                rgba_css(p.button_submit[1]),
-                rgba_css(p.button_submit[2]),
-            ],
-            "button_submit_fg": api::hex_color(p.button_submit_foreground),
-            "scrim": rgba_css(p.scrim),
-            "chart": p.chart.map(api::hex_color),
-        },
-        "fonts": {
-            "mono": font_config::font_family(),
-        },
-        "type": {
-            "ui": text(TYPE.ui),
-            "ui_medium": text(TYPE.ui_medium),
-            "small": text(TYPE.small),
-            "small_medium": text(TYPE.small_medium),
-            "text_xsmall": text(TYPE.text_xsmall),
-            "text_xsmall_medium": text(TYPE.text_xsmall_medium),
-        },
-        "radius": {
-            "sm": RADIUS.sm,
-            "md": RADIUS.md,
-            "lg": RADIUS.lg,
-            "row": f32::from(ui_theme::row_radius()),
-        },
-    })
 }
 
 /// 在本机系统文件管理器里定位一个文件或目录（macOS 选中该条目，其它平台打开所在目录）。
