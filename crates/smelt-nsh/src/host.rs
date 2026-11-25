@@ -3039,6 +3039,7 @@ fn rgba_css(color: gpui::Rgba) -> String {
 /// 插件自己画时要的几档色、字、圆角；字按这扇窗口的 rem 换成点。
 pub(crate) fn theme(rem: f32) -> Value {
     let p = ui_theme::palette();
+    let c = ui_theme::colors();
     let text = |style: TextStyle| {
         json!({
             "size": style.size / 16. * rem,
@@ -3076,6 +3077,8 @@ pub(crate) fn theme(rem: f32) -> Value {
             "row_hover": rgba_css(p.row_hover),
             "row_selected": rgba_css(p.row_selected),
             "focus": rgba_css(p.focus),
+            // 立体高光的上端（开关圆钮的上沿同一色）：插件画面上沿受光时取它再压透明度。
+            "depth_top": rgba_css(c.depth_top),
             "button_primary": [
                 rgba_css(p.button_primary[0]),
                 rgba_css(p.button_primary[1]),

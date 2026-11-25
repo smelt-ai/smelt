@@ -29,6 +29,7 @@ import { ElicitationCard, PermissionTray } from "./cards.tsx";
 import { ct } from "./i18n.ts";
 import {
   buildCompletionCandidates,
+  colorWithAlpha,
   detectCompletionTrigger,
   isNewConversationCommand,
   STOP_RING_INSET,
@@ -365,6 +366,14 @@ export function Composer(props: {
   );
   const ringMarkup = computed(() => stopRingMarkup(look().palette.text));
 
+  // 材质：光从上面来。高光取主题的 `depth_top`（开关圆钮上沿同一色）压透明度；浅色主题里面就是白的，自然看不出。
+  const cardSheen = computed(
+    () => `linear-gradient(90deg, transparent, ${colorWithAlpha(look().palette.depth_top, 0.12)}, transparent)`,
+  );
+  const cardWash = computed(
+    () => `linear-gradient(180deg, ${colorWithAlpha(look().palette.depth_top, 0.025)} 0%, transparent 40%)`,
+  );
+
   // 输入框几乎一直有焦点，不另画焦点环；边框只表示等你。
   const cardClass = computed(() =>
     awaitingUser()
@@ -448,9 +457,19 @@ export function Composer(props: {
           </View>
         </If>
 
-        {/* 主输入胶囊卡片及其外部运行态顶边扫光轨道（避免光晕被 overflow-hidden 裁剪） */}
-        <View style={{ position: "relative", width: "100%" }}>
-          <View class={cardClass()}>
+        {/* 主输入卡片：面上从上往下一层极淡的受光，上沿一道细高光，读起来是一块立着的板。 */}
+          <View class={cardClass()} style={{ backgroundImage: cardWash() }}>
+          <View
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 24,
+              right: 24,
+              height: 1,
+              backgroundImage: cardSheen(),
+              pointerEvents: "none",
+            }}
+          />
 
           {/* 1. 权限审批卡 */}
           <PermissionTray
@@ -869,7 +888,6 @@ export function Composer(props: {
                 </View>
               </If>
             </View>
-          </View>
           </View>
         </View>
       </View>
