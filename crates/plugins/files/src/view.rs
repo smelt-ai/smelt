@@ -15,8 +15,9 @@ use smelt_plugin_api::ui::truncated_line::truncated_line;
 use smelt_plugin_api::ui::{Button, CodeEditor, Icon, IconAction as _, IconName, TextInput};
 
 use crate::model::{
-    FileTreeRow, OpenFile, PreviewKind, SearchState, SearchTreeDir, breadcrumb_segments,
-    build_search_tree, file_tree_row_height, file_tree_row_id, name_likely_truncated,
+    FileTreeRow, OpenFile, OpenFileStatus, PreviewKind, SearchState, SearchTreeDir,
+    breadcrumb_segments, build_search_tree, file_tree_row_height, file_tree_row_id,
+    name_likely_truncated,
 };
 use crate::{FilesPanel, MAX_TREE_WIDTH, MIN_TREE_WIDTH, TREE_KEY_CONTEXT, ui_theme};
 use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
@@ -332,11 +333,15 @@ impl FilesPanel {
         } else {
             Vec::new()
         };
-        let segs = breadcrumb_segments(self.path_style(&of.runtime, cx), &of.path, &roots);
+        let style = self.path_style(&of.runtime, cx);
+        let segs = breadcrumb_segments(style, &of.path, &roots);
         let is_image = is_previewable_image(&of.path);
         let dirty = !is_image && of.dirty(cx);
-        let preview_kind = PreviewKind::for_path(&of.path);
+        let preview_kind = PreviewKind::for_path(style, &of.path);
         let preview = of.preview && preview_kind.is_some();
+        let ready = of.status == OpenFileStatus::Ready;
+        let show_full_path_tip = of.outside_project || segs.len() == 1;
+        let full_path: SharedString = of.path.clone().into();
         let last = segs.len().saturating_sub(1);
         let on_tree_machine = of.runtime == self.tree_runtime();
         let view = cx.entity();
@@ -350,6 +355,7 @@ impl FilesPanel {
                 let is_last = ix == last;
                 let path = seg.path.clone();
                 let view = view.clone();
+                let full_path = full_path.clone();
                 let seg_el = div()
                     .id((ElementId::from("file-breadcrumb-seg"), path.clone()))
                     .flex_shrink_0()
@@ -364,6 +370,11 @@ impl FilesPanel {
                     .when(!is_last, |el| el.text_color(muted))
                     .hover(move |el| el.bg(ui_theme::row_hover()).text_color(fg))
                     .child(seg.label.clone())
+                    .when(is_last && show_full_path_tip, |el| {
+                        el.tooltip(move |window, cx| {
+                            Tooltip::new(full_path.clone()).build(window, cx)
+                        })
+                    })
                     // 别的机器上的文件在树里定位不到。
                     .when(on_tree_machine, |el| {
                         el.on_click(move |_, _, cx| {
@@ -408,7 +419,7 @@ impl FilesPanel {
             )
             // 浏览器只能打开这台电脑上的文件。
             .when(
-                preview_kind == Some(PreviewKind::Html) && of.runtime == RuntimeKey::Local,
+                ready && preview_kind == Some(PreviewKind::Html) && of.runtime == RuntimeKey::Local,
                 |el| {
                     el.child(
                         Button::new("file-open-in-browser")
@@ -420,7 +431,21 @@ impl FilesPanel {
                     )
                 },
             )
-            .when(preview_kind.is_some(), |el| {
+            .when(ready && of.read_only && !is_image && of.image.is_none(), |el| {
+                el.child(
+                    Button::new("file-unlock-edit")
+                        .quiet()
+                        .small()
+                        .flex_shrink_0()
+                        .icon(IconName::Pencil)
+                        .label(t!("readonly.edit"))
+                        .tooltip(t!("readonly.tooltip"))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.unlock_open_file(window, cx)
+                        })),
+                )
+            })
+            .when(ready && preview_kind.is_some(), |el| {
                 el.child(
                     Button::new("file-preview-toggle")
                         .quiet()
@@ -458,8 +483,46 @@ impl FilesPanel {
 
     fn file_body(&self, of: &OpenFile, cx: &mut Context<Self>) -> AnyElement {
         let fg: Hsla = rgb(ui_theme::text()).into();
-        let preview = of.preview && PreviewKind::for_path(&of.path).is_some();
-        // 图片过大、读不出来时没有字节，落到编辑器分支显示原因。
+        let muted: Hsla = rgb(ui_theme::muted()).into();
+        match &of.status {
+            OpenFileStatus::Loading => {
+                return placeholder_view(&t!("loading"), muted).into_any_element();
+            }
+            OpenFileStatus::Unreadable { message, can_retry } => {
+                return div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .px_4()
+                    .child(
+                        div()
+                            .max_w(px(420.))
+                            .type_style(TYPE.ui_medium)
+                            .text_center()
+                            .text_color(muted)
+                            .child(message.clone()),
+                    )
+                    .when(*can_retry, |el| {
+                        el.child(
+                            Button::new("file-retry-open")
+                                .small()
+                                .label(t!("retry"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.retry_open_file(window, cx)
+                                })),
+                        )
+                    })
+                    .into_any_element();
+            }
+            OpenFileStatus::Ready => {}
+        }
+        let style = self.path_style(&of.runtime, cx);
+        let preview = of.preview && PreviewKind::for_path(style, &of.path).is_some();
         if let Some(image) = of.image.as_ref() {
             // 栅格图只画降采样预览，没好之前是空盒子。
             smelt_plugin_api::ui::image::ensure_preview(image, cx);
@@ -486,6 +549,14 @@ impl FilesPanel {
                 .into_any_element();
         }
         if preview {
+            let parent = style.parent(&of.path);
+            let remote = match &of.runtime {
+                RuntimeKey::Local => None,
+                RuntimeKey::Remote(id) => Some(id.as_str()),
+            };
+            let links =
+                smelt_plugin_api::ui::markdown_links::FileLinks::new(parent.as_deref(), remote)
+                    .with_style(style);
             return div()
                 .id("md-preview")
                 .flex_1()
@@ -494,9 +565,10 @@ impl FilesPanel {
                 .overflow_y_scroll()
                 .p_3()
                 .child(div().type_style(TYPE.ui).text_color(fg).child(
-                    smelt_plugin_api::ui::markdown_mermaid::markdown_view(
-                        "md-preview-body",
+                    smelt_plugin_api::ui::markdown_mermaid::markdown_view_with_links(
+                        ("md-preview-body", of.id),
                         of.preview_source.clone(),
+                        links,
                     ),
                 ))
                 .into_any_element();

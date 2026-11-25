@@ -5,6 +5,16 @@ title:
 loading:
   en: Loading…
   zh-CN: 加载中…
+retry:
+  en: Retry
+  zh-CN: 重试
+readonly:
+  edit:
+    en: Edit
+    zh-CN: 解锁编辑
+  tooltip:
+    en: Outside this project (read-only). Click to edit.
+    zh-CN: 项目外文件默认只读，点击解锁编辑。
 copy_path:
   en: Copy File Path
   zh-CN: 复制文件路径
@@ -98,6 +108,9 @@ save:
   unreadable:
     en: This file couldn't be read as text, so it can't be saved
     zh-CN: 此文件未能正常读取为文本，不支持保存
+  read_only:
+    en: This file is read-only. Click Edit to make changes.
+    zh-CN: 此文件当前只读，点击「解锁编辑」后再修改。
   conflict:
     en: The file was changed outside; press ⌘S again to overwrite the changes on disk
     zh-CN: 文件已被外部修改；再按一次 ⌘S 会强制覆盖磁盘上的改动

@@ -131,6 +131,8 @@ impl ConversationInstance {
             // 标题胶囊读对话的吸顶提问和模型。
             cx.observe(&view, |_, _, cx| cx.notify()),
         ];
+        let path_style = api::host(cx).path_style(&args.machine, cx);
+        view.update(cx, |view, cx| view.set_path_style(path_style, cx));
         if self.focus_handle.is_focused(window) {
             window.focus(&view.read(cx).focus_target(cx), cx);
         }
@@ -146,6 +148,12 @@ impl ConversationInstance {
                 if matches!(self.state, State::Waiting | State::Missing) {
                     self.connect(window, cx);
                 } else {
+                    if let (HostEvent::MachinesChanged, State::Live(view), Some(args)) =
+                        (event, &self.state, &self.args)
+                    {
+                        let path_style = api::host(cx).path_style(&args.machine, cx);
+                        view.update(cx, |view, cx| view.set_path_style(path_style, cx));
+                    }
                     self.refresh_title(cx);
                 }
             }

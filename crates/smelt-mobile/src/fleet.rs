@@ -200,11 +200,12 @@ impl Node {
         }
     }
 
-    /// 撤掉这台机器：会话目录不再推事件，对话订阅停下且不再写缓存，断开连接（终端随之以
-    /// fatal 收尾）。
+    /// 撤掉这台机器：会话目录不再推事件，对话订阅停下且不再写缓存，取消文件打开并清缓存，
+    /// 断开连接（终端随之以 fatal 收尾）。
     fn shutdown(&self) {
         self.catalog.close();
         self.conversations.close();
+        self.files.close();
         self.hub.disconnect();
     }
 }

@@ -24,6 +24,7 @@ use smelt_plugin_api::{
     ViewSpec, text,
 };
 
+mod cache;
 mod editor;
 mod html_preview;
 mod model;
@@ -168,13 +169,15 @@ pub(crate) struct ProjectRef {
 mod rt {
     use std::time::Duration;
 
-    use smelt_plugin_api::client::RuntimeClient;
     use smelt_plugin_api::client::protocol::control::{ControlCall, ControlClientError};
+    use smelt_plugin_api::client::{CallCancel, RuntimeClient};
     use smelt_plugin_api::{RuntimeKey, machine_removed};
 
     pub(crate) use smelt_plugin_api::call_error_text as error_text;
 
     pub(crate) const RUNTIME_CALL_TIMEOUT: Duration = smelt_plugin_api::CALL_TIMEOUT;
+    /// 远程拉取大文件 / 大图（经中继最大 20MB）耗时更长，与手机端保持一致。
+    pub(crate) const FILE_OPEN_TIMEOUT: Duration = Duration::from_secs(120);
 
     pub(crate) fn target(key: &RuntimeKey, cx: &gpui::App) -> Result<RuntimeClient, String> {
         smelt_plugin_api::host(cx)
@@ -188,6 +191,15 @@ mod rt {
         timeout: Duration,
     ) -> Result<C::Result, ControlClientError> {
         client.call::<C>(&params, timeout)
+    }
+
+    pub(crate) fn call_on_cancellable<C: ControlCall>(
+        client: &RuntimeClient,
+        params: C::Params,
+        timeout: Duration,
+        cancel: &CallCancel,
+    ) -> Result<C::Result, ControlClientError> {
+        client.call_cancellable::<C>(&params, timeout, cancel)
     }
 }
 
@@ -255,6 +267,8 @@ pub(crate) struct FilesPanel {
     git_generation: HashMap<ProjectRef, u64>,
     /// 已经请运行时监听过的根。
     watches: HashSet<ProjectRef>,
+    /// 打开过的文本/图片内容有界缓存，跨项目与跨切换复用。
+    file_cache: cache::FileContentCache,
     tree_scroll: VirtualListScrollHandle,
     search_scroll: ScrollHandle,
     /// 宿主的遮罩层开着：HTML 预览的原生网页视图要让开。随事件更新。
@@ -319,6 +333,7 @@ impl FilesPanel {
             git_inflight: HashSet::new(),
             git_generation: HashMap::new(),
             watches: HashSet::new(),
+            file_cache: cache::FileContentCache::default(),
             tree_scroll: VirtualListScrollHandle::new(),
             search_scroll: ScrollHandle::new(),
             overlay_open,

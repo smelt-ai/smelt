@@ -301,15 +301,28 @@ fn file_save_with_a_stale_version_is_a_conflict() {
     let runtime = in_process_runtime();
 
     let opened = runtime
-        .call::<FileOpenCall>(
-            &FilePathParams { path: path.clone() },
-            DEFAULT_REQUEST_TIMEOUT,
-        )
+        .call::<FileOpenCall>(&FilePathParams::new(path.clone()), DEFAULT_REQUEST_TIMEOUT)
         .unwrap();
     let FileContent::Text { text, version } = opened.content else {
         panic!("应作为文本打开");
     };
     assert_eq!(text, "v1");
+
+    let not_modified = runtime
+        .call::<FileOpenCall>(
+            &FilePathParams {
+                path: path.clone(),
+                if_none_match: Some(version.clone()),
+            },
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+        .unwrap();
+    assert_eq!(
+        not_modified.content,
+        FileContent::NotModified {
+            version: version.clone()
+        }
+    );
 
     std::fs::write(&file, "changed elsewhere").unwrap();
     let error = runtime

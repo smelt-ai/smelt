@@ -38,6 +38,15 @@ pub(crate) struct FileRef {
     pub(crate) path: String,
 }
 
+/// 文件加载与可读状态。加载中和失败都显式画在内容区，避免 Markdown / HTML 预览在读完
+/// 前或出错时显示成一片空白。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OpenFileStatus {
+    Loading,
+    Ready,
+    Unreadable { message: String, can_retry: bool },
+}
+
 /// 打开着的文件：可编辑的代码编辑器（tree-sitter 高亮、行号、搜索），或者图片。
 pub(crate) struct OpenFile {
     /// 这一次打开的编号。后台读写回来按它找到自己的文件：文件可能已经随项目停放了。
@@ -45,6 +54,11 @@ pub(crate) struct OpenFile {
     /// 文件在哪台机器上。读写都发给它，跟当前项目在哪台机器上无关。
     pub(crate) runtime: RuntimeKey,
     pub(crate) path: String,
+    pub(crate) status: OpenFileStatus,
+    /// 默认只读（项目外的文件经链接打开时只读防误改，可点按钮解锁编辑）。
+    pub(crate) read_only: bool,
+    pub(crate) outside_project: bool,
+    pub(crate) load_cancel: Option<smelt_plugin_api::client::CallCancel>,
     pub(crate) editor: Entity<gpui_base::input::EditorState>,
     /// 磁盘上（或最近一次保存后）的内容，跟编辑器当前内容一比就知道有没有没保存的改动。
     pub(crate) saved_content: Rc<String>,
@@ -75,9 +89,12 @@ pub(crate) struct OpenFile {
 }
 
 impl OpenFile {
-    /// 编辑器里有没保存的改动。
+    /// 编辑器里有没保存的改动。只读模式不允许修改，直接按未改算。
     pub(crate) fn dirty(&self, cx: &gpui::App) -> bool {
-        self.readable && self.editor.read(cx).value().as_ref() != self.saved_content.as_str()
+        !self.read_only
+            && self.readable
+            && self.status == OpenFileStatus::Ready
+            && self.editor.read(cx).value().as_ref() != self.saved_content.as_str()
     }
 
     /// 把预览正文交给 HTML 预览；不是 HTML 或没开预览时什么也不做。
@@ -97,8 +114,8 @@ pub(crate) enum PreviewKind {
 }
 
 impl PreviewKind {
-    pub(crate) fn for_path(path: &str) -> Option<Self> {
-        match editor_language_for_path(path).as_str() {
+    pub(crate) fn for_path(style: PathStyle, path: &str) -> Option<Self> {
+        match editor_language_for_path(style, path).as_str() {
             "md" => Some(Self::Markdown),
             "html" | "htm" => Some(Self::Html),
             _ => None,
@@ -108,13 +125,10 @@ impl PreviewKind {
 
 /// 文件扩展名 → 编辑器的语法高亮语言名。组件库的 `Language::from_name` 认常见扩展名，
 /// 认不出的回退成纯文本。没有扩展名的（Makefile 等）用文件名本身。
-pub(crate) fn editor_language_for_path(path: &str) -> String {
-    match PathStyle::LOCAL.extension(path) {
+pub(crate) fn editor_language_for_path(style: PathStyle, path: &str) -> String {
+    match style.extension(path) {
         Some(ext) => ext.to_lowercase(),
-        None => PathStyle::LOCAL
-            .file_name(path)
-            .unwrap_or("text")
-            .to_lowercase(),
+        None => style.file_name(path).unwrap_or("text").to_lowercase(),
     }
 }
 

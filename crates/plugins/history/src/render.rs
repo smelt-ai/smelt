@@ -243,8 +243,9 @@ impl Render for HistoryPage {
                 let detail = opened.detail.clone();
                 let turn_markdown = opened.turn_markdown.clone();
                 let remeasure = self.detail_list.clone();
-                // 文件链接按项目目录补全；远程项目的链接带上机器，点开时去那台机器读。
+                // 文件链接按项目目录和远端路径规则补全；远程项目的链接带上机器，点开时去那台机器读。
                 let cwd = project.root.clone();
+                let style = smelt_plugin_api::host(cx).path_style(&project.machine, cx);
                 let remote = match &project.machine {
                     RuntimeKey::Local => None,
                     RuntimeKey::Remote(id) => Some(id.clone()),
@@ -252,7 +253,7 @@ impl Render for HistoryPage {
                 // 和对话页同一套排版：居中限宽的阅读栏，间距算在虚拟项自己身上。
                 list(self.detail_list.clone(), move |i, _, cx| {
                     let turn = &detail.turns[i];
-                    let links = FileLinks::new(Some(&cwd), remote.as_deref());
+                    let links = FileLinks::new(Some(&cwd), remote.as_deref()).with_style(style);
                     let body = turn_markdown.view(i, &turn.text, links, &remeasure, cx);
                     div()
                         .flex()

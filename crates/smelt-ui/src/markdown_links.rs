@@ -15,16 +15,37 @@ use gpui::{AnyView, App, ClickEvent, Global, MouseButton, SharedString, Styled a
 use crate::tooltip::Tooltip;
 
 /// Markdown 里文件链接的解析基准。相对路径按 `cwd` 补全；`runtime` 是远程运行时的 id，
-/// 跟着链接交出去，应用据此知道文件在哪台机器上，不会去打开本机同路径的文件。
-#[derive(Clone, Copy, Debug, Default)]
+/// `style` 是那台机器的路径规则，跟着链接交出去，应用据此知道文件在哪台机器上、
+/// 按哪台机器的路径习惯解析。
+#[derive(Clone, Copy, Debug)]
 pub struct FileLinks<'a> {
     cwd: Option<&'a str>,
     runtime: Option<&'a str>,
+    style: smelt_model::runtime_path::PathStyle,
+}
+
+impl Default for FileLinks<'_> {
+    fn default() -> Self {
+        Self {
+            cwd: None,
+            runtime: None,
+            style: smelt_model::runtime_path::PathStyle::LOCAL,
+        }
+    }
 }
 
 impl<'a> FileLinks<'a> {
     pub fn new(cwd: Option<&'a str>, runtime: Option<&'a str>) -> Self {
-        Self { cwd, runtime }
+        Self {
+            cwd,
+            runtime,
+            style: smelt_model::runtime_path::PathStyle::LOCAL,
+        }
+    }
+
+    pub fn with_style(mut self, style: smelt_model::runtime_path::PathStyle) -> Self {
+        self.style = style;
+        self
     }
 }
 
@@ -51,11 +72,7 @@ pub enum LinkTarget {
 /// 解析点中的链接。
 pub fn link_target(url: &str, links: FileLinks<'_>) -> LinkTarget {
     // 哪些算文件链接、相对路径怎么补全、`path:行号` 怎么拆，和手机共用 smelt-model 的规则。
-    match smelt_model::file_link::parse_file_link(
-        url,
-        links.cwd,
-        smelt_model::runtime_path::PathStyle::LOCAL,
-    ) {
+    match smelt_model::file_link::parse_file_link(url, links.cwd, links.style) {
         Some(link) => LinkTarget::File(FileLinkTarget {
             runtime: links.runtime.map(str::to_owned),
             line: link.line(),
@@ -80,11 +97,15 @@ pub(crate) fn link_opener(
 ) -> impl Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync + 'static {
     let cwd = links.cwd.map(str::to_owned);
     let runtime = links.runtime.map(str::to_owned);
+    let style = links.style;
     move |url, event, _window, cx| {
         if !opens_link(event) {
             return;
         }
-        match link_target(url, FileLinks::new(cwd.as_deref(), runtime.as_deref())) {
+        match link_target(
+            url,
+            FileLinks::new(cwd.as_deref(), runtime.as_deref()).with_style(style),
+        ) {
             LinkTarget::File(target) => {
                 if let Some(handler) = cx.try_global::<FileLinkHandler>().map(|h| h.0.clone()) {
                     handler(target, cx);
@@ -101,8 +122,9 @@ pub(crate) fn link_tooltip(
 ) -> impl Fn(&SharedString, &mut Window, &mut App) -> AnyView + Send + Sync + 'static {
     let cwd = links.cwd.map(str::to_owned);
     let runtime = links.runtime.map(str::to_owned);
+    let style = links.style;
     move |url, window, cx| {
-        let links = FileLinks::new(cwd.as_deref(), runtime.as_deref());
+        let links = FileLinks::new(cwd.as_deref(), runtime.as_deref()).with_style(style);
         // 网址可以很长，限宽折行，不让提示横穿窗口。
         Tooltip::new(link_description(url, links))
             .max_w(px(TOOLTIP_MAX_WIDTH))
@@ -149,9 +171,13 @@ mod tests {
         })
     }
 
+    fn posix_links(cwd: Option<&str>) -> FileLinks<'_> {
+        FileLinks::new(cwd, None).with_style(smelt_model::runtime_path::PathStyle::Posix)
+    }
+
     #[test]
     fn local_files_become_file_targets() {
-        let links = FileLinks::new(Some("/tmp/project"), None);
+        let links = posix_links(Some("/tmp/project"));
         assert_eq!(
             link_target("docs/workspace.md", links),
             file(None, "/tmp/project/docs/workspace.md", None)
@@ -172,7 +198,7 @@ mod tests {
 
     #[test]
     fn tooltip_names_what_a_click_opens() {
-        let links = FileLinks::new(Some("/tmp/project"), None);
+        let links = posix_links(Some("/tmp/project"));
         assert_eq!(
             link_description("docs/workspace.md", links),
             "/tmp/project/docs/workspace.md"
@@ -192,7 +218,7 @@ mod tests {
         assert_eq!(
             link_target(
                 "/tmp/smelt-current-notification-final.png",
-                FileLinks::default()
+                posix_links(None)
             ),
             file(None, "/tmp/smelt-current-notification-final.png", None)
         );
@@ -203,6 +229,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn default_style_follows_local_os() {
+        if cfg!(windows) {
+            let links = FileLinks::new(Some(r"C:\repo"), None);
+            assert_eq!(
+                link_target(r"src\lib.rs:5", links),
+                file(None, r"C:\repo\src\lib.rs", Some(5))
+            );
+            assert_eq!(
+                link_target("file:///E:/AI/AGENTS.md", FileLinks::default()),
+                file(None, r"E:\AI\AGENTS.md", None)
+            );
+        } else {
+            let links = FileLinks::new(Some("/repo"), None);
+            assert_eq!(
+                link_target("src/lib.rs:5", links),
+                file(None, "/repo/src/lib.rs", Some(5))
+            );
+            assert_eq!(
+                link_target("file:///tmp/AGENTS.md", FileLinks::default()),
+                file(None, "/tmp/AGENTS.md", None)
+            );
+        }
+    }
+
     /// grep / 编译器诊断常见的 `path:行号` 引用格式（不是 `#L行号` 片段）也要能拆出行号，
     /// 不能把 `:2765` 当成文件名的一部分。
     #[test]
@@ -210,7 +261,7 @@ mod tests {
         assert_eq!(
             link_target(
                 "crates/app/src/view.rs:2765",
-                FileLinks::new(Some("/tmp/project"), None),
+                posix_links(Some("/tmp/project"))
             ),
             file(None, "/tmp/project/crates/app/src/view.rs", Some(2765))
         );
@@ -220,19 +271,18 @@ mod tests {
     #[test]
     fn colon_line_col_refs_take_line_not_col() {
         assert_eq!(
-            link_target(
-                "src/main.rs:10:5",
-                FileLinks::new(Some("/tmp/project"), None)
-            ),
+            link_target("src/main.rs:10:5", posix_links(Some("/tmp/project"))),
             file(None, "/tmp/project/src/main.rs", Some(10))
         );
     }
 
-    /// 远程对话里的文件在另一台机器上：带上运行时 id，应用不会去打开本机同路径的文件。
+    /// 远程对话里的文件在另一台机器上：带上运行时 id 和远端路径风格，macOS 客户端也能正确
+    /// 解析 Windows 远端的 `file://` URI 和相对路径。
     #[test]
     fn files_in_remote_conversations_carry_the_runtime() {
         let remote = "39fafd41-9942-49b0-b9ec-7eb670d2711e";
-        let links = FileLinks::new(Some("/root/project"), Some(remote));
+        let links = FileLinks::new(Some("/root/project"), Some(remote))
+            .with_style(smelt_model::runtime_path::PathStyle::Posix);
         assert_eq!(
             link_target("src/main.rs:3", links),
             file(Some(remote), "/root/project/src/main.rs", Some(3))
@@ -240,6 +290,21 @@ mod tests {
         assert_eq!(
             link_target("/etc/hosts", links),
             file(Some(remote), "/etc/hosts", None)
+        );
+
+        let win_links = FileLinks::new(Some(r"E:\AI\minigame-studio"), Some(remote))
+            .with_style(smelt_model::runtime_path::PathStyle::Windows);
+        assert_eq!(
+            link_target("file:///E:/AI/minigame-studio/AGENTS.md#L10-L20", win_links),
+            file(Some(remote), r"E:\AI\minigame-studio\AGENTS.md", Some(10))
+        );
+        assert_eq!(
+            link_target("WORKFLOW.md", win_links),
+            file(Some(remote), r"E:\AI\minigame-studio\WORKFLOW.md", None)
+        );
+        assert_eq!(
+            link_description("file:///E:/AI/minigame-studio/AGENTS.md#L10-L20", win_links),
+            r"E:\AI\minigame-studio\AGENTS.md:10"
         );
     }
 
@@ -252,7 +317,7 @@ mod tests {
         });
         let window = cx.add_empty_window();
         window.update(|window, cx| {
-            let open = link_opener(FileLinks::new(Some("/repo"), None));
+            let open = link_opener(posix_links(Some("/repo")));
             let click = ClickEvent::Keyboard(Default::default());
             open(&"src/lib.rs:7".into(), &click, window, cx);
         });
