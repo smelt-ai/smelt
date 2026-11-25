@@ -1,265 +1,167 @@
-# Smelt NSH 插件开发参考
+# Smelt 插件速查
 
-本文档说明如何为 Smelt（NSH A2 运行时）编写、调试并验证 TSX/JS 插件。
+给智能体写插件时用的速查。完整文档在仓库的 `docs/plugins/`（<https://github.com/smelt-ai/smelt/tree/main/docs/plugins>）；签名以插件目录里生成的 `.nsh/types/` 为准，按符号名搜，不要猜。
 
-## 1. 目录结构与清单（`smelt-plugin.json`）
-
-一个插件就是一个目录（用户插件位于 `~/.smelt/plugins/<id>/`）：
+## 1. 目录与清单
 
 ```
-com.example.demo/
-  smelt-plugin.json   # 必填：id、name、version、entry
-  nsh.tsx             # TSX/JS 入口（也可命名为 main.tsx 等，与 entry 一致）
-  locales/            # 可选：ui.yml / en.yml / zh-CN.yml，供 t() 和 text() 使用
-  themes/             # 可选：*.json 主题文件（Smelt 主题格式）
-  tsconfig.json       # 由 smelt plugin init / types 生成
-  .nsh/               # 生成的 TS 声明与 tsconfig（热重载监听与导入自动忽略点目录）
+~/.smelt/plugins/com.example.demo/
+  smelt-plugin.json   清单
+  nsh.tsx             入口（路径由 entry 定）
+  model.ts            同目录模块，相对路径 import，不能 ../ 越出目录
+  locales/ui.yml      文案（_version: 2，每个键下 en / zh-CN）
+  themes/*.json       可选：附带主题
+  tests/              单元测试（bun test），不打包、不触发重载
+  .nsh/  tsconfig.json  smelt plugin init / types 生成
 ```
-
-清单字段：
 
 ```json
-{
-  "id": "com.example.demo",
-  "name": "Demo",
-  "version": "1.0.0",
-  "entry": "nsh.tsx"
-}
+{ "id": "com.example.demo", "name": "Demo", "version": "0.1.0", "entry": "nsh.tsx" }
 ```
 
-- `id`：只能包含 ASCII 字母、数字、`.`、`-`、`_`，且不能以 `.` 开头。同来源内（用户目录下两份、或自带目录下两份）不可重名；用户目录若与自带插件同 `id` 则构成**原地覆写**（用户版编译/主题/启动失败时自动回退到自带版本，`smelt plugin status` 可查看 `overrides_builtin` 与 `fallback_to_builtin`；用 `smelt plugin fork <自带id>` 可一键拷贝自带源码到用户目录）。
-- `entry`：插件目录内的相对路径。若以 `.json` 结尾（如 `"themes/my-theme.json"`），则为**纯主题插件**，只加载主题 JSON，不启动 JS VM。
-- `pages` / `layouts`（可选，可替代 `entry`）：声明该插件为**零 VM 纯布局插件**（如内置 `smelt.layouts`），直接通过清单内 `pages` 与 `layouts[].state` 引用静态布局 JSON 文件与 `locales/*.yml` 文案（`"pages": [{ "name": "workbench", "title": "workbench.title", "home": true, "index": "smelt.sessions/session" }]`，`"layouts": [{ "page": "smelt.layouts/workbench", "name": "standard", "title": "standard.title", "state": "standard.json" }]`），无需 JS 入口与 QuickJS VM。
-- `module`（可选）：声明该插件为**共享 JS 模块插件**（至少两段 `/` 分隔且不占用内置保留名，如 `"smelt/conversation"`），不独立起 VM 与注册视图，而是供其他插件通过 `import { ... } from "<module>"` 直接内联打包。配套可选填 `types`（插件目录内的 `.d.ts` 相对路径，如 `"index.d.ts"`），`smelt plugin types` 会生成对应声明到 `.nsh/types/<module>.d.ts`。保存或删改用户覆写模块时，宿主会自动重新打包加载并增量重编依赖它的插件（出错自动回退自带模块并重载恢复）。
-- 若使用相对模块（如 `./model.ts`、`./store.js`），必须留在当前插件目录内，禁止 `../` 越出目录、禁止导入静态资源图片文件（`import logo from "./logo.png"` 会被打包器拒绝）。
+- `id`：ASCII 字母、数字、`.-_`，不以 `.` 开头。视图、命令、页、布局、事件 id 都是 `<插件 id>/<name>`。
+- `version`：只用来显示，宿主不比较。
+- 四种插件：脚本（`entry` 指 `.tsx`/`.ts`/`.js`）；共享模块（再加 `module: "a/b"` 和可选 `types`，打包进 import 它的插件，各插件各有一份顶层变量）；主题（`entry` 指 `.json`，不跑 JS）；布局（`pages` + `layouts`，没有 `entry`，不跑 JS）。`entry` 和 `pages`/`layouts` 二选一。
+- 布局插件清单：`pages: [{ name, title_key, home?, index? }]`，`layouts: [{ page, name, title_key, file, materials? }]`，`title_key` 取 `locales/ui.yml`。
+- 加载时忽略：点开头的、`node_modules/`、`tsconfig.json`、`tests/`、带 `.test.` 的。
+- 和内置插件同 id 是**覆写**：失败自动回退内置版；和内置版共用 `~/.smelt/plugin-data/<id>/` 的库。
 
-## 2. 隔离模型、可导入模块与能力边界
+## 2. 能 import 什么，能做什么
 
-未覆写的内置脚本插件共驻 1 个共享内置 VM（通过作用域 SDK 隔离 `pluginId`、`dataDir`、`texts`、`store`、`onCommand` 与视图边界），每个用户插件（含同名覆写内置与新增插件）则运行在各自独立的加固 QuickJS VM（`harden: true`）中，拥有独立的堆与 CPU 预算和不可伪造的宿主通道：
+- 模块：`nsh`、`nsh/base`、`nsh/desktop`、`nsh/i18n`、`smelt/sdk`、共享模块（如 `smelt/conversation`）、同目录相对文件。`smelt/host` 是底层绑定，用 `smelt/sdk`。`smelt/slots` 不对插件开放。
+- 全局只有 Web 标准的：`fetch`、`setTimeout`、`requestAnimationFrame`、`console`、`crypto`、`URL`、`TextEncoder` 等。**没有** Node 的 `fs`、`path`、`process`、`Buffer`、`require`。
+- 插件**没有文件系统接口**。数据存 `store`（SQLite）；远程或本机项目文件经运行时（`call(machine, "file.open" …)`）。插件目录里的图片宿主不加载，图形用自带图标或 `SmeltVector`。
+- 不按权限隔离：任何插件都能调运行时、发通知、启动本机应用。只装可信的。
 
-- **可导入的模块**：
-  - `"nsh"`：核心响应式原语（`signal`, `computed`, `effect`, `batch`, `untracked`, `cleanup`, `resource`, `context`, `split`, `ErrorBoundary`）与基础节点（`View`, `Text`, `Scroll`, `List`, `Overlay`, `Image`, `Input`, `Canvas`, `Shader`, ...）。
-  - `"nsh/base"`：桌面控件（`Button`, `Dialog`, `Popover`, `Select`, `Switch`, `Checkbox`, `Radio`, `Input`, `Tabs`, `Tooltip`, `Editor`, `DiffView`, `TextView`, `Tree`, `DataTable` 等，完整清单看 `.nsh/types/nsh/base.d.ts`）。
-  - `"nsh/desktop"`：桌面原语（如 `Menu`, `Window` 相关类型，见 `.nsh/types/nsh/desktop.d.ts`）。
-  - `"nsh/i18n"`：国际化工具（常规插件优先直接用 `smelt/sdk` 的 `t`/`text`）。
-  - `"smelt/sdk"`：Smelt 宿主桥、响应式状态、SQLite 存储、控制 RPC 与 Smelt 主题化组件。
-  - `"smelt/host"`：底层纯同步 Rust 原语（`<Icon>`, `<Vector>`, `nativeModule("smelt/host")`，常规功能已被 `smelt/sdk` 包装）。
-  - **共享 JS 模块插件**（如内置 `smelt.conversation` 提供的 `"smelt/conversation"`，导出 `<SmeltConversation>`）：可通过 `smelt plugin fork smelt.conversation` 在本地覆写完整对话界面（输入框、消息列表、卡片等）。
-  - 同插件目录内的 `./*.ts` / `./*.tsx` / `./*.js` / `./*.json` 相对模块。
-- **禁止导入 / 不可用**：
-  - 禁止导入 `"smelt/slots"`（主壳专用，Guest 插件不得嵌套其它插件）。
-  - **未向 Guest 插件开放** Node/标准库裸模块（`fs/promises`, `os`, `process`, `net`, `buffer`, `crypto`, `path`, `url`, `websocket`, `zlib` 等均不在插件 import 白名单内），也不提供全局 `Buffer` 或 `process`。
-  - 不支持下载网络图片到界面上直接加载外部 `assets/`（图标用内建 `icons/*.svg`、`smelt-icons/*.svg` 或内联 SVG `<SmeltVector>`）。
-- **权限说明**：虽然 VM 本身加固（冻结原型、独立堆/CPU 配额），但插件通过 `smelt/sdk` 宿主桥能发起 `call(...)`、`run(...)`、`os.launch_path(...)`、`openUrl(...)` 等拥有与宿主同等能力的调用，只安装/运行可信代码。
+## 3. NSH 写法红线
 
-## 3. NSH 响应式 JSX 写法与红线
+NSH 不是 React：组件函数只跑一次，读了 signal 的地方才更新。
 
-NSH **不是 React**：组件函数只在挂载时执行**一次**，之后只有读取 signal/accessor 的地方细粒度更新。
+1. 不解构 props：`function Card(props) { return <Text>{props.title}</Text>; }`。视图参数读 `props.args`。
+2. 字放进 `<Text>`。
+3. 条件和列表用全局 `<If when={x()} else={…}>{(v) => …}</If>`、`<Each of={items()} key={(i) => i.id}>{(i) => …}</Each>`（子函数拿到 accessor），大列表用 `nsh` 的 `<List>`。
+4. 组件里订的要清理：`cleanup(onEvent(fn, ["sessions_changed"]))`。
+5. 组件函数和渲染里不做 IO：放 `bootTask`、事件回调、`resource`。
+6. 不轮询：用状态访问器、`onEvent`、运行时话题、`waitOnline`。逐帧的事用 `requestAnimationFrame`，停了就别再要帧。
+7. 不写死颜色：用主题令牌 class 或 `theme().palette`。
+8. 文案走 `t()`，两种语言一起写。
 
-1. **禁止在组件函数顶层解构 `props`**：
-   - 错误：`function Card({ title }: { title: string }) { return <Text>{title}</Text>; }`
-   - 正确：`function Card(props: { title: string }) { return <Text>{props.title}</Text>; }`
-   - 如果视图参数通过 `props.args` 传入，`props.args` 是由外层 accessor 传入的，在 JSX 属性、文本插值、`computed(() => ...)`、`effect(() => ...)` 中通过 `props.args` 读取才会随 `args` 变更热更新。
-2. **所有可见文字必须包在 `<Text>` 里**：`<View>hello</View>` 不合法或不可见，必须 `<View><Text>hello</Text></View>`。
-3. **条件与列表使用全局 `<If>` / `<Each>`（无需 import）或函数子节点**：
-   - `<If when={ready()} else={<Text>Loading</Text>}>{(val) => <Text>{val()}</Text>}</If>`
-   - `<Each of={items()} key={(item) => item.id}>{(item, idx) => <Text>{item().name}</Text>}</Each>`
-   - 大列表用 `"nsh"` 的 `<List>`（虚拟滚动）。
-4. **副作用与清理**：`effect(() => { const off = onEvent(..., ["view_opened"]); cleanup(off); })`，或配合 `onSlices(["views"], ...)` 按需监听状态切片。不要设定时轮询；等待宿主或运行时变化一律监听事件（`onEvent` 须显式传第二个参数 `types` 数组 / `onSlices` / `waitOnline`）。要逐帧推进的（拖到边上自动滚动这类）用 `requestAnimationFrame`，按两帧时间差算步长，停下就别再要帧。
-5. **顶层不可阻塞主渲染**：文件/数据库/RPC 都异步放到 `bootTask` 或事件回调里，界面直接读内存 signal。
-6. **主题样式不要硬编码颜色**：尽量使用语义 Tailwind class（见第 6 节）或读取 `theme()` 切片信号（`theme().palette`、`theme().radius`、`theme().type`）。
+## 4. `smelt/sdk` 速查
 
-## 4. 生命周期与宿主注册
+**启动与登记**（都是整组登记，再调整组替换，空数组撤下）：
 
-### 启动初始化与视图导出
+- `bootTask(async () => …)`：启动要做完的事，宿主最多等 3 秒再挂视图；抛错只记日志。
+- `registerViews([{ name, export?, title, icon?, draws_top_bar?, instances?, settings? }])`。`export` 缺省同 `name`；`instances: true` 每次打开新建一份放进出口；`settings: { group: "general"|"agents"|"system"|"plugins", keywords? }` 做成设置页。
+- 导出 `root()`：无头根，一直挂着（全局对话框、后台逻辑）。
+- `registerCommands([{ name, title, key?, palette?, args?, cli?, when_view_shown?, when_active_session? }], groupTitle?)` + `onCommand(({ name, args }) => 结果)`：返回值是回复，抛错是失败。`args` 是认的字段名表（`[]` 不带参数），给了表外的字段宿主直接拒；`cli: true` 才能 `smelt app run`。
+- `registerPages`、`registerLayouts`、`registerTopics(["automations.changed"])`、`registerMenuItems([{ slot: "app"|"help", title, command }])`、`registerContextMenuItems(menu, [{ label, icon?, command, args? }])`、`setStatusMenu(menu|null)`、`registerFileOpener(name)`、`setActiveContext(ctx)`。
+- 标题用 `text("key")`（整张多语言表），界面里用 `t("key", { n })`。
 
-- 使用 `bootTask(async () => { await initHost(); ... })` 注册启动任务：宿主会等待所有 `bootTask`（最多 3 秒）后再发 `smelt.plugin.ready` 并重放工作台布局中的视图插槽。
-- 导出组件函数并在 `registerViews` 中声明对应名称：
-  - `name`：插件内视图名；完整视图 id 为 `<插件 id>/<name>`。
-  - `export`：导出的 JS 函数名，省略时默认与 `name` 相同。
-  - `title`：显示标题，可用字符串或 `text("i18n.key")` 多语言对象。
-  - `icon`：左侧/标签图标，如 `"icons/puzzle.svg"`。
-  - `draws_top_bar`：若视图自行绘制与系统红绿灯共存的顶栏填 `true`（普通面板或设置页留 `false`），自绘时搭配 `<SmeltWindowBar view={`${pluginId()}/${name}`} />`。
-  - `instances`：`true` 表示按参数开独立实例（每次 `open-view` 开到主出口）；默认 `false` 表示工作台单例视图。
-  - `settings`：可选 `{ group: "general" | "agents" | "system" | "plugins", keywords?: string[] }`，把该视图同时注册为设置页右侧的一个分类页面。
-- **后台无头逻辑 / 弹窗**：若插件需要始终在后台挂一个不可见根节点（比如监听事件并弹出全局 `<Dialog>`，或响应无界面命令），导出 `export function root() { ... }`，主壳会自动把它挂在隐藏层中（关闭主窗口时仍保活）。
+**状态**（响应式，读到才订）：`machineMeta()`、`machines()`、`machineEntry(m)`、`pathStyle(m)`、`conversationFacts(m)`、`sessionAttention(m)`、`activeContext()`、`connections()`、`windowActive()`、`notificationPermission()`、`views()`、`pages()`、`commands()`、`command(id)`（没有给 `null`）、`viewShown(id)`、`viewLaidOut(id)`、`viewBadge(id)`、`safeArea(id)`、`theme()`、`locale()`。`workspaceDirectory(m)`、`sessionStates(m)` 是运行时原始结构，会变。
 
-### 注册命令、页面、布局与菜单
+**事件**：`onEvent(fn, types)` 必须给 `types`。常用：`view_opened`（带 `args`）、`sessions_changed`、`attention_alert`、`machines_changed`、`project_changed`、`reconnected`、`window_activated`、`locale_changed`、`themes_changed`、`commands_changed`、`runtime_topic`、`plugin:<事件名>`。宿主先推切片再发事件。广播：`emitEvent(`${pluginId()}/name`, payload)`。
 
-所有登记 API 都在 `"smelt/sdk"` 中：
+**调用**：
 
-- `registerCommands(specs, groupTitle?)` + `onCommand(handler)`：
-  - 注册命令，完整 id 为 `<插件 id>/<name>`。
-  - `key` 可给默认快捷键（如 `"cmd-shift-y"`）；`palette` 控制是否进命令面板；`cli: true` + `args: ["field"]`（空数组 `[]` 表示无参）允许通过 `smelt app run <插件 id>/<name>` 从命令行调用。
-  - 用 `onCommand(async ({ name, args }) => { ... })` 分发并返回值或抛错。
-- `registerPages(specs)` & `registerLayouts(specs)`：声明扩展主窗口页面和 Dock 布局。
-- `registerTopics(topics)`：订阅守护运行时广播话题（如 `"automations.changed"`；会话提醒宿主已镜像，读 `sessionAttention(machine)`、收 `attention_alert` 事件），再由 `onEvent(..., ["runtime_topic"])` 接收 `{ type: "runtime_topic", machine, topic, message }`。
-- `registerMenuItems(items)`：`{ slot: "app" | "help", title, command }`（仅 macOS）。
-- `registerContextMenuItems(menu, items)`：向其他插件定义的右键菜单注册条目。
-- `setStatusMenu(menu | null)`：设置本插件专属 macOS 菜单栏状态图标与菜单（每插件独立）。
-- `registerFileOpener(name)`：登记为可被打开文件的目标插件。
+- `run(id, args?)`：调命令（插件的或 `smelt.app/*`）。
+- `call(machine, method, params?, timeoutMs?)`：Control API，`machine` 是 `null`（本机）或远程 id；方法名见 `ControlMethodName`。要错误码用 `callDetail`（`{ ok, value }` / `{ ok: false, code, message }`）。
+- `waitOnline(machine, failures?)`：等上线，机器被移除给 `false`。
+- 运行时话题消息 `kind`：`event` / `snapshot`（整份换掉）/ `lagged`（自己重读）/ `unavailable`（这台机器不支持）。
+- 本机：`openUrl`、`openFile({ machine, path, line? })`、`pathKind`、`revealPath`、`clipboardWrite`、`discoverApps`、`launchPath`、`processUsage`、`renderMermaidSvg`、`fetch`。
+- 路径用 `pathJoin(style, …)` 这组函数，`style = pathStyle(machine)`，远程可能是 Windows。
 
-## 5. 状态、RPC 与存储（`smelt/sdk`）
+**存储**：`store.migrate([step1, step2])`（`steps[i]` 把版本 i 迁到 i+1，只往后加，放 `bootTask` 里最先跑）、`store.query(sql, params)`、`store.execute(sql, params)`、`store.write([{ sql, params }])`（一个事务）。参数只能是 string/number/boolean/null，不存 JSON 大字段、不存 BLOB。
 
-- **细粒度响应式状态读取**（只订阅用到的切片）：
-  `locale()`、`systemLocale()`、`locales()`、`theme()` / `currentTheme()`、`machineMeta()`、`machineMetaEntry(machine)`、`machines()`、`machineEntry(machine)`、`connections()`、`activeContext()`、`views()`、`pages()`、`commands()`、`viewShown(id)`、`viewLaidOut(id)`、`safeArea(viewId)`、`windowActive()`、`notificationPermission()`、`onSlices(slices, fn)`、`initHost(initialSlices)`、`hostReady()`。
-- **国际化**：在插件目录 `locales/` 放 `ui.yml`（结构同 Smelt 主库，`en` / `zh-CN`），用 `t("key", { count })` 取当前语言译文，用 `text("key")` 生成传给 `registerViews` / `registerCommands` 的多语言对象。
-- **离散事件**：`onEvent((event) => { ... }, types)` 需显式传入第二个参数 `types` 数组（仅在订阅的事件到达时唤醒 VM），接收 `view_opened`（附带 `open-view` 的 `args`）、`runtime_topic`、`plugin:<name>`、`window_activated`、`machines_changed`、`sessions_changed`、`themes_changed`、`locale_changed` 等；本插件也可用 `emitEvent(`${pluginId()}/event-name`, payload)` 广播事件。
-- **调用命令与守护 RPC**：
-  - `run("smelt.app/open-view", { view, args })` 等触发宿主或其它插件命令。
-  - `call(machine, method, params, timeoutMs?)` / `callDetail(...)`：调用本机（`machine = null`）或远程（`machine = "<id>"`）`smeltd` 的 Control API（方法名联合类型见 `.nsh/types/smelt/sdk.d.ts` 中的 `ControlMethodName`）。可用 `await waitOnline(machine)` 事件驱动等待机器上线。
-  - `openFile({ machine, path, line })`、`openUrl(url)`、`clipboardWrite(text)`、`pathKind(path)`、`revealPath(path)`、`discoverApps(queries)`、`launchPath(opts)`、`processUsage()`。
-- **SQLite 持久化与数据目录**：
-  - `store.migrate(steps)` / `store.query(sql, params)` / `store.execute(sql, params)` / `store.write(statements)`：读写 `~/.smelt/plugin-data/<id>/store.sqlite3`（幂等建表建议用 `CREATE TABLE IF NOT EXISTS` 或按 `migrate` 数组顺序逐版递增）。
-  - `dataDir()`：返回本插件自己的可写数据目录路径，`pluginId()` 返回自身 id。
+**宿主命令**（`run`）：`smelt.app/open-view { view, args? }`、`open-page { page }`、`set-view-badge { view, label }`、`notify { id?, subtitle, body, on_click? }`、`withdraw-notification { id }`、`set-dock-badge { label }`、`pick-paths { machine, title, confirm, files?, multiple? }`、`open-in-text-editor { path }`、`open-in-file-manager { path }`、`show-main-window`、`settings`。
 
-## 6. UI 组件、图标与主题令牌
+**内部，不要用**：`SmeltNative*`、`nativeApi`、`acp*`、`resolve*Acp`、`agentCatalog`、`quotaFacts` 等给内置插件的规则函数、`shellState`、`jsViews`、`request`（少数 Control API 还没覆盖的才用）。
 
-- **Smelt 封装组件（优先使用，自动接入主题、字体、交互与 Markdown 链路）**：
-  - `SmeltButton`：`label`、`icon`、`trailingIcon`、`tooltip`、`command`、`quiet` / `primary` / `danger` / `dismiss` / `floating`、`small`、`circle`、`fill`、`loading`、`selected`、`onPress`。
-  - `SmeltIcon`：渲染内置 SVG，`<SmeltIcon path="icons/search.svg" size={14} spin={false} />`。
-  - `SmeltVector`：渲染任意内联 SVG 字符串 `<SmeltVector markup="<svg ...>...</svg>" width={16} height={16} />`。
-  - `SmeltMarkdown`、`SmeltEditor`、`SmeltDiffView`、`SmeltWindowBar`、`ViewInstance`（以及共享模块 `"smelt/conversation"` 导出的 `<SmeltConversation>`）。
-  - `SmeltNativeTerminal`、`SmeltNativeDesktop`。
-  - 共享浮层样式常量：`POPUP_CLASS`、`TOOLTIP_CLASS`、`MENU_ITEM_CLASS`、`INPUT_CLASS`、`DIALOG_SURFACE_CLASS`。
-- **可用图标路径**：只能使用内置 SVG 资产路径（`icons/<name>.svg` 和 `smelt-icons/agent-<id>.svg`），精确枚举位于 `.nsh/types/smelt/sdk.d.ts` 的 `SmeltIconPath`。
-- **Tailwind 语义令牌**（完整清单见 `.nsh/types/nsh/tokens.d.ts`）：
-  除了标准 shadcn 令牌（`bg-background`, `bg-card`, `bg-popover`, `bg-muted`, `bg-primary`, `bg-accent`, `text-foreground`, `text-muted-foreground`, `border-border`, `border-input`），Smelt 额外提供 `faint`、`link`、`run`、`need`、`ok`、`bad`、`on-bad`、`soft-hover`、`row-selected`（可写作 `text-faint`、`text-run`、`text-need`、`text-ok`、`text-bad`、`bg-soft-hover`、`bg-row-selected`）。
+## 5. 组件、图标、令牌
 
-## 7. 主题插件与主题 JSON 格式
+- `SmeltButton`：`label`、`icon`、`trailingIcon`、`tooltip`、`onPress`、`primary`（一块界面最多一个）、`quiet`、`danger`、`dismiss`、`floating`、`circle`、`small`、`fill`、`disabled`、`loading`、`selected`、`toggled`。`command` 只用来在提示里显示快捷键，不会替你执行。
+- 浮层：`SmeltPopover`、`SmeltMenu`、`SmeltContextMenu`、`SmeltSelect`、`SmeltTooltip`、`SmeltDialog`（`onOpenChange={({ open }) => …}`），样子常量 `POPUP_CLASS`、`MENU_CLASS`、`MENU_ITEM_CLASS`、`TOOLTIP_CLASS`、`INPUT_CLASS`、`DIALOG_SURFACE_CLASS`。
+- 内容：`SmeltMarkdown`、`SmeltEditor`、`SmeltDiffView`、`SmeltVector`、`SmeltDisclosure`、`SmeltWindowBar`、`ViewInstance`；对话界面是共享模块 `smelt/conversation` 的 `<SmeltConversation>`。
+- 图标：`<SmeltIcon path="icons/search.svg" size={14} spin? />`，只能用 `SmeltIconPath` 里列的；智能体标志 `smelt-icons/agent-<id>.svg`。
+- 令牌 class：`background`/`foreground`、`card`、`popover`、`primary`、`secondary`、`muted`/`muted-foreground`、`faint`、`accent`、`row-selected`、`soft`/`soft-hover`、`border`、`input`、`ring`、`link`、`run`、`need`、`ok`、`bad`、`on-bad`、`scrim`、`sidebar*`、`chart-1`…`chart-5`；阴影 `shadow-raised`、`shadow-floating`、`shadow-overlay`。完整清单 `.nsh/types/nsh/tokens.d.ts`。
 
-如果只想改变全 App 的配色方案，不需要写 JS/TSX，直接编写**纯主题插件**（`entry` 指向 `.json`）；普通 TSX 插件也可以在目录里放置 `themes/*.json` 附带主题。
-
-### 脚手架与验证
-
-```sh
-smelt plugin init me.sunset --theme --name "Sunset"
-smelt plugin check ~/.smelt/plugins/me.sunset
-smelt settings set appearance.theme="Sunset Dark"
-```
-
-- 纯主题插件的 `smelt-plugin.json` 示例：`{"id":"me.sunset","name":"Sunset","version":"0.1.0","entry":"themes/theme.json"}`。
-- App 会监听目录并在 200ms 内热重载主题；若当前正启用该主题，也会同步重新着色。
-
-### 主题文件格式（`themes/*.json`）
+## 6. 主题 JSON
 
 ```json
 {
   "version": 1,
   "name": "Sunset",
-  "author": "Optional",
-  "url": "https://example.com",
   "themes": [
     {
       "name": "Sunset Dark",
       "mode": "dark",
-      "colors": {
-        "bg_base": "#16171a",
-        "text_base": "#e6e7eb",
-        "bg_accent": "#e07a5f",
-        "success.fg": "#6fc276"
-      },
-      "elevation": {
-        "floating": [{ "y": 4, "blur": 8, "color": "#0000004d" }]
-      },
-      "syntax": {
-        "keyword": { "color": "#f08d6c", "font_weight": 600 },
-        "comment": { "color": "#7b818c", "font_style": "italic" }
-      }
+      "colors": { "bg_base": "#16171a", "text_base": "#e6e7eb", "bg_accent": "#e07a5f" },
+      "elevation": { "floating": [{ "y": 4, "blur": 8, "color": "#0000004d" }] },
+      "syntax": { "keyword": { "color": "#f08d6c", "font_weight": 600 } }
     }
   ]
 }
 ```
 
-- **严格校验与原子注册**：
-  - `version` 必须为 `1`；`name`（系列名）与每个主题的 `name`、`mode`（`"light"` | `"dark"`）、`colors` 必填；`author`、`url`、`elevation`、`syntax` 可选。
-  - 颜色只支持 `#rgb`、`#rgba`、`#rrggbb`、`#rrggbbaa`；任何不认识的键或非法颜色会令**整个插件的主题包原子拒绝**，保留之前可用的注册。
-  - **保留名与重名限制**：不能使用内置保留名 `smelt Light` / `smelt Dark`，也不能与其它已加载插件注册的主题名重复。
-- **`colors` 键说明**（仅 `bg_base` 与 `text_base` 必填且必须不透明，未写的颜色自动在 OKLab 空间按对比度规则推导）：
-  - **背景与层级**：`page`（外层侧栏）、`bg_base`（主内容底）、`bg_deep`、`layer_01`–`layer_04`、`surface_raised`（弹层/菜单）、`bg_inverse`、`bg_contrast`（主按钮高对比底）、`bg_button_neutral`、`bg_icon_button_contrast`、`bg_accent`（强调/开关底）。
-  - **文字与图标**：`text_base`、`text_muted`、`text_faint`、`text_inverse`、`text_contrast`、`text_accent`；对应的 `icon_base`、`icon_muted`、`icon_faint`、`icon_inverse`、`icon_contrast`、`icon_accent`。
-  - **边框与交互层**：`border_muted`、`border_base`、`border_strong`、`border_focus`、`hover`、`pressed`、`contrast_hover`、`contrast_pressed`、`scrim`、`selection`、`knob`、`knob_on`、`submit_highlight`、`submit_hover`、`submit_fg`、`submit_icon`、`depth_top`、`depth_bottom`、`white`、`black`。
-  - **状态色与图表色**：`success.{bg,fg,border,icon}`、`warning.{bg,fg,border,icon}`、`danger.{bg,fg,border,icon}`、`info.{bg,fg,border,icon}`、`chart.1`–`chart.5`。
-- **`elevation` 键说明**：可选，键为 `raised`、`floating`、`overlay`、`button_neutral`、`button_contrast`、`elements`、`switch_off`、`switch_on`、`md`、`knob`、`input`。每项是阴影对象数组 `[{ x?, y?, blur?, spread?, color, inset? }]`（只有 `color` 必填，其余默认 `0`/`false`，空数组 `[]` 表示取消投影）。
-- **`syntax` 键说明**：可选，支持 tree-sitter 高亮名（如 `attribute`、`boolean`、`comment`、`comment.doc`、`constant`、`constructor`、`function`、`keyword`、`label`、`number`、`operator`、`property`、`punctuation`、`string`、`string.escape`、`tag`、`text.code.span`、`text.literal`、`title`、`type`、`variable`、`variant` 等），每项 `{ color?, font_style?: "normal" | "italic" | "underline", font_weight?: 100..900（整百）}`。省略 `syntax` 时整套沿用同明暗的内置 `smelt` 代码高亮；若显式给出 `syntax`，则整套替换。
+- 必填：`version: 1`、系列 `name`、每个主题的 `name`、`mode`（`light`/`dark`）、`colors`。`colors` 里只有 `bg_base`、`text_base` 必填且不透明，其余在 OKLab 里推出来。颜色 `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`。
+- `colors` 键：`page`、`bg_base`、`bg_deep`、`layer_01`–`layer_04`、`surface_raised`、`bg_inverse`、`bg_contrast`、`bg_button_neutral`、`bg_icon_button_contrast`、`bg_accent`；`text_*`、`icon_*`（`base`/`muted`/`faint`/`inverse`/`contrast`/`accent`）；`border_muted`/`base`/`strong`/`focus`、`hover`、`pressed`、`contrast_hover`、`contrast_pressed`、`selection`、`scrim`；`submit_highlight`/`hover`/`fg`/`icon`；`knob`、`knob_on`、`depth_top`、`depth_bottom`、`white`、`black`；`success|warning|danger|info.{bg,fg,border,icon}`；`chart.1`–`chart.5`。
+- `elevation` 键：`raised`、`floating`、`overlay`、`md`、`button_neutral`、`button_contrast`、`elements`、`switch_off`、`switch_on`、`knob`、`input`，值是 `[{ x?, y?, blur?, spread?, color, inset? }]`，`[]` 是不要投影。
+- `syntax`：tree-sitter 高亮名 → `{ color?, font_style?: normal|italic|underline, font_weight?: 100..900 }`。给了就整套替换内置高亮。
+- 有一处不对，这个插件的主题整组不生效。不能用保留名 `smelt Light`/`smelt Dark`，不能和别的插件的主题重名。
 
-## 8. 最小完整示例
+## 7. 最小示例
 
 ```tsx
-import { computed, signal, Text, View } from "nsh";
+import { signal, Text, View } from "nsh";
 import {
-  bootTask,
-  initHost,
-  machineMeta,
-  onCommand,
-  onEvent,
-  registerCommands,
-  registerViews,
-  run,
-  SmeltButton,
-  SmeltIcon,
-  store,
+  bootTask, onCommand, pluginId, registerCommands, registerViews,
+  run, SmeltButton, store, t, text,
 } from "smelt/sdk";
 
-const lastMessage = signal("Ready");
-
-onEvent(
-  (ev) => {
-    if (ev.type === "view_opened") {
-      const note = (ev.args as { note?: string } | null)?.note;
-      if (note) lastMessage.set(String(note));
-    }
-  },
-  ["view_opened"],
-);
+const count = signal(0);
 
 bootTask(async () => {
-  await initHost(["machines_meta"]);
-  await store.migrate([
-    "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL);",
-  ]);
-  await registerViews([
-    {
-      name: "main",
-      export: "Main",
-      title: "Quick Notes",
-      icon: "icons/pencil.svg",
-    },
-  ]);
-  await registerCommands([
-    {
-      name: "ping",
-      title: "Ping Quick Notes",
-      cli: true,
-      args: ["text"],
-    },
-  ]);
-  onCommand(({ name, args }) => {
-    if (name === "ping") {
-      lastMessage.set(String(args?.text ?? "pong"));
-      return { ok: true };
-    }
-    return null;
-  });
+  await store.migrate(["CREATE TABLE counter (id INTEGER PRIMARY KEY CHECK (id = 1), n INTEGER NOT NULL);"]);
+  const rows = await store.query("SELECT n FROM counter WHERE id = 1");
+  count.set(Number(rows[0]?.n ?? 0));
+  await registerViews([{ name: "main", export: "Main", title: text("title"), icon: "icons/plus.svg" }]);
+  await registerCommands([{ name: "reset", title: text("cmd.reset"), cli: true, args: [] }]);
 });
 
-export function Main() {
-  const count = computed(() => machineMeta().length);
+onCommand(async ({ name }) => {
+  if (name !== "reset") throw new Error(`unknown command ${name}`);
+  await save(0);
+  return { n: 0 };
+});
 
+async function save(n: number) {
+  count.set(n);
+  await store.execute("INSERT INTO counter (id, n) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET n = excluded.n", [n]);
+}
+
+export function Main() {
   return (
     <View class="flex-1 gap-3 bg-background p-4">
-      <View class="flex-row items-center gap-2">
-        <SmeltIcon path="icons/pencil.svg" size={15} />
-        <Text class="text-sm font-semibold text-foreground">Quick Notes</Text>
-        <Text class="text-xs text-faint">{`Machines: ${count()}`}</Text>
+      <Text class="text-foreground">{t("count", { n: count() })}</Text>
+      <View class="flex-row gap-2">
+        <SmeltButton label={t("add")} primary onPress={() => void save(count() + 1)} />
+        <SmeltButton label={t("reset")} quiet onPress={() => void run(`${pluginId()}/reset`)} />
       </View>
-      <Text class="text-xs text-muted-foreground">{lastMessage()}</Text>
-      <SmeltButton
-        label="Notify"
-        small
-        onPress={() => void run("smelt.app/notify", { subtitle: "Quick Notes", body: lastMessage() })}
-      />
     </View>
   );
 }
 ```
+
+`locales/ui.yml` 里写 `title`、`cmd.reset`、`count`（`%{n}`）、`add`、`reset` 的 `en` 和 `zh-CN`。
+
+## 8. 闭环
+
+```sh
+smelt plugin init com.example.demo --name "Demo"     # 或 --theme；改内置用 smelt plugin fork <id> [--as <新 id>]
+smelt plugin check ~/.smelt/plugins/com.example.demo # 离线校验，不过不算写完
+smelt plugin status com.example.demo                 # 保存一两秒后：error 为 null、views 里有视图、fallback_to_builtin 为 false
+smelt app run smelt.app/open-view --args '{"view":"com.example.demo/main"}'
+```
+
+- 日志：`~/.smelt/app.log` 里 `[plugin]` 的行（`console.*`、未捕获异常、`bootTask failed`），行里不带插件 id。
+- 升级 Smelt 后：`smelt plugin types <目录>` 刷新声明，再 `check`。
+- 删插件先问用户；「设置 → 面板插件」里能恢复默认、看错误。

@@ -198,7 +198,7 @@ smelt settings set appearance.theme_mode=light appearance.ui_font_px=16
 
 Smelt 的界面插件运行在 **NSH**（独立加固的 QuickJS VM，由宿主 GPUI 原生绘制，热重载不用重启 App）。用户插件写在 `~/.smelt/plugins/<id>/`；用户问「会不会写 Smelt 插件」说的是这个，不是 `smelt pi` 里的 Pi 技能或扩展。下面的 `smelt plugin` 命令不需要 `smeltd`（仅桌面版本包含；Linux 无界面 CLI 没有）。
 
-> **开发前必读**：[references/plugins.md](references/plugins.md)（完整说明生命周期、响应式 JSX 规范、`nsh`/`nsh/base`/`smelt/sdk` 接口、图标/令牌与常见陷阱）。
+> **开发前必读**：[references/plugins.md](references/plugins.md)（速查：清单、NSH 写法红线、`smelt/sdk` 接口、组件/图标/令牌、主题格式）。完整文档在仓库 `docs/plugins/`（<https://github.com/smelt-ai/smelt/tree/main/docs/plugins>）。
 
 ```
 ~/.smelt/plugins/com.example.hello/
@@ -215,7 +215,7 @@ Smelt 的界面插件运行在 **NSH**（独立加固的 QuickJS VM，由宿主 
 3. **离线校验**：每改完跑 `smelt plugin check ~/.smelt/plugins/<id>`。它离线校验清单、`locales/` 翻译、主题 JSON、`nsh-bundler` TSX 打包、外部 `import` 白名单、未声明自由标识符及 QuickJS 字节码编译，并打印导出的符号表（共享模块插件还会带有 `module` 字段；纯主题 `entry: "*.json"` 与声明式纯布局 `pages`/`layouts` 插件零 VM 运行，分别标出 `theme_only: true` 或 `layout_only: true`）；不修改目录，过了退出 0，没过把错误写 stderr 并退出 1。`check` 不过不算写完。
 4. **确认运行挂载**：Smelt 开着时保存源码会自动热重载该插件的独立 VM（不重启其它插件和宿主；若修改了被其他插件 `import` 的共享模块插件，宿主只会自动增量重编引用它的插件）。保存一两秒后跑 `smelt plugin status <id>`：确认 `error` 为 `null`、`fallback_to_builtin` 为 `false`，且 `views` 里出现你登记的视图 id（不带 id 列全部，含 `source`、`overrides_builtin`、`module` 与 `uses_modules`）。
 5. **在 App 里亮出来**：check 和 status 都过了，用 `smelt app run smelt.app/open-view --args '{"view":"<id>/<视图名>"}'` 打开给用户看。不要用截屏或 AppleScript 点击界面。
-6. **日志与持久化**：运行时 `console.*` 与未捕获异常在 `~/.smelt/app.log`（`[plugin]` / `[smelt-nsh]`）。运行期文件写进 `dataDir()`（`~/.smelt/plugin-data/<id>/`）或调用 `store.*` SQLite，切勿写回插件目录，否则会反复触发热重载。
+6. **日志与持久化**：运行时 `console.*` 与未捕获异常在 `~/.smelt/app.log`（`[plugin]` / `[smelt-nsh]`）。插件没有文件系统接口，运行期数据一律存 `store.*`（`~/.smelt/plugin-data/<id>/store.sqlite3`）。
 7. **删除插件**：删掉 `~/.smelt/plugins/<id>/`（若要清数据再删 `~/.smelt/plugin-data/<id>/`），App 开着会自动卸载。删前必须跟用户确认。
 
 ### 写主题插件（自定义配色）
@@ -223,7 +223,7 @@ Smelt 的界面插件运行在 **NSH**（独立加固的 QuickJS VM，由宿主 
 全 App（含全部内置插件与 `smelt/sdk` 组件）统一消费语义主题令牌，改整体配色不需要写 JS/TSX，写一个纯主题插件即可：
 
 1. 运行 `smelt plugin init <id> --theme [--name "<系列名>"]`，会在 `~/.smelt/plugins/<id>/` 生成 `smelt-plugin.json`（`entry` 指向 `themes/theme.json`）与深浅两套起步主题 `themes/theme.json`。
-2. 编辑 `themes/theme.json`：`bg_base` 与 `text_base` 必填（不透明 hex 色值），`bg_accent` 等其余界面色、状态色、图表色、阴影 `elevation` 和代码高亮 `syntax` 均可按需覆盖，未写的会自动在 OKLab 空间推算（完整字段与规则见 [references/plugins.md](references/plugins.md) 第 7 节）。
+2. 编辑 `themes/theme.json`：`bg_base` 与 `text_base` 必填（不透明 hex 色值），`bg_accent` 等其余界面色、状态色、图表色、阴影 `elevation` 和代码高亮 `syntax` 均可按需覆盖，未写的会自动在 OKLab 空间推算（完整字段与规则见 [references/plugins.md](references/plugins.md) 第 6 节）。
 3. 跑 `smelt plugin check ~/.smelt/plugins/<id>` 校验 JSON 格式、颜色键名及保留名；成功后 stdout 的 `themes` 字段会列出登记的主题名。
 4. App 开着会自动热重载进主题目录，跑 `smelt settings set appearance.theme="<主题名>"` 即可生效。注意主题名不能与保留名（`smelt Light`、`smelt Dark`）或已有主题名（如 `Ayu Dark`）重名。
 

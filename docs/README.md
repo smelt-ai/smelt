@@ -15,6 +15,7 @@ How the product works today.
 - [`release.md`](release.md) — Tags, release artifacts, and stable versus pre-release.
 - [`ui-design-language.md`](ui-design-language.md) — Desktop visual language: theme tokens, surfaces, copy restraint, and snapshots.
 - [`i18n.md`](i18n.md) — Desktop, runtime, CLI, mobile, and JS plugin localization.
+- [`plugins/README.md`](plugins/README.md) — Plugin developer guide: getting started, views, commands, layouts, host state, runtime calls, storage, UI, themes, and the `smelt/sdk` reference.
 - [`windows-support.md`](windows-support.md) — Windows desktop, native `smeltd` (named pipe), Inno Setup installer, and in-app updater.
 - [`mobile/README.md`](../mobile/README.md) — Building the Flutter mobile client.
 

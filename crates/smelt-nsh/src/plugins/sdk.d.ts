@@ -104,6 +104,14 @@ export type HostEvent =
   | { type: "open_paths"; machine: string | null; paths: string[] }
   | { type: "project_changed"; machine: string | null; root: string }
   | { type: "sessions_changed" }
+  | {
+      type: "attention_alert";
+      machine: string | null;
+      session: SessionAttention;
+      alert: AttentionItem;
+      title: string;
+      message: string;
+    }
   | { type: "machines_changed" }
   | { type: "active_context_changed" }
   | { type: "views_changed" }
