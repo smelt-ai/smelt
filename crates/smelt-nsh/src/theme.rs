@@ -41,8 +41,9 @@ fn shadow_css(layers: &[BoxShadow]) -> String {
 
 /// 交给 NSH 的投影令牌（类名就是令牌名，`shadow-floating`）：主题 `elevation` 里组件直接取的几档，
 /// 和按钮实际画的那几组（[`resting_shadows`]，已按底色透不透换过）。按钮不给原始的
-/// `button_neutral`：半透明底上画外投影会透出一圈灰，要不要换内细圈归宿主定。
-fn shadows() -> [(&'static str, Vec<BoxShadow>); 7] {
+/// `button_neutral`：半透明底上画外投影会透出一圈灰，要不要换内细圈归宿主定。开关的槽
+/// （关、开两档内细圈）和圆钮也给，SDK 的开关照它画。
+fn shadows() -> [(&'static str, Vec<BoxShadow>); 10] {
     let e = elevation::current();
     [
         ("shadow-raised", e.raised.clone()),
@@ -58,6 +59,9 @@ fn shadows() -> [(&'static str, Vec<BoxShadow>); 7] {
             "shadow-button-floating",
             resting_shadows(ButtonShadow::Floating),
         ),
+        ("shadow-switch-off", e.switch_off.clone()),
+        ("shadow-switch-on", e.switch_on.clone()),
+        ("shadow-knob", e.elements.clone()),
     ]
 }
 
@@ -122,7 +126,6 @@ pub(crate) fn nsh_theme() -> Theme {
         // 全局语义色令牌（全应用共享，由引擎原生解析 Tailwind class，不经 JS 状态广播）。
         ("faint", solid(p.faint)),
         ("link", solid(p.link)),
-        ("run", solid(p.run)),
         ("need", solid(p.need)),
         ("ok", solid(p.ok)),
         ("bad", solid(p.bad)),
@@ -191,6 +194,7 @@ mod tests {
         assert_eq!(light["shadow-floating"], NO_SHADOW);
         let parsed = nsh_platform_gpui::Theme::from_json(&config.to_string()).unwrap();
         assert!(parsed.color("scrim").is_some());
+        assert!(parsed.color("run").is_none(), "在跑不配色");
         assert!(parsed.tokens().shadow("shadow-overlay").is_some());
     }
 
@@ -275,7 +279,6 @@ mod tests {
         for name in [
             "faint",
             "link",
-            "run",
             "need",
             "ok",
             "bad",

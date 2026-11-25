@@ -243,7 +243,7 @@ fn update_section(entity: Entity<update::Updater>, shown: Shown) -> SettingsSect
                 "updater.status.checking_detail",
                 channel = channel_label(channel)
             ),
-            Some(ui_theme::run()),
+            None,
         ),
         UpdateStatus::UpToDate => (
             t!("updater.status.up_to_date"),
@@ -260,7 +260,7 @@ fn update_section(entity: Entity<update::Updater>, shown: Shown) -> SettingsSect
                 channel = channel_label(channel),
                 version = version
             ),
-            Some(ui_theme::run()),
+            None,
         ),
         UpdateStatus::Downloading {
             version,
@@ -284,18 +284,18 @@ fn update_section(entity: Entity<update::Updater>, shown: Shown) -> SettingsSect
             (
                 t!("updater.status.downloading"),
                 detail,
-                Some(ui_theme::run()),
+                None,
             )
         }
         UpdateStatus::Installing { version } => (
             t!("updater.status.installing"),
             t!("updater.status.installing_detail", version = version),
-            Some(ui_theme::run()),
+            None,
         ),
         UpdateStatus::Applying { version } => (
             t!("updater.status.applying"),
             t!("updater.status.applying_detail", version = version),
-            Some(ui_theme::run()),
+            None,
         ),
         UpdateStatus::ReadyToInstall(update) => (
             t!("updater.status.ready"),

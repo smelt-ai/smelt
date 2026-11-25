@@ -1,8 +1,8 @@
 // 项目的仓库对话框（NSH A2 版）：复用纯逻辑 `../repositories.js`。
 
 import { computed, Scroll, Text, View } from "nsh";
-import { Checkbox, Input } from "nsh/base";
-import { DIALOG_SURFACE_CLASS, SmeltButton, SmeltDialog, SmeltIcon } from "smelt/sdk";
+import { Input } from "nsh/base";
+import { DIALOG_SURFACE_CLASS, SmeltButton, SmeltCheckbox, SmeltDialog, SmeltIcon } from "smelt/sdk";
 
 import { icon } from "../util.js";
 import { list, MemoryInputState, t, theme, tick } from "./bridge.ts";
@@ -255,27 +255,11 @@ export function RepositoriesDialog() {
                             }}
                           >
                             <If when={mode() === "create"}>
-                              <Checkbox
+                              <SmeltCheckbox
                                 checked={checked()}
                                 disabled={busy()}
                                 accessibilityLabel={r().name}
-                                onChange={({ checked: next }: any) => dialog()?.toggle(r().name, Boolean(next))}
-                                indicatorStyle={{
-                                  width: 16,
-                                  height: 16,
-                                  borderRadius: 4,
-                                  borderWidth: 1,
-                                  borderColor: checked() ? look().palette.link : look().palette.hair_strong,
-                                  backgroundColor: checked() ? look().palette.link : "transparent",
-                                  display: "flex",
-                                  alignItems: "center",
-                                  justifyContent: "center",
-                                }}
-                                indicator={
-                                  checked() ? (
-                                    <SmeltIcon path={icon("check")} size={11} color={look().palette.on_ink} />
-                                  ) : undefined
-                                }
+                                onChange={(next) => dialog()?.toggle(r().name, next)}
                               />
                             </If>
 

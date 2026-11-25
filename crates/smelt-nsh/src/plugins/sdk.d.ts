@@ -634,6 +634,37 @@ export declare function SmeltDisclosureChevron(props: {
   testID?: string;
 }): JSX.Element;
 
+/** 开关：一项设置立刻生效的开或关。打开铺强调色 `accent`。 */
+export declare function SmeltSwitch(props: {
+  checked: boolean;
+  disabled?: boolean;
+  accessibilityLabel?: string;
+  testID?: string;
+  onChange: (checked: boolean) => void;
+}): JSX.Element;
+/** 复选框：勾上铺强调色、压白勾。`children` 是标签，点标签和点框一样。 */
+export declare function SmeltCheckbox(props: {
+  checked: boolean;
+  disabled?: boolean;
+  accessibilityLabel?: string;
+  testID?: string;
+  onChange: (checked: boolean) => void;
+  class?: string;
+  style?: StyleProp<ViewStyle>;
+  children?: JSX.Element;
+}): JSX.Element;
+/** 单选：选中铺强调色、压白点。放在 `nsh/base` 的 `RadioGroup` 里；`children` 是标签。 */
+export declare function SmeltRadio(props: {
+  checked: boolean;
+  disabled?: boolean;
+  accessibilityLabel?: string;
+  testID?: string;
+  onChange: () => void;
+  class?: string;
+  style?: StyleProp<ViewStyle>;
+  children?: JSX.Element;
+}): JSX.Element;
+
 export interface SmeltButtonProps {
   label?: string;
   icon?: SmeltIconPath | (string & {});

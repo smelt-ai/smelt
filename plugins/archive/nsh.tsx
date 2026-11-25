@@ -1,6 +1,6 @@
 // 归档（NSH A2 独立 VM 版本）：复用纯逻辑 model.js 与 contract.js。
 import { computed, Scroll, signal, Text, View } from "nsh";
-import { Radio } from "nsh/base";
+import { RadioGroup } from "nsh/base";
 import {
   bootTask,
   call,
@@ -20,6 +20,7 @@ import {
   SmeltDialog,
   SmeltIcon,
   SmeltPopover,
+  SmeltRadio,
   SmeltTooltip,
   t,
   text,
@@ -446,7 +447,10 @@ export function button() {
                 </Text>
               ) : (
                 <Scroll style={{ maxHeight: CHOICES_MAX_HEIGHT, width: "100%" }}>
-                  <View style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <RadioGroup
+                    accessibilityLabel={t("restore.closed_title")}
+                    style={{ display: "flex", flexDirection: "column", gap: 8 }}
+                  >
                     <Each
                       of={dialog()!.row.closed_workset.candidates}
                       key={(c: any) => c.id}
@@ -457,7 +461,7 @@ export function button() {
                           return cur?.kind === "restore" && cur.picked === candidate().id;
                         };
                         return (
-                          <Radio
+                          <SmeltRadio
                             checked={checked()}
                             accessibilityLabel={candidate().label}
                             onChange={() => {
@@ -466,46 +470,15 @@ export function button() {
                                 dialog.set({ ...prev, picked: candidate().id });
                               }
                             }}
-                            style={{
-                              display: "flex",
-                              flexDirection: "row",
-                              alignItems: "center",
-                              gap: 8,
-                            }}
                           >
-                            <View
-                              style={{
-                                width: 14,
-                                height: 14,
-                                borderRadius: 7,
-                                borderWidth: 1.5,
-                                borderColor: checked()
-                                  ? look().palette.link
-                                  : look().palette.hair_strong,
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                              }}
-                            >
-                              {checked() ? (
-                                <View
-                                  style={{
-                                    width: 6,
-                                    height: 6,
-                                    borderRadius: 3,
-                                    backgroundColor: look().palette.link,
-                                  }}
-                                />
-                              ) : null}
-                            </View>
                             <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
                               {candidate().label}
                             </Text>
-                          </Radio>
+                          </SmeltRadio>
                         );
                       }}
                     </Each>
-                  </View>
+                  </RadioGroup>
                 </Scroll>
               )
             ) : null}

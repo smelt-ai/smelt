@@ -1,7 +1,7 @@
 // 输入栏工具弹层：模型与推理强度/配置弹层、能力（Skills/MCP）弹层、上下文用量弹层。
 import { computed, Scroll, signal, Text, View } from "nsh";
-import { Input, Switch } from "nsh/base";
-import { SmeltButton, SmeltIcon, SmeltPopover, theme } from "smelt/sdk";
+import { Input } from "nsh/base";
+import { SmeltButton, SmeltIcon, SmeltPopover, SmeltSwitch, theme } from "smelt/sdk";
 import { ct } from "./i18n.ts";
 import {
   buildVisibleModels,
@@ -77,11 +77,8 @@ export function ModelConfigPopover(props: {
               style={{
                 fontSize: look().type.text_xsmall_medium.size,
                 fontWeight: look().type.text_xsmall_medium.weight,
-                color: pendingNotice()
-                  ? look().palette.need
-                  : open()
-                    ? look().palette.text
-                    : look().palette.muted,
+                // 改了模型要等下一轮才生效：字提亮一档，不用要你的橙。
+                color: pendingNotice() || open() ? look().palette.text : look().palette.muted,
                 numberOfLines: 1,
               }}
             >
@@ -91,7 +88,7 @@ export function ModelConfigPopover(props: {
               <Text
                 style={{
                   fontSize: look().type.text_xsmall.size,
-                  color: pendingNotice() ? look().palette.need : look().palette.faint,
+                  color: pendingNotice() ? look().palette.muted : look().palette.faint,
                   numberOfLines: 1,
                 }}
               >
@@ -285,7 +282,7 @@ export function ModelConfigPopover(props: {
                 <Text
                   style={{
                     fontSize: look().type.small_medium.size,
-                    color: look().palette.need,
+                    color: look().palette.muted,
                   }}
                 >
                   · {ct("model.next_turn")}
@@ -342,31 +339,12 @@ export function ModelConfigPopover(props: {
                     <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
                       {cfg().name || cfg().config_id}
                     </Text>
-                    <Switch
+                    <SmeltSwitch
                       checked={Boolean(cfg().boolean)}
                       accessibilityLabel={cfg().name || cfg().config_id}
-                      onChange={({ checked }: any) => {
+                      onChange={(checked: boolean) => {
                         const val = Boolean(checked);
                         props.onSelectConfig(cfg().config_id, val ? "true" : "false", val);
-                      }}
-                      trackStyle={{
-                        width: 34,
-                        height: 20,
-                        borderRadius: 10,
-                        padding: 2,
-                        backgroundColor: Boolean(cfg().boolean)
-                          ? look().palette.link
-                          : look().palette.soft,
-                        display: "flex",
-                        flexDirection: "row",
-                        alignItems: "center",
-                        justifyContent: Boolean(cfg().boolean) ? "flex-end" : "flex-start",
-                      }}
-                      thumbStyle={{
-                        width: 16,
-                        height: 16,
-                        borderRadius: 8,
-                        backgroundColor: look().palette.on_ink,
                       }}
                     />
                   </View>
@@ -630,15 +608,16 @@ export function UsagePopover(props: {
   const rows = computed(() => {
     const b = props.breakdown();
     if (!b) return [];
+    // 五类固定开销各占一个分类色；后三类是对话本身，用三档灰，相邻两段深浅错开。
     const list: Array<{ label: string; tokens: number; colorClass: string }> = [
       { label: ct("usage.system"), tokens: b.systemPrompt ?? 0, colorClass: "bg-chart-1" },
       { label: ct("usage.tools"), tokens: b.toolsDefinition ?? 0, colorClass: "bg-chart-2" },
       { label: ct("usage.rules"), tokens: b.rules ?? 0, colorClass: "bg-chart-3" },
       { label: ct("usage.skills"), tokens: b.skills ?? 0, colorClass: "bg-chart-4" },
       { label: ct("usage.mcp"), tokens: b.mcpDynamic ?? 0, colorClass: "bg-chart-5" },
-      { label: ct("usage.subagents"), tokens: b.subagent ?? 0, colorClass: "bg-chart-2" },
-      { label: ct("usage.summarized"), tokens: b.summarized ?? 0, colorClass: "bg-chart-3" },
-      { label: ct("usage.conversation"), tokens: b.conversation ?? 0, colorClass: "bg-chart-1" },
+      { label: ct("usage.subagents"), tokens: b.subagent ?? 0, colorClass: "bg-foreground" },
+      { label: ct("usage.summarized"), tokens: b.summarized ?? 0, colorClass: "bg-faint" },
+      { label: ct("usage.conversation"), tokens: b.conversation ?? 0, colorClass: "bg-muted-foreground" },
     ];
     return list.filter((r) => r.tokens > 0);
   });
@@ -689,7 +668,7 @@ export function UsagePopover(props: {
                   />
                 }
               >
-                <SmeltIcon spin size={11} color={look().palette.run} />
+                <SmeltIcon spin size={11} color={look().palette.muted} />
               </If>
               <Text
                 style={{

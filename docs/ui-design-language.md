@@ -108,7 +108,7 @@ smelt 是 AI 桌面客户端：同时指挥多个编码智能体，跨多台机�
 | `bg_contrast` | 高对比底：带字的主按钮，两种明暗下都是压浅色字的深色块 | 深色 `layer_04` / 浅色 `text_base` |
 | `bg_button_neutral` | 中性按钮底 | 深色 字 6% / 浅色 `bg_base` |
 | `bg_icon_button_contrast` | 只有图标的主按钮（发送）底，深色主题里反过来是浅色块 | 深色 OKLab 明度 0.89、色相色度同 `text_base` / 浅色 `bg_contrast` |
-| `bg_accent` | 强调色：开关打开、单选。种子色，选填 | 蓝 oklch(0.55, 0.23, 268) |
+| `bg_accent` | 强调色：开关打开、复选框和单选选中、未读点、拖放插入线。种子色，选填 | 蓝 oklch(0.55, 0.23, 268) |
 | **发送按钮** | | |
 | `submit_highlight` | 上端的高光 | 白 深色 60% / 浅色 20% |
 | `submit_hover` |  | 深色 黑 8% / 浅色 `bg_base` 12% |
@@ -190,15 +190,18 @@ smelt 是 AI 桌面客户端：同时指挥多个编码智能体，跨多台机�
 | `text` | `text_base` | 正文、标题 |
 | `muted` | `text_muted` | 说明、次级信息、图标 |
 | `faint` | `text_faint` | 占位、时间、快捷键、空闲 |
-| `ink` / `ink_hover` / `ink_press` | `bg_contrast`，悬停、按下再叠 `contrast_hover` / `contrast_pressed` | 主操作、选中的复选框 |
+| `ink` / `ink_hover` / `ink_press` | `bg_contrast`，悬停、按下再叠 `contrast_hover` / `contrast_pressed` | 主操作 |
 | `on_ink` | `text_contrast`，在 `ink` 三档上都配够 4.5:1 | 主操作上的字 |
 | `button_submit` / `button_submit_foreground` | `bg_icon_button_contrast`，悬停、按下再叠 `submit_hover` / `contrast_pressed`；图标 `submit_icon`，三档上配够 4.5:1 | 只有图标的主按钮（发送） |
 | `button_secondary` | `bg_button_neutral`，悬停、按下再叠 `hover` / `pressed` | 次要按钮三档 |
 | `focus` | `border_focus` | 焦点环 |
 | `selection` | `selection` | 文字选区（输入框、Markdown） |
 | `link` | `text_accent` | 正文里的链接 |
-| `run` | `info.fg` | 在跑（`info.icon` 可以另配色相，不拿来表示在跑） |
-| `need` | `warning.icon` | 要你处理、提醒、git 已修改 |
+| `accent` | `bg_accent` | 开关打开、复选框和单选选中、未读点、拖放插入线 |
+| `on_accent` | `text_contrast`、`text_base` 里对 `accent` 对比高的那个，配够 4.5:1 | 强调色上的勾、圆点 |
+| `track` | `layer_04` | 关着的开关槽 |
+| `knob` / `knob_on` | `knob` / `knob_on` | 开关圆钮，关、开两档 |
+| `need` | `warning.icon` | 要你处理（等你的会话、要你动手才能继续的事）、git 已修改 |
 | `ok` | `success.icon` | 完成、通过、diff 新增 |
 | `bad` | `danger.icon` | 出错、危险操作、diff 删除 |
 | `on_bad` | `text_contrast`、`text_base` 里对 `bad` 对比高的那个，配够 4.5:1 | 危险色底上的字 |
@@ -210,11 +213,13 @@ diff 底色、`need` 和 `bad` 的浅底（悬停用的 8%–12% 透明度）都
 
 ### 用色规则
 
-- **界面本身是黑白灰。** 颜色只用来表示状态（在跑、要你、完成、出错）和主操作，不拿来装饰。
-- **主操作是 `ink`（近黑），不是品牌蓝。** 一处界面最多一个主操作。
-- **状态色只出现在状态上。** 蓝只表示在跑，橙只表示要你，不把蓝拿去当链接色或选中色。链接用 `text` 加下划线。
+- **界面本身是黑白灰。** 彩色只有两种用途：状态里要人看的那几种，和强调色。不拿来装饰。
+- **状态色只有三种：橙是要你，红是出错，绿是完成、通过、新增。** 在跑不配色：转圈本身在动，已经够醒目；在跑又是最常见、不用人管的状态，配了彩色侧栏会常年一片。在跑的转圈、计时、进度一律用中性色（`muted`，会话行的图标用 `text`，比空闲亮一档）。橙最稀缺：侧栏和对话区里的橙都会被读成「有会话在等你」，进行中、后台刷新失败、有提交没推这类都不用它。
+- **蓝是强调色 `accent`，表示可交互、选中，不表示状态。** 开关打开、复选框和单选选中、未读点、拖放插入线、链接（`link`）都是它，和 macOS 的强调色一个用法。
+- **主操作是 `ink`（近黑），不是强调色。** 一处界面最多一个主操作。
 - **分类用 `chart`，不借状态色。** 要区分几类东西（用量里的工具/规则/技能、轨迹里的输入/模型/工具、mermaid 系列）时用分类色，免得读的人以为是状态。
 - **选中靠底色，不靠彩色边。** 行选中是 `row_selected` 底加中等字重，比悬停深一档，一眼认得出。
+- **JS 插件的开关、复选框、单选用 `smelt/sdk` 的 `SmeltSwitch`、`SmeltCheckbox`、`SmeltRadio`**，不拿 `nsh/base` 的原件自己配色。
 
 ---
 
@@ -255,7 +260,7 @@ diff 底色、`need` 和 `bad` 的浅底（悬停用的 8%–12% 透明度）都
 | 关闭控件 | 20 | `md` | 提示条、卡片角上的 ×，`faint` 字 |
 | 悬停提示 | 随内容 | `sm` | `soft` 底，`TYPE.small_medium`，横向内边距 6、纵向 5；可带快捷键，键帽 `xs` 圆角。正文和快捷键与底色至少 4.5:1 |
 | 文本框 | 28（两档同高） | `md` | `bg` 底，不画描边，`input` 层级；`TYPE.ui_compact`，左右内边距 8，前后缀和字之间 6。多行文本框同样外形，高度跟内容长（`smelt_ui::field`）。嵌在浮层里的搜索框用 `bare()`：不画底和投影 |
-| 复选框、单选 | 16 | `sm` / 圆 | 没勾是 1px `hair_strong` 边；勾上 `ink` 实底，勾 10、圆点 6，用 `on_ink`。标签在右，复选框间距 12、行高 24、`text_small`；单选间距 8、行高 20、`ui`；点标签等于点框 |
+| 复选框、单选 | 16 | `sm` / 圆 | 没勾是 1px `hair_strong` 边；勾上、选中是 `accent` 实底，勾 10、圆点 6，用 `on_accent`；禁用的复选框勾上不铺底、勾用 `text`。标签在右，复选框间距 12、行高 24、`text_small`；单选间距 8、行高 20、`ui`；点标签等于点框 |
 | 开关 | 16×36 | 胶囊 | 开是 `bg_accent`，关是 `layer_04`，上沿是底色、下沿压一层白光（关 20%、开 10%）；悬停时关着的叠 `hover`、开着的叠 `contrast_hover`。滑块 14×21、离轨道边 1，`knob` / `knob_on` 底压一道 `depth_top` → `depth_bottom` 的高光、0.5px `depth_top` 描边。悬停时滑块拉长 2、按下拉长 5 |
 | 滑块 | 20 | 胶囊 | 槽 4 高 `layer_04`，已选那段 `ink`；圆钮 14，`knob` 加同开关的高光，1px `hair_strong` 边，`elements` 投影 |
 | 分段控件 | 28 | `md` | 每段左右 12，字 13 / 440；轨道 `soft` 底加 0.5px `hair` 细圈；选中块 `bg` 底加 0.5px `hair_strong` 细圈，从旧段滑到新段 |
@@ -374,7 +379,7 @@ diff 底色、`need` 和 `bad` 的浅底（悬停用的 8%–12% 透明度）都
 
 | 状态 | 侧栏行右侧 | 其它 |
 |---|---|---|
-| 在跑 | `run` 转圈 | 页签上也是转圈 |
+| 在跑 | 中性色转圈、计时 | 页签上也是转圈 |
 | 要你处理 | `need` 点 + 「等你允许」这类短句 | 对话里是审批卡片 |
 | 出错 | `bad` 图标 | 对话里给原因和「再试一次」 |
 | 空闲 | 最后活动时间，`faint` | — |

@@ -4,7 +4,6 @@ import { signal, Text, View } from "nsh";
 import {
   MenuItem,
   MenuSeparator,
-  Switch,
 } from "nsh/base";
 import {
   DIALOG_SURFACE_CLASS,
@@ -14,6 +13,7 @@ import {
   SmeltDialog,
   SmeltIcon,
   SmeltMenu,
+  SmeltSwitch,
   SmeltTooltip,
   t,
 } from "smelt/sdk";
@@ -229,35 +229,16 @@ export function ToggleSwitch(props: {
   tooltip?: string;
   onChange: (checked: boolean) => void;
 }) {
-  const look = currentTheme;
   return (
     <View
       tooltip={props.tooltip ? <Tip text={props.tooltip} /> : undefined}
       style={{ flexShrink: 0 }}
     >
-      <Switch
+      <SmeltSwitch
         checked={props.checked}
         disabled={props.disabled}
         accessibilityLabel={props.accessibilityLabel}
-        onChange={({ checked }: { checked: boolean }) => props.onChange(Boolean(checked))}
-        trackStyle={{
-          width: 34,
-          height: 20,
-          borderRadius: 10,
-          padding: 2,
-          backgroundColor: props.checked ? look().palette.link : look().palette.soft,
-          display: "flex",
-          flexDirection: "row",
-          alignItems: "center",
-          justifyContent: props.checked ? "flex-end" : "flex-start",
-          opacity: props.disabled ? 0.45 : 1,
-        }}
-        thumbStyle={{
-          width: 16,
-          height: 16,
-          borderRadius: 8,
-          backgroundColor: look().palette.on_ink,
-        }}
+        onChange={props.onChange}
       />
     </View>
   );

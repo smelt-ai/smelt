@@ -542,7 +542,7 @@ function ToolCallRow(props: {
                 />
               }
             >
-              <SmeltIcon spin size={12} color={look().palette.run} />
+              <SmeltIcon spin size={12} color={look().palette.muted} />
             </If>
             <Text
               style={{
@@ -614,7 +614,7 @@ function ToolCallRow(props: {
                         when={isRunning()}
                         else={<SmeltIcon path="icons/bot.svg" size={13} color={look().palette.muted} />}
                       >
-                        <SmeltIcon spin size={12} color={look().palette.run} />
+                        <SmeltIcon spin size={12} color={look().palette.muted} />
                       </If>
                       <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
                         <Text style={{ fontSize: look().type.small.size, color: look().palette.text, numberOfLines: 1 }}>
@@ -633,7 +633,7 @@ function ToolCallRow(props: {
                             status() === "failed"
                               ? look().palette.bad
                               : isRunning()
-                                ? look().palette.run
+                                ? look().palette.muted
                                 : look().palette.faint,
                         }}
                       >
@@ -846,7 +846,7 @@ export function MessageList(props: {
                         />
                       }
                     >
-                      <SmeltIcon spin size={12} color={look().palette.run} />
+                      <SmeltIcon spin size={12} color={look().palette.muted} />
                     </If>
                     <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.muted }}>
                       {summarizeTally(r().group?.tally)}

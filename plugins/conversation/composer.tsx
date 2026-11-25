@@ -106,7 +106,6 @@ export function Composer(props: {
   const draft = signal("");
   const attachments = signal<AttachedImage[]>([]);
   const inputHeight = signal(40);
-  const focused = signal(false);
   const planExpanded = signal(false);
   const workspaceFiles = signal<string[]>([]);
   const filesLoadedCwd = signal<string | null>(null);
@@ -446,21 +445,16 @@ export function Composer(props: {
     void sweepPos.stop();
   });
 
-  const sweepColor = computed(() => (awaitingUser() ? look().palette.need : look().palette.run));
+  // 在跑不配色：扫过的光用次要字色，等你时换成 `need`。
+  const sweepColor = computed(() => (awaitingUser() ? look().palette.need : look().palette.muted));
   const sweepHaloColor = computed(() => colorWithAlpha(sweepColor(), 0.35));
 
-  const cardClass = computed(() => {
-    if (focused()) {
-      return "relative w-full rounded-3xl border border-ring ring-2 ring-ring/25 bg-card shadow-md overflow-hidden transition-colors duration-150";
-    }
-    if (awaitingUser()) {
-      return "relative w-full rounded-3xl border border-need/45 bg-card shadow-md overflow-hidden transition-colors duration-150";
-    }
-    if (props.turnActive()) {
-      return "relative w-full rounded-3xl border border-run/35 bg-card shadow-md overflow-hidden transition-colors duration-150";
-    }
-    return "relative w-full rounded-3xl border border-border bg-card shadow-md overflow-hidden transition-colors duration-150";
-  });
+  // 输入框几乎一直有焦点，不另画焦点环；边框只表示等你。
+  const cardClass = computed(() =>
+    awaitingUser()
+      ? "relative w-full rounded-3xl border border-need/45 bg-card shadow-md overflow-hidden transition-colors duration-150"
+      : "relative w-full rounded-3xl border border-border bg-card shadow-md overflow-hidden transition-colors duration-150",
+  );
 
   return (
     <View
@@ -586,7 +580,7 @@ export function Composer(props: {
                             step().status === "Completed"
                               ? look().palette.ok
                               : step().status === "InProgress"
-                                ? look().palette.run
+                                ? look().palette.muted
                                 : look().palette.faint
                           }
                         />
@@ -802,11 +796,7 @@ export function Composer(props: {
                     ? ct("composer.placeholder_running")
                     : ct("composer.placeholder")
               }
-              onFocus={() => {
-                focused.set(true);
-                props.onFocusIn?.();
-              }}
-              onBlur={() => focused.set(false)}
+              onFocus={() => props.onFocusIn?.()}
               onChange={({ value }: any) => {
                 draft.set(value);
                 caretPos.set(value.length);

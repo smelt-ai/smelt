@@ -275,7 +275,7 @@ function AutomationTableRow(props: { machine: string | null; automation: any }) 
     const schedule = triggerSummary(auto.trigger, t);
     const dotColor =
       rowStatus === "running"
-        ? look().palette.run
+        ? look().palette.muted
         : rowStatus === "agent_missing" || rowStatus === "unavailable"
           ? look().palette.bad
           : rowStatus === "paused"

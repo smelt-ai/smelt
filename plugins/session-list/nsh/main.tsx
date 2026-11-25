@@ -125,9 +125,10 @@ interface MotionAccess {
   glowSerial: (key: string) => number | null;
 }
 
+/** 状态只有「要你」配色；在跑用正文色，比空闲的次要字亮一档，不另配彩色。 */
 function dotColor(palette: ReturnType<typeof theme>["palette"], status: string): string {
   if (status === "needs_you") return palette.need;
-  if (status === "running") return palette.run;
+  if (status === "running") return palette.text;
   return palette.faint;
 }
 
@@ -180,7 +181,7 @@ function rowMeta(row: any, selected: boolean) {
     return { text: t("bucket.needs_you"), color: palette.need, unread };
   }
   if (row.status === "running" && row.turn_started_at > 0) {
-    return { text: span(Math.max(nowSec - row.turn_started_at, 0), t), color: palette.run, unread };
+    return { text: span(Math.max(nowSec - row.turn_started_at, 0), t), color: rowMuted(palette, selected), unread };
   }
   return { text: relative_time(row.activity, nowSec, t), color: rowFaint(palette, selected), unread };
 }
@@ -323,7 +324,7 @@ function DropLine(props: { edge: "top" | "bottom" | null }) {
           right: 4,
           height: 2,
           borderRadius: 1,
-          backgroundColor: look().palette.focus,
+          backgroundColor: look().palette.accent,
           pointerEvents: "none",
         }}
       />
@@ -1046,7 +1047,7 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
                     width: 6,
                     height: 6,
                     borderRadius: 3,
-                    backgroundColor: look().palette.link,
+                    backgroundColor: look().palette.accent,
                   }}
                 />
               </If>

@@ -3,7 +3,6 @@
 import { computed, Scroll, signal, Text, View } from "nsh";
 import {
   Button as BaseButton,
-  Checkbox,
   Input,
   MenuItem,
   MenuSeparator,
@@ -15,6 +14,7 @@ import {
   INPUT_CLASS,
   MENU_ITEM_CLASS,
   SmeltButton,
+  SmeltCheckbox,
   SmeltDialog,
   SmeltIcon,
   SmeltMenu,
@@ -736,37 +736,11 @@ export function UsesPopover(props: {
                 const p = () => look().palette;
                 return (
                   <View style={{ paddingHorizontal: 6, paddingVertical: 3 }}>
-                    <Checkbox
+                    <SmeltCheckbox
                       checked={checked()}
                       disabled={pending()}
                       accessibilityLabel={agent().name}
-                      onChange={({ checked: next }: { checked: boolean }) =>
-                        props.page.setAgentUse(props.usable, agent().id, Boolean(next))
-                      }
-                      style={{
-                        display: "flex",
-                        flexDirection: "row",
-                        alignItems: "center",
-                        gap: 8,
-                        opacity: pending() ? 0.45 : 1,
-                      }}
-                      indicatorStyle={{
-                        width: 16,
-                        height: 16,
-                        borderRadius: look().radius.sm,
-                        borderWidth: 1,
-                        borderColor: checked() ? p().ink : p().hair_strong,
-                        backgroundColor: checked() ? p().ink : "transparent",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        flexShrink: 0,
-                      }}
-                      indicator={
-                        checked() ? (
-                          <SmeltIcon path="icons/check.svg" size={10} color={p().on_ink} />
-                        ) : undefined
-                      }
+                      onChange={(next) => props.page.setAgentUse(props.usable, agent().id, next)}
                     >
                       <Text
                         style={{
@@ -778,7 +752,7 @@ export function UsesPopover(props: {
                       >
                         {agent().name}
                       </Text>
-                    </Checkbox>
+                    </SmeltCheckbox>
                   </View>
                 );
               }}

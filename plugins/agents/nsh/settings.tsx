@@ -196,8 +196,9 @@ function CliSectionContent() {
             };
             const statusColor = () => {
               const p = look().palette;
-              if (!avail()) return p.bad;
-              if (row().executable.error) return p.need;
+              // 没装是常态（用不着的智能体），不算错；装了却探测失败才是错。
+              if (!avail()) return p.muted;
+              if (row().executable.error) return p.bad;
               return p.ok;
             };
             const pathText = () => row().executable.path || t("cli.not_on_path");

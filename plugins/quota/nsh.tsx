@@ -1,6 +1,5 @@
 // 账户额度（NSH A2 独立 VM 版本）：复用纯逻辑 model.js 与 contract.js，使用 NSH <Canvas> 画抗锯齿额度环。
 import { Canvas, computed, Scroll, signal, Text, View } from "nsh";
-import { Switch } from "nsh/base";
 import {
   bootTask,
   call,
@@ -14,6 +13,7 @@ import {
   SmeltButton,
   SmeltIcon,
   SmeltPopover,
+  SmeltSwitch,
   SmeltTooltip,
   t,
   text,
@@ -430,7 +430,7 @@ export function bar() {
                         id: e.id,
                         name: e.name,
                         icon: e.icon,
-                        color: e.error != null ? pal.need : pal.faint,
+                        color: e.error != null ? pal.bad : pal.faint,
                         text: "—",
                         used: 0,
                         refreshing: e.refreshing,
@@ -653,27 +653,10 @@ export function settings() {
                     />
                   ) : null}
 
-                  <Switch
+                  <SmeltSwitch
                     checked={facts().enabled}
                     accessibilityLabel={t("enable_label", { name: target()!.name })}
-                    onChange={({ checked }: any) => setEnabled(facts().id, Boolean(checked))}
-                    trackStyle={{
-                      width: 34,
-                      height: 20,
-                      borderRadius: 10,
-                      padding: 2,
-                      backgroundColor: facts().enabled ? p().link : p().soft,
-                      display: "flex",
-                      flexDirection: "row",
-                      alignItems: "center",
-                      justifyContent: facts().enabled ? "flex-end" : "flex-start",
-                    }}
-                    thumbStyle={{
-                      width: 16,
-                      height: 16,
-                      borderRadius: 8,
-                      backgroundColor: p().on_ink,
-                    }}
+                    onChange={(checked: boolean) => setEnabled(facts().id, Boolean(checked))}
                   />
                 </View>
               ) : null;

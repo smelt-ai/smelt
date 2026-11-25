@@ -4,7 +4,7 @@
 // - 角标：有机器离线、不兼容、高延迟或机器表读取失败时在「远程」页挂 "!" 角标。
 
 import { Canvas, cleanup, computed, Scroll, signal, Text, View } from "nsh";
-import { Input, Switch } from "nsh/base";
+import { Input } from "nsh/base";
 import {
   bootTask,
   call,
@@ -23,6 +23,7 @@ import {
   SmeltButton,
   SmeltDialog,
   SmeltIcon,
+  SmeltSwitch,
   SmeltTooltip,
   smeltVersion,
   t,
@@ -903,28 +904,11 @@ export function remote() {
                 {accessInfo().text}
               </Text>
             </View>
-            <Switch
+            <SmeltSwitch
               checked={enabled()}
               disabled={!loaded()}
               accessibilityLabel={t("access.title")}
-              onChange={({ checked }: { checked: boolean }) => setEnabled(Boolean(checked))}
-              trackStyle={{
-                width: 34,
-                height: 20,
-                borderRadius: 10,
-                padding: 2,
-                backgroundColor: enabled() ? look().palette.link : look().palette.soft,
-                display: "flex",
-                flexDirection: "row",
-                alignItems: "center",
-                justifyContent: enabled() ? "flex-end" : "flex-start",
-              }}
-              thumbStyle={{
-                width: 16,
-                height: 16,
-                borderRadius: 8,
-                backgroundColor: look().palette.on_ink,
-              }}
+              onChange={(checked: boolean) => setEnabled(Boolean(checked))}
             />
           </View>
 

@@ -34,15 +34,17 @@ function runStatusColor(status: string, palette: any): string {
     case "queued":
     case "dispatching":
     case "running":
-      return palette.run;
+      return palette.muted;
     case "awaiting_approval":
     case "waiting_for_user":
       return palette.need;
     case "completed":
       return palette.ok;
     case "failed":
-    case "skipped":
       return palette.bad;
+    case "cancelled":
+    case "skipped":
+      return palette.faint;
     default:
       return palette.faint;
   }

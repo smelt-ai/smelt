@@ -343,8 +343,8 @@ export function desktop(props: { args?: { machine?: string | null } | null }) {
   const statusColor = computed(() => {
     const p = look().palette;
     switch (presentation().tone) {
-      case "need":
-        return p.need;
+      case "strong":
+        return p.text;
       case "bad":
         return p.bad;
       default:

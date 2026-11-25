@@ -15,6 +15,7 @@ import {
 } from "nsh";
 import {
   Button as BaseButton,
+  Checkbox as BaseCheckbox,
   Collapsible,
   ContextMenu,
   Dialog,
@@ -22,7 +23,9 @@ import {
   Editor as BaseEditor,
   Menu,
   Popover,
+  Radio as BaseRadio,
   Select,
+  Switch as BaseSwitch,
   TextView,
   Tooltip,
 } from "nsh/base";
@@ -1507,6 +1510,125 @@ export function SmeltDisclosureChevron(props: {
       class="transition-transform duration-[300ms] ease-[cubic-bezier(0.32,0.72,0,1)]"
       rotate={props.open ? 90 : 0}
     />
+  );
+}
+
+// ---- 开关、复选框、单选：选中一律铺强调色 `accent`，和 smelt-ui 的 Switch / Checkbox / Radio 同一套 ----
+
+// 控件档动效（docs/ui-design-language.md「动效」control 档）：200ms。
+const CONTROL_TRANSITION = "duration-[200ms] ease-[cubic-bezier(0.32,0.72,0,1)]";
+const FOCUS_RING =
+  "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background";
+// 复选框、单选整行可点，焦点环只圈指示块：行上挂 `group`，指示块跟着它的键盘焦点。
+const INDICATOR_FOCUS_RING =
+  "group-focus-visible:ring-2 group-focus-visible:ring-ring group-focus-visible:ring-offset-1 group-focus-visible:ring-offset-background";
+
+/** 开关：一项设置立刻生效的开或关。36×16 的槽、21×14 的胶囊钮，按住时钮伸长。 */
+export function SmeltSwitch(props: {
+  checked: boolean;
+  disabled?: boolean;
+  accessibilityLabel?: string;
+  testID?: string;
+  onChange: (checked: boolean) => void;
+}) {
+  const p = () => theme().palette;
+  return (
+    <BaseSwitch
+      testID={props.testID}
+      checked={props.checked}
+      disabled={props.disabled}
+      accessibilityLabel={props.accessibilityLabel}
+      onChange={({ checked }: any) => props.onChange(Boolean(checked))}
+      class={`shrink-0 rounded-full disabled:opacity-50 ${FOCUS_RING}`}
+      trackClass={`relative rounded-full shadow-switch-off checked:shadow-switch-on transition-colors ${CONTROL_TRANSITION}`}
+      trackStyle={{ width: 36, height: 16, backgroundColor: props.checked ? p().accent : p().track }}
+      thumbClass={`absolute rounded-full shadow-knob origin-left checked:origin-right checked:translate-x-[13px] active:scale-x-125 transition-transform ${CONTROL_TRANSITION}`}
+      thumbStyle={{
+        top: 1,
+        left: 1,
+        width: 21,
+        height: 14,
+        backgroundColor: props.checked ? p().knob_on : p().knob,
+      }}
+    />
+  );
+}
+
+/** 复选框：16 见方、4 圆角，勾上铺强调色、压白勾。`children` 是标签，点标签和点框一样。 */
+export function SmeltCheckbox(props: {
+  checked: boolean;
+  disabled?: boolean;
+  accessibilityLabel?: string;
+  testID?: string;
+  onChange: (checked: boolean) => void;
+  class?: string;
+  style?: any;
+  children?: any;
+}) {
+  const p = () => theme().palette;
+  return (
+    <BaseCheckbox
+      testID={props.testID}
+      checked={props.checked}
+      disabled={props.disabled}
+      accessibilityLabel={props.accessibilityLabel}
+      onChange={({ checked }: any) => props.onChange(Boolean(checked))}
+      class={`group flex-row items-center gap-2 disabled:opacity-50 ${props.class ?? ""}`}
+      style={props.style}
+      indicatorClass={`items-center justify-center shrink-0 border ${INDICATOR_FOCUS_RING}`}
+      indicatorStyle={{
+        width: 16,
+        height: 16,
+        borderRadius: theme().radius.sm,
+        borderColor: props.checked ? p().accent : p().hair_strong,
+        backgroundColor: props.checked ? p().accent : "transparent",
+      }}
+      indicator={
+        props.checked ? <SmeltIcon path="icons/check.svg" size={10} color={p().on_accent} /> : undefined
+      }
+    >
+      {props.children}
+    </BaseCheckbox>
+  );
+}
+
+/** 单选：16 的圆，选中铺强调色、压 6 的白点。放在 `nsh/base` 的 `RadioGroup` 里；`children` 是标签。 */
+export function SmeltRadio(props: {
+  checked: boolean;
+  disabled?: boolean;
+  accessibilityLabel?: string;
+  testID?: string;
+  onChange: () => void;
+  class?: string;
+  style?: any;
+  children?: any;
+}) {
+  const p = () => theme().palette;
+  return (
+    <BaseRadio
+      testID={props.testID}
+      checked={props.checked}
+      disabled={props.disabled}
+      accessibilityLabel={props.accessibilityLabel}
+      onChange={() => props.onChange()}
+      class={`group flex-row items-center gap-2 disabled:opacity-50 ${props.class ?? ""}`}
+      style={props.style}
+    >
+      <View
+        class={`items-center justify-center shrink-0 rounded-full border ${INDICATOR_FOCUS_RING}`}
+        style={{
+          width: 16,
+          height: 16,
+          borderColor: props.checked ? p().accent : p().hair_strong,
+          backgroundColor: props.checked ? p().accent : p().bg,
+        }}
+      >
+        {props.checked ? (
+          <View class="rounded-full" style={{ width: 6, height: 6, backgroundColor: p().on_accent }} />
+        ) : null}
+      </View>
+      {props.children}
+    </BaseRadio>
   );
 }
 

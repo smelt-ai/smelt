@@ -1045,7 +1045,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
         <If when={Boolean(snapshot()?.status_line) && turnActive()}>
           <View style={{ width: "100%", alignItems: "center", paddingHorizontal: 16, paddingBottom: 6 }}>
             <View style={{ width: "100%", maxWidth: 768, paddingHorizontal: 6, flexDirection: "row", alignItems: "center", gap: 6 }}>
-              <SmeltIcon spin size={12} color={look().palette.run} />
+              <SmeltIcon spin size={12} color={look().palette.muted} />
               <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.muted }}>
                 {snapshot()?.status_line ?? ""}
               </Text>
@@ -1056,10 +1056,10 @@ export function SmeltConversation(props: SmeltConversationProps) {
         <If when={retryInfo() != null}>
           <View style={{ width: "100%", alignItems: "center", paddingHorizontal: 16, paddingBottom: 6 }}>
             <View
-              class="w-full px-3 py-2 rounded-[10px] bg-need/12 border border-need flex-row items-center gap-2"
+              class="w-full px-3 py-2 rounded-[10px] bg-soft border border-border flex-row items-center gap-2"
               style={{ maxWidth: 768 }}
             >
-              <SmeltIcon spin size={12} color={look().palette.need} />
+              <SmeltIcon spin size={12} color={look().palette.muted} />
               <Text style={{ flex: 1, fontSize: look().type.text_xsmall.size, color: look().palette.text }}>
                 {ct("status.retrying", {
                   attempt: retryInfo()?.attempt ?? 1,

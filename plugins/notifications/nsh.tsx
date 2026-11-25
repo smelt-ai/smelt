@@ -14,7 +14,6 @@
 // 主窗口关着时插件照常在后台跑，点通知、菜单项会重开主窗口跳到那段会话。什么时候做全靠事件。
 
 import { computed, Scroll, signal, Text, View } from "nsh";
-import { Switch } from "nsh/base";
 import {
   activeContext,
   bootTask,
@@ -30,6 +29,7 @@ import {
   run,
   setStatusMenu,
   SmeltButton,
+  SmeltSwitch,
   store,
   t,
   text,
@@ -419,27 +419,10 @@ function PrefSwitchRow(props: {
           </Text>
         </If>
       </View>
-      <Switch
+      <SmeltSwitch
         checked={props.checked}
         accessibilityLabel={props.label}
-        onChange={({ checked }: any) => props.onChange(Boolean(checked))}
-        trackStyle={{
-          width: 34,
-          height: 20,
-          borderRadius: 10,
-          padding: 2,
-          backgroundColor: props.checked ? look().palette.link : look().palette.soft,
-          display: "flex",
-          flexDirection: "row",
-          alignItems: "center",
-          justifyContent: props.checked ? "flex-end" : "flex-start",
-        }}
-        thumbStyle={{
-          width: 16,
-          height: 16,
-          borderRadius: 8,
-          backgroundColor: look().palette.on_ink,
-        }}
+        onChange={(checked: boolean) => props.onChange(Boolean(checked))}
       />
     </View>
   );

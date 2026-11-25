@@ -1,6 +1,14 @@
 // 自动化下钻头、左侧运行列表与任务表单编辑器。
 import { computed, Scroll, Text, View } from "nsh";
-import { isManagedAutomationWorkspace, pathStyle, SmeltButton, SmeltIcon, SmeltMenu, t } from "smelt/sdk";
+import {
+  isManagedAutomationWorkspace,
+  pathStyle,
+  SmeltButton,
+  SmeltIcon,
+  SmeltMenu,
+  SmeltSwitch,
+  t,
+} from "smelt/sdk";
 import {
   actionKindLabel,
   automationAccessNote,
@@ -79,7 +87,6 @@ import {
   type TriggerEntryDraft,
 } from "./state.ts";
 import {
-  AutomationSwitch,
   ContentCard,
   ErrorAlert,
   FieldHint,
@@ -203,7 +210,7 @@ export function DrillHeader() {
               }}
             >
               <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
-                <AutomationSwitch
+                <SmeltSwitch
                   testID="automation-editor-enabled"
                   checked={headerModel().enabled}
                   accessibilityLabel={t("editor.enabled")}

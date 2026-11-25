@@ -189,7 +189,7 @@ export function buildMenu(rows, bySession, palette, t) {
 
 function statusColor(status, palette) {
   if (status === "needs_you") return palette.need;
-  if (status === "running") return palette.run;
+  if (status === "running") return palette.muted;
   return palette.faint;
 }
 

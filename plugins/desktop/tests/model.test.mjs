@@ -32,7 +32,11 @@ describe("desktop model", () => {
     });
     expect(statusPresentation({ kind: "connected" }, true, null, fakeT)).toEqual({
       label: "status.controlling",
-      tone: "need",
+      tone: "strong",
+    });
+    expect(statusPresentation({ kind: "reconnecting" }, true, null, fakeT)).toEqual({
+      label: "status.reconnecting",
+      tone: "muted",
     });
     expect(statusPresentation({ kind: "connected" }, false, null, fakeT)).toEqual({
       label: "status.viewing",

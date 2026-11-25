@@ -2089,11 +2089,9 @@ export function Main() {
                     : `↑${activeStatus()?.ahead ?? 0} ↓${activeStatus()?.behind ?? 0}`
                 }
                 triggerColor={
-                  activeBusy()
-                    ? look().palette.need
-                    : (activeStatus()?.ahead ?? 0) + (activeStatus()?.behind ?? 0) > 0
-                      ? look().palette.ok
-                      : look().palette.faint
+                  activeBusy() || (activeStatus()?.ahead ?? 0) + (activeStatus()?.behind ?? 0) > 0
+                    ? look().palette.text
+                    : look().palette.faint
                 }
               />
             </If>
@@ -3168,11 +3166,9 @@ export function Main() {
                               : "⋯"
                         }
                         triggerColor={
-                          activeBusy()
-                            ? look().palette.need
-                            : (activeStatus()?.ahead ?? 0) + (activeStatus()?.behind ?? 0) > 0
-                              ? look().palette.ok
-                              : look().palette.faint
+                          activeBusy() || (activeStatus()?.ahead ?? 0) + (activeStatus()?.behind ?? 0) > 0
+                            ? look().palette.text
+                            : look().palette.faint
                         }
                       />
                     </If>
@@ -3658,7 +3654,7 @@ export function Main() {
                                   }
                                   triggerColor={
                                     row().ahead + row().behind > 0
-                                      ? look().palette.ok
+                                      ? look().palette.text
                                       : look().palette.faint
                                   }
                                 />

@@ -5,7 +5,6 @@ import {
   Input,
   MenuItem,
   MenuSeparator,
-  Switch,
 } from "nsh/base";
 import {
   DIALOG_SURFACE_CLASS,
@@ -451,42 +450,6 @@ export function MenuDivider() {
   return <MenuSeparator class="my-1 bg-border" style={{ height: 1 }} />;
 }
 
-export function AutomationSwitch(props: {
-  checked: boolean;
-  disabled?: boolean;
-  accessibilityLabel: string;
-  onChange: (checked: boolean) => void;
-  testID?: string;
-}) {
-  const look = currentTheme;
-  return (
-    <Switch
-      testID={props.testID}
-      checked={props.checked}
-      disabled={props.disabled}
-      accessibilityLabel={props.accessibilityLabel}
-      onChange={({ checked }: { checked: boolean }) => props.onChange(Boolean(checked))}
-      trackStyle={{
-        width: 34,
-        height: 20,
-        borderRadius: 10,
-        padding: 2,
-        backgroundColor: props.checked ? look().palette.link : look().palette.soft,
-        display: "flex",
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: props.checked ? "flex-end" : "flex-start",
-      }}
-      thumbStyle={{
-        width: 16,
-        height: 16,
-        borderRadius: 8,
-        backgroundColor: look().palette.on_ink,
-      }}
-    />
-  );
-}
-
 export function StyledInput(props: {
   value: string;
   placeholder?: string;
@@ -655,6 +618,6 @@ export function runStatusColor(status: string, palette: any): string {
     case "waiting_for_user":
       return palette.need;
     default:
-      return palette.run;
+      return palette.muted;
   }
 }

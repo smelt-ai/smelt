@@ -1338,7 +1338,7 @@ function MenuRow(props: {
 function gitMarkColor(mark: string, palette: any): string {
   if (mark === "D") return palette.bad;
   if (mark === "A") return palette.ok;
-  if (mark === "U") return palette.run;
+  if (mark === "U") return palette.ok;
   return palette.need;
 }
 
@@ -1593,7 +1593,7 @@ export function Main() {
                 style={{
                   fontSize: look().type.text_xsmall.size,
                   lineHeight: look().type.text_xsmall.line_height,
-                  color: look().palette.need,
+                  color: look().palette.bad,
                   marginLeft: 6,
                   flexShrink: 1,
                   numberOfLines: 1,

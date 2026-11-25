@@ -46,7 +46,7 @@ function t(key, params) {
   return out;
 }
 
-const PALETTE = { need: "#ff9900", run: "#0099ff", faint: "#888888" };
+const PALETTE = { need: "#ff9900", muted: "#666666", faint: "#888888" };
 const statusOf = (state) => state.status;
 const deps = { t, statusOf };
 const item = { kind: "success", title: "", message: "" };
@@ -201,7 +201,7 @@ describe("菜单栏的菜单", () => {
     expect(listed.items.length).toBe(3);
     expect(listed.items[0].command).toBe(ACTIVATE_SESSION);
     expect(listed.items[0].args).toStrictEqual({ machine: "box", session_id: "run" });
-    expect(listed.items[0].icon).toStrictEqual({ png: TERMINAL_MENU_ICON, color: PALETTE.run });
+    expect(listed.items[0].icon).toStrictEqual({ png: TERMINAL_MENU_ICON, color: PALETTE.muted });
     expect(listed.items[1]).toStrictEqual({ type: "separator" });
   });
 });

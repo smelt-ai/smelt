@@ -32,7 +32,7 @@ export function statusPresentation(status, controlling, typeError, t) {
       };
     }
     if (controlling) {
-      return { label: t("status.controlling"), tone: "need" };
+      return { label: t("status.controlling"), tone: "strong" };
     }
     return { label: t("status.viewing"), tone: "muted" };
   }
@@ -40,7 +40,7 @@ export function statusPresentation(status, controlling, typeError, t) {
     return { label: t("status.connecting"), tone: "muted" };
   }
   if (status?.kind === "reconnecting") {
-    return { label: t("status.reconnecting"), tone: "need" };
+    return { label: t("status.reconnecting"), tone: "muted" };
   }
   if (status?.kind === "closed") {
     const tone = status.closed?.kind === "by_user" ? "muted" : "bad";

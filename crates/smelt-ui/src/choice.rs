@@ -1,7 +1,7 @@
 //! 复选框和单选：在一组选项里勾几项、选一项。规则见 `docs/ui-design-language.md` 第 2、4、7 节。
 //!
-//! 指示块 16 见方：复选框 4 圆角、中性弱底和 10 的勾，标签隔 12、行高 24；单选是圆、
-//! 主题主色和 6 的圆点，标签隔 8、行高 20。可以带标签，点标签和点指示块一样。
+//! 指示块 16 见方：复选框 4 圆角、10 的勾，标签隔 12、行高 24；单选是圆、6 的圆点，标签隔 8、
+//! 行高 20。勾上、选中都铺强调色。可以带标签，点标签和点指示块一样。
 //!
 //! 建在 gpui-base 的无样式复选框和单选上：焦点、空格/回车、无障碍归它们。根元素对外开放
 //! 样式和交互，调用方可以把整行画成卡片（ACP 提问卡）；焦点环只画在指示块上，不圈整行。
@@ -184,7 +184,8 @@ impl Shape {
     }
 }
 
-/// 设计上的复选框、单选专用色位在当前主题中没有一一对应项；只按已有语义取近似色。
+/// 指示块的几样颜色。勾上、选中铺强调色（和开关打开同一个色），白勾白点压在上面；没勾的
+/// 是空框、空圈。
 #[derive(Debug, PartialEq)]
 struct IndicatorColors {
     background: Option<Rgba>,
@@ -201,28 +202,36 @@ fn indicator_colors(
     focus_visible: bool,
     palette: ui_theme::Palette,
 ) -> IndicatorColors {
+    let filled = checked && !(disabled && shape == Shape::Square);
+    // 勾上、选中后悬停不换底。
+    let hover = (interactive && !disabled && !checked).then(|| rgb(palette.soft_hover));
     match shape {
         Shape::Square => IndicatorColors {
-            // 禁用时不铺底（设计里的禁用底色为透明）。
-            background: (checked && !disabled).then(|| rgb(palette.soft)),
+            // 禁用时不铺底（设计里的禁用底色为透明），勾用正文色。
+            background: filled.then(|| rgb(palette.accent)),
             border: if disabled {
                 let mut border = palette.hair_strong;
                 border.a *= DISABLED_INDICATOR_OPACITY;
                 border
             } else if focus_visible {
                 palette.focus
+            } else if checked {
+                rgb(palette.accent)
             } else {
                 palette.hair_strong
             },
-            mark: rgb(palette.text),
-            hover: (interactive && !disabled).then(|| rgb(palette.soft_hover)),
+            mark: rgb(if filled { palette.on_accent } else { palette.text }),
+            hover,
         },
         Shape::Round => IndicatorColors {
-            background: Some(rgb(if checked { palette.ink } else { palette.bg })),
-            border: palette.hair_strong,
-            mark: rgb(palette.on_ink),
-            // 已选中的单选悬停不换底。
-            hover: (interactive && !disabled && !checked).then(|| rgb(palette.soft_hover)),
+            background: Some(rgb(if checked { palette.accent } else { palette.bg })),
+            border: if checked {
+                rgb(palette.accent)
+            } else {
+                palette.hair_strong
+            },
+            mark: rgb(palette.on_accent),
+            hover,
         },
     }
 }
@@ -457,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn checkbox_states_use_neutral_colors_and_disable_hover() {
+    fn checkbox_states_fill_with_accent_and_disable_hover() {
         for light in [true, false] {
             let p = ui_theme::builtin_fallback(light);
             let off = indicator_colors(Shape::Square, false, false, true, false, p);
@@ -465,9 +474,10 @@ mod tests {
             assert_eq!(off.border, p.hair_strong);
             assert_eq!(off.hover, Some(rgb(p.soft_hover)));
             let on = indicator_colors(Shape::Square, true, false, true, false, p);
-            assert_eq!(on.background, Some(rgb(p.soft)));
-            assert_eq!(on.mark, rgb(p.text));
-            assert_eq!(on.hover, Some(rgb(p.soft_hover)));
+            assert_eq!(on.background, Some(rgb(p.accent)));
+            assert_eq!(on.border, rgb(p.accent));
+            assert_eq!(on.mark, rgb(p.on_accent));
+            assert_eq!(on.hover, None);
             let focused = indicator_colors(Shape::Square, true, false, true, true, p);
             assert_eq!(focused.border, p.focus);
             let disabled = indicator_colors(Shape::Square, true, true, true, true, p);
@@ -486,24 +496,20 @@ mod tests {
     fn colors_follow_the_supplied_theme() {
         let mut p = ui_theme::builtin_fallback(true);
         let other = ui_theme::builtin_fallback(false);
-        p.soft = other.soft;
-        p.soft_hover = other.soft_hover;
-        p.text = other.text;
-        p.ink = other.ink;
-        p.on_ink = other.on_ink;
+        p.accent = 0x123456;
+        p.on_accent = 0xfedcba;
         p.focus = other.focus;
         let check = indicator_colors(Shape::Square, true, false, true, true, p);
-        assert_eq!(check.background, Some(rgb(other.soft)));
-        assert_eq!(check.mark, rgb(other.text));
+        assert_eq!(check.background, Some(rgb(0x123456)));
+        assert_eq!(check.mark, rgb(0xfedcba));
         assert_eq!(check.border, other.focus);
-        assert_eq!(check.hover, Some(rgb(other.soft_hover)));
         let radio = indicator_colors(Shape::Round, true, false, true, false, p);
-        assert_eq!(radio.background, Some(rgb(other.ink)));
-        assert_eq!(radio.mark, rgb(other.on_ink));
+        assert_eq!(radio.background, Some(rgb(0x123456)));
+        assert_eq!(radio.mark, rgb(0xfedcba));
     }
 
     #[test]
-    fn radio_states_use_primary_and_only_unselected_hover() {
+    fn radio_states_use_accent_and_only_unselected_hover() {
         for light in [true, false] {
             let p = ui_theme::builtin_fallback(light);
             let off = indicator_colors(Shape::Round, false, false, true, false, p);
@@ -511,8 +517,8 @@ mod tests {
             assert_eq!(off.border, p.hair_strong);
             assert_eq!(off.hover, Some(rgb(p.soft_hover)));
             let on = indicator_colors(Shape::Round, true, false, true, true, p);
-            assert_eq!(on.background, Some(rgb(p.ink)));
-            assert_eq!(on.mark, rgb(p.on_ink));
+            assert_eq!(on.background, Some(rgb(p.accent)));
+            assert_eq!(on.mark, rgb(p.on_accent));
             assert_eq!(on.hover, None);
             for checked in [false, true] {
                 let disabled = indicator_colors(Shape::Round, checked, true, true, false, p);
