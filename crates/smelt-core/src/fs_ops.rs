@@ -1,12 +1,15 @@
-//! 通用文件系统方法 `fs.*` 的运行时实现：看路径、列目录、删除（可移进废纸篓）、卷容量。
-//! 线上形状和语义见 `smelt_runtime_client::protocol::fs`。
+//! 通用文件系统方法 `fs.*` 的运行时实现：看路径、列目录、读写、建目录、改名复制、删除（可移进
+//! 废纸篓）、卷容量、常用位置。线上形状和语义见 `smelt_runtime_client::protocol::fs`。
 
 use std::fs::Metadata;
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Component, Path};
 use std::time::UNIX_EPOCH;
 
+use base64::Engine as _;
 use smelt_runtime_client::protocol::fs::{
-    FsDeleteParams, FsDirEntry, FsIdentity, FsKind, FsStat, FsVolume,
+    FS_READ_LIMIT, FsDeleteParams, FsDirEntry, FsEncoding, FsIdentity, FsKind, FsKnownDirs,
+    FsMoveParams, FsReadParams, FsReadResult, FsStat, FsVolume, FsWriteMode, FsWriteParams,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -17,6 +20,10 @@ pub enum FsError {
     PermissionDenied(String),
     /// 删除前核对身份没对上。
     Changed(String),
+    /// 目标已经存在。
+    Exists(String),
+    /// 参数本身不成立：读得太多、内容不是合法的 base64 / UTF-8、把目录复制进它自己。
+    Invalid(String),
     Io(String),
 }
 
@@ -27,7 +34,8 @@ impl std::fmt::Display for FsError {
             Self::NotFound(path) => write!(f, "{path} doesn't exist"),
             Self::PermissionDenied(path) => write!(f, "No permission to access {path}"),
             Self::Changed(path) => write!(f, "{path} has been replaced by something else"),
-            Self::Io(message) => f.write_str(message),
+            Self::Exists(path) => write!(f, "{path} already exists"),
+            Self::Invalid(message) | Self::Io(message) => f.write_str(message),
         }
     }
 }
@@ -36,6 +44,7 @@ fn io_error(path: &str, error: std::io::Error) -> FsError {
     match error.kind() {
         std::io::ErrorKind::NotFound => FsError::NotFound(path.to_string()),
         std::io::ErrorKind::PermissionDenied => FsError::PermissionDenied(path.to_string()),
+        std::io::ErrorKind::AlreadyExists => FsError::Exists(path.to_string()),
         _ => FsError::Io(format!("{path}: {error}")),
     }
 }
@@ -168,6 +177,208 @@ fn move_to_trash(path: &Path) -> Result<(), trash::Error> {
         context.set_delete_method(DeleteMethod::NsFileManager);
     }
     context.delete(path)
+}
+
+pub fn known_dirs() -> Result<FsKnownDirs, FsError> {
+    let home =
+        dirs::home_dir().ok_or_else(|| FsError::Io("couldn't find the home directory".into()))?;
+    let string = |path: std::path::PathBuf| path.to_string_lossy().into_owned();
+    let trash = if cfg!(target_os = "macos") {
+        Some(home.join(".Trash"))
+    } else if cfg!(windows) {
+        None
+    } else {
+        dirs::data_dir().map(|data| data.join("Trash"))
+    };
+    Ok(FsKnownDirs {
+        cache: dirs::cache_dir().map(string),
+        config: dirs::config_dir().map(string),
+        data: dirs::data_dir().map(string),
+        temp: string(std::env::temp_dir()),
+        desktop: dirs::desktop_dir().map(string),
+        documents: dirs::document_dir().map(string),
+        downloads: dirs::download_dir().map(string),
+        trash: trash.map(string),
+        home: string(home),
+    })
+}
+
+pub fn create_dir(path: &str) -> Result<(), FsError> {
+    let p = require_absolute(path)?;
+    match std::fs::create_dir_all(p) {
+        Ok(()) => Ok(()),
+        // 上级或自己是个文件。
+        Err(_) if p.exists() && !p.is_dir() => Err(FsError::Exists(path.to_string())),
+        Err(error) => Err(io_error(path, error)),
+    }
+}
+
+/// 目标和来源是不是同一个东西。大小写不敏感的卷上，只改大小写的两个路径就是同一个。
+fn same_entry(from: &Path, to: &Metadata) -> bool {
+    std::fs::symlink_metadata(from)
+        .ok()
+        .and_then(|source| identity_of(&source))
+        .is_some_and(|source| Some(source) == identity_of(to))
+}
+
+/// 改名、复制前腾出目标：不存在就好；存在又不许覆盖就报错；许覆盖就删掉。`keep_files` 时
+/// 目标是文件就不删。
+fn clear_target(to: &Path, params: &FsMoveParams, keep_files: bool) -> Result<(), FsError> {
+    let Ok(meta) = std::fs::symlink_metadata(to) else {
+        return Ok(());
+    };
+    if !params.overwrite {
+        return Err(FsError::Exists(params.to.clone()));
+    }
+    let removed = if meta.is_dir() {
+        std::fs::remove_dir_all(to)
+    } else if keep_files {
+        return Ok(());
+    } else {
+        std::fs::remove_file(to)
+    };
+    removed.map_err(|e| io_error(&params.to, e))
+}
+
+fn move_paths(params: &FsMoveParams) -> Result<(&Path, &Path), FsError> {
+    let from = require_absolute(&params.from)?;
+    let to = require_absolute(&params.to)?;
+    for (path, raw) in [(from, &params.from), (to, &params.to)] {
+        if path.parent().is_none() {
+            return Err(FsError::InvalidPath(raw.clone()));
+        }
+    }
+    std::fs::symlink_metadata(from).map_err(|e| io_error(&params.from, e))?;
+    if to != from && to.starts_with(from) {
+        return Err(FsError::Invalid(format!(
+            "can't put {} inside itself",
+            params.from
+        )));
+    }
+    Ok((from, to))
+}
+
+pub fn rename(params: &FsMoveParams) -> Result<(), FsError> {
+    let (from, to) = move_paths(params)?;
+    let same = std::fs::symlink_metadata(to).is_ok_and(|meta| same_entry(from, &meta));
+    if !same {
+        // 文件换文件交给 rename 原子替换；目录和文件互换 rename 做不了，先删目标。
+        let from_is_dir = std::fs::symlink_metadata(from).is_ok_and(|meta| meta.is_dir());
+        clear_target(to, params, !from_is_dir)?;
+    }
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+            clear_target(to, params, false)?;
+            copy_tree(from, to).map_err(|e| io_error(&params.to, e))?;
+            let meta = std::fs::symlink_metadata(from).map_err(|e| io_error(&params.from, e))?;
+            let removed = if meta.is_dir() {
+                std::fs::remove_dir_all(from)
+            } else {
+                std::fs::remove_file(from)
+            };
+            removed.map_err(|e| io_error(&params.from, e))
+        }
+        Err(error) => Err(io_error(&params.from, error)),
+    }
+}
+
+pub fn copy(params: &FsMoveParams) -> Result<(), FsError> {
+    let (from, to) = move_paths(params)?;
+    if from == to || std::fs::symlink_metadata(to).is_ok_and(|meta| same_entry(from, &meta)) {
+        return Err(FsError::Exists(params.to.clone()));
+    }
+    clear_target(to, params, false)?;
+    copy_tree(from, to).map_err(|e| io_error(&params.to, e))
+}
+
+/// 复制一个文件、符号链接或整个目录。目标不能已经存在。macOS 上 `std::fs::copy` 在 APFS
+/// 上是克隆，不占新空间。
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(from)?;
+    if meta.file_type().is_symlink() {
+        return copy_symlink(from, to);
+    }
+    if !meta.is_dir() {
+        return std::fs::copy(from, to).map(|_| ());
+    }
+    std::fs::create_dir(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+    }
+    std::fs::set_permissions(to, meta.permissions())
+}
+
+#[cfg(unix)]
+fn copy_symlink(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(std::fs::read_link(from)?, to)
+}
+
+#[cfg(windows)]
+fn copy_symlink(from: &Path, to: &Path) -> std::io::Result<()> {
+    let target = std::fs::read_link(from)?;
+    if std::fs::metadata(from).is_ok_and(|meta| meta.is_dir()) {
+        std::os::windows::fs::symlink_dir(target, to)
+    } else {
+        std::os::windows::fs::symlink_file(target, to)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn copy_symlink(_from: &Path, _to: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "can't copy symbolic links on this platform",
+    ))
+}
+
+pub fn read(params: &FsReadParams) -> Result<FsReadResult, FsError> {
+    let path = params.path.as_str();
+    let p = require_absolute(path)?;
+    let mut file = std::fs::File::open(p).map_err(|e| io_error(path, e))?;
+    let size = file.metadata().map_err(|e| io_error(path, e))?.len();
+    let available = size.saturating_sub(params.offset);
+    let length = match params.length {
+        Some(length) => length,
+        None => available,
+    };
+    if length > FS_READ_LIMIT {
+        return Err(FsError::Invalid(format!(
+            "{path}: can't read more than {FS_READ_LIMIT} bytes at once; read it in ranges"
+        )));
+    }
+    let mut bytes = Vec::with_capacity(length.min(available) as usize);
+    file.seek(SeekFrom::Start(params.offset))
+        .map_err(|e| io_error(path, e))?;
+    file.take(length)
+        .read_to_end(&mut bytes)
+        .map_err(|e| io_error(path, e))?;
+    let content = match params.encoding {
+        FsEncoding::Base64 => base64::engine::general_purpose::STANDARD.encode(&bytes),
+        FsEncoding::Utf8 => String::from_utf8(bytes)
+            .map_err(|_| FsError::Invalid(format!("{path} isn't UTF-8 text")))?,
+    };
+    Ok(FsReadResult { size, content })
+}
+
+pub fn write(params: &FsWriteParams) -> Result<(), FsError> {
+    let path = params.path.as_str();
+    let p = require_absolute(path)?;
+    let bytes = match params.encoding {
+        FsEncoding::Base64 => base64::engine::general_purpose::STANDARD
+            .decode(&params.content)
+            .map_err(|_| FsError::Invalid("content isn't valid base64".into()))?,
+        FsEncoding::Utf8 => params.content.clone().into_bytes(),
+    };
+    let mut options = std::fs::OpenOptions::new();
+    match params.mode {
+        FsWriteMode::Overwrite => options.write(true).create(true).truncate(true),
+        FsWriteMode::Create => options.write(true).create_new(true),
+        FsWriteMode::Append => options.append(true).create(true),
+    };
+    let mut file = options.open(p).map_err(|e| io_error(path, e))?;
+    file.write_all(&bytes).map_err(|e| io_error(path, e))
 }
 
 pub fn volume(path: &str) -> Result<FsVolume, FsError> {
@@ -326,5 +537,217 @@ mod tests {
         assert!(volume.total > 0);
         assert!(volume.available <= volume.total);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn moving(from: &Path, to: &Path, overwrite: bool) -> FsMoveParams {
+        FsMoveParams {
+            from: s(from).into(),
+            to: s(to).into(),
+            overwrite,
+        }
+    }
+
+    fn writing(path: &Path, text: &str, mode: FsWriteMode) -> FsWriteParams {
+        FsWriteParams {
+            path: s(path).into(),
+            content: text.into(),
+            encoding: FsEncoding::Utf8,
+            mode,
+        }
+    }
+
+    #[test]
+    fn write_modes_create_replace_and_append() {
+        let root = temp_dir("write");
+        let path = root.join("a.txt");
+        write(&writing(&path, "one", FsWriteMode::Create)).unwrap();
+        assert_eq!(
+            write(&writing(&path, "two", FsWriteMode::Create)),
+            Err(FsError::Exists(s(&path).into()))
+        );
+        write(&writing(&path, "two", FsWriteMode::Overwrite)).unwrap();
+        write(&writing(&path, "+", FsWriteMode::Append)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two+");
+
+        let bytes = FsWriteParams {
+            path: s(&root.join("b.bin")).into(),
+            content: "AP8=".into(),
+            encoding: FsEncoding::Base64,
+            mode: FsWriteMode::Overwrite,
+        };
+        write(&bytes).unwrap();
+        assert_eq!(std::fs::read(root.join("b.bin")).unwrap(), [0x00, 0xff]);
+
+        // 不建上级目录。
+        let nested = root.join("missing/c.txt");
+        assert_eq!(
+            write(&writing(&nested, "x", FsWriteMode::Overwrite)),
+            Err(FsError::NotFound(s(&nested).into()))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_gives_ranges_in_either_encoding_and_refuses_too_much() {
+        let root = temp_dir("read");
+        let path = root.join("a.txt");
+        std::fs::write(&path, "hello world").unwrap();
+        let read_as = |offset, length, encoding| {
+            read(&FsReadParams {
+                path: s(&path).into(),
+                offset,
+                length,
+                encoding,
+            })
+        };
+        assert_eq!(
+            read_as(0, None, FsEncoding::Utf8).unwrap(),
+            FsReadResult {
+                size: 11,
+                content: "hello world".into()
+            }
+        );
+        assert_eq!(
+            read_as(6, Some(3), FsEncoding::Utf8).unwrap().content,
+            "wor"
+        );
+        assert_eq!(
+            read_as(0, Some(2), FsEncoding::Base64).unwrap().content,
+            "aGU="
+        );
+        // 读过了末尾是空的，不报错。
+        assert_eq!(read_as(50, None, FsEncoding::Utf8).unwrap().content, "");
+        assert!(matches!(
+            read_as(0, Some(FS_READ_LIMIT + 1), FsEncoding::Base64),
+            Err(FsError::Invalid(_))
+        ));
+
+        std::fs::write(&path, [0xff, 0xfe]).unwrap();
+        assert!(matches!(
+            read_as(0, None, FsEncoding::Utf8),
+            Err(FsError::Invalid(_))
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn create_dir_makes_parents_and_rejects_a_file_in_the_way() {
+        let root = temp_dir("mkdir");
+        let nested = root.join("a/b/c");
+        create_dir(s(&nested)).unwrap();
+        create_dir(s(&nested)).unwrap();
+        assert!(nested.is_dir());
+
+        let file = root.join("file");
+        std::fs::write(&file, "x").unwrap();
+        assert_eq!(create_dir(s(&file)), Err(FsError::Exists(s(&file).into())));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rename_and_copy_respect_overwrite() {
+        let root = temp_dir("move");
+        let a = root.join("a.txt");
+        let b = root.join("b.txt");
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+
+        assert_eq!(
+            rename(&moving(&a, &b, false)),
+            Err(FsError::Exists(s(&b).into()))
+        );
+        assert_eq!(
+            copy(&moving(&a, &b, false)),
+            Err(FsError::Exists(s(&b).into()))
+        );
+        copy(&moving(&a, &b, true)).unwrap();
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "a");
+
+        std::fs::write(&b, "b").unwrap();
+        rename(&moving(&a, &b, true)).unwrap();
+        assert!(!a.exists());
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "a");
+
+        // 目录可以覆盖文件。
+        let dir = root.join("dir");
+        std::fs::create_dir(&dir).unwrap();
+        rename(&moving(&dir, &b, true)).unwrap();
+        assert!(b.is_dir());
+
+        assert_eq!(
+            copy(&moving(&b, &b, true)),
+            Err(FsError::Exists(s(&b).into()))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// 大小写不敏感的卷上，「目标」就是来源本身：不能当成已存在，更不能先删掉。
+    #[test]
+    fn renaming_only_the_case_keeps_the_file() {
+        let root = temp_dir("case");
+        let lower = root.join("a.txt");
+        std::fs::write(&lower, "a").unwrap();
+        let upper = root.join("A.txt");
+        if !upper.exists() {
+            // 大小写敏感的卷，没有这个问题。
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+        rename(&moving(&lower, &upper, false)).unwrap();
+        let names: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["A.txt"]);
+        assert_eq!(std::fs::read_to_string(&upper).unwrap(), "a");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_directory_cant_go_inside_itself() {
+        let root = temp_dir("inside");
+        let dir = root.join("dir");
+        std::fs::create_dir(&dir).unwrap();
+        let inner = dir.join("inner");
+        assert!(matches!(
+            rename(&moving(&dir, &inner, false)),
+            Err(FsError::Invalid(_))
+        ));
+        assert!(matches!(
+            copy(&moving(&dir, &inner, false)),
+            Err(FsError::Invalid(_))
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_duplicates_a_tree_and_keeps_links_as_links() {
+        let root = temp_dir("copy-tree");
+        let from = root.join("from");
+        std::fs::create_dir_all(from.join("sub")).unwrap();
+        std::fs::write(from.join("sub/a.txt"), "a").unwrap();
+        std::os::unix::fs::symlink("sub/a.txt", from.join("link")).unwrap();
+
+        let to = root.join("to");
+        copy(&moving(&from, &to, false)).unwrap();
+        assert_eq!(std::fs::read_to_string(to.join("sub/a.txt")).unwrap(), "a");
+        assert_eq!(
+            std::fs::read_link(to.join("link")).unwrap(),
+            Path::new("sub/a.txt")
+        );
+        assert!(from.join("sub/a.txt").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn known_dirs_are_absolute() {
+        let dirs = known_dirs().unwrap();
+        assert!(Path::new(&dirs.home).is_absolute());
+        assert!(Path::new(&dirs.temp).is_absolute());
+        if cfg!(target_os = "macos") {
+            assert_eq!(dirs.trash, Some(format!("{}/.Trash", dirs.home)));
+            assert_eq!(dirs.cache, Some(format!("{}/Library/Caches", dirs.home)));
+        }
     }
 }

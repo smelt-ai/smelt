@@ -192,6 +192,12 @@ fn dispatch_control(
         | ControlMethod::FsReadDir
         | ControlMethod::FsDelete
         | ControlMethod::FsVolume
+        | ControlMethod::FsKnownDirs
+        | ControlMethod::FsCreateDir
+        | ControlMethod::FsRename
+        | ControlMethod::FsCopy
+        | ControlMethod::FsRead
+        | ControlMethod::FsWrite
         | ControlMethod::FsUsageScan
         | ControlMethod::FsUsageChildren
         | ControlMethod::FsUsageRelease) => {

@@ -40,6 +40,19 @@ fs_calls! {
     FsDeleteCall => FsDelete(FsDeleteParams) -> EmptyParams;
     /// 路径所在卷的容量。
     FsVolumeCall => FsVolume(FilePathParams) -> FsVolume;
+    /// 这台机器的用户主目录、缓存目录这些常用位置。
+    FsKnownDirsCall => FsKnownDirs(EmptyParams) -> FsKnownDirs;
+    /// 建目录，缺的上级目录一起建。已经是目录算成功；路径上是别的东西报 `conflict`。
+    FsCreateDirCall => FsCreateDir(FilePathParams) -> EmptyParams;
+    /// 改名或移动，跨卷时先复制再删掉原来的。目标已存在时报 `conflict`，除非 `overwrite`。
+    FsRenameCall => FsRename(FsMoveParams) -> EmptyParams;
+    /// 复制文件或整个目录（目录里的符号链接照原样复制成链接）。目标已存在时报 `conflict`，
+    /// 除非 `overwrite`。
+    FsCopyCall => FsCopy(FsMoveParams) -> EmptyParams;
+    /// 读文件内容，可以只读一段。一次最多 [`FS_READ_LIMIT`] 字节，更大的文件分段读。
+    FsReadCall => FsRead(FsReadParams) -> FsReadResult;
+    /// 写文件。不建上级目录。
+    FsWriteCall => FsWrite(FsWriteParams) -> EmptyParams;
     /// 开始统计一个目录的占用，马上返回扫描 id；进度发 `fs.usage.progress`。结果留在运行时
     /// 内存里，用完调 `fs.usage.release`。
     FsUsageScanCall => FsUsageScan(FilePathParams) -> FsUsageScanResult;
@@ -120,6 +133,99 @@ pub struct FsVolume {
     pub total: u64,
     /// 可用空间，字节。macOS 上和访达一致，含系统需要时能清掉的空间（可清除空间）。
     pub available: u64,
+}
+
+/// 常用位置，都是绝对路径。这台机器上没有这个概念的给 `None`。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FsKnownDirs {
+    pub home: String,
+    /// 程序缓存，可以删的那种：macOS `~/Library/Caches`，Linux `~/.cache`，Windows
+    /// `%LOCALAPPDATA%`。
+    pub cache: Option<String>,
+    /// 程序配置：macOS `~/Library/Application Support`，Linux `~/.config`，Windows
+    /// `%APPDATA%`。
+    pub config: Option<String>,
+    /// 程序数据：macOS `~/Library/Application Support`，Linux `~/.local/share`，Windows
+    /// `%APPDATA%`。
+    pub data: Option<String>,
+    /// 临时目录。
+    pub temp: String,
+    pub desktop: Option<String>,
+    pub documents: Option<String>,
+    pub downloads: Option<String>,
+    /// 当前用户的废纸篓目录：macOS `~/.Trash`，Linux `~/.local/share/Trash`。Windows 的
+    /// 回收站不是一个目录，没有。
+    pub trash: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FsMoveParams {
+    pub from: String,
+    pub to: String,
+    /// 目标已存在时先删掉它（目录连同内容）。
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+/// `fs.read` 一次最多读这么多字节。
+pub const FS_READ_LIMIT: u64 = 16 * 1024 * 1024;
+
+/// 文件内容在线上的写法。
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FsEncoding {
+    /// 原始字节，标准 base64。
+    #[default]
+    Base64,
+    /// UTF-8 文本。读到的不是合法 UTF-8 时报 `invalid_params`。
+    Utf8,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FsReadParams {
+    pub path: String,
+    /// 从第几个字节开始。
+    #[serde(default)]
+    pub offset: u64,
+    /// 最多读多少字节，不给是读到文件末尾。超过 [`FS_READ_LIMIT`] 报 `invalid_params`。
+    #[serde(default)]
+    pub length: Option<u64>,
+    #[serde(default)]
+    pub encoding: FsEncoding,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FsReadResult {
+    /// 整个文件现在的长度，字节。分段读时据此算下一段。
+    pub size: u64,
+    /// 读到的内容，按请求的 `encoding` 写。
+    pub content: String,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FsWriteMode {
+    /// 有就整个替换，没有就新建。
+    #[default]
+    Overwrite,
+    /// 只新建：已经存在就报 `conflict`，不写。
+    Create,
+    /// 接在末尾，没有就新建。
+    Append,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FsWriteParams {
+    pub path: String,
+    pub content: String,
+    #[serde(default)]
+    pub encoding: FsEncoding,
+    #[serde(default)]
+    pub mode: FsWriteMode,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

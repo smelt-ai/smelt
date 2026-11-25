@@ -128,7 +128,7 @@ onEvent((event) => {
 
 ## 宿主给的其他能力
 
-插件没有文件系统、子进程和 Node API。宿主开了几样本机能力：
+插件里没有 Node API，文件操作走运行时（见下面），本机和远程机器一样。宿主另外开了几样本机能力：
 
 | 函数 | 做什么 |
 | --- | --- |
@@ -150,6 +150,12 @@ onEvent((event) => {
 | `fs.read_dir` | `{ path }` → `{ entries }`，每项是 `name` 加上同 `fs.stat` 的字段。原样一层，不过滤不排序；目录不存在报 `not_found`、没权限报 `permission_denied` |
 | `fs.delete` | `{ path, trash?, expect? }`。`trash: true` 移到废纸篓，否则直接删（目录连同内容）。`expect` 传之前拿到的 `identity`，路径上已经换成别的文件就报 `conflict`，不删 |
 | `fs.volume` | `{ path }` → `{ mount, name, file_system, total, available }`，字节。macOS 上 `available` 含系统可清掉的空间，和访达一致 |
+| `fs.known_dirs` | `{}` → `{ home, cache, config, data, temp, desktop, documents, downloads, trash }`，那台机器上的常用位置。macOS 的 `cache` 是 `~/Library/Caches`、`trash` 是 `~/.Trash`；没有的给 `null`（如 Windows 的 `trash`） |
+| `fs.read` | `{ path, offset?, length?, encoding? }` → `{ size, content }`。`encoding` 是 `"base64"`（默认）或 `"utf8"`，不是 UTF-8 时报 `invalid_params`。一次最多 16 MB，大文件用 `offset`、`length` 分段，`size` 是整个文件的长度 |
+| `fs.write` | `{ path, content, encoding?, mode? }`。`mode` 是 `"overwrite"`（默认）、`"create"`（已存在报 `conflict`）、`"append"`。不建上级目录 |
+| `fs.create_dir` | `{ path }`，缺的上级目录一起建。已经是目录算成功 |
+| `fs.rename` | `{ from, to, overwrite? }`，改名或移动，跨卷时先复制再删。目标已存在报 `conflict`，`overwrite: true` 时替换 |
+| `fs.copy` | `{ from, to, overwrite? }`，文件或整个目录，目录里的符号链接复制成链接 |
 | `fs.usage.scan` | `{ path }` → `{ scan }`。后台统计这个目录下每一层占多少，马上返回统计 id |
 | `fs.usage.children` | `{ scan, path }` → `{ done, progress, entry, children }`。扫完后 `entry` 是 `path` 自己，`children` 是下一层，按占用从大到小；没扫完 `done` 是 `false`。子目录的大小是扫描那一刻的，文件当场列，删掉的不再出现 |
 | `fs.usage.release` | `{ scan }`。不看了就放掉；在扫的会停下。同时留着的统计最多 4 个，满了 `fs.usage.scan` 报 `busy` |

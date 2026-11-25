@@ -52,6 +52,26 @@ pub(crate) fn dispatch(
         ControlMethod::FsVolume => {
             call::<FsVolumeCall>(params, |p| fs_ops::volume(&p.path).map_err(fs_error))
         }
+        ControlMethod::FsKnownDirs => {
+            call::<FsKnownDirsCall>(params, |_| fs_ops::known_dirs().map_err(fs_error))
+        }
+        ControlMethod::FsCreateDir => call::<FsCreateDirCall>(params, |p| {
+            fs_ops::create_dir(&p.path).map_err(fs_error)?;
+            Ok(EmptyParams::default())
+        }),
+        ControlMethod::FsRename => call::<FsRenameCall>(params, |p| {
+            fs_ops::rename(&p).map_err(fs_error)?;
+            Ok(EmptyParams::default())
+        }),
+        ControlMethod::FsCopy => call::<FsCopyCall>(params, |p| {
+            fs_ops::copy(&p).map_err(fs_error)?;
+            Ok(EmptyParams::default())
+        }),
+        ControlMethod::FsRead => call::<FsReadCall>(params, |p| fs_ops::read(&p).map_err(fs_error)),
+        ControlMethod::FsWrite => call::<FsWriteCall>(params, |p| {
+            fs_ops::write(&p).map_err(fs_error)?;
+            Ok(EmptyParams::default())
+        }),
         ControlMethod::FsUsageScan => {
             call::<FsUsageScanCall>(params, |p| start_scan(p.path, event_hub.clone()))
         }
@@ -171,7 +191,8 @@ fn fs_error(error: FsError) -> ControlError {
         FsError::InvalidPath(_) => ControlErrorCode::InvalidParams,
         FsError::NotFound(_) => ControlErrorCode::NotFound,
         FsError::PermissionDenied(_) => ControlErrorCode::PermissionDenied,
-        FsError::Changed(_) => ControlErrorCode::Conflict,
+        FsError::Changed(_) | FsError::Exists(_) => ControlErrorCode::Conflict,
+        FsError::Invalid(_) => ControlErrorCode::InvalidParams,
         FsError::Io(_) => ControlErrorCode::OperationFailed,
     };
     ControlError::new(code, error.to_string())

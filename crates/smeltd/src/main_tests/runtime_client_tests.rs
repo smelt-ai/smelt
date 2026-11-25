@@ -360,6 +360,48 @@ fn fs_read_dir_reports_a_missing_directory_instead_of_listing_it_empty() {
     assert_eq!(error.code, ControlErrorCode::NotFound);
 }
 
+/// 写进去的能原样读回来；已存在时只新建的写法报 `conflict`。
+#[test]
+fn fs_write_then_read_round_trips_and_create_refuses_an_existing_file() {
+    use smelt_runtime_client::protocol::fs::{
+        FsEncoding, FsReadCall, FsReadParams, FsWriteCall, FsWriteMode, FsWriteParams,
+    };
+    let dir = std::env::temp_dir().join(format!("smeltd-fs-rw-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a.txt").to_str().unwrap().to_string();
+    let runtime = in_process_runtime();
+    let write = |mode| {
+        runtime.call::<FsWriteCall>(
+            &FsWriteParams {
+                path: path.clone(),
+                content: "你好".into(),
+                encoding: FsEncoding::Utf8,
+                mode,
+            },
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+    };
+    write(FsWriteMode::Create).unwrap();
+    let ControlClientError::Protocol(error) = write(FsWriteMode::Create).unwrap_err() else {
+        panic!("expected a protocol error");
+    };
+    assert_eq!(error.code, ControlErrorCode::Conflict);
+
+    let read = runtime
+        .call::<FsReadCall>(
+            &FsReadParams {
+                path: path.clone(),
+                encoding: FsEncoding::Utf8,
+                ..Default::default()
+            },
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+        .unwrap();
+    assert_eq!(read.content, "你好");
+    assert_eq!(read.size, 6);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn fs_usage_scan_rolls_up_sizes_and_is_released() {
     use smelt_runtime_client::protocol::control::EmptyParams;
