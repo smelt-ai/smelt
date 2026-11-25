@@ -1,12 +1,12 @@
 // 会话头像的外形：按种子算出来，同一个种子永远同一个外形。
 //
-// 超椭圆打底（方圆程度、宽高比），上下收窄，叠几道左右对称的低频起伏，再统一面积、塞进 36 见方的
-// 画布，眼睛放在身子中心略往下。坐标都在 36×36 里，用的时候按头像尺寸缩放。
+// 超椭圆打底（方圆程度、宽高比），上下收窄，叠几道左右对称的低频起伏，再统一大小、塞进 36 见方的
+// 画布，眼睛差不多在身子正中。坐标都在 36×36 里，用的时候按头像尺寸缩放。
 
 /** 画布边长。 */
 export const CANVAS = 36;
 /** 眼睛半径。 */
-export const EYE_R = 2.5;
+export const EYE_R = 2.6;
 
 /** 字符串 → 32 位种子（FNV-1a）。 */
 export function hash(text) {
@@ -34,6 +34,12 @@ const lerp = (a, b, t) => a + (b - a) * t;
 const POINTS = 48;
 /** 统一到的面积（36 见方里的平方单位）。 */
 const AREA = 400;
+/** 外接框长边统一到多长。 */
+const BOX = 25;
+/** 定大小时外接框占几成：只按面积统一的话，扁宽的看着比圆的大。 */
+const BOX_WEIGHT = 0.6;
+/** 各阶起伏（2、3、4 阶）的最大幅度：奇数阶让上下不对称，给得最少。 */
+const WAVES = [0.06, 0.02, 0.035];
 
 /**
  * 种子 → `{ path, eyes: [左眼 x, 右眼 x, y] }`。新加随机量只能接在最后取，前面的不变，
@@ -41,11 +47,12 @@ const AREA = 400;
  */
 export function shapeOf(seed) {
   const r = rng(seed);
-  const n = lerp(2.1, 5.5, r()); // 2 是椭圆，越大越方
+  // 取值范围收在好看的一段：太圆像蛋、太方像屏幕，收窄和起伏大了会出盾牌、钟形。
+  const n = lerp(2.6, 4.2, r()); // 2 是椭圆，越大越方
   const a = lerp(10.5, 13, r());
   const b = lerp(9.5, 12.5, r());
-  const taper = lerp(-0.28, 0.28, r()); // 正：下宽上窄；负：上宽下窄
-  const waves = [2, 3, 4, 5].map((k) => [k, (r() - 0.5) * (k === 2 ? 0.16 : 0.09)]);
+  const taper = lerp(-0.16, 0.16, r()); // 正：下宽上窄；负：上宽下窄
+  const waves = WAVES.map((w, i) => [i + 2, (r() - 0.5) * 2 * w]);
 
   const pts = [];
   for (let i = 0; i < POINTS; i++) {
@@ -75,8 +82,12 @@ export function shapeOf(seed) {
     minY = Math.min(minY, y1);
     maxY = Math.max(maxY, y1);
   }
-  // 统一面积，再保证四边留够描边的位置。
-  const k = Math.min(Math.sqrt(AREA / Math.abs(area / 2)), 27 / (maxX - minX), 26 / (maxY - minY));
+  // 大小按面积和外接框长边混着统一，再保证四边留够描边的位置。
+  const width = maxX - minX;
+  const height = maxY - minY;
+  const byArea = Math.sqrt(AREA / Math.abs(area / 2));
+  const byBox = BOX / Math.max(width, height);
+  const k = Math.min(byArea * (1 - BOX_WEIGHT) + byBox * BOX_WEIGHT, 27 / width, 26 / height);
   const cy = 19.5 - ((minY + maxY) / 2) * k;
   const P = pts.map(([x, y]) => [CANVAS / 2 + x * k, cy + y * k]);
 
@@ -95,8 +106,8 @@ export function shapeOf(seed) {
   }
   path += " Z";
 
-  const eyeY = cy + (maxY - minY) * k * 0.06;
-  const half = Math.min(3.9, (maxX - minX) * k * 0.15);
+  const eyeY = cy + height * k * 0.02;
+  const half = Math.min(4.6, width * k * 0.17);
   return { path, eyes: [CANVAS / 2 - half, CANVAS / 2 + half, eyeY] };
 }
 

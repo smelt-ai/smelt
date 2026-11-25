@@ -46,3 +46,14 @@ test("两只眼睛左右对称、互不重叠、都落在身子里", () => {
     expect(y + EYE_R).toBeLessThan(Math.max(...ys) - 1);
   }
 });
+
+test("一排看下来大小差不多：外接框长边都在 23 到 26.5 之间", () => {
+  for (const seed of seeds) {
+    const pts = points(shapeOf(seed).path);
+    const xs = pts.map(([x]) => x);
+    const ys = pts.map(([, y]) => y);
+    const long = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+    expect(long).toBeGreaterThan(23);
+    expect(long).toBeLessThan(26.5);
+  }
+});
