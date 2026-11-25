@@ -12,14 +12,17 @@ use std::time::Duration;
 use rust_i18n::t;
 use smelt_model::runtime_path::PathStyle;
 use smelt_runtime_client::protocol::files::{
-    FileContent, FileOpenCall, FilePathParams, ProjectDirParams, ProjectSearchCall,
-    ProjectSearchParams, ProjectTreeCall,
+    FileContent, FileOpenCall, FilePathParams, ProjectSearchCall, ProjectSearchParams,
 };
+use smelt_runtime_client::protocol::fs::{FsKind, FsReadDirCall};
 
 use crate::api::error::{SmeltError, SmeltErrorKind, error};
 use crate::api::files::{FileEntry, FilePreview, FileSearch, FileSearchHit, TextDocument};
 use crate::catalog::control_error;
 use crate::connection::CurrentRuntime;
+
+/// 文件页不显示的目录项。
+const HIDDEN_ENTRIES: [&str; 4] = [".git", "node_modules", "target", ".DS_Store"];
 
 /// 这台机器的连接从哪来。生产用节点的 `NodeSource`（见 `crate::fleet`），测试注入假的。
 pub(crate) trait RuntimeSource: Send + Sync {
@@ -57,33 +60,41 @@ impl Files {
             .ok_or_else(|| error(SmeltErrorKind::Offline, t!("error.not_connected")))
     }
 
-    /// 列一层。`style` 是这台机器的路径规则，用来拼子项的绝对路径。
+    /// 列一层：滤掉 [`HIDDEN_ENTRIES`]，目录在前、同类按名字不区分大小写排，指向目录的
+    /// 符号链接当目录。`style` 是这台机器的路径规则，用来拼子项的绝对路径。
     pub(crate) fn list_dir(
         &self,
-        root: &str,
         dir: &str,
         style: PathStyle,
     ) -> Result<Vec<FileEntry>, SmeltError> {
-        let tree = self
+        let listed = self
             .runtime()?
             .client
-            .call::<ProjectTreeCall>(
-                &ProjectDirParams {
-                    root: root.to_string(),
-                    dir: dir.to_string(),
+            .call::<FsReadDirCall>(
+                &FilePathParams {
+                    path: dir.to_string(),
                 },
                 self.timing.call_timeout,
             )
             .map_err(control_error)?;
-        Ok(tree
+        let mut entries: Vec<FileEntry> = listed
             .entries
             .into_iter()
-            .map(|entry| FileEntry {
-                path: style.join(dir, &entry.name),
-                name: entry.name,
-                is_dir: entry.is_dir,
+            .filter(|entry| !HIDDEN_ENTRIES.contains(&entry.name.as_str()))
+            .map(|entry| {
+                let kind = match entry.stat.kind {
+                    FsKind::Symlink => entry.stat.target_kind,
+                    kind => Some(kind),
+                };
+                FileEntry {
+                    path: style.join(dir, &entry.name),
+                    name: entry.name,
+                    is_dir: kind == Some(FsKind::Dir),
+                }
             })
-            .collect())
+            .collect();
+        entries.sort_by_cached_key(|entry| (!entry.is_dir, entry.name.to_lowercase()));
+        Ok(entries)
     }
 
     pub(crate) fn search(&self, root: &str, query: &str) -> Result<FileSearch, SmeltError> {

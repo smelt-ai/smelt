@@ -179,13 +179,23 @@ fn dispatch_control(
             Ok(result) => success_value(control_version, &request_id, result),
             Err(error) => error_value(control_version, request_id, error),
         },
-        files @ (ControlMethod::ProjectTree
-        | ControlMethod::ProjectSearch
-        | ControlMethod::ProjectDeleteEntry
+        files @ (ControlMethod::ProjectSearch
         | ControlMethod::FileOpen
         | ControlMethod::FileSave
         | ControlMethod::SessionCompleteFiles) => {
             match super::files_control::dispatch(files, params) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        fs @ (ControlMethod::FsStat
+        | ControlMethod::FsReadDir
+        | ControlMethod::FsDelete
+        | ControlMethod::FsVolume
+        | ControlMethod::FsUsageScan
+        | ControlMethod::FsUsageChildren
+        | ControlMethod::FsUsageRelease) => {
+            match super::fs_control::dispatch(fs, params, event_hub) {
                 Ok(result) => success_value(control_version, &request_id, result),
                 Err(error) => error_value(control_version, request_id, error),
             }

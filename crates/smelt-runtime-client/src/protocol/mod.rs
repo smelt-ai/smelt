@@ -4,6 +4,7 @@ pub mod control;
 pub mod daemon;
 pub mod desktop;
 pub mod files;
+pub mod fs;
 pub mod git;
 pub mod history;
 pub mod reason;

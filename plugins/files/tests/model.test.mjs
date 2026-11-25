@@ -14,6 +14,7 @@ import {
   isMarkdownPath,
   isPreviewableImage,
   pathToFileUrl,
+  treeEntries,
   treeRoots,
 } from "../model.js";
 
@@ -299,5 +300,32 @@ describe("file helpers", () => {
       "/repo/a/b",
     ]);
     expect(ancestorsUnderRoot(posixOps, "/other/c.rs", "/repo")).toEqual([]);
+  });
+});
+
+describe("treeEntries", () => {
+  test("滤掉噪音项，目录在前、按名字不区分大小写排，指向目录的链接当目录", () => {
+    const raw = [
+      { name: "beta.rs", kind: "file" },
+      { name: ".git", kind: "dir" },
+      { name: "zeta", kind: "dir" },
+      { name: "Alpha.md", kind: "file" },
+      { name: "src", kind: "dir" },
+      { name: "link", kind: "symlink", target_kind: "dir" },
+      { name: "dangling", kind: "symlink", target_kind: null },
+      { name: ".DS_Store", kind: "file" },
+    ];
+    expect(treeEntries(raw)).toEqual([
+      { name: "link", is_dir: true },
+      { name: "src", is_dir: true },
+      { name: "zeta", is_dir: true },
+      { name: "Alpha.md", is_dir: false },
+      { name: "beta.rs", is_dir: false },
+      { name: "dangling", is_dir: false },
+    ]);
+  });
+
+  test("不是数组时是空的", () => {
+    expect(treeEntries(undefined)).toEqual([]);
   });
 });

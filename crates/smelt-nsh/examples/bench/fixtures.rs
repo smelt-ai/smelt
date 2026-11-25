@@ -727,9 +727,9 @@ impl Host for BenchHost {
                             "is_gitlink": false,
                         })
                     }
-                    "project.tree" => {
+                    "fs.read_dir" => {
                         counters.project_tree_served.store(true, Ordering::Release);
-                        let dir = params["dir"].as_str().unwrap_or("/work/smelt");
+                        let dir = params["path"].as_str().unwrap_or("/work/smelt");
                         json!({ "entries": generate_project_tree(dir) })
                     }
                     "file.open" => {
@@ -903,17 +903,17 @@ fn generate_project_tree(dir: &str) -> Vec<Value> {
     if dir == "/work/smelt" {
         let mut entries = Vec::with_capacity(120);
         for i in 0..20 {
-            entries.push(json!({ "name": format!("module_{i:02}"), "is_dir": true }));
+            entries.push(json!({ "name": format!("module_{i:02}"), "kind": "dir" }));
         }
-        entries.push(json!({ "name": "src", "is_dir": true }));
+        entries.push(json!({ "name": "src", "kind": "dir" }));
         for i in 0..99 {
             let ext = if i % 3 == 0 { "tsx" } else { "rs" };
-            entries.push(json!({ "name": format!("bench_file_{i:02}.{ext}"), "is_dir": false }));
+            entries.push(json!({ "name": format!("bench_file_{i:02}.{ext}"), "kind": "file" }));
         }
         entries
     } else {
         (0..30)
-            .map(|i| json!({ "name": format!("sub_entry_{i:02}.rs"), "is_dir": i < 5 }))
+            .map(|i| json!({ "name": format!("sub_entry_{i:02}.rs"), "kind": if i < 5 { "dir" } else { "file" } }))
             .collect()
     }
 }

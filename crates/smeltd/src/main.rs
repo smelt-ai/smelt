@@ -120,6 +120,7 @@ mod devices;
 mod app_requests;
 mod event_hub;
 mod files_control;
+mod fs_control;
 mod git_control;
 mod history_control;
 mod memory_peer_auth;

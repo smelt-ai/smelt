@@ -119,6 +119,10 @@ pub const CORE_TOPIC_AGENT_HOST_CHANGED: &str = "agent_host.changed";
 /// 终端里的程序用 OSC 9;4（ConEmu 进度）报的进度变了。运行时变了就发，进度条还在时
 /// 每 5 秒重发一次（后连上的客户端据此补齐），15 秒没新报告就清掉。不进会话投影。
 pub const CORE_TOPIC_TERMINAL_PROGRESS: &str = "terminal.progress";
+/// 一次目录占用统计（`fs.usage.scan`）的进度，载荷 [`FsUsageProgressChanged`]。扫的过程中
+/// 隔一会儿发一次，扫完或被 `fs.usage.release` 停下时再发一次。没有快照：错过了就用
+/// `fs.usage.children` 问。不进核心订阅，同 [`CORE_TOPIC_ATTENTION_CHANGED`]。
+pub const CORE_TOPIC_FS_USAGE_PROGRESS: &str = "fs.usage.progress";
 /// 「新建会话」目录（智能体选项、分组动作、Pin 与 CLI 探测）在运行时更新了，载荷为
 /// `smelt_model::control_api::NewSessionCatalogResult`，带快照 [`CORE_SNAPSHOT_NEW_SESSION_CATALOG`]。
 ///
@@ -726,6 +730,17 @@ pub struct TerminalProgress {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FsUsageProgressChanged {
+    /// `fs.usage.scan` 给的扫描 id。
+    pub scan: String,
+    /// 到目前为止数过的文件数和字节数。
+    pub files: u64,
+    pub bytes: u64,
+    /// 扫完了，或者被停下了。
+    pub done: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TerminalProgressChanged {
     pub session_id: String,
     /// `None`：进度条清掉了。
@@ -898,6 +913,12 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
             CORE_CAPABILITY_SESSION_READ,
             None,
             4 * 1024,
+        )?,
+        descriptor(
+            CORE_TOPIC_FS_USAGE_PROGRESS,
+            CORE_CAPABILITY_WORKSPACE_READ,
+            None,
+            1024,
         )?,
         // 两条提醒，各自的正文最多 4096 字节（扫描器上限），JSON 转义后可能翻倍。
         descriptor(
@@ -1217,6 +1238,7 @@ mod tests {
             (CORE_TOPIC_HISTORY_CHANGED, None, 1),
             (CORE_TOPIC_TERMINAL_NOTIFICATION, None, 1),
             (CORE_TOPIC_TERMINAL_PROGRESS, None, 1),
+            (CORE_TOPIC_FS_USAGE_PROGRESS, None, 1),
             (
                 CORE_TOPIC_ATTENTION_CHANGED,
                 Some(CORE_SNAPSHOT_ATTENTION),

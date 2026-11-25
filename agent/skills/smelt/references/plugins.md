@@ -67,7 +67,8 @@ NSH 不是 React：组件函数只跑一次，读了 signal 的地方才更新�
 - `call(machine, method, params?, timeoutMs?)`：Control API，`machine` 是 `null`（本机）或远程 id；方法名见 `ControlMethodName`。要错误码用 `callDetail`（`{ ok, value }` / `{ ok: false, code, message }`）。
 - `waitOnline(machine, failures?)`：等上线，机器被移除给 `false`。
 - 运行时话题消息 `kind`：`event` / `snapshot`（整份换掉）/ `lagged`（自己重读）/ `unavailable`（这台机器不支持）。
-- 本机：`openUrl`、`openFile({ machine, path, line? })`、`pathKind`、`revealPath`、`clipboardWrite`、`discoverApps`、`launchPath`、`processUsage`、`renderMermaidSvg`、`fetch`。
+- 文件（本机远程都行，走 `call`）：`fs.stat`、`fs.read_dir`、`fs.delete`（`trash`、`expect`）、`fs.volume`、`fs.usage.scan` / `children` / `release`（进度话题 `fs.usage.progress`），见 `docs/plugins/runtime.md`。
+- 本机：`openUrl`、`openFile({ machine, path, line? })`、`revealPath`、`clipboardWrite`、`discoverApps`、`launchPath`、`processUsage`、`renderMermaidSvg`、`fetch`。
 - 路径用 `pathJoin(style, …)` 这组函数，`style = pathStyle(machine)`，远程可能是 Windows。
 
 **存储**：`store.migrate([step1, step2])`（`steps[i]` 把版本 i 迁到 i+1，只往后加，放 `bootTask` 里最先跑）、`store.query(sql, params)`、`store.execute(sql, params)`、`store.write([{ sql, params }])`（一个事务）。参数只能是 string/number/boolean/null，不存 JSON 大字段、不存 BLOB。

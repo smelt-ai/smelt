@@ -189,16 +189,11 @@ impl FilePreview {
     }
 }
 
-/// 列项目里的一层：目录在前，按名字排。`.git`、`node_modules` 这类由运行时滤掉。
-/// `dir` 必须在 `root` 里面。
-pub fn list_project_dir(
-    runtime_id: String,
-    root: String,
-    dir: String,
-) -> Result<Vec<FileEntry>, SmeltError> {
+/// 列一个目录的一层：目录在前，按名字排，不显示 `.git`、`node_modules` 这类。
+pub fn list_project_dir(runtime_id: String, dir: String) -> Result<Vec<FileEntry>, SmeltError> {
     let node = crate::fleet::fleet().node(&runtime_id)?;
     let style = node.catalog.path_style();
-    node.files.list_dir(&root, &dir, style)
+    node.files.list_dir(&dir, style)
 }
 
 /// 按文件名和内容搜，不区分大小写，遵守 `.gitignore`。

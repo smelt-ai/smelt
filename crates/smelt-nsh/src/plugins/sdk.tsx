@@ -1204,10 +1204,6 @@ export function clipboardWrite(value: string): Promise<void> {
   return host.call("clipboard.write", { text: value });
 }
 
-export function pathKind(path: string): Promise<"dir" | "file" | null> {
-  return host.call("fs.path_kind", { path });
-}
-
 export function revealPath(path: string): Promise<void> {
   return host.call("fs.reveal_path", { path });
 }

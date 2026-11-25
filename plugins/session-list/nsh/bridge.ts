@@ -27,7 +27,6 @@ import {
   pathFileName,
   pathIsAbsolute,
   pathJoin,
-  pathKind,
   pathParent,
   pathStartsWith,
   pathStyle,
@@ -217,7 +216,12 @@ export const hostAdapter = {
   redraw() {
     tick.set(tick() + 1);
   },
-  path_kind: pathKind,
+  /** 本机路径是目录、文件还是读不到。指向目录的符号链接算目录。 */
+  async path_kind(path: string): Promise<"dir" | "file" | null> {
+    const stat = await call(null, "fs.stat", { path });
+    const kind = stat?.kind === "symlink" ? stat.target_kind : stat?.kind;
+    return kind === "dir" || kind === "file" ? kind : null;
+  },
   parent_dir(path: string): string | null {
     return pathParent(pathStyle(null), path);
   },

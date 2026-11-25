@@ -50,6 +50,10 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 # 项目搜索（project_files）遵守 .gitignore 等忽略规则。
 ignore = "0.4"
+# 目录占用统计（disk_usage）按子目录并行扫。
+rayon = "1"
+# `fs.delete` 移进系统废纸篓（macOS 废纸篓、freedesktop、Windows 回收站）。
+trash = "5"
 sha2.workspace = true
 hex = "0.4"
 # 规范化路径不带 Windows 的 `\\?\` 前缀（std::fs::canonicalize 会带）。

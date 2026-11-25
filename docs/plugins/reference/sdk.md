@@ -93,7 +93,6 @@
 | `fetch` | Web 标准全局，联网用 |
 | `openUrl(url)` | 用浏览器打开 |
 | `openFile({ machine, path, line? })` | 交给文件打开者 |
-| `pathKind(path)` | 本机路径是 `"dir"`、`"file"` 还是 `null` |
 | `revealPath(path)` | 在访达里显示 |
 | `clipboardWrite(text)` | 写剪贴板 |
 | `discoverApps(queries)`、`launchPath(target)` | 找本机应用，用它打开路径 |

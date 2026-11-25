@@ -102,23 +102,38 @@ fn connected(runtime: &Arc<FakeRuntime>) -> Files {
 }
 
 #[test]
-fn listing_joins_child_paths_with_the_machines_rules() {
+fn listing_hides_noise_sorts_dirs_first_and_joins_paths_with_the_machines_rules() {
     let runtime = FakeRuntime::new();
+    let stat = |kind: &str, target: Option<&str>| {
+        json!({ "kind": kind, "target_kind": target, "size": 0, "allocated": 0,
+                "modified": null, "identity": null })
+    };
+    let entry = |name: &str, kind: &str, target: Option<&str>| {
+        let mut value = stat(kind, target);
+        value["name"] = json!(name);
+        value
+    };
     runtime.result(
-        "project.tree",
+        "fs.read_dir",
         json!({ "entries": [
-            { "name": "src", "is_dir": true },
-            { "name": "README.md", "is_dir": false },
+            entry("README.md", "file", None),
+            entry(".git", "dir", None),
+            entry("src", "dir", None),
+            entry("docs", "symlink", Some("dir")),
+            entry("node_modules", "dir", None),
         ]}),
     );
     let files = connected(&runtime);
 
-    let posix = files
-        .list_dir("/home/u/app", "/home/u/app", PathStyle::Posix)
-        .unwrap();
+    let posix = files.list_dir("/home/u/app", PathStyle::Posix).unwrap();
     assert_eq!(
         posix,
         vec![
+            FileEntry {
+                name: "docs".into(),
+                path: "/home/u/app/docs".into(),
+                is_dir: true
+            },
             FileEntry {
                 name: "src".into(),
                 path: "/home/u/app/src".into(),
@@ -132,14 +147,12 @@ fn listing_joins_child_paths_with_the_machines_rules() {
         ]
     );
     assert_eq!(
-        runtime.params("project.tree"),
-        vec![json!({ "root": "/home/u/app", "dir": "/home/u/app" })]
+        runtime.params("fs.read_dir"),
+        vec![json!({ "path": "/home/u/app" })]
     );
 
-    let windows = files
-        .list_dir(r"C:\app", r"C:\app\src", PathStyle::Windows)
-        .unwrap();
-    assert_eq!(windows[1].path, r"C:\app\src\README.md");
+    let windows = files.list_dir(r"C:\app\src", PathStyle::Windows).unwrap();
+    assert_eq!(windows[2].path, r"C:\app\src\README.md");
 }
 
 #[test]
@@ -223,7 +236,7 @@ fn offline_and_old_runtimes_explain_themselves() {
     // 老运行时不认这个方法。
     let runtime = FakeRuntime::new();
     let error = connected(&runtime)
-        .list_dir("/p", "/p", PathStyle::Posix)
+        .list_dir("/p", PathStyle::Posix)
         .unwrap_err();
     assert_eq!(error.kind, SmeltErrorKind::RuntimeOutdated);
 }

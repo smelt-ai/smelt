@@ -532,7 +532,6 @@ export declare function contextMenuItems(
   context: unknown,
 ): Promise<any[]>;
 export declare function clipboardWrite(value: string): Promise<void>;
-export declare function pathKind(path: string): Promise<"dir" | "file" | null>;
 export declare function revealPath(path: string): Promise<void>;
 
 export interface ProcessMemoryBreakdown {

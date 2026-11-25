@@ -168,11 +168,11 @@ delete:
     en: Delete this file?
     zh-CN: 确定删除这个文件吗？
   folder_description:
-    en: “%{name}” and everything in it will be permanently deleted. This can't be undone.
-    zh-CN: 将永久删除「%{name}」及其全部内容，此操作不可撤销。
+    en: “%{name}” and everything in it will be moved to the Trash.
+    zh-CN: 「%{name}」及其全部内容会移到废纸篓。
   file_description:
-    en: “%{name}” will be permanently deleted. This can't be undone.
-    zh-CN: 将永久删除「%{name}」，此操作不可撤销。
+    en: “%{name}” will be moved to the Trash.
+    zh-CN: 「%{name}」会移到废纸篓。
   failed:
     en: "Couldn't delete: %{error}"
     zh-CN: 删除失败：%{error}

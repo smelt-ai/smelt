@@ -331,13 +331,13 @@ fn file_save_with_a_stale_version_is_a_conflict() {
 }
 
 #[test]
-fn project_tree_rejects_a_directory_outside_the_project() {
-    use smelt_runtime_client::protocol::files::{ProjectDirParams, ProjectTreeCall};
+fn fs_read_dir_reports_a_missing_directory_instead_of_listing_it_empty() {
+    use smelt_runtime_client::protocol::files::FilePathParams;
+    use smelt_runtime_client::protocol::fs::FsReadDirCall;
     let error = in_process_runtime()
-        .call::<ProjectTreeCall>(
-            &ProjectDirParams {
-                root: "/no/such/project".to_string(),
-                dir: "/etc".to_string(),
+        .call::<FsReadDirCall>(
+            &FilePathParams {
+                path: "/no/such/dir".to_string(),
             },
             DEFAULT_REQUEST_TIMEOUT,
         )
@@ -346,7 +346,66 @@ fn project_tree_rejects_a_directory_outside_the_project() {
     let ControlClientError::Protocol(error) = error else {
         panic!("expected a protocol error, got {error}");
     };
-    assert_eq!(error.code, ControlErrorCode::InvalidParams);
+    assert_eq!(error.code, ControlErrorCode::NotFound);
+}
+
+#[test]
+fn fs_usage_scan_rolls_up_sizes_and_is_released() {
+    use smelt_runtime_client::protocol::control::EmptyParams;
+    use smelt_runtime_client::protocol::files::FilePathParams;
+    use smelt_runtime_client::protocol::fs::{
+        FsUsageChildrenCall, FsUsageChildrenParams, FsUsageReleaseCall, FsUsageScanCall,
+        FsUsageScanParams,
+    };
+    let dir = std::env::temp_dir().join(format!("smeltd-fs-usage-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(dir.join("big")).unwrap();
+    std::fs::write(dir.join("big/a.bin"), vec![1u8; 200 * 1024]).unwrap();
+    std::fs::write(dir.join("small.txt"), "x").unwrap();
+    let root = dir.to_str().unwrap().to_string();
+    let runtime = in_process_runtime();
+
+    let scan = runtime
+        .call::<FsUsageScanCall>(
+            &FilePathParams { path: root.clone() },
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+        .unwrap()
+        .scan;
+    let children = |path: &str| {
+        runtime.call::<FsUsageChildrenCall>(
+            &FsUsageChildrenParams {
+                scan: scan.clone(),
+                path: path.to_string(),
+            },
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+    };
+    // 测试里没有事件订阅，扫完前隔一会儿再问；几个文件转眼就扫完。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let result = loop {
+        let result = children(&root).unwrap();
+        if result.done {
+            break result;
+        }
+        assert!(std::time::Instant::now() < deadline, "扫描没结束");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(result.progress.files, 2);
+    assert_eq!(result.entry.unwrap().files, 2);
+    let names: Vec<_> = result.children.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["big", "small.txt"]);
+
+    let _: EmptyParams = runtime
+        .call::<FsUsageReleaseCall>(
+            &FsUsageScanParams { scan: scan.clone() },
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+        .unwrap();
+    let ControlClientError::Protocol(error) = children(&root).unwrap_err() else {
+        panic!("expected a protocol error");
+    };
+    assert_eq!(error.code, ControlErrorCode::NotFound);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

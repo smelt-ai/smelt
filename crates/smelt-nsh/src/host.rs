@@ -1,13 +1,13 @@
 //! 给外壳和所有独立插件 VM 的通用宿主桥：一份只读通用状态（宿主变了广播整份）、离散宿主事件转发
 //! （`smelt.event`）、双向命令派发（`smelt.command` / `command.reply`），以及通用宿主调用
-//! （`state`、`run`、`call`、`request`、`context_menu_items`、`clipboard.write`、`fs.path_kind`、
+//! （`state`、`run`、`call`、`request`、`context_menu_items`、`clipboard.write`、
 //! `fs.reveal_path`、`sys.process_usage`、`os.discover_apps`、`os.launch_path`、`set_active_context`、`open_file`、`open_url`、`register_views`、
 //! `register_commands`、`register_topics`、`register_layouts`、`register_pages`、
 //! `register_context_menu_items`、`register_menu_items`、`register_file_opener`）。
 //!
 //! 只给通用事实与能力，不认识任何具体插件。
 //! 插件的 `host.call` 经各自的 `HostChannel` 在引擎线程上直达，携带不可伪造的 `plugin_id`：
-//! `state` 与 `command.reply` 当场在引擎线程处理；`fs.path_kind` 在后台线程做不碰主线程；
+//! `state` 与 `command.reply` 当场在引擎线程处理；`fs.reveal_path` 在后台线程做不碰主线程；
 //! 需要 GPUI `&App` 的调用封装为 [`Action`] 转主线程执行。
 
 use std::{
@@ -855,20 +855,6 @@ impl Bridge {
                 );
             });
         }
-
-        plugins.handle("fs.path_kind", move |_plugin, call| {
-            let Some(path) = call.data()["path"].as_str().map(str::to_owned) else {
-                return call.reject("fs.path_kind：缺 path 字符串");
-            };
-            api::blocking::spawn_detached(move || {
-                let kind = match std::fs::metadata(&path) {
-                    Ok(meta) if meta.is_dir() => Value::String("dir".to_owned()),
-                    Ok(meta) if meta.is_file() => Value::String("file".to_owned()),
-                    _ => Value::Null,
-                };
-                call.resolve(kind);
-            });
-        });
 
         plugins.handle("fs.reveal_path", move |_plugin, call| {
             let Some(path) = call.data()["path"].as_str().map(str::to_owned) else {

@@ -86,6 +86,28 @@ export function pathToFileUrl(path) {
   return null;
 }
 
+/** 文件树不显示的目录项。 */
+export const HIDDEN_TREE_ENTRIES = [".git", "node_modules", "target", ".DS_Store"];
+
+/**
+ * `fs.read_dir` 的原样结果 → 文件树的一层：滤掉 {@link HIDDEN_TREE_ENTRIES}，目录在前、同类按名字
+ * 不区分大小写排。指向目录的符号链接当目录，能展开。
+ */
+export function treeEntries(raw) {
+  const entries = [];
+  for (const item of Array.isArray(raw) ? raw : []) {
+    const name = String(item?.name ?? "");
+    if (!name || HIDDEN_TREE_ENTRIES.includes(name)) continue;
+    const kind = item.kind === "symlink" ? item.target_kind : item.kind;
+    entries.push({ name, is_dir: kind === "dir", key: name.toLowerCase() });
+  }
+  entries.sort((a, b) => {
+    if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+    return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+  });
+  return entries.map(({ name, is_dir }) => ({ name, is_dir }));
+}
+
 /** git status porcelain 两位码 → 简标（M / A / D / U）。 */
 export function gitStatusMark(code) {
   const pair = String(code ?? "").slice(0, 2);

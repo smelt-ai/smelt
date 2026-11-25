@@ -122,6 +122,7 @@ onEvent((event) => {
 | `history.changed` | 历史存档改过 | |
 | `new_session.catalog_changed` | 「新建会话」的选项 | 有 |
 | `terminal.notification`、`terminal.progress` | 终端程序发的通知、进度 | |
+| `fs.usage.progress` | `{ scan, files, bytes, done }`：占用统计扫了多少，每秒几次，扫完（含取消）发一条 `done: true` | |
 
 会话状态和工作区目录宿主已经订着，直接读[宿主状态](host-state.md#会话)，不用登记。
 
@@ -134,7 +135,6 @@ onEvent((event) => {
 | `fetch(url, init)` | Web 标准的 `fetch`，联网用它 |
 | `openUrl(url)` | 用系统浏览器打开链接 |
 | `openFile({ machine, path, line })` | 交给文件打开者打开，见[打开文件](commands.md#打开文件) |
-| `pathKind(path)` | 本机路径是目录、文件还是不存在：`"dir" \| "file" \| null` |
 | `revealPath(path)` | 在访达里显示本机路径 |
 | `clipboardWrite(text)` | 写剪贴板 |
 | `discoverApps(queries)` | 找本机装了哪些应用或命令行工具，可以带图标 |
@@ -142,7 +142,19 @@ onEvent((event) => {
 | `processUsage()` | Smelt 自己的 CPU、内存 |
 | `renderMermaidSvg(source)` | 把 Mermaid 源码画成 SVG |
 
-要读写远程机器上的文件，用运行时的 `project.tree`、`file.open`、`file.save` 这些方法。
+文件操作走运行时，本机和远程机器一样：
+
+| 方法 | 做什么 |
+| --- | --- |
+| `fs.stat` | `{ path }` → `{ kind, target_kind, size, allocated, modified, identity }`。`kind` 是 `"file"`、`"dir"`、`"symlink"`、`"other"`；符号链接的 `target_kind` 是它指向的东西，断了是 `null`。`allocated` 是实际占的磁盘字节，`modified` 是毫秒时间戳，`identity` 是 `{ dev, ino }` |
+| `fs.read_dir` | `{ path }` → `{ entries }`，每项是 `name` 加上同 `fs.stat` 的字段。原样一层，不过滤不排序；目录不存在报 `not_found`、没权限报 `permission_denied` |
+| `fs.delete` | `{ path, trash?, expect? }`。`trash: true` 移到废纸篓，否则直接删（目录连同内容）。`expect` 传之前拿到的 `identity`，路径上已经换成别的文件就报 `conflict`，不删 |
+| `fs.volume` | `{ path }` → `{ mount, name, file_system, total, available }`，字节。macOS 上 `available` 含系统可清掉的空间，和访达一致 |
+| `fs.usage.scan` | `{ path }` → `{ scan }`。后台统计这个目录下每一层占多少，马上返回统计 id |
+| `fs.usage.children` | `{ scan, path }` → `{ done, progress, entry, children }`。扫完后 `entry` 是 `path` 自己，`children` 是下一层，按占用从大到小；没扫完 `done` 是 `false`。子目录的大小是扫描那一刻的，文件当场列，删掉的不再出现 |
+| `fs.usage.release` | `{ scan }`。不看了就放掉；在扫的会停下。同时留着的统计最多 4 个，满了 `fs.usage.scan` 报 `busy` |
+
+路径都是那台机器上的绝对路径。统计按实际占的块算，硬链接只算一次，不跟符号链接，不跨卷。进度经话题 `fs.usage.progress` 推，见上面。
 
 ## 对话
 

@@ -1,6 +1,6 @@
 //! 文件面板与 Git 面板列表渲染回归测试（独立进程，避开 `nsh_platform_gpui::rt::JOBS` 单进程 `OnceLock`）：
 //! 覆盖：
-//! 1. 冷启动时 `project.tree` 晚于首帧返回，`Loading…` 必须响应式切到文件树而不是永远卡住；
+//! 1. 冷启动时 `fs.read_dir` 晚于首帧返回，`Loading…` 必须响应式切到文件树而不是永远卡住；
 //! 2. `ContextMenu` 必须通过 `trigger={...}` 挂载文件行/目录行，而不是丢进 `children` 导致列表全空；
 //! 3. 点击目录行可展开子目录、点击文件行可打开文件；
 //! 4. Git 改动树（同样使用 `ContextMenu`）能渲染改动文件行。
@@ -76,19 +76,19 @@ impl Host for FilesTestHost {
                 let method = req["method"].as_str().unwrap_or("");
                 let params = &req["params"];
                 let payload = match method {
-                    "project.tree" => {
-                        let dir = params["dir"].as_str().unwrap_or("").to_owned();
+                    "fs.read_dir" => {
+                        let dir = params["path"].as_str().unwrap_or("").to_owned();
                         tree_calls.lock().unwrap().push(dir.clone());
                         match dir.as_str() {
                             "/work/smelt" => json!({
                                 "entries": [
-                                    { "name": "crates", "is_dir": true },
-                                    { "name": "Cargo.toml", "is_dir": false }
+                                    { "name": "crates", "kind": "dir" },
+                                    { "name": "Cargo.toml", "kind": "file" }
                                 ]
                             }),
                             "/work/smelt/crates" => json!({
                                 "entries": [
-                                    { "name": "smelt-nsh", "is_dir": true }
+                                    { "name": "smelt-nsh", "kind": "dir" }
                                 ]
                             }),
                             _ => json!({ "entries": [] }),
@@ -399,13 +399,13 @@ fn files_tree_renders_and_interacts_after_async_load(cx: &mut TestAppContext) {
         has_a11y_text(cx, "Loading…")
     });
 
-    // 2. 守护上线重连后，project.tree 返回，Loading… 必须消失，文件树行（crates、Cargo.toml）渲染出来。
+    // 2. 守护上线重连后，fs.read_dir 返回，Loading… 必须消失，文件树行（crates、Cargo.toml）渲染出来。
     local_online.store(true, Ordering::SeqCst);
     cx.update(|_, cx| {
         api::emit(HostEvent::MachinesChanged, cx);
         api::emit(HostEvent::Reconnected(RuntimeKey::Local), cx);
     });
-    wait_for(cx, "project.tree 已完成抓取", |_| {
+    wait_for(cx, "fs.read_dir 已完成抓取", |_| {
         tree_calls
             .lock()
             .unwrap()

@@ -608,6 +608,35 @@ impl DaemonEventHub {
         Ok(())
     }
 
+    /// 一次目录占用统计的进度。没人订阅就不发。
+    pub(crate) fn publish_fs_usage_progress(
+        &self,
+        scan: &str,
+        files: u64,
+        bytes: u64,
+        done: bool,
+    ) -> Result<(), EventBusError> {
+        let topic = Topic::new(smelt_event_protocol::CORE_TOPIC_FS_USAGE_PROGRESS)
+            .expect("registered core topic is valid");
+        if !self.hub.has_subscriber(&topic)? {
+            return Ok(());
+        }
+        let payload = smelt_event_protocol::FsUsageProgressChanged {
+            scan: scan.to_string(),
+            files,
+            bytes,
+            done,
+        };
+        self.publish_core(
+            smelt_event_protocol::CORE_TOPIC_FS_USAGE_PROGRESS,
+            serde_json::to_value(payload).map_err(|error| {
+                EventBusError::new(format!("serialize fs usage progress: {error}"))
+            })?,
+            None,
+        )?;
+        Ok(())
+    }
+
     /// 智能体的记忆目录里有文件变了（`agent_id` 为 `None` 是用户全局记忆）。没人订阅就不发。
     pub(crate) fn publish_agent_memory_changed(
         &self,

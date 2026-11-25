@@ -10,15 +10,12 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 // These functions are ignored because they are not marked as `pub`: `binary`, `empty`, `image`, `new`, `text`, `too_large`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `hash`
 
-/// 列项目里的一层：目录在前，按名字排。`.git`、`node_modules` 这类由运行时滤掉。
-/// `dir` 必须在 `root` 里面。
+/// 列一个目录的一层：目录在前，按名字排，不显示 `.git`、`node_modules` 这类。
 Future<List<FileEntry>> listProjectDir({
   required String runtimeId,
-  required String root,
   required String dir,
 }) => RustLib.instance.api.crateApiFilesListProjectDir(
   runtimeId: runtimeId,
-  root: root,
   dir: dir,
 );
 

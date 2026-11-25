@@ -78,7 +78,7 @@ impl Host for TabBadgeTestHost {
                 let params = &req["params"];
                 let payload = match method {
                     "project.watch" => json!({}),
-                    "project.tree" => json!({ "entries": [] }),
+                    "fs.read_dir" => json!({ "entries": [] }),
                     "git.discover" => json!({
                         "repos": [
                             {

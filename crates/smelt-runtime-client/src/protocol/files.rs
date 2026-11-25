@@ -1,9 +1,8 @@
-//! 项目文件和文件查看器的业务方法。
+//! 项目和文件查看器的业务方法。
 //!
-//! 没有通用的读写原语（见设计文档 D4）：浏览、删除、搜索以项目为范围，运行时拒绝
-//! 越出项目根的路径；查看器按路径打开和保存，因为要打开的文件可能来自终端里的
-//! `smelt open`、对话中的链接，不一定在任何项目里。大小上限、二进制识别、保存冲突
-//! 这些规则都在运行时里执行。
+//! 搜索、监听以项目为范围（要按 ignore 规则、滤掉构建产物）；查看器按路径打开和保存，
+//! 大小上限、二进制识别、保存冲突这些规则都在运行时里执行。列目录、删除这些通用操作
+//! 见 [`super::fs`]。
 
 use serde::{Deserialize, Serialize};
 
@@ -26,12 +25,8 @@ macro_rules! file_calls {
 }
 
 file_calls! {
-    /// 项目里一个目录的直接子项。遵守噪音目录过滤，目录在前，按名字排序。
-    ProjectTreeCall => ProjectTree(ProjectDirParams) -> ProjectTreeResult;
     /// 按文件名和内容搜索项目，遵守 ignore 规则，命中数有上限。
     ProjectSearchCall => ProjectSearch(ProjectSearchParams) -> ProjectSearchResult;
-    /// 删除项目里的一个文件或目录（目录连同内容）。不能删项目根本身。
-    ProjectDeleteEntryCall => ProjectDeleteEntry(ProjectPathParams) -> EmptyParams;
     /// 打开文件查看或编辑。超过大小上限、不是 UTF-8 文本的，只说明原因不给内容。
     FileOpenCall => FileOpen(FilePathParams) -> FileOpenResult;
     /// 保存。`base_version` 和磁盘当前内容对不上时返回 `conflict`，不写入。
@@ -46,25 +41,6 @@ file_calls! {
 pub struct ProjectRootParams {
     /// 项目根，绝对路径。
     pub root: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ProjectDirParams {
-    /// 项目根，绝对路径。
-    pub root: String,
-    /// 要列的目录，绝对路径，必须在 `root` 之内（可以就是 `root`）。
-    pub dir: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ProjectEntry {
-    pub name: String,
-    pub is_dir: bool,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ProjectTreeResult {
-    pub entries: Vec<ProjectEntry>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -90,13 +66,6 @@ pub struct ProjectSearchResult {
     pub hits: Vec<ProjectSearchHit>,
     /// 命中数触顶后停止，后面还有。
     pub truncated: bool,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ProjectPathParams {
-    pub root: String,
-    /// 绝对路径，必须在 `root` 之内，且不能是 `root` 本身。
-    pub path: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

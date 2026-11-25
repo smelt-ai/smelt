@@ -72,6 +72,7 @@ import {
   nameLikelyTruncated,
   pathToFileUrl,
   projectKey,
+  treeEntries,
   treeRoots,
 } from "./model.js";
 import { clampTreeWidth, createFilesStore } from "./store.js";
@@ -385,7 +386,7 @@ function treeRootFor(machine: string | null, path: string): string | null {
   return best;
 }
 
-function ensureDir(machine: string | null, root: string, dir: string) {
+function ensureDir(machine: string | null, dir: string) {
   const key = projectKey(machine, dir);
   const map = getDirMap(machine);
   const existing = map.get(dir);
@@ -393,13 +394,18 @@ function ensureDir(machine: string | null, root: string, dir: string) {
   dirInflight.add(key);
   const gen = dirGeneration.get(key) ?? 0;
 
-  void call(machine, "project.tree", { root, dir })
-    .then((result: any) => {
+  void callDetail(machine, "fs.read_dir", { path: dir })
+    .then((outcome) => {
       dirInflight.delete(key);
+      // 目录没了、没权限读：当空目录显示。连不上之类的失败等重连后再取。
+      const unreadable =
+        !outcome.ok && (outcome.code === "not_found" || outcome.code === "permission_denied");
+      if (!outcome.ok && !unreadable) {
+        failedDirs.add(key);
+        return;
+      }
       failedDirs.delete(key);
-      const entries = Array.isArray(result?.entries)
-        ? result.entries.map((e: any) => ({ name: String(e.name ?? ""), is_dir: Boolean(e.is_dir) }))
-        : [];
+      const entries = outcome.ok ? treeEntries(outcome.value?.entries) : [];
       const stale = (dirGeneration.get(key) ?? 0) !== gen;
       getDirMap(machine).set(dir, { entries, stale });
       bumpCache();
@@ -450,11 +456,11 @@ function refreshVisible() {
   for (const root of roots) {
     ensureWatch(machine, root);
     if (roots.length > 1 && collapsed.has(root)) continue;
-    ensureDir(machine, root, root);
+    ensureDir(machine, root);
     ensureGitStatus(machine, root);
     for (const dir of expanded) {
       if (dir !== root && ops.startsWith(dir, root)) {
-        ensureDir(machine, root, dir);
+        ensureDir(machine, dir);
       }
     }
   }
@@ -936,10 +942,11 @@ async function confirmDelete() {
   deleteDialog.set(null);
   const machine = treeMachine();
   const root = treeRootFor(machine, dlg.path);
-  if (!root) return;
+  // 项目根本身不从文件树里删。
+  if (!root || dlg.path === root) return;
   const ops = styleOpsFor(machine);
   try {
-    await call(machine, "project.delete_entry", { root, path: dlg.path });
+    await call(machine, "fs.delete", { path: dlg.path, trash: true });
     // 清掉已删除路径对应的打开文件、选中和展开缓存。
     const cur = openFile();
     if (cur && cur.machine === machine && ops.startsWith(cur.path, dlg.path)) {

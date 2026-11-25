@@ -236,7 +236,6 @@ abstract class RustLibApi extends BaseApi {
 
   Future<List<FileEntry>> crateApiFilesListProjectDir({
     required String runtimeId,
-    required String root,
     required String dir,
   });
 
@@ -1625,7 +1624,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @override
   Future<List<FileEntry>> crateApiFilesListProjectDir({
     required String runtimeId,
-    required String root,
     required String dir,
   }) {
     return handler.executeNormal(
@@ -1633,7 +1631,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(runtimeId, serializer);
-          sse_encode_String(root, serializer);
           sse_encode_String(dir, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
@@ -1647,7 +1644,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_smelt_error,
         ),
         constMeta: kCrateApiFilesListProjectDirConstMeta,
-        argValues: [runtimeId, root, dir],
+        argValues: [runtimeId, dir],
         apiImpl: this,
       ),
     );
@@ -1656,7 +1653,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiFilesListProjectDirConstMeta =>
       const TaskConstMeta(
         debugName: "list_project_dir",
-        argNames: ["runtimeId", "root", "dir"],
+        argNames: ["runtimeId", "dir"],
       );
 
   @override

@@ -1,9 +1,8 @@
-//! `project.*`、`file.*` 控制方法：文件树、查看器、项目搜索都由运行时在它那台机器上
-//! 执行。业务规则在 `smelt_core::project_files`，这里只做解码和错误归类。
+//! `project.*`、`file.*` 控制方法：查看器、项目搜索都由运行时在它那台机器上执行。业务规则在 `smelt_core::project_files`，这里只做解码和错误归类。
 
 use smelt_core::project_files::{self, ProjectFileError};
 use smelt_runtime_client::protocol::control::{
-    ControlCall, ControlError, ControlErrorCode, ControlMethod, EmptyParams, decode_params,
+    ControlCall, ControlError, ControlErrorCode, ControlMethod, decode_params,
 };
 use smelt_runtime_client::protocol::files::*;
 
@@ -13,18 +12,9 @@ pub(crate) fn dispatch(
     params: serde_json::Value,
 ) -> Result<serde_json::Value, ControlError> {
     match method {
-        ControlMethod::ProjectTree => call::<ProjectTreeCall>(params, |p| {
-            Ok(ProjectTreeResult {
-                entries: project_files::tree(&p.root, &p.dir)?,
-            })
-        }),
         ControlMethod::ProjectSearch => {
             call::<ProjectSearchCall>(params, |p| Ok(project_files::search(&p.root, &p.query)))
         }
-        ControlMethod::ProjectDeleteEntry => call::<ProjectDeleteEntryCall>(params, |p| {
-            project_files::delete_entry(&p.root, &p.path)?;
-            Ok(EmptyParams::default())
-        }),
         ControlMethod::FileOpen => call::<FileOpenCall>(params, |p| {
             Ok(FileOpenResult {
                 content: project_files::open(&p.path)?,
@@ -52,7 +42,6 @@ fn call<C: ControlCall>(
     let params = decode_params::<C::Params>(params)?;
     let result = run(params).map_err(|error| {
         let code = match error {
-            ProjectFileError::OutsideProject(_) => ControlErrorCode::InvalidParams,
             ProjectFileError::Conflict => ControlErrorCode::Conflict,
             ProjectFileError::Io(_) => ControlErrorCode::OperationFailed,
         };
