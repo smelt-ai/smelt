@@ -146,6 +146,58 @@ pub fn conversation_title(_override_dir: Option<&str>, _conversation_id: &str) -
     None
 }
 
+/// agy 的子智能体（`research` 这类）。
+///
+/// 子智能体是一段独立的会话：自己的 id、自己的索引行（`parent_conversation_id` 指向
+/// 派它的会话，没有标题），hooks 是全局装的，它跑的时候 hook 带的是它自己的 id。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Subagent {
+    /// 一路往上找到的顶层会话，也就是终端里用户在聊的那段。
+    pub root: String,
+    /// 子智能体的名字，没有是空串。
+    pub agent_name: String,
+}
+
+/// 子智能体链再深也不会超过这么多层；防索引里万一成环。
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+const MAX_SUBAGENT_DEPTH: usize = 16;
+
+/// `conversation_id` 是子智能体就给出它的顶层会话；顶层会话、索引里没有这一行、库打不开
+/// 都是 `None`。在 hook 里同步调用，等锁跟 [`conversation_title`] 一样最多 250ms。
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+pub fn subagent(override_dir: Option<&str>, conversation_id: &str) -> Option<Subagent> {
+    let conn = open_readonly(&summaries_db(override_dir))?;
+    conn.busy_timeout(std::time::Duration::from_millis(250)).ok()?;
+    let mut stmt = conn
+        .prepare(
+            "select parent_conversation_id, agent_name from conversation_summaries \
+             where conversation_id = ?1",
+        )
+        .ok()?;
+    let mut lookup = |id: &str| -> Option<(String, String)> {
+        stmt.query_row([id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .ok()
+    };
+    let (parent, agent_name) = lookup(conversation_id)?;
+    let mut root = parent.trim().to_string();
+    if root.is_empty() {
+        return None;
+    }
+    for _ in 0..MAX_SUBAGENT_DEPTH {
+        match lookup(&root) {
+            Some((parent, _)) if !parent.trim().is_empty() => root = parent.trim().to_string(),
+            _ => break,
+        }
+    }
+    Some(Subagent { root, agent_name })
+}
+
+/// 移动端不编译原生 SQLite，见 [`list_conversations`]。
+#[cfg(any(target_os = "ios", target_os = "android"))]
+pub fn subagent(_override_dir: Option<&str>, _conversation_id: &str) -> Option<Subagent> {
+    None
+}
+
 /// 移动端不编译原生 SQLite（见 Cargo.toml 的目标门），历史页在那边本来就不存在。
 #[cfg(any(target_os = "ios", target_os = "android"))]
 pub fn list_conversations(_override_dir: Option<&str>, _want_cwd: &str) -> Vec<ConversationRow> {

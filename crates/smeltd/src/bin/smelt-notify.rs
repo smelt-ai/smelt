@@ -57,7 +57,11 @@ fn run() -> Option<()> {
     let hook: serde_json::Value = serde_json::from_str(&input).ok()?;
 
     let provider = std::env::var("SMELT_HOOK_PROVIDER").unwrap_or_else(|_| "claude".into());
-    let event = normalize_hook_event_for_provider(&hook, &provider)?;
+    let mut event = normalize_hook_event_for_provider(&hook, &provider)?;
+    let subagent = antigravity_subagent(&hook, &provider, None);
+    if let Some(subagent) = &subagent {
+        event = fold_antigravity_subagent(&hook, event, subagent);
+    }
     // 一条只发一次，并等 daemon 确认 reducer 已提交。provider 的 hooks 是同步
     // 生命周期边沿；本 helper 退出后它才会继续下一步，因此确认把原始事件顺序
     // 延伸到 daemon。超时/断线也绝不重放，避免“结果未知”变成重复事件。
@@ -72,8 +76,14 @@ fn run() -> Option<()> {
     // 生命周期事件先发，再去查标题：标题要读文件或别人的库，hook 有超时，被拖住时宁可
     // 丢标题，不丢状态。
     send(&event);
+    // 子智能体没有自己的名字可报；主会话的名字由主会话自己的事件查。
     let title = claude_title_event(&hook, &provider)
-        .or_else(|| antigravity_title_event(&hook, &provider, None))
+        .or_else(|| {
+            subagent
+                .is_none()
+                .then(|| antigravity_title_event(&hook, &provider, None))
+                .flatten()
+        })
         .or_else(|| codex_title_event(&hook, &provider, None));
     if let Some(title) = title {
         send(&title);
@@ -483,6 +493,47 @@ fn normalize_antigravity_stop(
     } else {
         Some((AgentEventKind::TurnSucceeded, None))
     }
+}
+
+/// 这条 Antigravity hook 是不是子智能体发的。`root` 只给测试指定数据目录。
+fn antigravity_subagent(
+    hook: &serde_json::Value,
+    provider: &str,
+    root: Option<&str>,
+) -> Option<smelt_core::antigravity_history::Subagent> {
+    if provider != "antigravity" {
+        return None;
+    }
+    smelt_core::antigravity_history::subagent(root, &hook_conversation_id(hook)?)
+}
+
+/// 子智能体的 hook 带的是子会话自己的 id。照原样上报，守护会当成用户在终端里换了一段
+/// 对话：名字清空（侧栏退回启动项名），子智能体的 Stop 还会把主回合画成已完成。
+///
+/// 所以折成主会话里的子任务：停下是 `SubagentStopped`，其余都是 `SubagentStarted`；
+/// 对话 id 换成顶层会话的。子任务事件不改对话绑定，也不收回合。
+fn fold_antigravity_subagent(
+    hook: &serde_json::Value,
+    event: AgentEvent,
+    subagent: &smelt_core::antigravity_history::Subagent,
+) -> AgentEvent {
+    let name = subagent.agent_name.trim();
+    let (kind, message) = match event.kind {
+        AgentEventKind::TurnSucceeded => (AgentEventKind::SubagentStopped, None),
+        AgentEventKind::TurnFailed => (AgentEventKind::SubagentStopped, event.message),
+        _ => (
+            AgentEventKind::SubagentStarted,
+            Some(match (name, event.message) {
+                ("", Some(message)) => message,
+                ("", None) => "Running a subtask".to_string(),
+                (name, Some(message)) => format!("{name} · {message}"),
+                (name, None) => format!("Subtask: {name}"),
+            }),
+        ),
+    };
+    let mut folded = build_agent_event(hook, "antigravity", kind, message);
+    folded.conversation_id = Some(subagent.root.clone());
+    folded
 }
 
 /// Claude Stop / SubagentStop 的 `background_tasks` 里还在跑的子智能体和 workflow 个数。
@@ -1649,6 +1700,72 @@ mod tests {
         assert_eq!(antigravity_title_event(&other, "claude", dir), None);
         let unknown = json!({ "hook_event_name": "Stop", "conversationId": "c2" });
         assert_eq!(antigravity_title_event(&unknown, "antigravity", dir), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 子智能体的 hook 照原样上报会让守护以为换了对话（名字被清空），Stop 还会收掉主回合。
+    #[test]
+    fn antigravity_subagent_hooks_fold_into_the_parent_conversation() {
+        let root =
+            std::env::temp_dir().join(format!("smelt-notify-agy-sub-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = rusqlite::Connection::open(root.join("conversation_summaries.db")).unwrap();
+        conn.execute_batch(
+            "create table if not exists conversation_summaries \
+             (conversation_id text primary key, title text not null default '', \
+              agent_name text not null default '', parent_conversation_id text not null default '');
+             insert or replace into conversation_summaries values ('main', 'App性能评估', '', '');
+             insert or replace into conversation_summaries values ('child', '', 'research', 'main');
+             insert or replace into conversation_summaries values ('grandchild', '', '', 'child');",
+        )
+        .unwrap();
+        drop(conn);
+        let dir = root.to_str();
+        let fold = |hook: serde_json::Value| {
+            let event = normalize_hook_event_for_provider(&hook, "antigravity").unwrap();
+            match antigravity_subagent(&hook, "antigravity", dir) {
+                Some(subagent) => fold_antigravity_subagent(&hook, event, &subagent),
+                None => event,
+            }
+        };
+
+        let call = fold(json!({
+            "hook_event_name": "PreInvocation", "invocationNum": 0, "conversationId": "child"
+        }));
+        assert_eq!(call.kind, AgentEventKind::SubagentStarted);
+        assert_eq!(call.conversation_id.as_deref(), Some("main"));
+        assert_eq!(call.message.as_deref(), Some("research · Model call 1"));
+        let done = fold(json!({
+            "hook_event_name": "Stop", "fullyIdle": true, "terminationReason": "model_stop",
+            "conversationId": "child"
+        }));
+        assert_eq!(done.kind, AgentEventKind::SubagentStopped);
+        assert_eq!(done.conversation_id.as_deref(), Some("main"));
+        let failed = fold(json!({
+            "hook_event_name": "Stop", "fullyIdle": true, "error": "rate limited",
+            "conversationId": "child"
+        }));
+        assert_eq!(failed.kind, AgentEventKind::SubagentStopped);
+        assert_eq!(
+            failed.message.as_deref(),
+            Some("⚠ Antigravity stopped: rate limited")
+        );
+        let nested = fold(json!({
+            "hook_event_name": "PostInvocation", "conversationId": "grandchild"
+        }));
+        assert_eq!(nested.kind, AgentEventKind::SubagentStarted);
+        assert_eq!(nested.conversation_id.as_deref(), Some("main"));
+        assert_eq!(nested.message.as_deref(), Some("Running a subtask"));
+
+        // 顶层会话、索引里还没有的会话照原样上报。
+        let own =
+            fold(json!({ "hook_event_name": "Stop", "fullyIdle": true, "conversationId": "main" }));
+        assert_eq!(own.kind, AgentEventKind::TurnSucceeded);
+        assert_eq!(own.conversation_id.as_deref(), Some("main"));
+        let unknown = json!({ "hook_event_name": "Stop", "conversationId": "elsewhere" });
+        assert_eq!(antigravity_subagent(&unknown, "antigravity", dir), None);
+        let other = json!({ "hook_event_name": "Stop", "conversationId": "child" });
+        assert_eq!(antigravity_subagent(&other, "claude", dir), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 
