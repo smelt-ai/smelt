@@ -26,7 +26,7 @@ import {
   SESSION_MENU,
 } from "../contract.js";
 import { bucket_label } from "../group.js";
-import { machine_id, same_conversation, selected_session, show_buddy_avatar } from "../model.js";
+import { machine_id, same_conversation, selected_session, show_avatar } from "../model.js";
 import { ListMotion, WASH_END } from "../motion.js";
 import { hint, tally_is_empty, tally_label } from "../offscreen.js";
 import {
@@ -44,7 +44,7 @@ import { relative_time, span } from "../time.js";
 import { icon, message } from "../util.js";
 import { Avatar } from "./avatar.tsx";
 import {
-  buddyActor,
+  avatarActor,
   clipboardWrite,
   ContributedMenuItem,
   fetchContextMenuItems,
@@ -644,7 +644,7 @@ function DragPreviewCard(props: { drag: () => DragState | null }) {
 
 interface SharedRowProps {
   sidebar: () => any;
-  showBuddy: () => boolean;
+  showAvatar: () => boolean;
   rename: () => RenameState | null;
   startRename: (target: RenameState["target"], original: string) => void;
   updateRename: (value: string) => void;
@@ -735,9 +735,9 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
   const loud = () =>
     row().status === "needs_you" || row().status === "running" || unread();
   const quiet = () => !selected() && !loud();
-  const hasAvatar = computed(() => props.showBuddy());
+  const hasAvatar = computed(() => props.showAvatar());
   const initialKey = row().key;
-  const actor = computed(() => buddyActor(initialKey.machine, initialKey.id));
+  const actor = computed(() => avatarActor(initialKey.machine, initialKey.id));
   const info = () => rowMeta(row(), selected());
   const indentLevel = () => (hasAvatar() ? Math.max(props.level - 1, 0) : props.level);
   const iconAlpha = () => (isDragged() ? 0.4 : 1);
@@ -1222,7 +1222,7 @@ function ProjectSection(props: SharedRowProps & { project: () => any; byMachine:
                   row={() => item().row}
                   level={areaLevel() + 1}
                   sidebar={props.sidebar}
-                  showBuddy={props.showBuddy}
+                  showAvatar={props.showAvatar}
                   rename={props.rename}
                   startRename={props.startRename}
                   updateRename={props.updateRename}
@@ -1243,7 +1243,7 @@ function ProjectSection(props: SharedRowProps & { project: () => any; byMachine:
                   workset={() => item().workset}
                   level={areaLevel() + 1}
                   sidebar={props.sidebar}
-                  showBuddy={props.showBuddy}
+                  showAvatar={props.showAvatar}
                   rename={props.rename}
                   startRename={props.startRename}
                   updateRename={props.updateRename}
@@ -1584,7 +1584,7 @@ function WorksetSection(props: SharedRowProps & { workset: () => any; level: num
                 row={row}
                 level={props.level + 1}
                 sidebar={props.sidebar}
-                showBuddy={props.showBuddy}
+                showAvatar={props.showAvatar}
                 rename={props.rename}
                 startRename={props.startRename}
                 updateRename={props.updateRename}
@@ -2310,9 +2310,9 @@ export function main() {
     tick();
     return list.sidebar;
   };
-  const showBuddy = computed((): boolean => {
+  const showAvatar = computed((): boolean => {
     tick();
-    return show_buddy_avatar(list.avatar);
+    return show_avatar(list.avatar);
   });
   const hasConversations = computed(() => sidebar().conversations != null);
   const conversationsCollapsed = computed(() => sidebar().conversations?.collapsed ?? false);
@@ -2506,7 +2506,7 @@ export function main() {
 
   const sharedRowProps: SharedRowProps = {
     sidebar,
-    showBuddy,
+    showAvatar,
     rename,
     startRename,
     updateRename,

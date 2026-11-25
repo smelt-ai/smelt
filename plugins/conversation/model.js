@@ -585,7 +585,7 @@ export function buildCompletionCandidates(trigger, files, commands, builtinDescr
       ["clear", builtinDescriptions.clear ?? "Start a new conversation"],
       ["compact", builtinDescriptions.compact ?? "Compact conversation context"],
       ["handoff", builtinDescriptions.handoff ?? "Hand off to another agent"],
-      ["shake", builtinDescriptions.shake ?? "Shake buddy"],
+      ["shake", builtinDescriptions.shake ?? "Prune stale context"],
     ];
     const list = [];
     const seen = new Set();

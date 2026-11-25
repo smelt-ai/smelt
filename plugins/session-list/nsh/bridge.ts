@@ -45,7 +45,7 @@ import {
   workspaceDirectory,
 } from "smelt/sdk";
 
-import { conversation_key, empty_stage, greet, track } from "../buddy_stage.js";
+import { conversation_key, empty_stage, greet, track } from "../avatar_stage.js";
 import {
   FOCUS_LIST,
   LIST_NAME,
@@ -69,10 +69,10 @@ export { clipboardWrite, t };
 export const tick = signal(0);
 
 /** 行首头像的演出状态机（`<Avatar>` 按它演，无跨 VM 插槽）。 */
-const buddyStage = empty_stage();
-let buddySeats = new Map<string, string>();
-let buddyKnown = new Set<string>();
-export const buddyTick = signal(0);
+const avatarStage = empty_stage();
+let avatarSeats = new Map<string, string>();
+let avatarKnown = new Set<string>();
+export const avatarTick = signal(0);
 
 function sameSeats(a: Map<string, string>, b: Map<string, string>): boolean {
   if (a.size !== b.size) return false;
@@ -80,7 +80,7 @@ function sameSeats(a: Map<string, string>, b: Map<string, string>): boolean {
   return true;
 }
 
-function syncBuddyStage() {
+function syncAvatarStage() {
   const viewedSession = activeContext().session;
   const next = new Map<string, string>();
   let viewed: string | null = null;
@@ -91,10 +91,10 @@ function syncBuddyStage() {
     const machine = entry.machine ?? null;
     const directory = workspaceDirectory(machine);
     if (!directory) continue;
-    const seen = buddyKnown.has(machine ?? "");
+    const seen = avatarKnown.has(machine ?? "");
     for (const fact of conversationFacts(machine)) {
       const key = conversation_key(machine, fact.id);
-      if (seen && !buddySeats.has(key) && !buddyStage.actors.has(key)) fresh.push(key);
+      if (seen && !avatarSeats.has(key) && !avatarStage.actors.has(key)) fresh.push(key);
       next.set(key, fact.status);
     }
     if (viewedSession && (viewedSession.machine ?? null) === machine) {
@@ -105,22 +105,22 @@ function syncBuddyStage() {
     }
     seenMachines.add(machine ?? "");
   }
-  buddyKnown = seenMachines;
-  if (sameSeats(next, buddySeats) && viewed === buddyStage.selected) return;
+  avatarKnown = seenMachines;
+  if (sameSeats(next, avatarSeats) && viewed === avatarStage.selected) return;
   const now = Date.now();
-  track(buddyStage, next, viewed, now);
-  for (const key of fresh) greet(buddyStage, key, now);
-  buddySeats = next;
-  buddyTick.set(buddyTick() + 1);
+  track(avatarStage, next, viewed, now);
+  for (const key of fresh) greet(avatarStage, key, now);
+  avatarSeats = next;
+  avatarTick.set(avatarTick() + 1);
 }
 
-export function buddyActor(machine: string | null, conversation: string): {
+export function avatarActor(machine: string | null, conversation: string): {
   seed: string;
   act: string;
   since: number;
 } {
-  buddyTick();
-  const current = buddyStage.actors.get(conversation_key(machine, conversation));
+  avatarTick();
+  const current = avatarStage.actors.get(conversation_key(machine, conversation));
   return {
     seed: conversation,
     act: current?.act ?? "rest",
@@ -129,7 +129,7 @@ export function buddyActor(machine: string | null, conversation: string): {
 }
 
 /** 搜索词两种语言都写：用哪种语言搜都找得到。 */
-const SETTINGS_KEYWORDS = ["头像", "小人", "行首", "侧栏", "avatar", "buddy", "sidebar", "sessions"];
+const SETTINGS_KEYWORDS = ["头像", "行首", "侧栏", "avatar", "sidebar", "sessions"];
 
 const nameOf = (id: string) => id.slice(OWNER.length + 1);
 
@@ -299,7 +299,7 @@ function syncFallbackSelection() {
 function maybeBoot() {
   if (booted || !storeReady || !stateReady) return;
   booted = true;
-  syncBuddyStage();
+  syncAvatarStage();
   syncFallbackSelection();
   list.start().catch((error: unknown) => {
     console.error(`[session-list] 启动失败：${message(error)}`);
@@ -329,7 +329,7 @@ function handleEvent(event: any) {
 
 onSlices(["machines_meta", "sessions_data", "active_context", "locale"], () => {
   stateReady = true;
-  syncBuddyStage();
+  syncAvatarStage();
   if (!booted) {
     maybeBoot();
     return;

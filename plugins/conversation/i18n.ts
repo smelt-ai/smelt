@@ -119,7 +119,7 @@ const TABLE: Record<string, { en: string; zh: string }> = {
   "slash.clear": { en: "Start a new conversation", zh: "开一段新对话" },
   "slash.compact": { en: "Compact conversation context", zh: "压缩上下文" },
   "slash.handoff": { en: "Hand off to another agent", zh: "交接给其他智能体" },
-  "slash.shake": { en: "Shake buddy", zh: "摇一摇小人" },
+  "slash.shake": { en: "Prune stale context", zh: "清理过时上下文" },
   "mermaid.rendering": { en: "Rendering diagram…", zh: "正在渲染图表…" },
   "mermaid.failed": { en: "Diagram failed: %{msg}", zh: "图表渲染失败：%{msg}" },
   "choice.yes": { en: "Yes", zh: "是" },

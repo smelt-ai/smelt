@@ -702,7 +702,7 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
         Some("z")
     );
 
-    // 7. 重命名期间悬停在行首小人头像上也不应弹出子 Tooltip 吃掉 Esc。
+    // 7. 重命名期间悬停在行首头像上也不应弹出子 Tooltip 吃掉 Esc。
     open_rename_by_double_click(cx);
     cx.simulate_mouse_move(a_rect.center(), None, Modifiers::default());
     cx.run_until_parked();

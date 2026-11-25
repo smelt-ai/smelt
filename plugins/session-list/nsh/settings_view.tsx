@@ -3,11 +3,11 @@
 import { computed, Scroll, Text, View } from "nsh";
 import { MENU_ITEM_CLASS, SmeltIcon, SmeltSelect } from "smelt/sdk";
 
-import { show_buddy_avatar } from "../model.js";
+import { show_avatar } from "../model.js";
 import { icon } from "../util.js";
 import { list, t, theme, tick } from "./bridge.ts";
 
-const BUDDY = "buddy";
+const ANIMATED = "animated";
 const ICON = "icon";
 
 export function SessionListSettings() {
@@ -15,14 +15,14 @@ export function SessionListSettings() {
   const options = computed(() => {
     tick();
     return [
-      { value: BUDDY, title: t("settings.avatar_buddy") },
+      { value: ANIMATED, title: t("settings.avatar_animated") },
       { value: ICON, title: t("settings.avatar_icon") },
     ];
   });
 
   const currentValue = computed(() => {
     tick();
-    return show_buddy_avatar(list.avatar) ? BUDDY : ICON;
+    return show_avatar(list.avatar) ? ANIMATED : ICON;
   });
 
   const currentTitle = computed(() => {

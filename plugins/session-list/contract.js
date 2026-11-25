@@ -11,7 +11,7 @@ export const OWNER = "smelt.session-list";
 /** 视图名：会话列表，单例，摆在布局里。打开参数 `{ focus?: boolean }`：focus 把键盘焦点交给列表。 */
 export const LIST_NAME = "main";
 export const LIST = `${OWNER}/${LIST_NAME}`;
-/** 设置页（「会话列表」：行首显示小人还是图标）。 */
+/** 设置页（「会话列表」：行首显示头像还是图标）。 */
 export const SETTINGS_NAME = "settings";
 
 // ---- 右键菜单 ----

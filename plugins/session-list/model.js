@@ -230,9 +230,9 @@ export function folds_over(machine, placement, grouping) {
 }
 
 /**
- * 行首是否画 3D 小人头像：默认（`unset` 或任何非 `icon` 选择）画小人；`{ kind: "icon" }` 画图标。
+ * 行首是否画会动的头像：默认（`unset` 或任何非 `icon` 选择）画；`{ kind: "icon" }` 画工具图标。
  */
-export function show_buddy_avatar(choice) {
+export function show_avatar(choice) {
   return choice?.kind !== "icon";
 }
 

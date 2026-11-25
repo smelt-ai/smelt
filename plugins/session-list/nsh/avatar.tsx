@@ -1,7 +1,7 @@
 // 会话头像：外形按会话 id 算（../avatar_shape.js），按会话挑一个颜色：身子是它的浅色、细边是它本色、
 // 眼睛是它的深色竖椭圆。纯 JS。
 //
-// 演哪一出、从什么时候起照用会话列表的 buddy_stage.js（act/since），这里只管怎么演。
+// 演哪一出、从什么时候起照用会话列表的 avatar_stage.js（act/since），这里只管怎么演。
 // 身子是一张静态 SVG，只在第一次显示时算；动的是叠在上面的眼睛和整个身子，全用关键帧交给 NSH
 // 原生跑，限 30 帧。干活、喊你按拍子走：每拍按（种子, 第几拍）挑一个动作，演完再挑下一拍；
 // 每个头像有按种子定的性格（节奏快慢、幅度、第一拍晚多久起）。站着不动不要帧；App 不在前台
@@ -11,7 +11,7 @@ import { cleanup, createMotion, Easing, effect, lifecycle, reduceMotion, View } 
 import { SmeltVector } from "smelt/sdk";
 
 import { bodySvg, CANVAS, EYE_RX, EYE_RY, hash, mix, shapeOf } from "../avatar_shape.js";
-import { ONE_SHOT_MS } from "../buddy_stage.js";
+import { ONE_SHOT_MS } from "../avatar_stage.js";
 /** 动作的帧率上限：眼睛小、动得慢，30 帧够。 */
 const FPS = 30;
 

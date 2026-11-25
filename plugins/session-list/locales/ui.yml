@@ -536,7 +536,7 @@ settings:
   avatar:
     en: "Row avatar"
     zh-CN: "行首头像"
-  avatar_buddy:
+  avatar_animated:
     en: "Session avatar"
     zh-CN: "会话头像"
   avatar_description:

@@ -42,10 +42,9 @@ cargo run --bin smelt
 
 - **`crates/smelt`** —— GUI 主程序（bin 名 `smelt`），宿主：窗口、页和布局、命令和快捷键、
   设置页机制与外观、运行时连接。不认识具体功能，详见 `docs/app-plugins.md`。
-- **`crates/smelt-nsh`** —— NSH A2 主窗口外壳与 JS/TSX 插件运行时（每插件独立 QuickJS VM），加载仓库根 `plugins/*` 与 `~/.smelt/plugins/`。
-- **`plugins/*`** —— 已迁出的内置 JS/TSX 插件（9 个：`archive`、`buddies`、`language`、`launcher`、`layouts`、`machines`、`quota`、`session-list`、`themes`）。
-- **`crates/plugins/*`** —— 过渡期尚未迁出的 Rust 内置插件（16 个：`agents`、`automations`、`capabilities`、`conversation`、`desktop`、`files`、`git`、`history`、`ide`、`maintenance`、`notifications`、`resources`、`sessions`、`skills`、`terminal`、`updater`），只依赖 `smelt-plugin-api`。
-- **`crates/plugins/terminal`**（`smelt-terminal`）—— 内置插件「终端」：`terminal.rs` 是内嵌终端
+- **`crates/smelt-nsh`** —— NSH A2 主窗口外壳与 JS/TSX 插件运行时（内置插件共用一个 QuickJS VM，用户插件各自一个），加载仓库根 `plugins/*` 与 `~/.smelt/plugins/`。
+- **`plugins/*`** —— 内置 JS/TSX 插件（20 个：`agents`、`archive`、`automations`、`capabilities`、`conversation`、`desktop`、`files`、`git`、`history`、`ide`、`launcher`、`layouts`、`machines`、`notifications`、`quota`、`resources`、`session-list`、`sessions`、`skills`、`themes`）。
+- **`crates/smelt-terminal`** —— 终端能力：`terminal.rs` 是内嵌终端
   前端（连 smeltd 拿字节流 + alacritty 状态机 + 颜色解析），`terminal_view.rs` 是单个终端视图
   （渲染/输入/IME/选区/滚动/resize）。PTY 与 shell 在 `smeltd`。
 - **`crates/smelt-model`** —— 桌面、守护、手机共用的类型：Control API、会话状态、事件订阅解码。

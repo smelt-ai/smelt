@@ -6,7 +6,7 @@
 //! - 自动发现、运行时打包并热重载自带与用户插件（[`manifest`]、[`plugins`]），装改删不用重编；
 //! - 宿主纯同步 Rust 模块与原生矢量图标 `smelt/host`（[`module`]）、每插件独立 SQLite 存储（[`store`]）、
 //!   原生重组件桥 `smelt.view`（[`view`]）、统一宿主状态/事件/动作桥（[`host`]）、
-//!   原生小人/标题带/毛玻璃坐标（[`components`]）和主题投影（[`theme`]）。
+//!   原生标题带/毛玻璃坐标（[`components`]）和主题投影（[`theme`]）。
 
 mod components;
 mod desktop;

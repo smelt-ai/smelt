@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { ONE_SHOT_MS, conversation_key, empty_stage, greet, track } from "../buddy_stage.js";
+import { ONE_SHOT_MS, conversation_key, empty_stage, greet, track } from "../avatar_stage.js";
 
 const key = (id) => conversation_key(null, id);
 const rows = (entries) => new Map(entries.map(([id, status]) => [key(id), status]));

@@ -14,7 +14,7 @@ import {
   selection_from_wire,
   set_collapsed,
   set_pinned,
-  show_buddy_avatar,
+  show_avatar,
   title,
 } from "../model.js";
 import { t } from "./helpers.mjs";
@@ -22,10 +22,10 @@ import { t } from "./helpers.mjs";
 const terminal_session = (id, terminal, cwd) => ({ id, terminals: [{ id: terminal, cwd }], acp: null });
 const state = (id, since, turn = 0) => ({ id, phase_since: since, turn_started_at: turn });
 
-test("行首头像默认显示小人，选不要头像时画图标", () => {
-  expect(show_buddy_avatar({ kind: "unset" })).toBe(true);
-  expect(show_buddy_avatar({ kind: "view", id: "smelt.buddies/avatar" })).toBe(true);
-  expect(show_buddy_avatar({ kind: "icon" })).toBe(false);
+test("行首默认显示头像，选不要头像时画图标", () => {
+  expect(show_avatar({ kind: "unset" })).toBe(true);
+  expect(show_avatar({ kind: "view", id: "other.avatars/avatar" })).toBe(true);
+  expect(show_avatar({ kind: "icon" })).toBe(false);
 });
 
 test("最近动静只看守护", () => {

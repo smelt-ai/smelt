@@ -70,7 +70,7 @@ test("行首头像的选择存得回来", async () => {
   for (const choice of [
     { kind: "view", id: "someone.avatars/avatar" },
     { kind: "icon" },
-    { kind: "view", id: "smelt.buddies/avatar" },
+    { kind: "view", id: "other.avatars/avatar" },
     { kind: "unset" },
   ]) {
     list.save_avatar_choice(choice);
