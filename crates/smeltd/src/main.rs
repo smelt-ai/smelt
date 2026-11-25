@@ -155,6 +155,7 @@ mod terminal_registry;
 mod terminal_resume;
 mod terminal_shell;
 mod terminal_snapshot;
+mod terminal_stage_image;
 mod webhook;
 mod workset_control;
 mod workspace_directory;
@@ -2688,6 +2689,7 @@ fn run_serve_loop(
     thread::spawn(|| {
         smelt_core::managed_runtime::retire_managed_bun();
         smelt_core::pi_mcp::upgrade_preset_pins();
+        terminal_stage_image::cleanup_expired_images();
     });
     thread::spawn(smelt_core::control_skill::remove_legacy_copy);
     #[cfg(target_os = "linux")]

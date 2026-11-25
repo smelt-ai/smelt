@@ -77,7 +77,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => 994169321;
+  int get rustContentHash => 446368948;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -414,10 +414,22 @@ abstract class RustLibApi extends BaseApi {
     required String data,
   });
 
+  void crateApiTerminalTerminalInputSegments({
+    required String runtimeId,
+    required String sessionId,
+    required List<String> segments,
+  });
+
   void crateApiTerminalTerminalResize({
     required String runtimeId,
     required String sessionId,
     required TerminalGeometry geometry,
+  });
+
+  Future<String> crateApiTerminalTerminalStageImage({
+    required String runtimeId,
+    required String sessionId,
+    required ImageInput image,
   });
 
   Future<void> crateApiConversationUnwatchConversation({
@@ -2819,6 +2831,38 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  void crateApiTerminalTerminalInputSegments({
+    required String runtimeId,
+    required String sessionId,
+    required List<String> segments,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(runtimeId, serializer);
+          sse_encode_String(sessionId, serializer);
+          sse_encode_list_String(segments, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 70)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_smelt_error,
+        ),
+        constMeta: kCrateApiTerminalTerminalInputSegmentsConstMeta,
+        argValues: [runtimeId, sessionId, segments],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTerminalTerminalInputSegmentsConstMeta =>
+      const TaskConstMeta(
+        debugName: "terminal_input_segments",
+        argNames: ["runtimeId", "sessionId", "segments"],
+      );
+
+  @override
   void crateApiTerminalTerminalResize({
     required String runtimeId,
     required String sessionId,
@@ -2831,7 +2875,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(runtimeId, serializer);
           sse_encode_String(sessionId, serializer);
           sse_encode_box_autoadd_terminal_geometry(geometry, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 70)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 71)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -2851,6 +2895,43 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<String> crateApiTerminalTerminalStageImage({
+    required String runtimeId,
+    required String sessionId,
+    required ImageInput image,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(runtimeId, serializer);
+          sse_encode_String(sessionId, serializer);
+          sse_encode_box_autoadd_image_input(image, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 72,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_smelt_error,
+        ),
+        constMeta: kCrateApiTerminalTerminalStageImageConstMeta,
+        argValues: [runtimeId, sessionId, image],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTerminalTerminalStageImageConstMeta =>
+      const TaskConstMeta(
+        debugName: "terminal_stage_image",
+        argNames: ["runtimeId", "sessionId", "image"],
+      );
+
+  @override
   Future<void> crateApiConversationUnwatchConversation({
     required String runtimeId,
     required String sessionId,
@@ -2866,7 +2947,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 71,
+            funcId: 73,
             port: port_,
           );
         },
@@ -2905,7 +2986,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 72,
+            funcId: 74,
             port: port_,
           );
         },
@@ -2943,7 +3024,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 73,
+            funcId: 75,
             port: port_,
           );
         },
@@ -2973,7 +3054,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 74,
+            funcId: 76,
             port: port_,
           );
         },
@@ -3010,7 +3091,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 75,
+              funcId: 77,
               port: port_,
             );
           },
@@ -3045,7 +3126,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 76,
+            funcId: 78,
             port: port_,
           );
         },
@@ -3597,6 +3678,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_i_64(raw);
+  }
+
+  @protected
+  ImageInput dco_decode_box_autoadd_image_input(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_image_input(raw);
   }
 
   @protected
@@ -6116,6 +6203,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_i_64(deserializer));
+  }
+
+  @protected
+  ImageInput sse_decode_box_autoadd_image_input(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_image_input(deserializer));
   }
 
   @protected
@@ -9216,6 +9309,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_64(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_image_input(
+    ImageInput self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_image_input(self, serializer);
   }
 
   @protected

@@ -39,5 +39,7 @@
   "terminalOpenComposer": "打开输入框",
   "terminalCloseComposer": "收起输入框",
   "terminalComposerHint": "输入消息或命令",
-  "terminalKeyArrows": "方向键"
+  "terminalKeyArrows": "方向键",
+  "terminalSendingImages": "正在上传图片…",
+  "terminalImageSendFailed": "图片发送失败：{message}"
 }

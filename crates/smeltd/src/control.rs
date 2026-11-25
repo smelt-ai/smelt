@@ -266,6 +266,17 @@ fn dispatch_control(
             smelt_core::terminal_theme::publish(&theme);
             success_value(control_version, &request_id, EmptyParams::default())
         }
+        ControlMethod::TerminalStageImage => {
+            let params: smelt_runtime_client::protocol::terminal::TerminalStageImageParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match super::terminal_stage_image::stage_image(params, sessions) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
         ControlMethod::DesktopTypeText => {
             let params: smelt_runtime_client::protocol::desktop::DesktopTypeTextParams =
                 match params_or_error(control_version, &request_id, params) {
@@ -2070,6 +2081,30 @@ mod tests {
             "conversation.image",
             serde_json::json!({"session_id": "acp-nope", "digest": "abc"}),
         );
+        assert_eq!(bad["error"]["code"], "invalid_params");
+    }
+
+    #[test]
+    fn terminal_stage_image_is_dispatched_with_typed_errors() {
+        let missing = dispatch_for_test(
+            "terminal.stage_image",
+            serde_json::json!({
+                "session_id": "term-nope",
+                "mime": "image/png",
+                "data": "iVBORw0KGgo=",
+            }),
+        );
+        assert_eq!(missing["status"], "error");
+        assert_eq!(missing["error"]["code"], "not_found");
+
+        let bad = dispatch_for_test(
+            "terminal.stage_image",
+            serde_json::json!({
+                "session_id": "term-nope",
+                "mime": "image/png",
+            }),
+        );
+        assert_eq!(bad["status"], "error");
         assert_eq!(bad["error"]["code"], "invalid_params");
     }
 

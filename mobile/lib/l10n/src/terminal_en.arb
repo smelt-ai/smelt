@@ -43,5 +43,8 @@
   "terminalOpenComposer": "Open input box",
   "terminalCloseComposer": "Close input box",
   "terminalComposerHint": "Message or command",
-  "terminalKeyArrows": "Arrow keys"
+  "terminalKeyArrows": "Arrow keys",
+  "terminalSendingImages": "Uploading images…",
+  "terminalImageSendFailed": "Couldn't send images: {message}",
+  "@terminalImageSendFailed": {"placeholders": {"message": {"type": "String"}}}
 }

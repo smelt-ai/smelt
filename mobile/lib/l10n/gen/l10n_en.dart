@@ -2340,6 +2340,14 @@ class L10nEn extends L10n {
   String get terminalKeyArrows => 'Arrow keys';
 
   @override
+  String get terminalSendingImages => 'Uploading images…';
+
+  @override
+  String terminalImageSendFailed(String message) {
+    return 'Couldn\'t send images: $message';
+  }
+
+  @override
   String get updateSection => 'Updates';
 
   @override

@@ -217,6 +217,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw);
 
   @protected
+  ImageInput dco_decode_box_autoadd_image_input(dynamic raw);
+
+  @protected
   ImageRef dco_decode_box_autoadd_image_ref(dynamic raw);
 
   @protected
@@ -1074,6 +1077,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer);
+
+  @protected
+  ImageInput sse_decode_box_autoadd_image_input(SseDeserializer deserializer);
 
   @protected
   ImageRef sse_decode_box_autoadd_image_ref(SseDeserializer deserializer);
@@ -2123,6 +2129,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_i_64(
     PlatformInt64 self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_image_input(
+    ImageInput self,
     SseSerializer serializer,
   );
 

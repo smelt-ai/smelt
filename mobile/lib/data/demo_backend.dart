@@ -30,6 +30,7 @@ class DemoBackend implements Backend {
   late List<PassTicket> _tickets;
   late Map<String, List<SessionSummary>> _sessions;
   final Map<String, MessageDraft> _drafts = {};
+  int _demoImageSeq = 0;
 
   int _ago(Duration d) => _now.subtract(d).millisecondsSinceEpoch ~/ 1000;
 
@@ -1477,6 +1478,24 @@ class DemoBackend implements Backend {
   @override
   void terminalInput(String runtimeId, String sessionId, String data) =>
       demoTerminalInput(sessionId, data);
+
+  @override
+  void terminalInputSegments(
+    String runtimeId,
+    String sessionId,
+    List<String> segments,
+  ) {
+    for (final segment in segments) {
+      demoTerminalInput(sessionId, segment);
+    }
+  }
+
+  @override
+  Future<String> terminalStageImage(
+    String runtimeId,
+    String sessionId,
+    ImageInput image,
+  ) async => '/tmp/smelt-demo-image-${++_demoImageSeq}.jpg';
 
   @override
   void terminalDetach(String runtimeId, String sessionId) {}

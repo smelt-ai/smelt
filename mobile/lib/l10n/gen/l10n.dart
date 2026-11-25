@@ -3997,6 +3997,18 @@ abstract class L10n {
   /// **'Arrow keys'**
   String get terminalKeyArrows;
 
+  /// No description provided for @terminalSendingImages.
+  ///
+  /// In en, this message translates to:
+  /// **'Uploading images…'**
+  String get terminalSendingImages;
+
+  /// No description provided for @terminalImageSendFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t send images: {message}'**
+  String terminalImageSendFailed(String message);
+
   /// No description provided for @updateSection.
   ///
   /// In en, this message translates to:
