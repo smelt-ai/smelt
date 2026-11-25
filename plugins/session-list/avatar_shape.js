@@ -42,7 +42,7 @@ const BOX_WEIGHT = 0.6;
 const WAVES = [0.06, 0.02, 0.035];
 
 /**
- * 种子 → `{ path, eyes: [左眼 x, 右眼 x, y] }`。新加随机量只能接在最后取，前面的不变，
+ * 种子 → `{ path, eyes: [左眼 x, 右眼 x, y], mouth: [x, y] }`。新加随机量只能接在最后取，前面的不变，
  * 不然升级后人人换脸。
  */
 export function shapeOf(seed) {
@@ -106,9 +106,10 @@ export function shapeOf(seed) {
   }
   path += " Z";
 
-  const eyeY = cy + height * k * 0.02;
+  // 眼睛和嘴合起来大致居中，所以眼睛比身子中心略高。
+  const eyeY = cy + height * k * 0.02 - 1;
   const half = Math.min(4.6, width * k * 0.17);
-  return { path, eyes: [CANVAS / 2 - half, CANVAS / 2 + half, eyeY] };
+  return { path, eyes: [CANVAS / 2 - half, CANVAS / 2 + half, eyeY], mouth: [CANVAS / 2, eyeY + EYE_R + 2.3] };
 }
 
 /** 外形 → 头像身子的 SVG：先描一圈彩边，再填深色身子。 */
@@ -119,4 +120,21 @@ export function bodySvg(path, tint, fill) {
     `<path d="${path}" fill="${fill}" stroke="${fill}" stroke-width="1.2" stroke-linejoin="round"/>` +
     `</svg>`
   );
+}
+
+/**
+ * 嘴的 SVG（整张 36 见方的画布，只画嘴）：`smile` 微笑、`flat` 短横、`o` 张成圆、`grin` 张嘴笑。
+ * `[x, y]` 是 shapeOf 给的嘴的位置（嘴角那条线的中点）。
+ */
+export function mouthSvg([x, y], kind, color) {
+  const line = `fill="none" stroke="${color}" stroke-width="1.1" stroke-linecap="round"`;
+  const shape =
+    kind === "flat"
+      ? `<path d="M${x - 1.4} ${y + 0.6} H${x + 1.4}" ${line}/>`
+      : kind === "o"
+        ? `<ellipse cx="${x}" cy="${y + 1}" rx="1.2" ry="1.5" fill="${color}"/>`
+        : kind === "grin"
+          ? `<path d="M${x - 1.7} ${y - 0.2} H${x + 1.7} Q${x + 1.7} ${y + 2.2} ${x} ${y + 2.2} Q${x - 1.7} ${y + 2.2} ${x - 1.7} ${y - 0.2} Z" fill="${color}"/>`
+          : `<path d="M${x - 1.8} ${y} Q${x} ${y + 1.8} ${x + 1.8} ${y}" ${line}/>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${CANVAS} ${CANVAS}">${shape}</svg>`;
 }
