@@ -16,7 +16,7 @@ description: 用 smelt CLI 操作本机 Smelt：产品智能体及其记忆、�
 - 删除：`agent delete`、`automation delete`、`conversation delete`、`history delete`、删除 `~/.smelt/plugins/<id>/`（不可恢复）。
 - 收工作树：`worktree finish`（删掉 worktree 目录；`--allow-unconfirmed-merge` 更要先问）。
 - 给别人的对话发消息：`conversation send` 发进去的话那个 agent 会照着做；发给不是你自己开的对话前先确认。
-- 全局能力，对所有智能体生效：`mcp add|enable|disable|remove`、`model default|thinking`。
+- 全局能力，对所有智能体生效：`mcp add|enable|disable|remove`、`model default|thinking`、`pi skill|extension import|remove`。
 - 改这台机器的环境：`engine install`（用 brew 或 npm 装命令行工具）、`hooks install|uninstall`（改各家 agent 的配置文件）。
 - `app run` 一条会改数据的插件命令（看 `app commands` 里它的名字和参数判断；只开视图、页面、窗口的不用问）。
 
@@ -37,7 +37,7 @@ smelt agent delete <id>
 ```
 
 - `--skill` / `--extension` / `--mcp` / `--folder` / `--link` 可以重复写多个。update 时按类整份替换（技能、扩展各算一份，只写了技能就不动扩展），写 `""` 清空那一类；只改 prompt 时不要带它们。
-- `--skill` / `--extension` 勾的是这个智能体能用的 Pi 技能和扩展，和下面的 Smelt App 插件无关，名字从 `smelt pi skill list`、`smelt pi extension list` 取。MCP 服务器名从 `smelt mcp list` 取，模型从 `smelt model list` 取；不存在的会直接报错。智能体只连 `--mcp` 列出的服务器，一个都没列就不连 MCP。
+- `--skill` / `--extension` 勾的是这个智能体能用的 Pi 技能和扩展，和下面的 Smelt App 插件无关，名字从 `smelt pi skill list`、`smelt pi extension list` 取。没有的先用 `smelt pi skill import <目录>`、`smelt pi extension import <路径>` 装进来，`remove <名字>` 卸掉。MCP 服务器名从 `smelt mcp list` 取，模型从 `smelt model list` 取；不存在的会直接报错。智能体只连 `--mcp` 列出的服务器，一个都没列就不连 MCP。
 - `--model default` 跟随 Pi 的默认模型。
 - `--memory on|off` 开关这个智能体的长期记忆（默认开）。关掉后不注入、不写入，已有记忆文件保留；正在进行的对话下一轮生效。
 - `chat` 开一场新对话，出现在桌面「对话」栏。带 `--message` 会把第一句话发出去。返回的 `session_id` 是这场对话的 id，后面的操作都用它，不要拿智能体 id 去改标题。
@@ -196,42 +196,30 @@ smelt settings set appearance.theme_mode=light appearance.ui_font_px=16
 
 ## 写 Smelt 插件（NSH TSX/JS）
 
-Smelt 的界面插件运行在 **NSH**（独立加固的 QuickJS VM，由宿主 GPUI 原生绘制，热重载不用重启 App）。用户插件写在 `~/.smelt/plugins/<id>/`；用户问「会不会写 Smelt 插件」说的是这个，不是 `smelt pi` 里的 Pi 技能或扩展。下面的 `smelt plugin` 命令不需要 `smeltd`（仅桌面版本包含；Linux 无界面 CLI 没有）。
+Smelt 的界面插件是 NSH 上的 TSX/JS：每个用户插件跑在自己的 QuickJS VM 里，界面由 App 原生绘制，保存就热重载。写在 `~/.smelt/plugins/<id>/`。用户问「写 Smelt 插件」说的是这个，不是上面 `smelt pi` 的 Pi 技能和扩展。`smelt plugin` 只在桌面版里有，Linux 不带界面的 `smelt` 没有。
 
-> **开发前必读**：[references/plugins.md](references/plugins.md)（速查：清单、NSH 写法红线、`smelt/sdk` 接口、组件/图标/令牌、主题格式）。完整文档在仓库 `docs/plugins/`（<https://github.com/smelt-ai/smelt/tree/main/docs/plugins>）。
+**动手前先读 [references/plugins.md](references/plugins.md)**（清单、NSH 写法红线、`smelt/sdk`、组件/图标/令牌、主题格式）；完整文档在仓库 `docs/plugins/`（<https://github.com/smelt-ai/smelt/tree/main/docs/plugins>）。
 
+```sh
+smelt plugin init <id> [--name "<名字>"]           # 起步 TSX 插件（带 locales/ 和 .nsh/types/）
+smelt plugin init <id> --theme [--name "<系列名>"]  # 纯主题插件，只改配色时用这个
+smelt plugin fork <自带 id> [--as <新 id>]          # 复制自带插件来改
+smelt plugin types <目录>                          # 刷新 .nsh/types/（升级 Smelt 后重跑）
+smelt plugin check <目录>                          # 离线校验，过了退出 0
+smelt plugin status [<id>]                         # 开着的 App 里的加载结果
 ```
-~/.smelt/plugins/com.example.hello/
-  smelt-plugin.json   {"id":"com.example.hello","name":"Hello","version":"0.1.0","entry":"nsh.tsx"}
-  nsh.tsx             用 "nsh"、"nsh/base"、"smelt/sdk" 编写界面并导出视图组件 / root()
-  tsconfig.json       继承 ./.nsh/tsconfig.json（smelt plugin init/types 自动生成）
-  .nsh/types/         精确匹配当前 Smelt 宿主的完整 TypeScript 声明
-```
 
-写、测、看、开的闭环：
+写的流程：
 
-1. **脚手架创建**：直接用 `smelt plugin init <id> [--name "<显示名>"]` 在 `~/.smelt/plugins/<id>/` 生成起步 TSX 工程与 `.nsh/types/`（加 `--theme` 则生成纯主题插件，不含 JS/TSX；id 只含字母、数字和 `.-_`，不以 `.` 开头）。新插件避免和自带插件重名；如果要改预置插件，直接用下面的 `smelt plugin fork`。若要在已有插件目录补充/更新类型声明，运行 `smelt plugin types <目录>`（会自动包含自带及用户覆写共享模块的 `.d.ts`）。
-2. **查类型不要猜**：所有可用模块、组件、图标路径（`SmeltIconPath`）和宿主 RPC 方法（`ControlMethodName`）都在 `<插件目录>/.nsh/types/`（重点查 `smelt/sdk.d.ts`、`smelt/conversation.d.ts`、`nsh/index.d.ts`、`nsh/base.d.ts`、`nsh/tokens.d.ts`）。按符号名搜索，不要盲写 API。
-3. **离线校验**：每改完跑 `smelt plugin check ~/.smelt/plugins/<id>`。它离线校验清单、`locales/` 翻译、主题 JSON、`nsh-bundler` TSX 打包、外部 `import` 白名单、未声明自由标识符及 QuickJS 字节码编译，并打印导出的符号表（共享模块插件还会带有 `module` 字段；纯主题 `entry: "*.json"` 与声明式纯布局 `pages`/`layouts` 插件零 VM 运行，分别标出 `theme_only: true` 或 `layout_only: true`）；不修改目录，过了退出 0，没过把错误写 stderr 并退出 1。`check` 不过不算写完。
-4. **确认运行挂载**：Smelt 开着时保存源码会自动热重载该插件的独立 VM（不重启其它插件和宿主；若修改了被其他插件 `import` 的共享模块插件，宿主只会自动增量重编引用它的插件）。保存一两秒后跑 `smelt plugin status <id>`：确认 `error` 为 `null`、`fallback_to_builtin` 为 `false`，且 `views` 里出现你登记的视图 id（不带 id 列全部，含 `source`、`overrides_builtin`、`module` 与 `uses_modules`）。
-5. **在 App 里亮出来**：check 和 status 都过了，用 `smelt app run smelt.app/open-view --args '{"view":"<id>/<视图名>"}'` 打开给用户看。不要用截屏或 AppleScript 点击界面。
-6. **日志与持久化**：运行时 `console.*` 与未捕获异常在 `~/.smelt/app.log`（`[plugin]` / `[smelt-nsh]`）。插件没有文件系统接口，运行期数据一律存 `store.*`（`~/.smelt/plugin-data/<id>/store.sqlite3`）。
-7. **删除插件**：删掉 `~/.smelt/plugins/<id>/`（若要清数据再删 `~/.smelt/plugin-data/<id>/`），App 开着会自动卸载。删前必须跟用户确认。
+1. 签名查 `<插件目录>/.nsh/types/`（`smelt/sdk.d.ts`、`nsh/index.d.ts`、`nsh/base.d.ts`、`nsh/tokens.d.ts`），按符号名搜，不要猜。
+2. 改完跑 `check`，不过不算写完。
+3. App 开着时保存一两秒后跑 `status <id>`：`stale: false`、`error: null`、`views` 里有登记的视图才算加载上；`stale: true` 是还没按最新源码重新加载完，稍等再查。
+4. 运行时日志和没接住的异常在 `~/.smelt/app.log`（`[plugin]`）。插件没有文件系统接口，数据存 `store.*`。
+5. 删插件是删 `~/.smelt/plugins/<id>/`，数据在 `~/.smelt/plugin-data/<id>/`；都先问用户。
 
-### 写主题插件（自定义配色）
+改自带插件：
 
-全 App（含全部内置插件与 `smelt/sdk` 组件）统一消费语义主题令牌，改整体配色不需要写 JS/TSX，写一个纯主题插件即可：
-
-1. 运行 `smelt plugin init <id> --theme [--name "<系列名>"]`，会在 `~/.smelt/plugins/<id>/` 生成 `smelt-plugin.json`（`entry` 指向 `themes/theme.json`）与深浅两套起步主题 `themes/theme.json`。
-2. 编辑 `themes/theme.json`：`bg_base` 与 `text_base` 必填（不透明 hex 色值），`bg_accent` 等其余界面色、状态色、图表色、阴影 `elevation` 和代码高亮 `syntax` 均可按需覆盖，未写的会自动在 OKLab 空间推算（完整字段与规则见 [references/plugins.md](references/plugins.md) 第 6 节）。
-3. 跑 `smelt plugin check ~/.smelt/plugins/<id>` 校验 JSON 格式、颜色键名及保留名；成功后 stdout 的 `themes` 字段会列出登记的主题名。
-4. App 开着会自动热重载进主题目录，跑 `smelt settings set appearance.theme="<主题名>"` 即可生效。注意主题名不能与保留名（`smelt Light`、`smelt Dark`）或已有主题名（如 `Ayu Dark`）重名。
-
-### 改 Smelt 自带插件（覆写 / Fork）
-
-自带插件与共享模块均允许通过 `~/.smelt/plugins/<原id>/` **同名覆写**（热重载无缝接管原视图/命令/主题/共享模块，跨插件引用不断链）；发版包内也保留了可编辑源码供直接 fork。特别注意：**对话界面（输入框 `Composer`、消息流、卡片等）不在 `smelt.sessions` 里，也不在 `smelt/sdk` 黑盒里，而是独立共享模块插件 `smelt.conversation`（`plugins/conversation/`）**，用户要改对话输入框或对话界面时直接 fork `smelt.conversation`：
-
-1. **原地覆写（推荐）**：运行 `smelt plugin fork <原id>`（如 `smelt plugin fork smelt.conversation`、`smelt plugin fork smelt.sessions`），会把自带源码拷贝到 `~/.smelt/plugins/<原id>/` 并自动生成 `.nsh/types/`（不带 `tests/` 与预编译字节码）。直接修改该目录的 TSX/主题后保存即可原地从共享内置 VM 中摘出并跑在独立用户 VM 中（改共享模块 `smelt.conversation` 后宿主会自动重编 `smelt.sessions` 与 `smelt.automations`），且直接继承 `~/.smelt/plugin-data/<原id>/store.sqlite3`（注意仅追加新表/列，别破坏原自带插件读取旧表的结构）。
-2. **校验与状态**：改完先跑 `smelt plugin check ~/.smelt/plugins/<原id>`，保存后再看 `smelt plugin status <原id>`，确认 `source: "user"`、`overrides_builtin: true`、`fallback_to_builtin: false`、`error: null`（共享模块还会列出 `module`；引用它的插件会列出 `uses_modules`）。
-3. **自动回退机制**：如果覆写版（含被其他插件 `import` 的共享模块覆写版）出现清单/主题/编译或启动崩溃，宿主会**自动回退到自带版本继续运行**（不致面板空白），同时在设置页和 `smelt plugin status` 标出 `fallback_to_builtin: true` 与 `error`；修好用户目录源码一保存会自动切回覆写版。
-4. **一键恢复默认 / 改名并存**：删掉 `~/.smelt/plugins/<原id>/`（或在桌面「设置 → 面板插件」点「恢复默认…」），会立刻切回自带版；如想保留原自带插件并再挂一份，用 `smelt plugin fork <原id> --as <新id>`，若需搬迁数据再用 `sqlite3 <原库> ".backup '<新库>'"` 备份到 `~/.smelt/plugin-data/<新id>/store.sqlite3`。
+- 对话界面（输入框、消息流、卡片）在共享模块 `smelt.conversation`，不在 `smelt.sessions` 里；要改它 fork `smelt.conversation`。改了共享模块，宿主重编所有用它的插件（谁在用看 `status` 的 `uses_modules`）。
+- 不带 `--as` 是同 id 覆写：视图、命令 id 不变，别的插件照常接上。覆写版的数据是从自带版复制出来的一份（`plugin-data/.overrides/<id>/`），各改各的；再 fork 一次会重新复制。覆写版加载失败自动回退自带版，`status` 标 `fallback_to_builtin: true` 和 `error`。删掉覆写目录（或设置 →「面板插件」里「恢复默认…」）就回到自带版。
+- `--as` 是改名并存：只改清单 id，源码里写死的 `<自带 id>/…` 要自己搜着改；新 id 是空库；带主题的插件不能 `--as`。
+- 覆写版不跟着 Smelt 升级变，升级后对比 fork 结果里 `source_path` 的自带源码。

@@ -92,7 +92,8 @@ await store.migrate([
 
 - 库按插件 id 放。插件改了 id，就是一个新的空库。
 - 删掉插件，库还在；装回来接着用。
-- [覆写](plugin-interop.md#覆写和-fork-内置插件)内置插件时，覆写版和内置版用**同一个库**。覆写版改了表结构，切回内置版可能就读不了了。改之前先备份：
+- [覆写](plugin-interop.md#覆写和-fork-内置插件)内置插件时，覆写版用**自己的一份**：`~/.smelt/plugin-data/.overrides/<id>/`。第一次用库时从内置版的库复制过来，之后各改各的，覆写版加表、加迁移不影响内置版。重新 fork（或重新导入同 id 的插件）会丢掉这份，再从内置版复制一次。
+- 想手动留一份：
 
   ```sh
   sqlite3 ~/.smelt/plugin-data/<id>/store.sqlite3 ".backup /tmp/<id>.sqlite3"
@@ -106,7 +107,7 @@ await store.migrate([
 
 ## 数据目录
 
-`dataDir()` 给出 `~/.smelt/plugin-data/<插件 id>/` 的绝对路径。插件没有文件系统接口，不能直接读写这个目录；它的用处是给要路径的地方（比如 `revealPath` 打开给用户看）。
+`dataDir()` 给出 `~/.smelt/plugin-data/<插件 id>/` 的绝对路径（覆写版是 `.overrides/<插件 id>/`）。插件没有文件系统接口，不能直接读写这个目录；它的用处是给要路径的地方（比如 `revealPath` 打开给用户看）。
 
 ## 相关
 

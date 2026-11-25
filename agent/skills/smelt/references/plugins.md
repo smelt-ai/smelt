@@ -24,7 +24,7 @@
 - 四种插件：脚本（`entry` 指 `.tsx`/`.ts`/`.js`）；共享模块（再加 `module: "a/b"` 和可选 `types`，打包进 import 它的插件，各插件各有一份顶层变量）；主题（`entry` 指 `.json`，不跑 JS）；布局（`pages` + `layouts`，没有 `entry`，不跑 JS）。`entry` 和 `pages`/`layouts` 二选一。
 - 布局插件清单：`pages: [{ name, title_key, home?, index? }]`，`layouts: [{ page, name, title_key, file, materials? }]`，`title_key` 取 `locales/ui.yml`。
 - 加载时忽略：点开头的、`node_modules/`、`tsconfig.json`、`tests/`、带 `.test.` 的。
-- 和内置插件同 id 是**覆写**：失败自动回退内置版；和内置版共用 `~/.smelt/plugin-data/<id>/` 的库。
+- 和内置插件同 id 是**覆写**：失败自动回退内置版；数据是从内置版复制出来的一份（`~/.smelt/plugin-data/.overrides/<id>/`），各改各的，再 fork 一次重新复制。
 
 ## 2. 能 import 什么，能做什么
 
@@ -55,7 +55,7 @@ NSH 不是 React：组件函数只跑一次，读了 signal 的地方才更新�
 - 导出 `root()`：无头根，一直挂着（全局对话框、后台逻辑）。
 - `registerCommands([{ name, title, key?, palette?, args?, cli?, when_view_shown?, when_active_session? }], groupTitle?)` + `onCommand(({ name, args }) => 结果)`：返回值是回复，抛错是失败。`args` 是认的字段名表（`[]` 不带参数），给了表外的字段宿主直接拒；`cli: true` 才能 `smelt app run`。
 - `registerPages`、`registerLayouts`、`registerTopics(["automations.changed"])`、`registerMenuItems([{ slot: "app"|"help", title, command }])`、`registerContextMenuItems(menu, [{ label, icon?, command, args? }])`、`setStatusMenu(menu|null)`、`registerFileOpener(name)`、`setActiveContext(ctx)`。
-- 标题用 `text("key")`（整张多语言表），界面里用 `t("key", { n })`。
+- 标题用 `text("key")`（整张多语言表），界面里用 `t("key", { n })`。文案表随宿主状态来，`text()` 要在 `await initHost()` 之后。
 
 **状态**（响应式，读到才订）：`machineMeta()`、`machines()`、`machineEntry(m)`、`pathStyle(m)`、`conversationFacts(m)`、`sessionAttention(m)`、`activeContext()`、`connections()`、`windowActive()`、`notificationPermission()`、`views()`、`pages()`、`commands()`、`command(id)`（没有给 `null`）、`viewShown(id)`、`viewLaidOut(id)`、`viewBadge(id)`、`safeArea(id)`、`theme()`、`locale()`。`workspaceDirectory(m)`、`sessionStates(m)` 是运行时原始结构，会变。
 
@@ -106,20 +106,21 @@ NSH 不是 React：组件函数只跑一次，读了 signal 的地方才更新�
 - `colors` 键：`page`、`bg_base`、`bg_deep`、`layer_01`–`layer_04`、`surface_raised`、`bg_inverse`、`bg_contrast`、`bg_button_neutral`、`bg_icon_button_contrast`、`bg_accent`；`text_*`、`icon_*`（`base`/`muted`/`faint`/`inverse`/`contrast`/`accent`）；`border_muted`/`base`/`strong`/`focus`、`hover`、`pressed`、`contrast_hover`、`contrast_pressed`、`selection`、`scrim`；`submit_highlight`/`hover`/`fg`/`icon`；`knob`、`knob_on`、`depth_top`、`depth_bottom`、`white`、`black`；`success|warning|danger|info.{bg,fg,border,icon}`；`chart.1`–`chart.5`。
 - `elevation` 键：`raised`、`floating`、`overlay`、`md`、`button_neutral`、`button_contrast`、`elements`、`switch_off`、`switch_on`、`knob`、`input`，值是 `[{ x?, y?, blur?, spread?, color, inset? }]`，`[]` 是不要投影。
 - `syntax`：tree-sitter 高亮名 → `{ color?, font_style?: normal|italic|underline, font_weight?: 100..900 }`。给了就整套替换内置高亮。
-- 有一处不对，这个插件的主题整组不生效。不能用保留名 `smelt Light`/`smelt Dark`，不能和别的插件的主题重名。
+- 有一处不对，这个插件的主题整组不生效。不能用保留名 `smelt Light`/`smelt Dark`，不能和别的插件的主题重名（`check` 会查已装的）。
 
 ## 7. 最小示例
 
 ```tsx
 import { signal, Text, View } from "nsh";
 import {
-  bootTask, onCommand, pluginId, registerCommands, registerViews,
+  bootTask, initHost, onCommand, pluginId, registerCommands, registerViews,
   run, SmeltButton, store, t, text,
 } from "smelt/sdk";
 
 const count = signal(0);
 
 bootTask(async () => {
+  await initHost();
   await store.migrate(["CREATE TABLE counter (id INTEGER PRIMARY KEY CHECK (id = 1), n INTEGER NOT NULL);"]);
   const rows = await store.query("SELECT n FROM counter WHERE id = 1");
   count.set(Number(rows[0]?.n ?? 0));
@@ -158,7 +159,7 @@ export function Main() {
 ```sh
 smelt plugin init com.example.demo --name "Demo"     # 或 --theme；改内置用 smelt plugin fork <id> [--as <新 id>]
 smelt plugin check ~/.smelt/plugins/com.example.demo # 离线校验，不过不算写完
-smelt plugin status com.example.demo                 # 保存一两秒后：error 为 null、views 里有视图、fallback_to_builtin 为 false
+smelt plugin status com.example.demo                 # 保存一两秒后：stale 为 false、error 为 null、views 里有视图、fallback_to_builtin 为 false
 smelt app run smelt.app/open-view --args '{"view":"com.example.demo/main"}'
 ```
 

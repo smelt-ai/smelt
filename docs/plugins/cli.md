@@ -19,14 +19,15 @@
 
 不给 `--dir` 时建在 `~/.smelt/plugins/<id>/`。`--name` 不给时从 id 最后一段推（`com.example.my-tool` → `My Tool`）。id 和内置插件重名会被拒绝；目录里已有清单或入口也会被拒绝，不覆盖。
 
-建出来的插件已经能通过 `check`。结果里的 `view` 是起步视图的 id。
+建出来的插件已经能通过 `check`，文案已经放在 `locales/ui.yml` 里。结果里的 `view` 是起步视图的 id。
 
 ### `fork`
 
 把内置插件复制到 `~/.smelt/plugins/<id>/`（或 `--dir`），跳过 `tests/`、`.test.` 文件和预编译字节码，再生成类型声明。
 
 - 不带 `--as`：同 id，**覆写**内置插件。
-- 带 `--as <新 id>`：改名，和内置的并存。
+- 带 `--as <新 id>`：改名，和内置的并存。带主题的插件不能改名 fork。
+- 同 id fork 会丢掉以前覆写留下的数据，覆写版第一次用库时从内置版重新复制。
 
 结果里的 `overrides_builtin` 说明是不是覆写，`source_path` 是复制的来源。覆写的规则和风险见[插件之间](plugin-interop.md#覆写和-fork-内置插件)。
 
@@ -42,7 +43,7 @@
 
 - 读清单，校验字段；
 - 读 `locales/`；
-- 校验 `themes/` 下的主题，整包要么全过、要么全不登记；
+- 校验 `themes/` 下的主题，整包要么全过、要么全不登记；主题名和已装的别的插件撞了也算错；
 - 打包 TSX，查剩下的 import 是否都在白名单里、有没有用到没声明的全局变量；
 - 编成 QuickJS 字节码。
 
@@ -78,8 +79,9 @@
 | `uses_modules` | 打包进来的共享模块 |
 | `views` | 登记了的视图 id |
 | `error` | 加载失败的原因；加载好了是 `null` |
+| `stale` | 源码在这次加载之后又改过，上面是旧版本的结果。只有用户插件会是 `true` |
 
-改完保存，等一两秒再看 `status`：`error` 是 `null`、`views` 里有你的视图，才算真的加载上了。
+改完保存，等一两秒再看 `status`：`stale` 是 `false`、`error` 是 `null`、`views` 里有你的视图，才算真的加载上了。带 id 查时 `stale` 是 `true` 退出码也是 1。
 
 ## `smelt app`
 
