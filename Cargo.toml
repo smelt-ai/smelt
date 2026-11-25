@@ -75,18 +75,31 @@ rust-i18n = "4.2"
 # libc 的上限另见 crates/smelt-mobile/Cargo.toml。
 netdev = { git = "https://github.com/shellrow/netdev", rev = "b3bfb0fb5595cd143bfa0b9f07d1ad6e0ef0c313" }
 
+# gpui-fast 用我们的 fork：源码长期单分支 `smelt/release`，发布态 Crate 工作区由
+# `bun script/prepare-release.ts --tag v0.1.19` 生成并推到 `smelt/crates` 分支。
+gpui-fast = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+gpui-fast-apple = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+gpui-fast-linux = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+gpui-fast-macos = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+gpui-fast-macros = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+gpui-fast-platform = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+gpui-fast-scheduler = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+gpui-fast-web = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+gpui-fast-wgpu = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+gpui-fast-windows = { git = "https://github.com/smelt-ai/gpui-fast", rev = "9064725bfba934bc642646db6c871cbb1197c207" }
+
 # NSH 用我们的 fork：长期单分支 `smelt/release`，不强推、不打标签；同步上游发版直接 merge
 # 对应 tag，这里十个包一起换到同一个 rev。
-nsh-base = { git = "https://github.com/smelt-ai/nsh", rev = "2c50b6b7aec73626a480aa29661aec78bd605160" }
-nsh-bundler = { git = "https://github.com/smelt-ai/nsh", rev = "2c50b6b7aec73626a480aa29661aec78bd605160" }
-nsh-core = { git = "https://github.com/smelt-ai/nsh", rev = "2c50b6b7aec73626a480aa29661aec78bd605160" }
-nsh-engine = { git = "https://github.com/smelt-ai/nsh", rev = "2c50b6b7aec73626a480aa29661aec78bd605160" }
-nsh-i18n = { git = "https://github.com/smelt-ai/nsh", rev = "2c50b6b7aec73626a480aa29661aec78bd605160" }
-nsh-js = { git = "https://github.com/smelt-ai/nsh", rev = "2c50b6b7aec73626a480aa29661aec78bd605160" }
-nsh-macros = { git = "https://github.com/smelt-ai/nsh", rev = "2c50b6b7aec73626a480aa29661aec78bd605160" }
-nsh-package = { git = "https://github.com/smelt-ai/nsh", rev = "2c50b6b7aec73626a480aa29661aec78bd605160" }
-nsh-platform-gpui = { git = "https://github.com/smelt-ai/nsh", rev = "2c50b6b7aec73626a480aa29661aec78bd605160" }
-nsh-updater = { git = "https://github.com/smelt-ai/nsh", rev = "2c50b6b7aec73626a480aa29661aec78bd605160" }
+nsh-base = { git = "https://github.com/smelt-ai/nsh", rev = "74e9f51822d80b15236c9ab620c3ef95850eb253" }
+nsh-bundler = { git = "https://github.com/smelt-ai/nsh", rev = "74e9f51822d80b15236c9ab620c3ef95850eb253" }
+nsh-core = { git = "https://github.com/smelt-ai/nsh", rev = "74e9f51822d80b15236c9ab620c3ef95850eb253" }
+nsh-engine = { git = "https://github.com/smelt-ai/nsh", rev = "74e9f51822d80b15236c9ab620c3ef95850eb253" }
+nsh-i18n = { git = "https://github.com/smelt-ai/nsh", rev = "74e9f51822d80b15236c9ab620c3ef95850eb253" }
+nsh-js = { git = "https://github.com/smelt-ai/nsh", rev = "74e9f51822d80b15236c9ab620c3ef95850eb253" }
+nsh-macros = { git = "https://github.com/smelt-ai/nsh", rev = "74e9f51822d80b15236c9ab620c3ef95850eb253" }
+nsh-package = { git = "https://github.com/smelt-ai/nsh", rev = "74e9f51822d80b15236c9ab620c3ef95850eb253" }
+nsh-platform-gpui = { git = "https://github.com/smelt-ai/nsh", rev = "74e9f51822d80b15236c9ab620c3ef95850eb253" }
+nsh-updater = { git = "https://github.com/smelt-ai/nsh", rev = "74e9f51822d80b15236c9ab620c3ef95850eb253" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow" }
