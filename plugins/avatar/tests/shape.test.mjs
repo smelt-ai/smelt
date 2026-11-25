@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { BADGE, bodySvg, CANVAS, EYE_R, hash, shapeOf, tintOf } from "../shape.js";
+import { bodySvg, CANVAS, EYE_R, hash, shapeOf, tintOf } from "../shape.js";
 
 /** 路径里所有坐标点（每对数是一个点）。 */
 function points(path) {
@@ -82,29 +82,4 @@ test("身子 SVG 带渐变描边，坐标没有 NaN", () => {
   expect(svg).toContain('stroke="url(#t)"');
   expect(svg).toContain(tintOf(seed).from);
   expect(svg).not.toContain("NaN");
-});
-
-test("角标在右下、整个图标在画布里、碰不到眼睛", () => {
-  for (const seed of seeds) {
-    const { badge, eyes } = shapeOf(seed);
-    const [x, y] = badge;
-    const [, right, eyeY] = eyes;
-    expect(x + BADGE / 2).toBeLessThanOrEqual(CANVAS);
-    expect(y + BADGE / 2).toBeLessThanOrEqual(CANVAS);
-    expect(x).toBeGreaterThan(CANVAS / 2);
-    expect(y).toBeGreaterThan(eyeY);
-    expect(Math.hypot(x - right, y - eyeY)).toBeGreaterThanOrEqual(BADGE / 2 + EYE_R + 1 - 1e-9);
-  }
-});
-
-test("给了角标位置，身子 SVG 在那里挖一个圆；不给就不挖", () => {
-  const seed = hash("conv-a");
-  const { path, badge } = shapeOf(seed);
-  const cut = bodySvg(path, tintOf(seed), "#141B24", badge);
-  // NSH 的矢量管线不画 mask，只能用 clip-path。
-  expect(cut).toContain('clip-path="url(#c)"');
-  expect(cut).toContain('clip-rule="evenodd"');
-  expect(cut).toContain(`M${(badge[0] - 6.5).toFixed(2)} ${badge[1].toFixed(2)}a6.5 6.5`);
-  expect(cut).not.toContain("<mask");
-  expect(bodySvg(path, tintOf(seed), "#141B24")).not.toContain("clip");
 });

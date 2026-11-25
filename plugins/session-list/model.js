@@ -259,13 +259,14 @@ export function states_in(conversation, states) {
 }
 
 /**
- * 最近一次动静（unix 秒）：各格最近一次换阶段、开始一轮里最晚的。守护里还没有它的是 0。
+ * 最近一次动静（unix 秒），各格里最晚的：在跑的认这一轮开始的时刻，停着的认停下来的时刻。
+ * 一轮里思考、调工具来回换阶段不算，不然几段同时在跑时会跟着来回换位置。守护里还没有它的是 0。
  * 「对话」那一段按它排。
  */
 export function last_activity(conversation, states) {
   let at = 0;
   for (const state of states_in(conversation, states)) {
-    at = Math.max(at, state.phase_since ?? 0, state.turn_started_at ?? 0);
+    at = Math.max(at, state.turn_started_at || state.phase_since || 0);
   }
   return at;
 }

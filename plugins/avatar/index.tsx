@@ -1,23 +1,29 @@
 // 共享模块插件 `smelt/avatar`：算法头像组件 `<Avatar seed act since size>`。外形、渐变描边按 seed 算
-// （./shape.js），深色身子、白色圆点眼睛；给了 `badge` 就在描边右下断开一截，把那个图标嵌进去。纯 JS。
+// （./shape.js），深色身子、白色眼睛：默认圆点，给了 `eye` 就用那个图标当两只眼。纯 JS。
 //
 // 演哪一出、从什么时候起由引用方定（act/since，会话列表按会话状态给），这里只管怎么演、一出演多久。
-// 身子是一张静态 SVG，只在有变化时算；动的是叠在上面的眼睛和整个身子，全用关键帧交给 NSH
-// 原生按屏幕刷新率跑（静止区域由 NSH 图层缓存合成）。干活、喊你按拍子走：每拍按（种子, 第几拍）挑一个动作，演完再挑下一拍；
+// 身子是一张静态 SVG，只在第一次显示时算；动的是叠在上面的眼睛和整个身子，全用关键帧交给 NSH
+// 原生跑，限 20 帧。干活、喊你按拍子走：每拍按（种子, 第几拍）挑一个动作，演完再挑下一拍；
 // 每个头像有按种子定的性格（节奏快慢、幅度、第一拍晚多久起）。站着不动不要帧；App 不在前台
 // 或系统要求减弱动态效果时也不动。
 
-import { cleanup, computed, createMotion, Easing, effect, lifecycle, reduceMotion, View } from "nsh";
+import { cleanup, createMotion, Easing, effect, lifecycle, reduceMotion, View } from "nsh";
 import { SmeltIcon, SmeltVector } from "smelt/sdk";
 
-import { BADGE, bodySvg, CANVAS, EYE_R, hash, shapeOf, tintOf } from "./shape.js";
+import { bodySvg, CANVAS, EYE_R, hash, shapeOf, tintOf } from "./shape.js";
 
 /** 演一遍就停的那几出演多久（毫秒）：过了这么久站好不演。引用方据此判断头像闲没闲着。 */
 export const ONE_SHOT_MS = { cheer: 1600, greet: 1100 };
+/** 动作的帧率上限：每动一帧整窗重画，眼睛小、动得慢，20 帧看不出顿。 */
+const FPS = 20;
 
 const BODY = "#141B24";
 const EYE = "#F4F8FF";
 const EYE_CALL = "#FFC24A";
+/** 图标眼的边长（36 见方画布里）：比圆点眼大，1x 下才认得出图标。 */
+const ICON_EYE = 8;
+/** 图标眼比圆点眼大，两眼各往外挪这么多，免得挤在一起。 */
+const ICON_SPREAD = (ICON_EYE / 2 - EYE_R) * 0.8;
 
 type Frames = Record<string, number[]>;
 /** 一个动作：身子和眼睛各自的关键帧，时长按一拍的倍数。 */
@@ -98,8 +104,8 @@ export interface AvatarProps {
   since: number;
   opacity?: number;
   size: number;
-  /** 角标图标路径：嵌在描边右下的断口里，和眼睛同色，跟着身子动。 */
-  badge?: string;
+  /** 眼睛用的图标路径；不给就是圆点眼。 */
+  eye?: string;
 }
 
 export function Avatar(props: AvatarProps) {
@@ -107,8 +113,7 @@ export function Avatar(props: AvatarProps) {
   const eyes = createMotion();
   const seed = hash(props.seed);
   const shape = shapeOf(seed);
-  const tint = tintOf(seed);
-  const markup = computed(() => bodySvg(shape.path, tint, BODY, props.badge ? shape.badge : undefined));
+  const markup = bodySvg(shape.path, tintOf(seed), BODY);
   // 性格：一拍多长、动作幅度、第一拍晚多久起。
   const beat = 700 + dice(seed, 0) * 600;
   const reach = 0.75 + dice(seed, 1) * 0.5;
@@ -120,7 +125,7 @@ export function Avatar(props: AvatarProps) {
   });
 
   const play = (move: Move, delay: number) => {
-    const timing = { duration: move.beats * beat, delay, easing: Easing.inOut(Easing.ease) };
+    const timing = { duration: move.beats * beat, delay, easing: Easing.inOut(Easing.ease), frameRate: FPS };
     const factor = (reach * props.size) / CANVAS;
     const b = scaled(move.body, factor);
     const e = scaled(move.eyes, factor);
@@ -172,34 +177,29 @@ export function Avatar(props: AvatarProps) {
   const unit = () => props.size / CANVAS;
   const [left, right, eyeY] = shape.eyes;
   const eyeColor = () => (props.act === "call" ? EYE_CALL : EYE);
-  const eye = () => (
-    <View
-      style={{ width: EYE_R * 2 * unit(), height: EYE_R * 2 * unit(), borderRadius: EYE_R * unit(), backgroundColor: eyeColor() }}
-    />
-  );
+  // 眼睛那一排：图标眼比圆点眼大，也更开。
+  const eyeHalf = () => (props.eye ? ICON_EYE / 2 : EYE_R);
+  const spread = () => (props.eye ? ICON_SPREAD : 0);
+  const eye = () =>
+    props.eye ? (
+      <SmeltIcon path={props.eye} size={ICON_EYE * unit()} color={eyeColor()} />
+    ) : (
+      <View
+        style={{ width: EYE_R * 2 * unit(), height: EYE_R * 2 * unit(), borderRadius: EYE_R * unit(), backgroundColor: eyeColor() }}
+      />
+    );
 
   return (
     <View style={{ width: props.size, height: props.size, opacity: props.opacity ?? 1, pointerEvents: "none" }}>
       <View style={{ position: "absolute", left: 0, top: 0, width: props.size, height: props.size, ...body.style }}>
-        <SmeltVector markup={markup()} width={props.size} height={props.size} />
-        <If when={props.badge != null}>
-          <View
-            style={{
-              position: "absolute",
-              left: (shape.badge[0] - BADGE / 2) * unit(),
-              top: (shape.badge[1] - BADGE / 2) * unit(),
-            }}
-          >
-            <SmeltIcon path={props.badge!} size={BADGE * unit()} color={eyeColor()} />
-          </View>
-        </If>
+        <SmeltVector markup={markup} width={props.size} height={props.size} />
         <View
           style={{
             position: "absolute",
-            left: (left - EYE_R) * unit(),
-            top: (eyeY - EYE_R) * unit(),
-            width: (right - left + EYE_R * 2) * unit(),
-            height: EYE_R * 2 * unit(),
+            left: (left - spread() - eyeHalf()) * unit(),
+            top: (eyeY - eyeHalf()) * unit(),
+            width: (right - left + (spread() + eyeHalf()) * 2) * unit(),
+            height: eyeHalf() * 2 * unit(),
             flexDirection: "row",
             justifyContent: "space-between",
             ...eyes.style,

@@ -1,11 +1,11 @@
 // 会话列表插件（NSH A2 独立 Guest VM 正式版）：
 // 复用 `plugins/session-list/` 全部纯 JS 逻辑与 SQLite 存储，导出：
 // - `root`：承载 ⌘N 新建会话面板与项目仓库管理对话框（挂在主壳 0×0 无头根层）；
-// - `main`：侧栏会话列表视图（行首会话头像 `<Avatar>`（共享模块 `smelt/avatar`，智能体图标嵌在描边断口里）、分组折叠弹簧动画、悬停图标切换、
+// - `main`：侧栏会话列表视图（行首会话头像 `<Avatar>`（共享模块 `smelt/avatar`，智能体会话的眼睛是智能体图标）、分组折叠弹簧动画、悬停图标切换、
 //   拖拽浮卡与落点线、新建会话「+」弹层、搜索、分组/机器菜单、可视区外提示胶囊、动效与外部拖入项目）；
 // - `settings`：设置「通用 → 会话列表」行首头像选择。
 
-import { cleanup, computed, effect, Overlay, Scroll, signal, Text, View } from "nsh";
+import { cleanup, computed, createAnimatedValue, Easing, effect, Overlay, Scroll, signal, Text, View } from "nsh";
 import { Input, Submenu } from "nsh/base";
 import {
   fileUriToPath,
@@ -86,6 +86,7 @@ const DRAG_THRESHOLD = 4;
 const AUTOSCROLL_EDGE = 40;
 /** 拖到边上时每毫秒滚多少：按两帧间隔算，高刷屏不会滚得更快。 */
 const AUTOSCROLL_SPEED = 0.5;
+const WASH_RISE_MS = 120;
 const WASH_HOLD_MS = 360;
 const WASH_PEAK_OPACITY = 0.1;
 
@@ -180,13 +181,8 @@ function rowMeta(row: any, selected: boolean) {
     return { text: t("bucket.needs_you"), color: palette.need, unread };
   }
   if (row.status === "running" && row.turn_started_at > 0) {
-    // 在跑：计时前加一个中性色转圈。不配色，但静着看（截图、减弱动态、App 不在前台）也认得出。
-    return {
-      text: span(Math.max(nowSec - row.turn_started_at, 0), t),
-      color: rowMuted(palette, selected),
-      unread,
-      running: true,
-    };
+    // 在跑：计时用强调色，和空闲的「几分钟前」一眼分开；不另加转圈。
+    return { text: span(Math.max(nowSec - row.turn_started_at, 0), t), color: palette.accent, unread };
   }
   return { text: relative_time(row.activity, nowSec, t), color: rowFaint(palette, selected), unread };
 }
@@ -337,39 +333,33 @@ function DropLine(props: { edge: "top" | "bottom" | null }) {
   );
 }
 
-/** 定位/新落进列表时铺一层底色淡入、停住、慢慢退干净（纯 NSH transition，无轮询）。 */
+/** 定位/新落进列表时铺一层底色淡入、停住、慢慢退干净（原生 UI 线程关键帧，无 JS 定时器）。 */
 function WashLayer(props: { serial: () => number | null }) {
   const look = () => theme();
-  const alpha = signal(0);
-  const phase = signal<"rise" | "fall">("rise");
+  const opacity = createAnimatedValue(0);
   let lastSeen = 0;
 
   effect(() => {
     const serial = props.serial();
     if (serial == null || serial <= 0 || serial === lastSeen) return;
     lastSeen = serial;
-    phase.set("rise");
-    alpha.set(WASH_PEAK_OPACITY);
-    const t1 = setTimeout(() => {
-      phase.set("fall");
-      alpha.set(0);
-    }, WASH_HOLD_MS);
-    const t2 = setTimeout(() => {
-      alpha.set(0);
-    }, WASH_END);
-    cleanup(() => {
-      clearTimeout(t1);
-      clearTimeout(t2);
-    });
+    void opacity.keyframes(
+      [
+        { offset: 0, value: 0, easing: Easing.inOut(Easing.quad) },
+        { offset: WASH_RISE_MS / WASH_END, value: WASH_PEAK_OPACITY, easing: Easing.linear },
+        { offset: WASH_HOLD_MS / WASH_END, value: WASH_PEAK_OPACITY, easing: Easing.inOut(Easing.quad) },
+        { offset: 1, value: 0 },
+      ],
+      { duration: WASH_END },
+    );
+  });
+
+  cleanup(() => {
+    opacity.stop();
   });
 
   return (
     <View
-      class={
-        phase() === "rise"
-          ? "transition-opacity duration-150"
-          : "transition-opacity duration-700"
-      }
       style={{
         position: "absolute",
         top: 0,
@@ -378,7 +368,7 @@ function WashLayer(props: { serial: () => number | null }) {
         left: 0,
         borderRadius: look().radius.row,
         backgroundColor: look().palette.text,
-        opacity: alpha(),
+        opacity,
         pointerEvents: "none",
       }}
     />
@@ -888,7 +878,7 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
                 since={actor().since}
                 opacity={iconAlpha()}
                 size={AVATAR}
-                badge={iconPath(row().icon)}
+                eye={row().icon?.kind === "provider" ? row().icon.path : undefined}
               />
             </View>
           </If>
@@ -1028,9 +1018,6 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
                     backgroundColor: look().palette.accent,
                   }}
                 />
-              </If>
-              <If when={Boolean(info().running)}>
-                <SmeltIcon spin size={11} color={info().color} />
               </If>
               <Text
                 style={{

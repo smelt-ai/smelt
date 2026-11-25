@@ -7,12 +7,6 @@
 export const CANVAS = 36;
 /** 眼睛半径。 */
 export const EYE_R = 2.6;
-/** 角标图标的边长：嵌在描边右下的断口里。 */
-export const BADGE = 9.4;
-/** 断口半径：比图标大一圈，图标和两头的描边之间留缝。 */
-const BADGE_GAP = 6.5;
-/** 角标中心离右眼中心至少多远：图标半边 + 眼睛半径 + 1 的缝。 */
-const BADGE_CLEAR = BADGE / 2 + EYE_R + 1;
 
 /** 字符串 → 32 位种子（FNV-1a）。 */
 export function hash(text) {
@@ -48,7 +42,7 @@ const BOX_WEIGHT = 0.6;
 const WAVES = [0.06, 0.02, 0.035];
 
 /**
- * 种子 → `{ path, eyes: [左眼 x, 右眼 x, y], badge: [x, y] }`，badge 是角标中心（轮廓最靠右下那点往里收一点）。新加随机量只能接在最后取，前面的不变，
+ * 种子 → `{ path, eyes: [左眼 x, 右眼 x, y] }`。新加随机量只能接在最后取，前面的不变，
  * 不然升级后人人换脸。
  */
 export function shapeOf(seed) {
@@ -114,27 +108,7 @@ export function shapeOf(seed) {
 
   const eyeY = cy + height * k * 0.02;
   const half = Math.min(4.6, width * k * 0.17);
-  const eyes = [CANVAS / 2 - half, CANVAS / 2 + half, eyeY];
-  return { path, eyes, badge: badgeAt(P, eyes) };
-}
-
-/**
- * 角标中心：轮廓最靠右下那点（往下多偏一点，右下在下巴那侧）往里收一点。矮胖的外形眼睛低，
- * 这点会贴着右眼，就沿离开右眼的方向推开到留出一点缝，推的时候不出画布。
- */
-function badgeAt(P, [, right, eyeY]) {
-  const corner = P.reduce((best, p) => (p[0] + p[1] * 1.15 > best[0] + best[1] * 1.15 ? p : best));
-  let x = corner[0] - 0.6;
-  let y = corner[1] - 0.6;
-  const dx = x - right;
-  const dy = y - eyeY;
-  const d = Math.hypot(dx, dy);
-  if (d < BADGE_CLEAR) {
-    x = right + (dx / d) * BADGE_CLEAR;
-    y = eyeY + (dy / d) * BADGE_CLEAR;
-  }
-  const edge = CANVAS - BADGE / 2;
-  return [Math.min(x, edge), Math.min(y, edge)];
+  return { path, eyes: [CANVAS / 2 - half, CANVAS / 2 + half, eyeY] };
 }
 
 /** OKLCH → 线性 sRGB 三分量（可能越界）。 */
@@ -187,24 +161,8 @@ export function tintOf(seed) {
   };
 }
 
-/**
- * 挖洞用的裁剪形状：比画布大一圈的方框里套一个圆，按 evenodd 只留圆外。用 clip-path 不用 mask：
- * NSH 把 SVG 转成矢量绘制指令，mask 不画（被遮的东西原样整个画出来），clip-path 画。
- */
-function cutPath([x, y]) {
-  const r = BADGE_GAP;
-  const f2 = (v) => v.toFixed(2);
-  return (
-    `M-2 -2H${CANVAS + 2}V${CANVAS + 2}H-2Z` +
-    `M${f2(x - r)} ${f2(y)}a${r} ${r} 0 1 0 ${r * 2} 0a${r} ${r} 0 1 0 ${-r * 2} 0Z`
-  );
-}
-
-/**
- * 外形 → 头像身子的 SVG：先描一圈渐变彩边（`tintOf` 的结果），再填深色身子。给了 `cut`（角标中心）
- * 就在那里挖掉一个圆，描边和身子都断开，给角标图标让位。
- */
-export function bodySvg(path, tint, fill, cut) {
+/** 外形 → 头像身子的 SVG：先描一圈渐变彩边（`tintOf` 的结果），再填深色身子。 */
+export function bodySvg(path, tint, fill) {
   // 渐变沿 angle 方向穿过外接框中心，两端落在框边上。
   const rad = (tint.angle * Math.PI) / 180;
   const at = (v) => (0.5 + v).toFixed(3);
@@ -214,11 +172,9 @@ export function bodySvg(path, tint, fill, cut) {
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${CANVAS} ${CANVAS}">` +
     `<defs><linearGradient id="t" x1="${at(-dx)}" y1="${at(-dy)}" x2="${at(dx)}" y2="${at(dy)}">` +
     `<stop offset="0" stop-color="${tint.from}"/><stop offset="1" stop-color="${tint.to}"/>` +
-    `</linearGradient>` +
-    (cut ? `<clipPath id="c"><path clip-rule="evenodd" d="${cutPath(cut)}"/></clipPath>` : "") +
-    `</defs><g${cut ? ' clip-path="url(#c)"' : ""}>` +
+    `</linearGradient></defs>` +
     `<path d="${path}" fill="none" stroke="url(#t)" stroke-width="4.2" stroke-linejoin="round"/>` +
     `<path d="${path}" fill="${fill}" stroke="${fill}" stroke-width="1.2" stroke-linejoin="round"/>` +
-    `</g></svg>`
+    `</svg>`
   );
 }

@@ -37,6 +37,12 @@ test("最近动静只看守护", () => {
   expect(last_activity(conversation, [])).toBe(0);
 });
 
+test("一轮里换阶段不算动静：只认这一轮开始的时刻", () => {
+  const conversation = terminal_session("c", "t1", "/repo");
+  // 120 开始这一轮，300 从思考换到调工具。
+  expect(last_activity(conversation, [state("t1", 300, 120)])).toBe(120);
+});
+
 test("名字：派生事实里的，没有是通用名", () => {
   expect(title({ name: null }, true, t)).toBe("Conversation");
   expect(title({ name: null }, false, t)).toBe("Terminal");

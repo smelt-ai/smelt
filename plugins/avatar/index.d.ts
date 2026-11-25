@@ -11,8 +11,8 @@ export interface AvatarProps {
   since: number;
   size: number;
   opacity?: number;
-  /** 角标图标路径（比如智能体图标）：彩色描边在右下断开一截，图标嵌在断口里，和眼睛同色。 */
-  badge?: string;
+  /** 眼睛用的图标路径（比如智能体图标）：两只眼都画成它，和圆点眼同色；不给就是圆点眼。 */
+  eye?: string;
 }
 
 /** 演一遍就停的那几出演多久（毫秒）：过了这么久头像自己站好。 */
