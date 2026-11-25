@@ -1,7 +1,7 @@
 // 会话列表插件（NSH A2 独立 Guest VM 正式版）：
 // 复用 `plugins/session-list/` 全部纯 JS 逻辑与 SQLite 存储，导出：
 // - `root`：承载 ⌘N 新建会话面板与项目仓库管理对话框（挂在主壳 0×0 无头根层）；
-// - `main`：侧栏会话列表视图（行首会话头像 `<Avatar>`（共享模块 `smelt/avatar`）、分组折叠弹簧动画、悬停图标切换、
+// - `main`：侧栏会话列表视图（行首会话头像 `<Avatar>`（共享模块 `smelt/avatar`，智能体图标嵌在描边断口里）、分组折叠弹簧动画、悬停图标切换、
 //   拖拽浮卡与落点线、新建会话「+」弹层、搜索、分组/机器菜单、可视区外提示胶囊、动效与外部拖入项目）；
 // - `settings`：设置「通用 → 会话列表」行首头像选择。
 
@@ -80,7 +80,6 @@ const ROW_MD = 32;
 const AVATAR = 36;
 const AVATAR_ROW = 44;
 const LEAD = 16;
-const BADGE = 13;
 const EDGE = 8;
 const INDENT = 16;
 const DRAG_THRESHOLD = 4;
@@ -875,7 +874,6 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
                 ) : undefined
               }
               style={{
-                position: "relative",
                 width: AVATAR,
                 height: AVATAR,
                 flexShrink: 0,
@@ -890,34 +888,8 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
                 since={actor().since}
                 opacity={iconAlpha()}
                 size={AVATAR}
+                badge={iconPath(row().icon)}
               />
-              <View
-                style={{
-                  position: "absolute",
-                  right: -2,
-                  bottom: -1,
-                  width: BADGE + 2,
-                  height: BADGE + 2,
-                  borderRadius: (BADGE + 2) / 2,
-                  alignItems: "center",
-                  justifyContent: "center",
-                  backgroundColor: selected() ? look().palette.surface : look().palette.side,
-                  borderWidth: 1.5,
-                  borderColor: selected() ? look().palette.surface : look().palette.side,
-                  pointerEvents: "none",
-                }}
-              >
-                <SmeltIcon
-                  path={iconPath(row().icon)}
-                  size={10}
-                  color={
-                    row().status === "idle"
-                      ? look().palette.text
-                      : dotColor(look().palette, row().status)
-                  }
-                  opacity={iconAlpha()}
-                />
-              </View>
             </View>
           </If>
 
