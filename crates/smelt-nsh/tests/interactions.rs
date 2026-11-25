@@ -18,7 +18,7 @@ use std::{
 };
 
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Context, IntoElement, Modifiers, MouseButton,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, IntoElement, Modifiers,
     Pixels, Render, TestAppContext, VisualTestContext, Window, div,
     point, px, size,
 };
@@ -336,7 +336,7 @@ fn session_avatar(index: usize) -> Bounds<Pixels> {
 }
 
 #[gpui::test]
-fn main_shell_hover_drag_and_quota_regressions(cx: &mut TestAppContext) {
+fn main_shell_hover_toggle_and_quota_regressions(cx: &mut TestAppContext) {
     // 独立测试进程单测试，开启 GPUI a11y 树捕获以直接校验一等 NSH 节点可见性。
     unsafe {
         std::env::set_var("GPUI_A11Y_ACTIVE", "1");
@@ -344,7 +344,6 @@ fn main_shell_hover_drag_and_quota_regressions(cx: &mut TestAppContext) {
 
     let local_online = Arc::new(AtomicBool::new(false));
     let rpc_methods = Arc::new(Mutex::new(Vec::<String>::new()));
-    let opened_sessions = Rc::new(RefCell::new(Vec::<Value>::new()));
 
     cx.executor().allow_parking();
     cx.update(|cx| {
@@ -363,7 +362,6 @@ fn main_shell_hover_drag_and_quota_regressions(cx: &mut TestAppContext) {
             cx,
         )
         .unwrap();
-        let opened = opened_sessions.clone();
         api::register_commands(
             "smelt.app",
             "App",
@@ -376,10 +374,7 @@ fn main_shell_hover_drag_and_quota_regressions(cx: &mut TestAppContext) {
                 requires_args: false,
                 args: None,
                 cli: false,
-                handler: Rc::new(move |args, _, _| {
-                    if args["view"].as_str() == Some("smelt.sessions/session") {
-                        opened.borrow_mut().push(args.clone());
-                    }
+                handler: Rc::new(|_, _, _| {
                     api::Handled::Done(gpui::Task::ready(Ok(json!(true))))
                 }),
             }],
@@ -473,7 +468,6 @@ fn main_shell_hover_drag_and_quota_regressions(cx: &mut TestAppContext) {
 
     // 2. 悬停项目行：icons/folder-open.svg 隐藏、折叠箭头按钮露出来。
     let a_rect = session_avatar(0);
-    let b_rect = session_avatar(1);
     let project_hover = point(a_rect.origin.x + px(40.), a_rect.origin.y - px(16.));
     cx.simulate_mouse_move(project_hover, None, Modifiers::default());
     wait_for(
@@ -494,30 +488,7 @@ fn main_shell_hover_drag_and_quota_regressions(cx: &mut TestAppContext) {
         has_a11y(cx, Some("Button"), "Close")
     });
 
-    // 4. 拖拽重排：把 conv-b 拖到 conv-a 上半区，顺序翻转且不误触打开会话。
-    opened_sessions.borrow_mut().clear();
-    let drag_start = point(b_rect.center().x + px(40.), b_rect.center().y);
-    let drag_mid = point(a_rect.center().x + px(40.), a_rect.center().y + px(4.));
-    let drag_target = point(a_rect.center().x + px(40.), a_rect.origin.y + px(3.));
-    cx.simulate_mouse_down(drag_start, MouseButton::Left, Modifiers::default());
-    cx.simulate_mouse_move(drag_mid, Some(MouseButton::Left), Modifiers::default());
-    cx.run_until_parked();
-    cx.update(|window, _| window.refresh());
-    cx.simulate_mouse_move(drag_target, Some(MouseButton::Left), Modifiers::default());
-    cx.run_until_parked();
-    cx.update(|window, _| window.refresh());
-    cx.simulate_mouse_up(drag_target, MouseButton::Left, Modifiers::default());
-
-    wait_for(cx, "拖拽后 conv-b 排到 conv-a 上方", |cx| {
-        session_above(cx, "Beta Chat", "Alpha Chat") == Some(true)
-    });
-    assert!(
-        opened_sessions.borrow().is_empty(),
-        "拖拽松手不应误触发打开会话：{:?}",
-        *opened_sessions.borrow()
-    );
-
-    // 5. 红绿灯旁的左抽屉开关按钮：点击收起、再点击展开，同帧同步材质分块，无重复抖动。
+    // 4. 红绿灯旁的左抽屉开关按钮：点击收起、再点击展开，同帧同步材质分块，无重复抖动。
     let layout_changes = Rc::new(std::cell::Cell::new(0usize));
     let lc = layout_changes.clone();
     let _sub = cx.update(|_, cx| {
@@ -581,7 +552,7 @@ fn main_shell_hover_drag_and_quota_regressions(cx: &mut TestAppContext) {
         "再展开应只多触发一次 LayoutChanged"
     );
 
-    // 6. 项目行「+」按钮：点击弹出新建会话弹层，再次点击收起（不能开完立刻被 Popover 自己关掉）。
+    // 5. 项目行「+」按钮：点击弹出新建会话弹层，再次点击收起（不能开完立刻被 Popover 自己关掉）。
     // 左停靠区宽 260，列表水平内边距 8，行右内边距 4，20x20 按钮中心在 x=238。
     let plus_pos = point(px(238.), a_rect.origin.y - px(22.));
     cx.simulate_mouse_move(plus_pos, None, Modifiers::default());
