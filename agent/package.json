@@ -20,7 +20,7 @@
     "@agentclientprotocol/claude-agent-acp": "0.108.0",
     "@agentclientprotocol/codex-acp": "2.7.0",
     "@earendil-works/pi-ai": "1.5.2",
-    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@earendil-works/pi-coding-agent": "1.6.0",
     "@earendil-works/pi-mcp": "1.5.2",
     "@playwright/mcp": "0.0.85",
     "proper-lockfile": "4.1.2",
