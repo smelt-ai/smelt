@@ -11,6 +11,12 @@ export const SETTINGS = "smelt.app/settings";
 export const NEW_CONVERSATION = "smelt.agents/new-conversation";
 /** 出口（布局里摆的放打开的视图的那一格）。 */
 const OUTLET = "smelt/outlet";
+/**
+ * 入口列表排最前的几个内置功能，按这个顺序；其余（用户装的插件，和布局里被拿掉的内置视图）跟在后面按
+ * id 排。宿主视图表是登记顺序，各插件异步登记、谁先到谁在前，直接用会每次启动不一样。
+ */
+// 约定：各自 contract.js 的 VIEW（smelt.agents、smelt.automations、smelt.capabilities）。
+const LEADING = ["smelt.agents/main", "smelt.automations/main", "smelt.capabilities/main"];
 
 /** 这两个视图要据此重算的事件。标题是按当前语言取好的字，换了语言也要重算。 */
 const AFFECTS = new Set([
@@ -54,6 +60,7 @@ export function nav_state(host) {
         (view) =>
           launchable(view.id, view.settings != null, view.instances, indexes) && !host.view_laid_out(view.id),
       )
+      .sort(by_nav_order)
       .map((view) => ({
         id: view.id,
         title: view.title,
@@ -62,6 +69,15 @@ export function nav_state(host) {
         shown: host.view_shown(view.id),
       })),
   };
+}
+
+/** 入口顺序：LEADING 里的按它排在前，其余按 id。 */
+function by_nav_order(a, b) {
+  const rank = (id) => {
+    const at = LEADING.indexOf(id);
+    return at < 0 ? LEADING.length : at;
+  };
+  return rank(a.id) - rank(b.id) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 }
 
 /** 设置按钮上有什么：available 是设置命令登记了，attention 是有设置页挂着角标。 */

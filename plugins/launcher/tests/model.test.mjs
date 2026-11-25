@@ -65,6 +65,25 @@ test("入口列表：布局摆了的不列，角标和露着照实给，新对�
   expect(nav_state(fake_host()).new_conversation, "命令没登记不出按钮").toBe(null);
 });
 
+test("入口顺序：智能体、自动化、能力库在前，其余按 id，与登记先后无关", () => {
+  const host = fake_host({
+    views: [
+      view("com.smelt.mac-clean/main"),
+      view("smelt.capabilities/main"),
+      view("com.acme.zeta/main"),
+      view("smelt.automations/main"),
+      view("smelt.agents/main"),
+    ],
+  });
+  expect(nav_state(host).entries.map((entry) => entry.id)).toStrictEqual([
+    "smelt.agents/main",
+    "smelt.automations/main",
+    "smelt.capabilities/main",
+    "com.acme.zeta/main",
+    "com.smelt.mac-clean/main",
+  ]);
+});
+
 test("设置按钮：命令登记了才有，设置页挂着角标才带红点", () => {
   const settings = { group: "general", keywords: [] };
   expect(settings_state(fake_host())).toStrictEqual({ available: false, attention: false });
