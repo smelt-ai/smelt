@@ -1058,11 +1058,27 @@ export function selectedConfigIndex(cfg) {
 
 // ---- 输入框运行态顶边扫光模式与颜色透明度（composer.tsx 与 model.test.mjs 共用） ----
 
-export function composerSweepMode({ turnActive, awaitingUser, windowActive, reduceMotion }) {
-  if (!turnActive && !awaitingUser) return "off";
-  if (awaitingUser) return "hold";
+/** 停止按钮外圈：不在跑、等你时不画；在跑时转，失焦或要求减弱动态时静着（画着不转，不要帧）。 */
+export function stopRingMode({ turnActive, awaitingUser, windowActive, reduceMotion }) {
+  if (!turnActive || awaitingUser) return "off";
   if (reduceMotion || !windowActive) return "still";
-  return "sweep";
+  return "spin";
+}
+
+/** 外圈比 28 的圆按钮每边外扩 3。 */
+export const STOP_RING_INSET = 3;
+export const STOP_RING_SIZE = 28 + STOP_RING_INSET * 2;
+
+/** 外圈：一整圈淡轨，加一段四分之一圈的亮弧，都用正文色（在跑不配色）。 */
+export function stopRingMarkup(color) {
+  const c = STOP_RING_SIZE / 2;
+  const r = c - 0.75;
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${STOP_RING_SIZE} ${STOP_RING_SIZE}">` +
+    `<circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="${color}" stroke-opacity="0.16" stroke-width="1.5"/>` +
+    `<path d="M${c} ${c - r} A${r} ${r} 0 0 1 ${c + r} ${c}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round"/>` +
+    `</svg>`
+  );
 }
 
 export function colorWithAlpha(color, alpha) {

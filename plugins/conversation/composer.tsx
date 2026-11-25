@@ -1,11 +1,7 @@
 // 对话底部输入栏：权限审批卡 / Elicitation 表单 / 计划栏 / 排队提示 / 附件缩略图 / `@`/`/` 补全弹层 /
 // 多行自适应输入框（Enter 发送、Shift+Enter 换行、零拷贝截图粘贴、+ 选文件）/ 模型、能力、子智能体、后台任务与用量工具栏。
 import {
-  Animated,
-  AnimatedValue,
-  cleanup,
   computed,
-  Easing,
   effect,
   Image,
   reduceMotion,
@@ -25,6 +21,7 @@ import {
   SmeltDisclosure,
   SmeltDisclosureChevron,
   SmeltIcon,
+  SmeltVector,
   theme,
   windowActive,
 } from "smelt/sdk";
@@ -32,10 +29,12 @@ import { ElicitationCard, PermissionTray } from "./cards.tsx";
 import { ct } from "./i18n.ts";
 import {
   buildCompletionCandidates,
-  colorWithAlpha,
-  composerSweepMode,
   detectCompletionTrigger,
   isNewConversationCommand,
+  STOP_RING_INSET,
+  STOP_RING_SIZE,
+  stopRingMarkup,
+  stopRingMode,
 } from "./model.js";
 import { CapabilitiesPopover, ModelConfigPopover, UsagePopover } from "./model_popover.tsx";
 import { BackgroundTasksControl, SubagentsControl } from "./subagents.tsx";
@@ -355,105 +354,16 @@ export function Composer(props: {
 
   const hasPendingConfig = computed(() => props.pendingConfigCount() > 0 && props.turnActive());
 
-  // 顶边运行态扫光状态与原生 UI 线程动画驱动（仅在激活时运行，空闲与失焦/减弱动态零唤醒）
-  const INITIAL_TRACK_WIDTH = 720;
-  const computeBeamWidth = (w: number) => Math.max(96, Math.round(w * 0.34));
-  const sweepMode = computed(() =>
-    composerSweepMode({
+  // 在跑：停止按钮外圈转（和侧栏「在跑＝中性色转圈」同一种表达）；等你时不转，边框换琥珀色。
+  const ringMode = computed(() =>
+    stopRingMode({
       turnActive: props.turnActive(),
       awaitingUser: awaitingUser(),
       windowActive: windowActive(),
       reduceMotion: reduceMotion(),
     }),
   );
-  const sweepMounted = signal(false);
-  const trackWidth = signal(INITIAL_TRACK_WIDTH);
-  const beamWidth = computed(() => computeBeamWidth(trackWidth()));
-  const haloLeft = computed(() => Math.round(beamWidth() * 0.22));
-  const haloWidth = computed(() => Math.round(beamWidth() * 0.56));
-
-  const presence = new AnimatedValue(0);
-  const sweepPos = new AnimatedValue(0);
-  const beamTravelVal = new AnimatedValue(
-    INITIAL_TRACK_WIDTH - computeBeamWidth(INITIAL_TRACK_WIDTH),
-  );
-  const beamX = sweepPos.mul(beamTravelVal);
-
-  let activeLoop: any = null;
-  let fadeToken = 0;
-  const stopLoop = () => {
-    if (activeLoop) {
-      activeLoop.stop();
-      activeLoop = null;
-    }
-  };
-  const handleTrackLayout = (ev: any) => {
-    const w = Math.round(ev?.bounds?.size?.width ?? 0);
-    if (w > 0 && w !== trackWidth()) {
-      trackWidth.set(w);
-      beamTravelVal.set(Math.max(0, w - computeBeamWidth(w)));
-    }
-  };
-
-  effect(() => {
-    const mode = sweepMode();
-    if (mode === "off") {
-      if (!sweepMounted()) {
-        stopLoop();
-        return;
-      }
-      const token = ++fadeToken;
-      void presence
-        .timing(0, { duration: 280, easing: Easing.out(Easing.cubic) })
-        .then(({ finished }) => {
-          if (token === fadeToken && finished && sweepMode() === "off") {
-            stopLoop();
-            sweepMounted.set(false);
-          }
-        });
-      return;
-    }
-
-    const wasMounted = sweepMounted();
-    fadeToken += 1;
-    if (!wasMounted) {
-      sweepMounted.set(true);
-    }
-
-    if (mode === "sweep") {
-      if (!activeLoop) {
-        activeLoop = Animated.keyframes(sweepPos, {
-          keyframes: [0, 1, 0],
-          duration: 4400,
-          easing: Easing.inOut(Easing.sin),
-          iterations: "infinite",
-        });
-        void activeLoop.start();
-      }
-    } else if (mode === "hold") {
-      stopLoop();
-      if (!wasMounted) {
-        sweepPos.set(0.5);
-      } else {
-        void sweepPos.timing(0.5, { duration: 260, easing: Easing.out(Easing.cubic) });
-      }
-    } else {
-      stopLoop();
-    }
-
-    void presence.timing(1, { duration: 220, easing: Easing.out(Easing.cubic) });
-  });
-
-  cleanup(() => {
-    fadeToken += 1;
-    stopLoop();
-    void presence.stop();
-    void sweepPos.stop();
-  });
-
-  // 在跑不配色：扫过的光用次要字色，等你时换成 `need`。
-  const sweepColor = computed(() => (awaitingUser() ? look().palette.need : look().palette.muted));
-  const sweepHaloColor = computed(() => colorWithAlpha(sweepColor(), 0.35));
+  const ringMarkup = computed(() => stopRingMarkup(look().palette.text));
 
   // 输入框几乎一直有焦点，不另画焦点环；边框只表示等你。
   const cardClass = computed(() =>
@@ -939,79 +849,28 @@ export function Composer(props: {
                   </If>
                 }
               >
-                <SmeltButton
-                  primary
-                  circle
-                  icon="icons/stop.svg"
-                  tooltip={ct("action.stop")}
-                  onPress={props.onCancel}
-                />
-              </If>
-            </View>
-          </View>
-          </View>
-
-          <If when={sweepMounted()}>
-            <View
-              onLayout={handleTrackLayout}
-              style={{
-                position: "absolute",
-                top: 0,
-                left: 24,
-                right: 24,
-                height: 2,
-                opacity: presence,
-                pointerEvents: "none",
-              }}
-            >
-              {/* 全宽淡底轨（减弱动态 / 失焦时保持柔和静显） */}
-              <View
-                style={{
-                  position: "absolute",
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  height: 1,
-                  borderRadius: 1,
-                  opacity: sweepMode() === "still" ? 0.5 : 0.26,
-                  backgroundImage: `linear-gradient(90deg, transparent, ${sweepColor()}, transparent)`,
-                }}
-              />
-              {/* 彗星扫光束 + 柔和光晕 */}
-              <If when={sweepMode() !== "still"}>
-                <View
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    width: beamWidth(),
-                    height: 2,
-                    transform: [{ translateX: beamX }],
-                  }}
-                >
-                  <View
-                    style={{
-                      position: "absolute",
-                      top: 0,
-                      left: haloLeft(),
-                      width: haloWidth(),
-                      height: 2,
-                      borderRadius: 999,
-                      boxShadow: [{ x: 0, y: 0, blur: 10, spread: 1, color: sweepHaloColor() }],
-                    }}
-                  />
-                  <View
-                    style={{
-                      width: "100%",
-                      height: 2,
-                      borderRadius: 1,
-                      backgroundImage: `linear-gradient(90deg, transparent, ${sweepColor()}, transparent)`,
-                    }}
+                <View style={{ width: 28, height: 28 }}>
+                  <If when={ringMode() !== "off"}>
+                    <SmeltVector
+                      markup={ringMarkup()}
+                      width={STOP_RING_SIZE}
+                      height={STOP_RING_SIZE}
+                      class={ringMode() === "spin" ? "animate-spin" : undefined}
+                      style={{ position: "absolute", left: -STOP_RING_INSET, top: -STOP_RING_INSET }}
+                    />
+                  </If>
+                  <SmeltButton
+                    primary
+                    circle
+                    icon="icons/stop.svg"
+                    tooltip={ct("action.stop")}
+                    onPress={props.onCancel}
                   />
                 </View>
               </If>
             </View>
-          </If>
+          </View>
+          </View>
         </View>
       </View>
     </View>

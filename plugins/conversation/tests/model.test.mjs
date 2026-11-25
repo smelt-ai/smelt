@@ -9,7 +9,7 @@ import {
   collectEditFilesFromRange,
   colorWithAlpha,
   compactTokenCount,
-  composerSweepMode,
+  stopRingMode,
   computePromptRailWindow,
   consumeComposerRestore,
   detectCompletionTrigger,
@@ -309,55 +309,15 @@ describe("ACP launch & fork wire contract", () => {
     expect(selectedConfigIndex(cfg)).toBe(2);
   });
 
-  test("composerSweepMode resolves off, sweep, hold, and still transitions", () => {
-    expect(
-      composerSweepMode({
-        turnActive: false,
-        awaitingUser: false,
-        windowActive: true,
-        reduceMotion: false,
-      }),
-    ).toBe("off");
-    expect(
-      composerSweepMode({
-        turnActive: true,
-        awaitingUser: false,
-        windowActive: true,
-        reduceMotion: false,
-      }),
-    ).toBe("sweep");
-    expect(
-      composerSweepMode({
-        turnActive: true,
-        awaitingUser: true,
-        windowActive: false,
-        reduceMotion: true,
-      }),
-    ).toBe("hold");
-    expect(
-      composerSweepMode({
-        turnActive: false,
-        awaitingUser: true,
-        windowActive: true,
-        reduceMotion: false,
-      }),
-    ).toBe("hold");
-    expect(
-      composerSweepMode({
-        turnActive: true,
-        awaitingUser: false,
-        windowActive: false,
-        reduceMotion: false,
-      }),
-    ).toBe("still");
-    expect(
-      composerSweepMode({
-        turnActive: true,
-        awaitingUser: false,
-        windowActive: true,
-        reduceMotion: true,
-      }),
-    ).toBe("still");
+  test("stopRingMode: spins while running, still without focus or motion, off when idle or waiting on you", () => {
+    const mode = (o) =>
+      stopRingMode({ turnActive: true, awaitingUser: false, windowActive: true, reduceMotion: false, ...o });
+    expect(mode({})).toBe("spin");
+    expect(mode({ turnActive: false })).toBe("off");
+    expect(mode({ awaitingUser: true })).toBe("off");
+    expect(mode({ awaitingUser: true, windowActive: false, reduceMotion: true })).toBe("off");
+    expect(mode({ windowActive: false })).toBe("still");
+    expect(mode({ reduceMotion: true })).toBe("still");
   });
 
   test("colorWithAlpha formats #rrggbb, #rgb, rgb(), rgba(), clamps alpha, and preserves unknown inputs", () => {
