@@ -181,7 +181,13 @@ function rowMeta(row: any, selected: boolean) {
     return { text: t("bucket.needs_you"), color: palette.need, unread };
   }
   if (row.status === "running" && row.turn_started_at > 0) {
-    return { text: span(Math.max(nowSec - row.turn_started_at, 0), t), color: rowMuted(palette, selected), unread };
+    // 在跑：计时前加一个中性色转圈。不配色，但静着看（截图、减弱动态、App 不在前台）也认得出。
+    return {
+      text: span(Math.max(nowSec - row.turn_started_at, 0), t),
+      color: rowMuted(palette, selected),
+      unread,
+      running: true,
+    };
   }
   return { text: relative_time(row.activity, nowSec, t), color: rowFaint(palette, selected), unread };
 }
@@ -1050,6 +1056,9 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
                     backgroundColor: look().palette.accent,
                   }}
                 />
+              </If>
+              <If when={Boolean(info().running)}>
+                <SmeltIcon spin size={11} color={info().color} />
               </If>
               <Text
                 style={{
