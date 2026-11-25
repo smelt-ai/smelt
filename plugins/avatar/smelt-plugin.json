@@ -1,0 +1,8 @@
+{
+  "id": "smelt.avatar",
+  "name": "Avatar",
+  "version": "1.0.0",
+  "module": "smelt/avatar",
+  "entry": "index.tsx",
+  "types": "index.d.ts"
+}

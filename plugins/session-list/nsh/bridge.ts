@@ -44,6 +44,7 @@ import {
   theme as sdkTheme,
   workspaceDirectory,
 } from "smelt/sdk";
+import { ONE_SHOT_MS } from "smelt/avatar";
 
 import { conversation_key, empty_stage, greet, track } from "../avatar_stage.js";
 import {
@@ -69,7 +70,7 @@ export { clipboardWrite, t };
 export const tick = signal(0);
 
 /** 行首头像的演出状态机（`<Avatar>` 按它演，无跨 VM 插槽）。 */
-const avatarStage = empty_stage();
+const avatarStage = empty_stage(ONE_SHOT_MS);
 let avatarSeats = new Map<string, string>();
 let avatarKnown = new Set<string>();
 export const avatarTick = signal(0);

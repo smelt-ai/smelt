@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { bodySvg, CANVAS, EYE_R, hash, shapeOf, tintOf } from "../avatar_shape.js";
+import { bodySvg, CANVAS, EYE_R, hash, shapeOf, tintOf } from "../shape.js";
 
 /** 路径里所有坐标点（每对数是一个点）。 */
 function points(path) {

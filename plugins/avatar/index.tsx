@@ -1,6 +1,7 @@
-// 会话头像：外形按会话 id 算（../avatar_shape.js），深色身子、按会话 id 算的渐变描边、白色圆点眼睛。纯 JS。
+// 共享模块插件 `smelt/avatar`：算法头像组件 `<Avatar seed act since size>`。外形、渐变描边按 seed 算
+// （./shape.js），深色身子、白色圆点眼睛。纯 JS。
 //
-// 演哪一出、从什么时候起照用会话列表的 avatar_stage.js（act/since），这里只管怎么演。
+// 演哪一出、从什么时候起由引用方定（act/since，会话列表按会话状态给），这里只管怎么演、一出演多久。
 // 身子是一张静态 SVG，只在第一次显示时算；动的是叠在上面的眼睛和整个身子，全用关键帧交给 NSH
 // 原生跑，限 20 帧。干活、喊你按拍子走：每拍按（种子, 第几拍）挑一个动作，演完再挑下一拍；
 // 每个头像有按种子定的性格（节奏快慢、幅度、第一拍晚多久起）。站着不动不要帧；App 不在前台
@@ -9,8 +10,10 @@
 import { cleanup, createMotion, Easing, effect, lifecycle, reduceMotion, View } from "nsh";
 import { SmeltVector } from "smelt/sdk";
 
-import { bodySvg, CANVAS, EYE_R, hash, shapeOf, tintOf } from "../avatar_shape.js";
-import { ONE_SHOT_MS } from "../avatar_stage.js";
+import { bodySvg, CANVAS, EYE_R, hash, shapeOf, tintOf } from "./shape.js";
+
+/** 演一遍就停的那几出演多久（毫秒）：过了这么久站好不演。引用方据此判断头像闲没闲着。 */
+export const ONE_SHOT_MS = { cheer: 1600, greet: 1100 };
 /** 动作的帧率上限：每动一帧整窗重画，眼睛小、动得慢，20 帧看不出顿。 */
 const FPS = 20;
 
@@ -147,7 +150,7 @@ export function Avatar(props: AvatarProps) {
     body.reset();
     eyes.reset();
     if (still) return;
-    const length = (ONE_SHOT_MS as Record<string, number>)[act];
+    const length = ONE_SHOT_MS[act as keyof typeof ONE_SHOT_MS];
     if (length != null && Date.now() - since >= length) return;
     switch (act) {
       case "work":

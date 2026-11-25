@@ -1,13 +1,16 @@
 import { expect, test } from "bun:test";
 
-import { ONE_SHOT_MS, conversation_key, empty_stage, greet, track } from "../avatar_stage.js";
+import { conversation_key, empty_stage, greet, track } from "../avatar_stage.js";
+
+/** 演一遍的那几出的时长；运行时用头像模块导出的那份。 */
+const ONE_SHOT_MS = { cheer: 1600, greet: 1100 };
 
 const key = (id) => conversation_key(null, id);
 const rows = (entries) => new Map(entries.map(([id, status]) => [key(id), status]));
 const act = (stage, id) => stage.actors.get(key(id))?.act;
 
 test("第一次看到的只按状态摆，不起反应", () => {
-  const stage = empty_stage();
+  const stage = empty_stage(ONE_SHOT_MS);
   track(
     stage,
     rows([
@@ -22,7 +25,7 @@ test("第一次看到的只按状态摆，不起反应", () => {
 });
 
 test("状态变了换一出：跑完才欢呼", () => {
-  const stage = empty_stage();
+  const stage = empty_stage(ONE_SHOT_MS);
   track(stage, rows([["a", "idle"]]), null, 0);
   for (const [status, expected] of [
     ["running", "work"],
@@ -38,14 +41,14 @@ test("状态变了换一出：跑完才欢呼", () => {
 });
 
 test("状态没变接着演，不从头来", () => {
-  const stage = empty_stage();
+  const stage = empty_stage(ONE_SHOT_MS);
   track(stage, rows([["a", "running"]]), null, 0);
   track(stage, rows([["a", "running"]]), null, 5_000);
   expect(stage.actors.get(key("a")).since).toBe(0);
 });
 
 test("选中闲着的打一次招呼；在忙的不打；招呼没打完再选回来不从头打", () => {
-  const stage = empty_stage();
+  const stage = empty_stage(ONE_SHOT_MS);
   const both = rows([
     ["a", "idle"],
     ["b", "running"],
@@ -60,7 +63,7 @@ test("选中闲着的打一次招呼；在忙的不打；招呼没打完再选�
 });
 
 test("欢呼完了才算闲着", () => {
-  const stage = empty_stage();
+  const stage = empty_stage(ONE_SHOT_MS);
   track(stage, rows([["a", "running"]]), null, 0);
   track(stage, rows([["a", "idle"]]), null, 0);
   greet(stage, key("a"), ONE_SHOT_MS.cheer - 1);
@@ -70,7 +73,7 @@ test("欢呼完了才算闲着", () => {
 });
 
 test("没了的会话去掉", () => {
-  const stage = empty_stage();
+  const stage = empty_stage(ONE_SHOT_MS);
   track(
     stage,
     rows([
