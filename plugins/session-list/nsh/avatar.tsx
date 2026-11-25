@@ -1,4 +1,5 @@
-// 会话头像：外形按会话 id 算（../avatar_shape.js），深色身子、按会话变色的描边、白色圆点眼睛。纯 JS。
+// 会话头像：外形按会话 id 算（../avatar_shape.js），按会话挑一个颜色：身子是它的浅色、细边是它本色、
+// 眼睛是它的深色竖椭圆。纯 JS。
 //
 // 演哪一出、从什么时候起照用会话列表的 buddy_stage.js（act/since），这里只管怎么演。
 // 身子是一张静态 SVG，只在第一次显示时算；动的是叠在上面的眼睛和整个身子，全用关键帧交给 NSH
@@ -9,16 +10,13 @@
 import { cleanup, createMotion, Easing, effect, lifecycle, reduceMotion, View } from "nsh";
 import { SmeltVector } from "smelt/sdk";
 
-import { bodySvg, CANVAS, EYE_R, hash, shapeOf } from "../avatar_shape.js";
+import { bodySvg, CANVAS, EYE_RX, EYE_RY, hash, mix, shapeOf } from "../avatar_shape.js";
 import { ONE_SHOT_MS } from "../buddy_stage.js";
 /** 动作的帧率上限：眼睛小、动得慢，30 帧够。 */
 const FPS = 30;
 
-/** 描边颜色，按种子挑一个。 */
+/** 每个头像的本色，按种子挑一个。 */
 const TINTS = ["#4FC3F7", "#81C784", "#4DB6AC", "#FFB74D", "#BA68C8", "#F06292", "#9FA8DA", "#E57373"];
-const BODY = "#141B24";
-const EYE = "#F4F8FF";
-const EYE_CALL = "#FFC24A";
 
 type Frames = Record<string, number[]>;
 /** 一个动作：身子和眼睛各自的关键帧，时长按一拍的倍数。 */
@@ -106,7 +104,9 @@ export function Avatar(props: AvatarProps) {
   const eyes = createMotion();
   const seed = hash(props.seed);
   const shape = shapeOf(seed);
-  const markup = bodySvg(shape.path, TINTS[seed % TINTS.length], BODY);
+  const tint = TINTS[seed % TINTS.length];
+  const markup = bodySvg(shape.path, mix(tint, 255, 0.78), tint);
+  const eyeColor = mix(tint, 0, 0.7);
   // 性格：一拍多长、动作幅度、第一拍晚多久起。
   const beat = 700 + dice(seed, 0) * 600;
   const reach = 0.75 + dice(seed, 1) * 0.5;
@@ -169,10 +169,9 @@ export function Avatar(props: AvatarProps) {
 
   const unit = () => props.size / CANVAS;
   const [left, right, eyeY] = shape.eyes;
-  const eyeColor = () => (props.act === "call" ? EYE_CALL : EYE);
   const eye = () => (
     <View
-      style={{ width: EYE_R * 2 * unit(), height: EYE_R * 2 * unit(), borderRadius: EYE_R * unit(), backgroundColor: eyeColor() }}
+      style={{ width: EYE_RX * 2 * unit(), height: EYE_RY * 2 * unit(), borderRadius: EYE_RX * unit(), backgroundColor: eyeColor }}
     />
   );
 
@@ -183,10 +182,10 @@ export function Avatar(props: AvatarProps) {
         <View
           style={{
             position: "absolute",
-            left: (left - EYE_R) * unit(),
-            top: (eyeY - EYE_R) * unit(),
-            width: (right - left + EYE_R * 2) * unit(),
-            height: EYE_R * 2 * unit(),
+            left: (left - EYE_RX) * unit(),
+            top: (eyeY - EYE_RY) * unit(),
+            width: (right - left + EYE_RX * 2) * unit(),
+            height: EYE_RY * 2 * unit(),
             flexDirection: "row",
             justifyContent: "space-between",
             ...eyes.style,
