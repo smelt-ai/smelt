@@ -49,6 +49,8 @@ export interface AttachedImage {
 }
 
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp)$/i;
+/** 空对话时输入区最低留几行。 */
+const ROOMY_INPUT_LINES = 3;
 
 export function Composer(props: {
   machine: () => string | null;
@@ -79,6 +81,8 @@ export function Composer(props: {
   usage: () => [number, number] | null;
   usageBreakdown: () => any | null;
   focusSeq: () => number;
+  /** 空对话：输入框在页面中间当主角，最低留三行；进了对话回到两行，不挤消息。 */
+  roomy: () => boolean;
   insertText: () => { seq: number; text: string } | null;
   restoreDraft: () => { seq: number; text: string; images: AttachedImage[] } | null;
   onSend: (text: string, imageRefs: string[], followUp: boolean) => void;
@@ -106,6 +110,8 @@ export function Composer(props: {
   const draft = signal("");
   const attachments = signal<AttachedImage[]>([]);
   const inputHeight = signal(40);
+  // 正文档 14/21，跟着界面字号缩放
+  const lineHeight = computed(() => (21 / 16) * (look().rem ?? 16));
   const planExpanded = signal(false);
   const workspaceFiles = signal<string[]>([]);
   const filesLoadedCwd = signal<string | null>(null);
@@ -843,9 +849,9 @@ export function Composer(props: {
               }}
               style={{
                 width: "100%",
-                height: inputHeight(),
+                height: Math.max(props.roomy() ? ROOMY_INPUT_LINES * lineHeight() : 0, inputHeight()),
                 fontSize: (14 / 16) * (look().rem ?? 16),
-                lineHeight: (21 / 16) * (look().rem ?? 16),
+                lineHeight: lineHeight(),
                 color: look().palette.text,
                 placeholderColor: look().palette.faint,
               }}

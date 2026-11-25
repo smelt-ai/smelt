@@ -1115,6 +1115,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
           usage={() => snapshot()?.usage ?? null}
           usageBreakdown={() => snapshot()?.usage_breakdown ?? null}
           focusSeq={() => props.focusSeq ?? 0}
+          roomy={showEmptyWelcome}
           insertText={quickInsert}
           restoreDraft={restoreDraft}
           onSend={(text, imageRefs, followUp) => {
