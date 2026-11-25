@@ -25,11 +25,29 @@ use crate::plugins::PluginHost;
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 enum StoreRoot {
-    /// 生产环境：走 `smelt_plugin_api::plugin_store(owner)`（`~/.smelt/plugin-data/<id>/store.sqlite3`）。
+    /// 生产环境：走 `smelt_plugin_api::plugin_store(id)`（`~/.smelt/plugin-data/<id>/store.sqlite3`），
+    /// 覆写版走 `override_store(id)`。
     Global,
     /// 测试隔离目录：`<root>/<id>/store.sqlite3`，不碰用户主目录。
     #[cfg(test)]
     Custom(PathBuf),
+}
+
+/// 库归谁：插件 id，加上是不是用户覆写自带插件的那一版（它的库另放一份）。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct StoreOwner {
+    id: String,
+    overrides_builtin: bool,
+}
+
+impl StoreOwner {
+    #[cfg(test)]
+    fn plugin(id: &str) -> Self {
+        Self {
+            id: id.to_owned(),
+            overrides_builtin: false,
+        }
+    }
 }
 
 enum Op {
@@ -64,9 +82,9 @@ struct QueueSlot {
 #[derive(Clone)]
 pub(crate) struct StoreHub {
     root: Arc<StoreRoot>,
-    queues: Arc<Mutex<HashMap<String, QueueSlot>>>,
+    queues: Arc<Mutex<HashMap<StoreOwner, QueueSlot>>>,
     #[cfg(test)]
-    custom_stores: Arc<Mutex<HashMap<String, Arc<PluginStore>>>>,
+    custom_stores: Arc<Mutex<HashMap<StoreOwner, Arc<PluginStore>>>>,
 }
 
 impl StoreHub {
@@ -110,22 +128,20 @@ impl StoreHub {
 
     fn submit(
         &self,
-        plugin: &str,
+        owner: StoreOwner,
         op: Op,
         done: impl FnOnce(Result<Value, String>) + Send + 'static,
     ) {
-        if plugin.is_empty() {
+        if owner.id.is_empty() {
             done(Err("插件没有来源身份，不能用库".to_owned()));
             return;
         }
         let should_spawn = {
             let mut queues = self.queues.lock().unwrap_or_else(|e| e.into_inner());
-            let slot = queues
-                .entry(plugin.to_owned())
-                .or_insert_with(|| QueueSlot {
-                    running: false,
-                    pending: VecDeque::new(),
-                });
+            let slot = queues.entry(owner.clone()).or_insert_with(|| QueueSlot {
+                running: false,
+                pending: VecDeque::new(),
+            });
             slot.pending.push_back(PluginRequest {
                 op,
                 done: Box::new(done),
@@ -139,15 +155,14 @@ impl StoreHub {
         };
         if should_spawn {
             let hub = self.clone();
-            let owner = plugin.to_owned();
             api::blocking::spawn_detached(move || hub.drain_plugin(owner));
         }
     }
 
-    fn drain_plugin(&self, owner: String) {
+    fn drain_plugin(&self, owner: StoreOwner) {
         struct DrainGuard<'a> {
             hub: &'a StoreHub,
-            owner: &'a str,
+            owner: &'a StoreOwner,
             finished: bool,
         }
 
@@ -172,7 +187,7 @@ impl StoreHub {
                 };
                 if respawn {
                     let hub = self.hub.clone();
-                    let owner = self.owner.to_owned();
+                    let owner = self.owner.clone();
                     api::blocking::spawn_detached(move || hub.drain_plugin(owner));
                 }
             }
@@ -206,7 +221,7 @@ impl StoreHub {
         }
     }
 
-    fn open_cached_store(&self, owner: &str) -> Result<Arc<PluginStore>, String> {
+    fn open_cached_store(&self, owner: &StoreOwner) -> Result<Arc<PluginStore>, String> {
         match self.root.as_ref() {
             StoreRoot::Global => open_store(&self.root, owner),
             #[cfg(test)]
@@ -219,7 +234,7 @@ impl StoreHub {
                 }
                 let opened = open_store(&self.root, owner)?;
                 let mut stores = self.custom_stores.lock().unwrap_or_else(|e| e.into_inner());
-                Ok(Arc::clone(stores.entry(owner.to_owned()).or_insert(opened)))
+                Ok(Arc::clone(stores.entry(owner.clone()).or_insert(opened)))
             }
         }
     }
@@ -231,28 +246,35 @@ impl StoreHub {
         parse: impl Fn(&Value) -> Result<Op, String> + Send + Sync + 'static,
     ) {
         let hub = self.clone();
-        plugins.handle(method, move |plugin, call| {
-            if plugin == crate::plugins::BUILTINS_VM_ID {
+        plugins.handle_caller(method, move |caller, call| {
+            if caller.id == crate::plugins::BUILTINS_VM_ID {
                 return call.reject("共享内置插件调用存储缺少成员插件身份");
             }
             let op = match parse(call.data()) {
                 Ok(op) => op,
                 Err(error) => return call.reject(error),
             };
-            hub.submit(plugin, op, move |result| call.reply(result));
+            let owner = StoreOwner {
+                id: caller.id.to_owned(),
+                overrides_builtin: caller.overrides_builtin,
+            };
+            hub.submit(owner, op, move |result| call.reply(result));
         });
     }
 }
 
-fn open_store(root: &StoreRoot, owner: &str) -> Result<Arc<PluginStore>, String> {
-    if owner.is_empty() {
+fn open_store(root: &StoreRoot, owner: &StoreOwner) -> Result<Arc<PluginStore>, String> {
+    if owner.id.is_empty() {
         return Err("插件没有来源身份，不能用库".to_owned());
     }
     match root {
-        StoreRoot::Global => api::plugin_store(owner).map_err(|error| error.to_string()),
+        StoreRoot::Global if owner.overrides_builtin => {
+            api::override_store(&owner.id).map_err(|error| error.to_string())
+        }
+        StoreRoot::Global => api::plugin_store(&owner.id).map_err(|error| error.to_string()),
         #[cfg(test)]
         StoreRoot::Custom(base) => {
-            validate_owner(owner)?;
+            validate_owner(&owner.id)?;
             let path = custom_store_path(base, owner);
             PluginStore::open(path)
                 .map(Arc::new)
@@ -262,8 +284,13 @@ fn open_store(root: &StoreRoot, owner: &str) -> Result<Arc<PluginStore>, String>
 }
 
 #[cfg(test)]
-fn custom_store_path(base: &Path, owner: &str) -> PathBuf {
-    base.join(owner).join("store.sqlite3")
+fn custom_store_path(base: &Path, owner: &StoreOwner) -> PathBuf {
+    let dir = if owner.overrides_builtin {
+        base.join(".overrides").join(&owner.id)
+    } else {
+        base.join(&owner.id)
+    };
+    dir.join("store.sqlite3")
 }
 
 #[cfg(test)]
@@ -448,8 +475,16 @@ mod tests {
     #[test]
     fn migrate_write_query_and_plugin_isolation() {
         let root = temp_root();
-        let store_a = open_store(&StoreRoot::Custom(root.clone()), "alpha").unwrap();
-        let store_b = open_store(&StoreRoot::Custom(root.clone()), "beta").unwrap();
+        let store_a = open_store(
+            &StoreRoot::Custom(root.clone()),
+            &StoreOwner::plugin("alpha"),
+        )
+        .unwrap();
+        let store_b = open_store(
+            &StoreRoot::Custom(root.clone()),
+            &StoreOwner::plugin("beta"),
+        )
+        .unwrap();
 
         execute_op(
             &store_a,
@@ -538,7 +573,7 @@ mod tests {
 
         let submit = |plugin: &str, op: Op| -> mpsc::Receiver<Result<Value, String>> {
             let (tx, rx) = mpsc::channel();
-            hub.submit(plugin, op, move |result| {
+            hub.submit(StoreOwner::plugin(plugin), op, move |result| {
                 let _ = tx.send(result);
             });
             rx
@@ -566,7 +601,9 @@ mod tests {
         .unwrap();
 
         // 在外部连接上持住 alpha 的 EXCLUSIVE 锁，让 alpha worker 的写事务阻塞在 SQLite 锁里。
-        let blocker = rusqlite::Connection::open(custom_store_path(&root, "alpha")).unwrap();
+        let blocker =
+            rusqlite::Connection::open(custom_store_path(&root, &StoreOwner::plugin("alpha")))
+                .unwrap();
         blocker.execute_batch("BEGIN EXCLUSIVE;").unwrap();
 
         let alpha_rx = submit(

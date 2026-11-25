@@ -23,7 +23,10 @@ pub use smelt_client::runtime::{Runtime, RuntimeKey};
 // 发给运行时的短请求（守护协议），如改历史会话的名字。
 pub use smelt_client::session_ops;
 // 插件自己的库：每个来源一个 SQLite 文件，表由插件自己建、自己迁移。
-pub use smelt_client_store::{PluginStore, plugin_data_dir, plugin_store, rusqlite};
+pub use smelt_client_store::{
+    PluginStore, override_data_dir, override_store, plugin_data_dir, plugin_store,
+    remove_override_data, rusqlite,
+};
 pub use smelt_model as model;
 // 本机数据目录（`~/.smelt`）在哪。
 pub use smelt_paths as paths;

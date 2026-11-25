@@ -74,6 +74,8 @@ pub struct Compiled {
     id: String,
     members: Vec<String>,
     code: CompiledCode,
+    /// 用户覆写自带插件的那一版：库和数据目录用覆写版自己的（见 [`Caller`]）。
+    overrides_builtin: bool,
 }
 
 impl Compiled {
@@ -86,6 +88,7 @@ impl Compiled {
             id,
             members,
             code: CompiledCode::Bytecode(Arc::from(bytes)),
+            overrides_builtin: false,
         }
     }
 
@@ -94,7 +97,14 @@ impl Compiled {
             id,
             members,
             code: CompiledCode::Source(source.into()),
+            overrides_builtin: false,
         }
+    }
+
+    /// 标成用户覆写自带插件的那一版。
+    pub(crate) fn overriding_builtin(mut self) -> Self {
+        self.overrides_builtin = true;
+        self
     }
 
     pub fn id(&self) -> &str {
@@ -230,6 +240,21 @@ pub(crate) fn module_fingerprint(
         fnv1a_feed(&mut hash, &bytes);
     }
     Ok(format!("{hash:016x}"))
+}
+
+/// 插件目录里源码的指纹（和打包读的是同一批文件）。宿主加载时记一份，`smelt plugin status`
+/// 现算一份比对，就知道开着的 App 有没有按最新的源码重新加载。读不了目录给 `None`。
+pub fn source_fingerprint(root: &Path) -> Option<String> {
+    let files = read_dir(root).ok()?;
+    let mut hash = FNV1A_OFFSET;
+    for (rel, bytes) in files {
+        fnv1a_feed(
+            &mut hash,
+            rel.to_string_lossy().replace('\\', "/").as_bytes(),
+        );
+        fnv1a_feed(&mut hash, &bytes);
+    }
+    Some(format!("{hash:016x}"))
 }
 
 /// 对嵌入所有 Guest 插件的 SDK、配置与 QuickJS 字节码版本生成稳定指纹，
@@ -813,7 +838,16 @@ fn select_candidate_modules<'a>(
 #[derive(Clone, Default)]
 pub struct PluginHost(Arc<Mutex<HostInner>>);
 
-type CallHandler = Arc<dyn Fn(&str, HostCall) + Send + Sync>;
+/// 调宿主函数的插件。由 Rust 闭包在装 VM 时绑定，插件伪造不了。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Caller<'a> {
+    pub id: &'a str,
+    /// 用户覆写自带插件的那一版。它和自带版同 id，但数据各存各的：两份代码各迁各的表，
+    /// 共用一个库会让回退、恢复默认后的自带版打不开（见 `smelt_plugin_api::override_store`）。
+    pub overrides_builtin: bool,
+}
+
+type CallHandler = Arc<dyn Fn(Caller<'_>, HostCall) + Send + Sync>;
 
 /// 插件 VM 生命周期事件（在引擎线程触发，经 channel 转主线程处理）。
 #[derive(Clone, Debug)]
@@ -880,6 +914,15 @@ impl PluginHost {
         &self,
         name: impl Into<String>,
         handler: impl Fn(&str, HostCall) + Send + Sync + 'static,
+    ) {
+        self.handle_caller(name, move |caller, call| handler(caller.id, call));
+    }
+
+    /// 同 [`Self::handle`]，但要分清是不是覆写版（按插件存数据的宿主函数用）。
+    pub fn handle_caller(
+        &self,
+        name: impl Into<String>,
+        handler: impl Fn(Caller<'_>, HostCall) + Send + Sync + 'static,
     ) {
         self.lock().handlers.insert(name.into(), Arc::new(handler));
     }
@@ -1008,7 +1051,13 @@ impl PluginHost {
                 let mut declared_host = vec![SLOT_OPS.to_owned()];
                 for (name, handler) in handlers {
                     declared_host.push(name.clone());
-                    shell_channel.handle(name, move |call| handler(SHELL_OWNER, call));
+                    shell_channel.handle(name, move |call| {
+                        let caller = Caller {
+                            id: SHELL_OWNER,
+                            overrides_builtin: false,
+                        };
+                        handler(caller, call)
+                    });
                 }
 
                 let mut policy = Policy::default();
@@ -1104,6 +1153,7 @@ impl PluginHost {
     fn load_one(&self, view: &AppView, plugin: Compiled) {
         let vm_id = plugin.id;
         let members = plugin.members;
+        let overrides_builtin = plugin.overrides_builtin;
         let is_builtins = vm_id == BUILTINS_VM_ID;
         let channel = HostChannel::new();
         let (generation, handlers, limits, cpu_window, clear_failed_shell, cleared_failed) = {
@@ -1183,7 +1233,12 @@ impl PluginHost {
                 "__smelt_plugin_id".into(),
                 Value::String(logical_id.to_owned()),
             );
-            if let Ok(data_dir) = smelt_plugin_api::plugin_data_dir(logical_id) {
+            let data_dir = if overrides_builtin {
+                smelt_plugin_api::override_data_dir(logical_id)
+            } else {
+                smelt_plugin_api::plugin_data_dir(logical_id)
+            };
+            if let Ok(data_dir) = data_dir {
                 params.insert(
                     "__smelt_data_dir".into(),
                     Value::String(data_dir.to_string_lossy().into_owned()),
@@ -1286,11 +1341,21 @@ impl PluginHost {
                         .filter(|id| allowed.contains(*id))
                         .map(str::to_owned)
                         .unwrap_or_else(|| vm.clone());
-                    handler(&caller, call);
+                    let caller = Caller {
+                        id: &caller,
+                        overrides_builtin: false,
+                    };
+                    handler(caller, call);
                 });
             } else {
                 let plugin_id = vm_id.clone();
-                channel.handle(name, move |call| handler(&plugin_id, call));
+                channel.handle(name, move |call| {
+                    let caller = Caller {
+                        id: &plugin_id,
+                        overrides_builtin,
+                    };
+                    handler(caller, call)
+                });
             }
         }
 

@@ -40,6 +40,18 @@ pub(super) struct Entry {
     pub(super) views: Vec<String>,
     /// 加载失败的原因；加载好了是 `None`。
     pub(super) error: Option<String>,
+    /// 用户插件这次加载时源码的指纹；`cli` 现算一份比对，看是不是最新源码的结果。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) source_fingerprint: Option<String>,
+}
+
+impl Entry {
+    /// 用户插件的源码在加载之后又改过（App 还没按最新的重新加载完，或者刚保存还没轮到）。
+    pub(super) fn is_stale(&self) -> bool {
+        self.source_fingerprint.as_ref().is_some_and(|loaded| {
+            smelt_nsh::source_fingerprint(&self.path).as_ref() != Some(loaded)
+        })
+    }
 }
 
 fn source_label(source: PluginSource) -> String {
@@ -72,6 +84,7 @@ pub(crate) fn publish(plugins: &[smelt_nsh::LoadedPluginInfo]) {
                 path: plugin.root.clone(),
                 views: plugin.views.clone(),
                 error: plugin.error.clone(),
+                source_fingerprint: plugin.source_fingerprint.clone(),
             })
             .collect(),
     };
@@ -147,6 +160,7 @@ mod tests {
                 path: "/tmp/hello".into(),
                 views: vec!["com.example.hello/main".into()],
                 error: Some("SyntaxError".into()),
+                source_fingerprint: Some("0123456789abcdef".into()),
             }],
         };
         write(&path, &snapshot).unwrap();
@@ -156,6 +170,38 @@ mod tests {
             std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
             1
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_entry_is_stale_once_its_source_changes() {
+        let dir = std::env::temp_dir().join(format!("smelt-plugin-stale-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("nsh.tsx"), "export const a = 1;").unwrap();
+        let mut entry = Entry {
+            id: "com.example.hello".into(),
+            name: "Hello".into(),
+            version: "0.1.0".into(),
+            source: "user".into(),
+            overrides_builtin: false,
+            fallback_to_builtin: false,
+            module: None,
+            uses_modules: Vec::new(),
+            path: dir.clone(),
+            views: Vec::new(),
+            error: None,
+            source_fingerprint: smelt_nsh::source_fingerprint(&dir),
+        };
+        assert!(!entry.is_stale());
+        // 只改了测试和隐藏目录，不算：加载时也不读它们。
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("tests/a.test.ts"), "x").unwrap();
+        assert!(!entry.is_stale());
+        std::fs::write(dir.join("nsh.tsx"), "export const a = 2;").unwrap();
+        assert!(entry.is_stale());
+        // 自带插件不比。
+        entry.source_fingerprint = None;
+        assert!(!entry.is_stale());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

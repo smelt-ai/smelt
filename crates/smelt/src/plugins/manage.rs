@@ -44,7 +44,22 @@ fn read_import_manifest(source: &Path) -> Result<PluginManifest, String> {
 /// 把 `source` 目录里的插件复制进用户插件目录。返回插件名。
 pub(crate) fn import(source: &Path) -> Result<String, String> {
     let plugins = user_plugin_dir().ok_or_else(|| t!("plugins.no_data_dir").into_owned())?;
+    let manifest = read_import_manifest(source)?;
+    start_override(&plugins, &manifest.id)?;
     import_into(source, &plugins).map(|manifest| manifest.name)
+}
+
+/// 用户目录里要新出现一份覆写 `id` 的插件：丢掉以前的覆写留下的数据，新覆写版第一次用库时
+/// 从自带版重新复制（见 `smelt_plugin_api::override_store`）。不是自带插件的 id、或者用户
+/// 目录里已经有它（覆写版正在用那份数据），什么都不做。要在插件落进用户目录之前调：落进去
+/// 就会被加载、打开库。
+pub(super) fn start_override(plugins: &Path, id: &str) -> Result<(), String> {
+    let overrides_builtin =
+        super::builtin::dir().is_some_and(|dir| installed_root(dir, id).is_some());
+    if !overrides_builtin || installed_root(plugins, id).is_some() {
+        return Ok(());
+    }
+    smelt_plugin_api::remove_override_data(id).map_err(|error| error.to_string())
 }
 
 /// 把用户插件目录里的 `root` 挪进回收目录。

@@ -42,6 +42,13 @@ pub(super) fn run(args: &[String]) -> i32 {
             None => return fail(&t!("plugins.no_data_dir")),
         },
     };
+    // 同 id 覆写：从自带版此刻的数据重新开始，不接以前覆写留下的。
+    if target_id == parsed.builtin_id
+        && let Some(plugins) = super::manage::user_plugin_dir()
+        && let Err(error) = super::manage::start_override(&plugins, &target_id)
+    {
+        return fail(&error);
+    }
 
     match fork_into(&builtin_root, &target_dir, &parsed.builtin_id, &target_id) {
         Ok(report) => {
@@ -126,6 +133,13 @@ pub(super) fn fork_into(
     target_id: &str,
 ) -> Result<serde_json::Value, String> {
     let manifest = smelt_nsh::PluginManifest::read(builtin_root)?;
+    // 改名并存时主题名原样带过去，和原插件全撞，运行时这一份的主题整组不生效。
+    if target_id != builtin_id
+        && !manifest.is_layout_only()
+        && !super::themes::read(builtin_root, &manifest.entry)?.is_empty()
+    {
+        return Err(t!("plugins.cli_fork_as_themes", id = builtin_id).into_owned());
+    }
     if manifest.is_layout_only() {
         for layout in &manifest.layouts {
             let normalized_file = normalize_relative(&layout.file)?;
@@ -317,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn fork_with_as_rewrites_id_and_theme_only_skips_types() {
+    fn fork_theme_plugin_overrides_in_place_but_refuses_as() {
         let scratch = Scratch::new("theme");
         let builtin = scratch.0.join("builtin/themes");
         fs::create_dir_all(builtin.join("themes")).unwrap();
@@ -332,17 +346,21 @@ mod tests {
         )
         .unwrap();
 
-        let target = scratch.0.join("user/me.themes");
-        let report = fork_into(&builtin, &target, "smelt.themes", "me.themes").unwrap();
-        assert_eq!(report["id"], "me.themes");
-        assert_eq!(report["overrides_builtin"], false);
+        // 改名并存：主题名和原插件全撞，直接拒，不写目录。
+        let renamed = scratch.0.join("user/me.themes");
+        let error = fork_into(&builtin, &renamed, "smelt.themes", "me.themes").unwrap_err();
+        assert!(error.contains("smelt.themes"), "{error}");
+        assert!(!renamed.exists());
+
+        let target = scratch.0.join("user/smelt.themes");
+        let report = fork_into(&builtin, &target, "smelt.themes", "smelt.themes").unwrap();
+        assert_eq!(report["id"], "smelt.themes");
+        assert_eq!(report["overrides_builtin"], true);
         assert_eq!(report["theme_only"], true);
         assert_eq!(report["types_generated"], false);
         assert!(!target.join(".nsh").exists());
         assert!(!target.join("tsconfig.json").exists());
 
-        let manifest = smelt_nsh::PluginManifest::read(&target).unwrap();
-        assert_eq!(manifest.id, "me.themes");
         let checked = smelt_nsh::check_plugin(&target).unwrap();
         assert!(checked.theme_only);
         assert_eq!(checked.themes, vec!["Pack Dark"]);

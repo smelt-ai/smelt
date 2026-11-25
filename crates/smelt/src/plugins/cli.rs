@@ -8,7 +8,8 @@
 //! - `fork <builtin-id> [--as <new-id>] [--dir <目录>]`：拷贝自带插件源码到用户目录以覆写或改名（见 `fork`）。
 //! - `types <目录>`：生成或刷新 `<目录>/.nsh/types/` 与 `.nsh/tsconfig.json`。
 //! - `check <目录>`：离线校验清单、locales、主题、TSX 打包、import 与 QuickJS 编译（见 `check`）。
-//! - `status [<id>]`：开着的 App 里各插件的加载结果、来源、覆写状态与已登记视图（见 `status`）。
+//! - `status [<id>]`：开着的 App 里各插件的加载结果、来源、覆写状态与已登记视图（见 `status`）；
+//!   源码在加载之后又改过的标 `stale: true`。
 //!
 //! 和 `smelt-cli` 一样：结果是 stdout 上的 JSON，失败原因写 stderr、退出码非 0。
 
@@ -95,18 +96,34 @@ fn status(id: Option<&str>) -> i32 {
         return 1;
     };
     let Some(id) = id else {
-        return print(&snapshot.plugins);
+        let all: Vec<_> = snapshot.plugins.iter().map(status_json).collect();
+        return print(&all);
     };
     let Some(plugin) = snapshot.plugins.iter().find(|plugin| plugin.id == id) else {
         eprintln!("{}", t!("plugins.cli_not_loaded", id = id));
         return 1;
     };
-    let code = print(plugin);
+    let code = print(&status_json(plugin));
+    // 先报过时：旧的结果（不管成没成）都不算数，等重新加载完再看。
+    if plugin.is_stale() {
+        eprintln!("{}", t!("plugins.cli_stale", id = id));
+        return 1;
+    }
     if let Some(error) = &plugin.error {
         eprintln!("{error}");
         return 1;
     }
     code
+}
+
+/// 给人看的样子：指纹换成 `stale`（源码在这次加载之后又改过）。
+fn status_json(plugin: &super::status::Entry) -> serde_json::Value {
+    let mut value = serde_json::to_value(plugin).unwrap_or_default();
+    if let Some(object) = value.as_object_mut() {
+        object.remove("source_fingerprint");
+        object.insert("stale".into(), plugin.is_stale().into());
+    }
+    value
 }
 
 fn print(value: &impl serde::Serialize) -> i32 {

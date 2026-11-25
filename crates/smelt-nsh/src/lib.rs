@@ -29,7 +29,7 @@ pub use manifest::{
     PluginManifest, PluginSource, SourceDir, StageReport, discover_module_packages,
     stage_builtin_plugins,
 };
-pub use plugins::ModulePackage;
+pub use plugins::{ModulePackage, source_fingerprint};
 pub use shell::{MainShell, MainShellEvent, OutletTarget, ShellConfig, ShellLabels};
 pub use shell_layout::{ComputedShellView, WindowCorners};
 pub use types::{

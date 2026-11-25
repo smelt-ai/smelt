@@ -4,6 +4,8 @@
 //! 宿主不认识插件存什么，只给一个连接：表由插件自己建、自己迁移（[`PluginStore::migrate`]），
 //! 和客户端库分开，插件建错表、写坏数据都波及不到宿主和别的插件。删掉一个插件，它的
 //! 文件留着，再装回来接着用。
+//!
+//! 用户覆写自带插件时，覆写版的数据另放一份（[`override_store`]），不和自带版共用。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -104,34 +106,146 @@ impl PluginStore {
     }
 }
 
+/// 覆写自带插件的用户版，数据放在 `plugin-data/.overrides/<id>/`，和自带版各存各的：
+/// 两份代码各自迁移表结构，共用一个库时版本号会互相打架（覆写版多迁一步，回退到自带版
+/// 就打不开；升级后自带版新加的那步又被跳过）。点开头的名字不会是插件 id，撞不上。
+const OVERRIDES_DIR: &str = ".overrides";
+
+fn open_stores() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Arc<PluginStore>>> {
+    static STORES: OnceLock<Mutex<HashMap<PathBuf, Arc<PluginStore>>>> = OnceLock::new();
+    STORES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+fn smelt_home() -> Result<PathBuf, ClientStoreError> {
+    smelt_paths::smelt_home()
+        .ok_or_else(|| ClientStoreError("couldn't find the home directory".into()))
+}
+
 /// 来源 `owner`（命令、布局用的同一个来源 id）的库，第一次用时打开，之后同一份。
 /// 来源 id 只能是字母、数字和 `.`、`_`、`-`，不能以 `.` 开头：它直接当目录名。
 pub fn plugin_store(owner: &str) -> Result<Arc<PluginStore>, ClientStoreError> {
-    static STORES: OnceLock<Mutex<HashMap<String, Arc<PluginStore>>>> = OnceLock::new();
     validate_owner(owner)?;
-    let mut stores = STORES
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if let Some(store) = stores.get(owner) {
+    plugin_store_at(&smelt_home()?, owner)
+}
+
+fn plugin_store_at(home: &Path, owner: &str) -> Result<Arc<PluginStore>, ClientStoreError> {
+    let key = plugin_store_path(home, owner);
+    let mut stores = open_stores();
+    if let Some(store) = stores.get(&key) {
         return Ok(store.clone());
     }
-    let home = smelt_paths::smelt_home()
-        .ok_or_else(|| ClientStoreError("couldn't find the home directory".into()))?;
-    let store = Arc::new(PluginStore::open(open_path(&home, owner))?);
-    stores.insert(owner.to_string(), store.clone());
+    let store = Arc::new(PluginStore::open(open_path(home, owner))?);
+    stores.insert(key, store.clone());
+    Ok(store)
+}
+
+/// 覆写自带插件 `id` 的用户版用的库。第一次打开时从自带版的库复制一份（自带版还没有库就
+/// 从空库开始），之后两边各改各的：回退或恢复默认时自带版拿到的还是它自己那份。
+pub fn override_store(id: &str) -> Result<Arc<PluginStore>, ClientStoreError> {
+    validate_owner(id)?;
+    override_store_at(&smelt_home()?, id)
+}
+
+fn override_store_at(home: &Path, id: &str) -> Result<Arc<PluginStore>, ClientStoreError> {
+    let path = override_store_path(home, id);
+    if let Some(store) = open_stores().get(&path) {
+        return Ok(store.clone());
+    }
+    if !path.exists() && has_store(home, id) {
+        copy_store(&*plugin_store_at(home, id)?, &path)?;
+    }
+    let mut stores = open_stores();
+    // 复制时没拿着锁，别的线程可能已经打开了。
+    if let Some(store) = stores.get(&path) {
+        return Ok(store.clone());
+    }
+    let store = Arc::new(PluginStore::open(&path)?);
+    stores.insert(path, store.clone());
     Ok(store)
 }
 
 /// 来源 `owner` 的数据目录 `~/.smelt/plugin-data/<来源>/`，整个归这个插件。不存在就建。
 pub fn plugin_data_dir(owner: &str) -> Result<PathBuf, ClientStoreError> {
     validate_owner(owner)?;
-    let home = smelt_paths::smelt_home()
-        .ok_or_else(|| ClientStoreError("couldn't find the home directory".into()))?;
-    let dir = data_dir(&home, owner);
+    create_dir(data_dir(&smelt_home()?, owner))
+}
+
+/// 覆写自带插件 `id` 的用户版的数据目录 `~/.smelt/plugin-data/.overrides/<id>/`。不存在就建。
+pub fn override_data_dir(id: &str) -> Result<PathBuf, ClientStoreError> {
+    validate_owner(id)?;
+    create_dir(override_dir(&smelt_home()?, id))
+}
+
+/// 丢掉覆写版的数据（恢复默认、重新 fork 时）：下次覆写再从自带版复制。开着的连接一并
+/// 关掉。没有数据不算错。
+pub fn remove_override_data(id: &str) -> Result<(), ClientStoreError> {
+    validate_owner(id)?;
+    remove_override_data_at(&smelt_home()?, id)
+}
+
+fn remove_override_data_at(home: &Path, id: &str) -> Result<(), ClientStoreError> {
+    open_stores().remove(&override_store_path(home, id));
+    let dir = override_dir(home, id);
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ClientStoreError(format!(
+            "couldn't remove {}: {error}",
+            dir.display()
+        ))),
+    }
+}
+
+fn create_dir(dir: PathBuf) -> Result<PathBuf, ClientStoreError> {
     std::fs::create_dir_all(&dir)
         .map_err(|error| ClientStoreError(format!("couldn't create {}: {error}", dir.display())))?;
     Ok(dir)
+}
+
+fn override_dir(home: &Path, id: &str) -> PathBuf {
+    home.join(PLUGIN_DATA_DIR).join(OVERRIDES_DIR).join(id)
+}
+
+fn override_store_path(home: &Path, id: &str) -> PathBuf {
+    override_dir(home, id).join("store.sqlite3")
+}
+
+/// 自带版有没有库（新位置或旧位置）。没有就不去打开它：打开会建一个空库。
+fn has_store(home: &Path, owner: &str) -> bool {
+    plugin_store_path(home, owner).exists()
+        || home
+            .join(PLUGIN_DATA_DIR)
+            .join(format!("{owner}.sqlite3"))
+            .exists()
+}
+
+/// 用 `VACUUM INTO` 拍一份一致的快照（含 WAL 里还没并回的写入），先写临时文件再改名，
+/// 中途失败不会留下半份库。
+fn copy_store(source: &PluginStore, path: &Path) -> Result<(), ClientStoreError> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| ClientStoreError(format!("{} has no parent", path.display())))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|error| ClientStoreError(format!("couldn't create {}: {error}", dir.display())))?;
+    let staging = path.with_extension(format!("sqlite3.{}", std::process::id()));
+    let _ = std::fs::remove_file(&staging);
+    let staging_text = staging
+        .to_str()
+        .ok_or_else(|| ClientStoreError(format!("{} is not UTF-8", staging.display())))?;
+    let copied = source
+        .read(|db| db.execute("VACUUM INTO ?1", [staging_text]).map(|_| ()))
+        .and_then(|()| {
+            std::fs::rename(&staging, path).map_err(|error| {
+                ClientStoreError(format!("couldn't move {}: {error}", staging.display()))
+            })
+        });
+    if copied.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    copied
 }
 
 fn data_dir(home: &Path, owner: &str) -> PathBuf {
@@ -354,5 +468,58 @@ mod tests {
         for bad in ["", ".hidden", "../x", "a/b", "a b", "名字"] {
             assert!(validate_owner(bad).is_err(), "{bad}");
         }
+    }
+
+    fn version(store: &PluginStore) -> i64 {
+        store
+            .read(|db| db.query_row("PRAGMA user_version", [], |row| row.get(0)))
+            .unwrap()
+    }
+
+    #[test]
+    fn an_override_starts_from_a_copy_and_never_touches_the_builtin_store() {
+        let home = std::env::temp_dir().join(format!("smelt-override-{}", uuid::Uuid::new_v4()));
+        let builtin = plugin_store_at(&home, "smelt.files").unwrap();
+        builtin.migrate(&STEPS[..1]).unwrap();
+        builtin
+            .write(|tx| tx.execute("INSERT INTO item (name) VALUES ('a')", []))
+            .unwrap();
+
+        let fork = override_store_at(&home, "smelt.files").unwrap();
+        // 覆写版多迁一步、写自己的数据。
+        fork.migrate(&STEPS).unwrap();
+        fork.write(|tx| tx.execute("INSERT INTO item (name) VALUES ('b')", []))
+            .unwrap();
+        let count = |store: &PluginStore| -> i64 {
+            store
+                .read(|db| db.query_row("SELECT count(*) FROM item", [], |row| row.get(0)))
+                .unwrap()
+        };
+        assert_eq!((version(&fork), count(&fork)), (2, 2));
+        // 自带版还是它自己那份：版本没被抬高，回退时迁移照常。
+        assert_eq!((version(&builtin), count(&builtin)), (1, 1));
+        builtin.migrate(&STEPS[..1]).unwrap();
+
+        // 再开一次是同一份，不会重新复制。
+        assert!(Arc::ptr_eq(
+            &fork,
+            &override_store_at(&home, "smelt.files").unwrap()
+        ));
+
+        // 丢掉后下次重新从自带版复制。
+        remove_override_data_at(&home, "smelt.files").unwrap();
+        let again = override_store_at(&home, "smelt.files").unwrap();
+        assert_eq!((version(&again), count(&again)), (1, 1));
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn an_override_of_a_plugin_without_a_store_starts_empty() {
+        let home = std::env::temp_dir().join(format!("smelt-override-{}", uuid::Uuid::new_v4()));
+        let fork = override_store_at(&home, "smelt.fresh").unwrap();
+        assert_eq!(version(&fork), 0);
+        // 没替自带版建空库。
+        assert!(!plugin_store_path(&home, "smelt.fresh").exists());
+        let _ = std::fs::remove_dir_all(home);
     }
 }

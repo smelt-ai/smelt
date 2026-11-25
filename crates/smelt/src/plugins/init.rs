@@ -148,10 +148,17 @@ pub(super) fn scaffold(dir: &Path, id: &str, name: &str) -> Result<serde_json::V
     fs::write(root.join(smelt_nsh::MANIFEST_FILE), manifest_text)
         .map_err(|error| format!("写入 {} 失败：{error}", smelt_nsh::MANIFEST_FILE))?;
 
-    let escaped_name = serde_json::to_string(name).map_err(|e| e.to_string())?;
-    let entry_text = STARTER_ENTRY.replace("__NAME_JSON__", &escaped_name);
-    fs::write(root.join("nsh.tsx"), entry_text)
+    fs::write(root.join("nsh.tsx"), STARTER_ENTRY)
         .map_err(|error| format!("写入 nsh.tsx 失败：{error}"))?;
+    // 文案一开始就走 locales：起步插件是照着改的样板，样板写死一种语言，改出来的也是。
+    let escaped_name = serde_json::to_string(name).map_err(|e| e.to_string())?;
+    fs::create_dir_all(root.join("locales"))
+        .map_err(|error| t!("plugins.create_dir_failed", error = error).into_owned())?;
+    fs::write(
+        root.join("locales/ui.yml"),
+        STARTER_LOCALES.replace("__NAME_JSON__", &escaped_name),
+    )
+    .map_err(|error| format!("写入 locales/ui.yml 失败：{error}"))?;
 
     let gitignore = root.join(".gitignore");
     let created_gitignore = if !gitignore.exists() {
@@ -168,6 +175,7 @@ pub(super) fn scaffold(dir: &Path, id: &str, name: &str) -> Result<serde_json::V
     let mut files = vec![
         smelt_nsh::MANIFEST_FILE.to_owned(),
         "nsh.tsx".to_owned(),
+        "locales/ui.yml".to_owned(),
         ".nsh/tsconfig.json".to_owned(),
         ".nsh/types/".to_owned(),
     ];
@@ -272,9 +280,9 @@ pub(super) fn scaffold_theme(
 }
 
 const STARTER_ENTRY: &str = r#"import { signal, Text, View } from "nsh";
-import { bootTask, initHost, registerViews, SmeltButton, SmeltIcon } from "smelt/sdk";
+import { bootTask, initHost, registerViews, SmeltButton, SmeltIcon, t, text } from "smelt/sdk";
 
-const VIEW_TITLE = __NAME_JSON__;
+const count = signal(0);
 
 bootTask(async () => {
   await initHost();
@@ -282,25 +290,36 @@ bootTask(async () => {
     {
       name: "main",
       export: "Main",
-      title: VIEW_TITLE,
+      title: text("title"),
       icon: "icons/puzzle.svg",
     },
   ]);
 });
 
 export function Main() {
-  const count = signal(0);
   return (
     <View class="flex-1 items-center justify-center gap-3 bg-background p-6">
       <View class="flex-row items-center gap-2">
         <SmeltIcon path="icons/puzzle.svg" size={16} />
-        <Text class="text-sm font-semibold text-foreground">{VIEW_TITLE}</Text>
+        <Text class="text-sm font-semibold text-foreground">{t("title")}</Text>
       </View>
-      <Text class="text-xs text-muted-foreground">{`Count: ${count()}`}</Text>
-      <SmeltButton label="Increment" primary onPress={() => count.update((n) => n + 1)} />
+      <Text class="text-xs text-muted-foreground">{t("count", { n: count() })}</Text>
+      <SmeltButton label={t("add")} primary onPress={() => count.update((n) => n + 1)} />
     </View>
   );
 }
+"#;
+
+const STARTER_LOCALES: &str = r#"_version: 2
+title:
+  en: __NAME_JSON__
+  zh-CN: __NAME_JSON__
+count:
+  en: "Count: %{n}"
+  zh-CN: "计数：%{n}"
+add:
+  en: Add one
+  zh-CN: 加一
 "#;
 
 fn fail(message: &str) -> i32 {
@@ -341,6 +360,7 @@ mod tests {
         assert_eq!(report["view"], "com.example.hello/main");
         assert!(dir.join(smelt_nsh::MANIFEST_FILE).is_file());
         assert!(dir.join("nsh.tsx").is_file());
+        assert!(dir.join("locales/ui.yml").is_file());
         assert!(dir.join(".gitignore").is_file());
         assert!(dir.join("tsconfig.json").is_file());
         assert!(dir.join(".nsh/tsconfig.json").is_file());

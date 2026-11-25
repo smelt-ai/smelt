@@ -895,6 +895,8 @@ pub struct LoadedPluginInfo {
     pub used_modules: Vec<String>,
     pub views: Vec<String>,
     pub error: Option<String>,
+    /// 用户插件这次加载时源码的指纹（[`crate::source_fingerprint`]）；自带插件是 `None`。
+    pub source_fingerprint: Option<String>,
 }
 
 /// 一轮发现/热重载推回主线程的完整批次。
@@ -1318,6 +1320,8 @@ struct CompileJob {
     id: String,
     root: PathBuf,
     entry: String,
+    /// 用户覆写自带插件（数据另存一份，见 [`Compiled::overriding_builtin`]）。
+    overrides_builtin: bool,
 }
 
 type CompileJobOutput = Result<(Compiled, BTreeMap<String, String>, Vec<String>), String>;
@@ -1349,8 +1353,13 @@ fn compile_jobs_parallel(
             false,
         )?;
         crate::plugins::validate_unresolved_references(&job.id, &compiled.code)?;
+        let compiled_vm = Compiled::from_source(job.id.clone(), compiled.code);
         Ok((
-            Compiled::from_source(job.id.clone(), compiled.code),
+            if job.overrides_builtin {
+                compiled_vm.overriding_builtin()
+            } else {
+                compiled_vm
+            },
             compiled.used_modules,
             compiled.used_module_ids,
         ))
@@ -1494,6 +1503,17 @@ impl Worker {
         }
 
         let slots = discover_slots(&self.sources);
+        // 先于打包算：中途又保存了，记下的是旧指纹，`status` 只会多报一次「还没重新加载」。
+        let fingerprints: BTreeMap<PathBuf, String> = slots
+            .iter()
+            .filter_map(|slot| match slot {
+                DiscoverySlot::Active { primary, .. } if primary.source == PluginSource::User => {
+                    crate::source_fingerprint(&primary.root)
+                        .map(|hash| (primary.root.clone(), hash))
+                }
+                _ => None,
+            })
+            .collect();
         let sdk_fp = crate::plugins::sdk_fingerprint();
 
         let previously_active_scripts: BTreeSet<String> = self
@@ -1653,6 +1673,7 @@ impl Worker {
                                     module: Some(pkg.specifier),
                                     used_modules: Vec::new(),
                                     views: Vec::new(),
+                                    source_fingerprint: None,
                                     error: Some(msg),
                                 },
                                 themes: None,
@@ -1678,6 +1699,7 @@ impl Worker {
                                     module: Some(pkg.specifier),
                                     used_modules: Vec::new(),
                                     views: Vec::new(),
+                                    source_fingerprint: None,
                                     error: None,
                                 },
                                 themes: (!themes.is_empty()).then_some((id, themes)),
@@ -1722,6 +1744,7 @@ impl Worker {
                                     module: fb.manifest.module.clone(),
                                     used_modules: Vec::new(),
                                     views: Vec::new(),
+                                    source_fingerprint: None,
                                     error: Some(err),
                                 },
                                 themes: fb_themes.map(|s| (id, s)),
@@ -1743,6 +1766,7 @@ impl Worker {
                                     module: primary.manifest.module.clone(),
                                     used_modules: Vec::new(),
                                     views: Vec::new(),
+                                    source_fingerprint: None,
                                     error: Some(err),
                                 },
                                 themes: (!themes.is_empty()).then_some((id, themes)),
@@ -1783,6 +1807,7 @@ impl Worker {
                         module: fb.manifest.module.clone(),
                         used_modules: Vec::new(),
                         views: Vec::new(),
+                        source_fingerprint: None,
                         error: Some(err),
                     },
                     themes: fb_themes.map(|s| (id, s)),
@@ -1827,6 +1852,7 @@ impl Worker {
                             module: item.manifest.module,
                             used_modules: Vec::new(),
                             views: Vec::new(),
+                            source_fingerprint: None,
                             error: Some(format!("与 {} 重复，已跳过", duplicate_of.display())),
                         },
                         themes: None,
@@ -1892,6 +1918,7 @@ impl Worker {
                                 module: None,
                                 used_modules: Vec::new(),
                                 views: Vec::new(),
+                                source_fingerprint: None,
                                 error: theme_error,
                             },
                             themes: (!themes.is_empty()).then_some((id, themes)),
@@ -1921,6 +1948,7 @@ impl Worker {
                                         module: None,
                                         used_modules: Vec::new(),
                                         views: Vec::new(),
+                                        source_fingerprint: None,
                                         error: theme_error,
                                     },
                                     themes: (!themes.is_empty()).then_some((id, themes)),
@@ -1954,6 +1982,7 @@ impl Worker {
                                             module: None,
                                             used_modules: Vec::new(),
                                             views: Vec::new(),
+                                            source_fingerprint: None,
                                             error: theme_error.or(Some(error)),
                                         },
                                         themes: (!themes.is_empty()).then_some((id, themes)),
@@ -2021,6 +2050,7 @@ impl Worker {
                                 module: None,
                                 used_modules,
                                 views: Vec::new(),
+                                source_fingerprint: None,
                                 error: theme_error,
                             },
                             themes: (!themes.is_empty()).then_some((id.clone(), themes)),
@@ -2064,6 +2094,7 @@ impl Worker {
                                         module: None,
                                         used_modules,
                                         views: Vec::new(),
+                                        source_fingerprint: None,
                                         error: theme_error.or(Some(error)),
                                     },
                                     themes: (!themes.is_empty()).then_some((id.clone(), themes)),
@@ -2081,6 +2112,7 @@ impl Worker {
                         id,
                         root: primary.root.clone(),
                         entry: primary.manifest.entry.clone(),
+                        overrides_builtin: fallback.is_some(),
                     });
                     stages[slot_ix] = Some(SlotStage::WaitingUserCompile {
                         primary,
@@ -2128,6 +2160,7 @@ impl Worker {
                                 module: None,
                                 used_modules: mod_ids,
                                 views: Vec::new(),
+                                source_fingerprint: None,
                                 error: theme_error,
                             },
                             themes: (!themes.is_empty()).then_some((id.clone(), themes)),
@@ -2167,6 +2200,7 @@ impl Worker {
                                     module: None,
                                     used_modules,
                                     views: Vec::new(),
+                                    source_fingerprint: None,
                                     error: theme_error.or(Some(error)),
                                 },
                                 themes: (!themes.is_empty()).then_some((id.clone(), themes)),
@@ -2208,6 +2242,7 @@ impl Worker {
                         module: None,
                         used_modules: Vec::new(),
                         views: Vec::new(),
+                        source_fingerprint: None,
                         error: Some(pending.reason),
                     },
                     themes: fb_themes.map(|s| (id, s)),
@@ -2241,6 +2276,7 @@ impl Worker {
                         module: None,
                         used_modules: Vec::new(),
                         views: Vec::new(),
+                        source_fingerprint: None,
                         error: Some(pending.reason),
                     },
                     themes: fb_themes.map(|s| (id, s)),
@@ -2312,6 +2348,7 @@ impl Worker {
                             module: None,
                             used_modules,
                             views: Vec::new(),
+                            source_fingerprint: None,
                             error: cand.error,
                         },
                         themes: (!cand.themes.is_empty()).then_some((id.clone(), cand.themes)),
@@ -2333,6 +2370,8 @@ impl Worker {
                             id: job_id,
                             root,
                             entry,
+                            // 拆出来单跑的是自带版本身（它引用的共享模块被覆写了），数据还是它的。
+                            overrides_builtin: false,
                         });
                         stages[slot_ix] = Some(SlotStage::WaitingSplitCompile { cand, texts });
                     }
@@ -2351,6 +2390,7 @@ impl Worker {
                                 module: None,
                                 used_modules: Vec::new(),
                                 views: Vec::new(),
+                                source_fingerprint: None,
                                 error: cand.error.or(Some(fb_err)),
                             },
                             themes: (!cand.themes.is_empty()).then_some((cand.id, cand.themes)),
@@ -2378,6 +2418,7 @@ impl Worker {
                                 module: None,
                                 used_modules: Vec::new(),
                                 views: Vec::new(),
+                                source_fingerprint: None,
                                 error: cand.error.or(Some(err)),
                             },
                             themes: (!cand.themes.is_empty()).then_some((cand.id, cand.themes)),
@@ -2440,6 +2481,7 @@ impl Worker {
                                 module: None,
                                 used_modules: mod_ids,
                                 views: Vec::new(),
+                                source_fingerprint: None,
                                 error: cand.error,
                             },
                             themes: (!cand.themes.is_empty()).then_some((id.clone(), cand.themes)),
@@ -2464,6 +2506,7 @@ impl Worker {
                                 module: None,
                                 used_modules: Vec::new(),
                                 views: Vec::new(),
+                                source_fingerprint: None,
                                 error: cand.error.or(Some(fb_err)),
                             },
                             themes: (!cand.themes.is_empty()).then_some((id.clone(), cand.themes)),
@@ -2537,6 +2580,7 @@ impl Worker {
                             module: None,
                             used_modules,
                             views: Vec::new(),
+                            source_fingerprint: None,
                             error: item.initial_error,
                         },
                         themes: None,
@@ -2619,6 +2663,7 @@ impl Worker {
                                     module: None,
                                     used_modules,
                                     views: Vec::new(),
+                                    source_fingerprint: None,
                                     error: item.initial_error,
                                 },
                                 themes: None,
@@ -2698,6 +2743,7 @@ impl Worker {
                                     module: None,
                                     used_modules,
                                     views: Vec::new(),
+                                    source_fingerprint: None,
                                     error: err,
                                 },
                                 themes: None,
@@ -2729,6 +2775,10 @@ impl Worker {
             else {
                 unreachable!();
             };
+            let mut info = info;
+            if info.source == PluginSource::User {
+                info.source_fingerprint = fingerprints.get(&info.root).cloned();
+            }
             loaded.push(info);
             if let Some(theme_entry) = plugin_themes {
                 themes.push(theme_entry);

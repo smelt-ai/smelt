@@ -90,7 +90,7 @@ pub(crate) fn installed() -> Vec<InstalledPlugin> {
     REGISTRY.with(|registry| registry.borrow().installed.clone())
 }
 
-fn scan_theme_manifests(
+pub(super) fn scan_theme_manifests(
     dir: Option<&Path>,
 ) -> BTreeMap<String, (PathBuf, smelt_nsh::PluginManifest)> {
     let mut found = BTreeMap::new();

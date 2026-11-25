@@ -382,6 +382,9 @@ plugins:
   cli_bad_id:
     en: "Invalid plugin id %{id}: use ASCII letters, digits, ., -, or _, and don't start with ."
     zh-CN: "插件 id %{id} 不合法：只能含字母、数字和 .-_，且不能以 . 开头"
+  cli_fork_as_themes:
+    en: "%{id} comes with themes, and a renamed copy would reuse their names, so none of its themes would load. To change colors, create a theme plugin with smelt plugin init <id> --theme; to change %{id} itself, fork it without --as"
+    zh-CN: "%{id} 带主题，改名复制后主题名和原插件全撞，这一份的主题一个都装不上。要改配色用 smelt plugin init <id> --theme 新建主题插件；要改它本身，去掉 --as 原地覆写"
   cli_fork_exists:
     en: "%{path} already has a plugin"
     zh-CN: "%{path} 已经有插件了"
@@ -406,6 +409,9 @@ plugins:
   cli_not_loaded:
     en: "Smelt hasn't loaded a plugin with id %{id}. Check that its folder is in ~/.smelt/plugins/ and that smelt-plugin.json has this id"
     zh-CN: "Smelt 没有加载 id 为 %{id} 的插件。看看它的目录在不在 ~/.smelt/plugins/ 里、smelt-plugin.json 里的 id 对不对"
+  cli_stale:
+    en: "%{id} changed after Smelt last loaded it; this is the result of an older version. Check again in a moment"
+    zh-CN: "%{id} 的源码在上次加载之后又改过，上面是旧版本的结果。稍等再查"
   cli_usage:
     en: "Usage: smelt plugin init <id> [--theme] [--name <name>] [--dir <dir>] | fork <builtin-id> [--as <new-id>] [--dir <dir>] | types <dir> | check <dir> | status [<id>]"
     zh-CN: "用法：smelt plugin init <id> [--theme] [--name <名称>] [--dir <目录>] | fork <自带插件id> [--as <新id>] [--dir <目录>] | types <目录> | check <目录> | status [<id>]"
