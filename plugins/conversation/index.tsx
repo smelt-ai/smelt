@@ -194,10 +194,6 @@ export function SmeltConversation(props: SmeltConversationProps) {
     }
   });
 
-  const insertPromptIntoComposer = (text: string) => {
-    quickInsertSeq += 1;
-    quickInsert.set({ seq: quickInsertSeq, text });
-  };
   let lastRefreshModelsSeq = props.refreshModelsSeq ?? 0;
   let lastNotifiedAtLatest = true;
   let historyBackfillDone = false;
@@ -722,7 +718,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
   const freshConversation = computed(
     () => props.start == null && !props.directoryAcp?.history_session_id,
   );
-  // 空对话：输入框移到中间，上面是标题，下面是建议。
+  // 空对话：输入框移到中间，上面是标题。
   const showEmptyWelcome = computed(
     () =>
       !props.embedded &&
@@ -737,34 +733,6 @@ export function SmeltConversation(props: SmeltConversationProps) {
   const showEndedEmpty = computed(
     () => dead() && entriesState().entries.length === 0 && entriesState().loadedOffset === 0,
   );
-  // 这几条都是对着代码仓库说的，只在项目里给。
-  const quickPrompts = computed(() => [
-    {
-      id: "understand",
-      icon: "icons/folder-tree.svg",
-      title: ct("empty.quick.understand.title"),
-      prompt: ct("empty.quick.understand.prompt"),
-    },
-    {
-      id: "review",
-      icon: "icons/git-branch.svg",
-      title: ct("empty.quick.review.title"),
-      prompt: ct("empty.quick.review.prompt"),
-    },
-    {
-      id: "debug",
-      icon: "icons/search.svg",
-      title: ct("empty.quick.debug.title"),
-      prompt: ct("empty.quick.debug.prompt"),
-    },
-    {
-      id: "test",
-      icon: "icons/circle-check.svg",
-      title: ct("empty.quick.test.title"),
-      prompt: ct("empty.quick.test.prompt"),
-    },
-  ]);
-  const showQuickPrompts = computed(() => !props.readOnly && projectName() != null);
 
   return (
     <View
@@ -844,7 +812,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
           </View>
         </If>
 
-        {/* 空对话：输入框移到中间，标题贴在它上面（下面的建议在输入框后面） */}
+        {/* 空对话：输入框移到中间，标题贴在它上面 */}
         <If when={showEmptyWelcome()}>
           <View
             style={{
@@ -1191,35 +1159,9 @@ export function SmeltConversation(props: SmeltConversationProps) {
           onFocusIn={props.onFocusIn}
         />
 
-        {/* 空对话的建议：和输入框同宽，点一下填进输入框 */}
+        {/* 空对话：和上面的标题区等高，把输入框撑在中间 */}
         <If when={showEmptyWelcome()}>
-          <View style={{ flexGrow: 1, flexBasis: 0, minHeight: 0, alignItems: "center", paddingHorizontal: 16 }}>
-            <If when={showQuickPrompts()}>
-              <View
-                style={{
-                  width: "100%",
-                  maxWidth: 768,
-                  flexDirection: "row",
-                  flexWrap: "wrap",
-                  justifyContent: "center",
-                  gap: 8,
-                }}
-              >
-                <Each of={quickPrompts()}>
-                  {(chip) => (
-                    <SmeltButton
-                      quiet
-                      icon={chip().icon}
-                      label={chip().title}
-                      class="border border-border"
-                      style={{ borderRadius: 999, paddingHorizontal: 14 }}
-                      onPress={() => insertPromptIntoComposer(chip().prompt)}
-                    />
-                  )}
-                </Each>
-              </View>
-            </If>
-          </View>
+          <View style={{ flexGrow: 1, flexBasis: 0, minHeight: 0 }} />
         </If>
       </View>
 
