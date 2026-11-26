@@ -14,7 +14,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ops::{BitOr, BitOrAssign},
     rc::Rc,
-    sync::{Arc, Mutex, MutexGuard, RwLock},
+    sync::{
+        Arc, Mutex, MutexGuard, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -153,6 +156,7 @@ pub(crate) enum Action {
         machine: RuntimeKey,
         reuse_key: Option<String>,
         launch: smelt_acp::ConversationClientLaunch,
+        pending: PendingAcpSubscribe,
         call: HostCall,
     },
     AcpHistory {
@@ -323,11 +327,42 @@ impl SessionsDataUpdate {
         }
     }
 }
+
+/// 在途 `Action::AcpSubscribe` 取消护卫：不论主线程正常执行、提前取消或面板关闭丢弃，都会自动清理登记表。
+pub(crate) struct PendingAcpSubscribe {
+    bridge: Bridge,
+    key: (String, String),
+    cancelled: Arc<AtomicBool>,
+}
+
+impl PendingAcpSubscribe {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for PendingAcpSubscribe {
+    fn drop(&mut self) {
+        let mut pending = self
+            .bridge
+            .0
+            .pending_acp_subscribes
+            .lock()
+            .expect("host bridge pending acp subscribes lock poisoned");
+        if pending
+            .get(&self.key)
+            .is_some_and(|entry| Arc::ptr_eq(entry, &self.cancelled))
+        {
+            pending.remove(&self.key);
+        }
+    }
+}
 #[derive(Default)]
 struct BridgeInner {
     shared: Mutex<Shared>,
     clients: RwLock<BTreeMap<RuntimeKey, api::client::RuntimeClient>>,
     sessions_cache: Mutex<SessionsDataCache>,
+    pending_acp_subscribes: Mutex<BTreeMap<(String, String), Arc<AtomicBool>>>,
 }
 
 #[derive(Clone, Default)]
@@ -336,6 +371,54 @@ pub(crate) struct Bridge(Arc<BridgeInner>);
 impl Bridge {
     fn lock(&self) -> MutexGuard<'_, Shared> {
         self.0.shared.lock().expect("host bridge lock poisoned")
+    }
+
+    fn register_pending_acp_subscribe(&self, owner: &str, sub_id: &str) -> PendingAcpSubscribe {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let key = (owner.to_owned(), sub_id.to_owned());
+        self.0
+            .pending_acp_subscribes
+            .lock()
+            .expect("host bridge pending acp subscribes lock poisoned")
+            .insert(key.clone(), Arc::clone(&cancelled));
+        PendingAcpSubscribe {
+            bridge: self.clone(),
+            key,
+            cancelled,
+        }
+    }
+
+    fn cancel_pending_acp_subscribe(&self, owner: &str, sub_id: &str) {
+        let entry = {
+            let mut pending = self
+                .0
+                .pending_acp_subscribes
+                .lock()
+                .expect("host bridge pending acp subscribes lock poisoned");
+            pending.remove(&(owner.to_owned(), sub_id.to_owned()))
+        };
+        if let Some(cancelled) = entry {
+            cancelled.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn subscribe_acp_resolved(
+        &self,
+        hub: &smelt_acp::AcpHub,
+        client: api::client::RuntimeClient,
+        req: smelt_acp::SubscribeRequest,
+        pending: PendingAcpSubscribe,
+    ) {
+        if pending.is_cancelled() {
+            return;
+        }
+        let owner = req.owner.clone();
+        let sub_id = req.sub_id.clone();
+        hub.subscribe(client, req);
+        // 若 `acp.unsubscribe` 恰好在 `hub.subscribe` 挂表过程中触发取消，补做一次退订，防止遗留幽灵连接。
+        if pending.is_cancelled() {
+            hub.unsubscribe(&owner, &sub_id, None);
+        }
     }
 
     pub fn sync_clients(&self, cx: &App) {
@@ -424,6 +507,7 @@ impl Bridge {
                     );
                     call.resolve(Value::Null);
                 } else {
+                    let pending = bridge.register_pending_acp_subscribe(plugin, &sub_id);
                     send_action(
                         &actions,
                         Action::AcpSubscribe {
@@ -432,6 +516,7 @@ impl Bridge {
                             machine,
                             reuse_key,
                             launch,
+                            pending,
                             call,
                         },
                     );
@@ -440,6 +525,7 @@ impl Bridge {
         }
 
         {
+            let bridge = self.clone();
             let hub = acp_hub.clone();
             plugins.handle("acp.unsubscribe", move |plugin, call| {
                 let data = call.data();
@@ -451,6 +537,7 @@ impl Bridge {
                     .and_then(Value::as_str)
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned);
+                bridge.cancel_pending_acp_subscribe(plugin, sub_id);
                 hub.unsubscribe(plugin, sub_id, reuse_key);
                 call.resolve(Value::Null);
             });
@@ -1448,6 +1535,13 @@ impl Bridge {
         self.lock().acp_hub.clone()
     }
 
+    /// 清理某台重连机器在 ACP 暂存池里遗留的旧传输连接。
+    pub(crate) fn drop_parked_acp_for_machine(&self, machine: &RuntimeKey) {
+        if let Some(hub) = self.acp_hub() {
+            hub.drop_parked_for_machine(machine);
+        }
+    }
+
     /// 撤下插件在宿主 `smelt_plugin_api` 里登记的全部内容并清理本桥上的记录。
     pub fn unregister_plugin(&self, plugin: &str, cx: &mut App) {
         self.forget_plugin(plugin);
@@ -2314,17 +2408,26 @@ pub(crate) fn handle_action(action: Action, bridge: &Bridge, plugins: &PluginHos
             machine,
             reuse_key,
             launch,
+            pending,
             call,
         } => {
+            if pending.is_cancelled() {
+                drop(pending);
+                call.resolve(Value::Null);
+                return;
+            }
             let Some(hub) = bridge.acp_hub() else {
+                drop(pending);
                 call.reject("acp.subscribe：ACP hub 未初始化");
                 return;
             };
             let Some(client) = api::host(cx).client(&machine, cx) else {
+                drop(pending);
                 call.reject(api::machine_removed());
                 return;
             };
-            hub.subscribe(
+            bridge.subscribe_acp_resolved(
+                &hub,
                 client,
                 smelt_acp::SubscribeRequest {
                     sub_id,
@@ -2333,6 +2436,7 @@ pub(crate) fn handle_action(action: Action, bridge: &Bridge, plugins: &PluginHos
                     reuse_key,
                     launch,
                 },
+                pending,
             );
             call.resolve(Value::Null);
         }
@@ -3679,5 +3783,84 @@ mod tests {
             );
             assert_eq!(remote_reads.load(Ordering::Relaxed), 4);
         });
+    }
+
+    #[test]
+    fn pending_acp_subscribe_cancelled_before_main_thread_never_dials_or_leaks() {
+        use std::sync::atomic::AtomicUsize;
+
+        use api::client::{RuntimeClient, RuntimeStream};
+
+        let bridge = Bridge::default();
+        let hub = smelt_acp::AcpHub::new(smelt_acp::ImageStore::new(), Arc::new(|_, _| {}));
+        let dials = Arc::new(AtomicUsize::new(0));
+        let dials_for_client = Arc::clone(&dials);
+        let client = RuntimeClient::new(move || {
+            dials_for_client.fetch_add(1, Ordering::SeqCst);
+            let (client_stream, _server_stream) = RuntimeStream::pair()?;
+            Ok(client_stream)
+        });
+        let launch: smelt_acp::ConversationClientLaunch = serde_json::from_value(json!({
+            "id": "s-1",
+            "launch": { "command": "pi", "env": {} },
+            "engine_kind": "pi",
+        }))
+        .expect("valid launch");
+
+        // 1. 排队期间触发 acp.unsubscribe：主线程执行 subscribe_acp_resolved 时绝不拨号也绝不挂入 AcpHub。
+        let pending_cancelled = bridge.register_pending_acp_subscribe("plug.a", "sub-1");
+        bridge.cancel_pending_acp_subscribe("plug.a", "sub-1");
+        bridge.subscribe_acp_resolved(
+            &hub,
+            client.clone(),
+            smelt_acp::SubscribeRequest {
+                sub_id: "sub-1".into(),
+                owner: "plug.a".into(),
+                machine: RuntimeKey::Local,
+                reuse_key: Some("pane-1".into()),
+                launch: launch.clone(),
+            },
+            pending_cancelled,
+        );
+        assert_eq!(dials.load(Ordering::SeqCst), 0);
+        assert!(
+            hub.send_action("plug.a", "sub-1", json!("Refresh"), &[])
+                .is_err(),
+            "cancelled pending subscribe must not leave an active session in AcpHub"
+        );
+
+        // 2. 通道丢弃 unsent Action 时，Drop 护卫也应自动清空登记表。
+        let pending_dropped = bridge.register_pending_acp_subscribe("plug.a", "sub-2");
+        drop(pending_dropped);
+
+        // 3. 未取消的订阅能正常挂表，随后可通过 hub.unsubscribe 释放并清空登记表。
+        let pending_live = bridge.register_pending_acp_subscribe("plug.a", "sub-3");
+        bridge.subscribe_acp_resolved(
+            &hub,
+            client,
+            smelt_acp::SubscribeRequest {
+                sub_id: "sub-3".into(),
+                owner: "plug.a".into(),
+                machine: RuntimeKey::Local,
+                reuse_key: None,
+                launch,
+            },
+            pending_live,
+        );
+        assert!(
+            hub.send_action("plug.a", "sub-3", json!("Refresh"), &[])
+                .is_ok(),
+            "active subscribe should register into AcpHub"
+        );
+        hub.unsubscribe("plug.a", "sub-3", None);
+        assert!(
+            bridge
+                .0
+                .pending_acp_subscribes
+                .lock()
+                .expect("lock")
+                .is_empty(),
+            "all pending subscribe entries should be cleaned up"
+        );
     }
 }

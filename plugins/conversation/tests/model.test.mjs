@@ -9,6 +9,12 @@ import {
   collectEditFilesFromRange,
   colorWithAlpha,
   compactTokenCount,
+  endedBannerState,
+  isEndedPhase,
+  isTransientDisconnect,
+  nextResubscribeDecision,
+  shouldAutoResubscribe,
+  shouldReconnectOnMachineReconnected,
   stopRingMode,
   showsEmptyWelcome,
   launchBringsContent,
@@ -512,5 +518,156 @@ describe("sessionSkills", () => {
     ).toEqual([{ command: "skill:deploy", name: "deploy", description: "把构建推上去" }]);
     expect(sessionSkills([["review", "Review"]])).toEqual([]);
     expect(sessionSkills(undefined)).toEqual([]);
+  });
+});
+
+describe("reconnect & ended state machine", () => {
+  test("distinguishes transient transport disconnect from real provider failure and termination", () => {
+    const transport = { phase: "dead", end_kind: "transport_disconnected", end_reason: "disconnected" };
+    const provider = { phase: "dead", end_kind: "provider_failed", end_reason: "exit 1" };
+    const terminated = { phase: "dead", end_kind: "session_terminated", end_reason: "closed" };
+    const failedPhase = { phase: "failed", end_kind: "unknown", end_reason: "boom" };
+    const live = { phase: "idle", end_kind: "unknown", end_reason: "" };
+
+    expect(isEndedPhase("dead")).toBe(true);
+    expect(isEndedPhase("failed")).toBe(true);
+    expect(isEndedPhase("idle")).toBe(false);
+
+    expect(isTransientDisconnect(transport)).toBe(true);
+    expect(isTransientDisconnect(provider)).toBe(false);
+    expect(isTransientDisconnect(terminated)).toBe(false);
+    expect(isTransientDisconnect(live)).toBe(false);
+
+    expect(shouldAutoResubscribe(null)).toBe(true);
+    expect(shouldAutoResubscribe(live)).toBe(true);
+    expect(shouldAutoResubscribe(transport)).toBe(true);
+    expect(shouldAutoResubscribe(provider)).toBe(false);
+    expect(shouldAutoResubscribe(terminated)).toBe(false);
+    expect(shouldAutoResubscribe(failedPhase)).toBe(false);
+  });
+
+  test("nextResubscribeDecision resets backoff after stable uptime and exhausts at maxAttempts", () => {
+    const transport = { phase: "dead", end_kind: "transport_disconnected" };
+    expect(nextResubscribeDecision({ snapshot: transport, previousFailures: 0, elapsedMs: 100 })).toEqual({
+      action: "retry",
+      failures: 1,
+    });
+    expect(nextResubscribeDecision({ snapshot: transport, previousFailures: 5, elapsedMs: 100 })).toEqual({
+      action: "retry",
+      failures: 6,
+    });
+    expect(nextResubscribeDecision({ snapshot: transport, previousFailures: 6, elapsedMs: 100 })).toEqual({
+      action: "exhausted",
+      failures: 6,
+    });
+    // 稳定撑过 30s 后断流，退避计数清零
+    expect(nextResubscribeDecision({ snapshot: transport, previousFailures: 6, elapsedMs: 30_000 })).toEqual({
+      action: "retry",
+      failures: 1,
+    });
+    // 从未真正连上过（如远端拨号 30s 超时失败，elapsedMs 传 0）：不该清零计数，达到上限即耗尽
+    expect(nextResubscribeDecision({ snapshot: transport, previousFailures: 6, elapsedMs: 0 })).toEqual({
+      action: "exhausted",
+      failures: 6,
+    });
+    // 真实 provider 失败绝不自动重订
+    expect(
+      nextResubscribeDecision({
+        snapshot: { phase: "dead", end_kind: "provider_failed" },
+        previousFailures: 0,
+        elapsedMs: 60_000,
+      }),
+    ).toEqual({
+      action: "stop",
+      failures: 0,
+    });
+  });
+
+  test("shouldReconnectOnMachineReconnected recovers live/transient/exhausted conversations without relaunching failed ones", () => {
+    expect(shouldReconnectOnMachineReconnected(null)).toBe(true);
+    expect(shouldReconnectOnMachineReconnected({ phase: "idle", end_kind: "unknown" })).toBe(true);
+    expect(shouldReconnectOnMachineReconnected({ phase: "thinking", end_kind: "unknown" })).toBe(true);
+    expect(
+      shouldReconnectOnMachineReconnected({ phase: "dead", end_kind: "transport_disconnected" }),
+    ).toBe(true);
+    expect(shouldReconnectOnMachineReconnected({ phase: "dead", end_kind: "provider_failed" })).toBe(false);
+    expect(shouldReconnectOnMachineReconnected({ phase: "dead", end_kind: "session_terminated" })).toBe(
+      false,
+    );
+    expect(shouldReconnectOnMachineReconnected({ phase: "failed", end_kind: "unknown" })).toBe(false);
+  });
+
+  test("endedBannerState distinguishes quiet reconnecting, exhausted reconnect, restart, and terminated", () => {
+    const transport = { phase: "dead", end_kind: "transport_disconnected" };
+    const provider = { phase: "dead", end_kind: "provider_failed" };
+    const terminated = { phase: "dead", end_kind: "session_terminated" };
+
+    // 自动重连中：安静的重连中提示，不显示红色重新开始
+    expect(
+      endedBannerState({ snapshot: transport, reconnecting: true, reconnectExhausted: false, streamClosed: true }),
+    ).toEqual({ kind: "reconnecting" });
+
+    // 流还开着且是 transport_disconnected（smeltd 正在自动拉起 provider）：显示重连中
+    expect(
+      endedBannerState({ snapshot: transport, reconnecting: false, reconnectExhausted: false, streamClosed: false }),
+    ).toEqual({ kind: "reconnecting" });
+
+    // 自动重连耗尽：显示红色条 + 「重新连接」（不是杀进程的重启）
+    expect(
+      endedBannerState({ snapshot: transport, reconnecting: false, reconnectExhausted: true, streamClosed: true }),
+    ).toEqual({ kind: "ended", action: "reconnect", exhausted: true });
+
+    // 真实 provider 失败：显示红色条 + 「重新开始」
+    expect(
+      endedBannerState({ snapshot: provider, reconnecting: false, reconnectExhausted: false, streamClosed: false }),
+    ).toEqual({ kind: "ended", action: "restart", exhausted: false });
+
+    // 会话已明确终结：不提供重启按钮，避免把已删会话复活
+    expect(
+      endedBannerState({ snapshot: terminated, reconnecting: false, reconnectExhausted: false, streamClosed: true }),
+    ).toEqual({ kind: "ended", action: "none", exhausted: false });
+
+    // 正常对话：不显示横幅
+    expect(
+      endedBannerState({
+        snapshot: { phase: "idle", end_kind: "unknown" },
+        reconnecting: false,
+        reconnectExhausted: false,
+        streamClosed: false,
+      }),
+    ).toEqual({ kind: "none" });
+  });
+
+  test("buildAcpLaunchPayload preserves retainedEntriesEnd and drops fork/initial_prompt once history exists", () => {
+    const reopened = buildAcpLaunchPayload({
+      sessionId: "acp-1",
+      cwd: "/repo",
+      launchSpec: { command: "pi", env: {} },
+      agentId: "pi",
+      dirAcp: { history_session_id: "hist-dir", pending_prompt: "首条提问" },
+      start: { fork: { provider_session_id: "src-1", cut: { text: "hi" } } },
+      resumeId: "hist-live",
+      retainedEntriesEnd: 42,
+      hasLiveHistory: true,
+    });
+    expect(reopened.resume_id).toBe("hist-live");
+    expect(reopened.retained_entries_end).toBe(42);
+    expect(reopened.fork_id).toBeNull();
+    expect(reopened.fork_cut).toBeNull();
+    expect(reopened.initial_prompt).toBeNull();
+
+    // 首次建连前失败重连：保留 fork 和 initial_prompt
+    const retryInitial = buildAcpLaunchPayload({
+      sessionId: "acp-2",
+      cwd: "/repo",
+      launchSpec: { command: "pi", env: {} },
+      agentId: "pi",
+      dirAcp: { pending_prompt: "首条提问" },
+      start: { fork: { provider_session_id: "src-1", cut: null } },
+      retainedEntriesEnd: 0,
+      hasLiveHistory: false,
+    });
+    expect(retryInitial.fork_id).toBe("src-1");
+    expect(retryInitial.initial_prompt).toEqual({ text: "首条提问", images: [] });
   });
 });

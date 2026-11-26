@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -94,6 +94,8 @@ struct RouteState {
     latest_snapshot: Option<Value>,
     /// 已经收到过完整信封的订阅：只有它收省略帧时才去掉信封键（它手里有上一份可沿用）。
     envelope_sub_id: Option<String>,
+    /// 底层快照流是否已经退出（读/转发结束）。已关闭的会话不得被 `park` 或 `reclaim`。
+    closed: bool,
 }
 
 struct LiveSession {
@@ -104,6 +106,17 @@ struct LiveSession {
     /// 持有底层连接句柄；Drop 时后台关闭 socket，读线程随之自然退出。
     _handle_guard: Arc<HandleGuard>,
     route: Arc<Mutex<RouteState>>,
+}
+
+impl LiveSession {
+    fn is_closed(&self) -> bool {
+        self.action_tx.is_closed()
+            || self
+                .route
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .closed
+    }
 }
 
 struct HandleGuard {
@@ -193,13 +206,14 @@ impl AcpHub {
             active_sub_id: Some(sub_id.clone()),
             latest_snapshot: None,
             envelope_sub_id: None,
+            closed: false,
         }));
         let guard = Arc::new(HandleGuard {
             _conn: Mutex::new(Some(handle)),
         });
 
         let session = LiveSession {
-            owner: owner.clone(),
+            owner,
             machine,
             session_id,
             action_tx,
@@ -240,52 +254,81 @@ impl AcpHub {
         session_id: &str,
         new_sub_id: &str,
     ) -> Option<Option<Value>> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let matches = state.parked.get(reuse_key).is_some_and(|p| {
-            p.session.owner == owner
-                && p.session.machine == *machine
-                && p.session.session_id == session_id
-        });
-        if !matches {
-            return None;
-        }
-        let parked = state.parked.remove(reuse_key)?;
-        let latest = {
-            let mut route = parked
-                .session
-                .route
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            route.active_sub_id = Some(new_sub_id.to_owned());
-            route.envelope_sub_id = None;
-            route.latest_snapshot.clone()
+        let mut stale_to_drop: Option<ParkedEntry> = None;
+        let mut old_active: Option<LiveSession> = None;
+        let result = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let matches = state.parked.get(reuse_key).is_some_and(|p| {
+                p.session.owner == owner
+                    && p.session.machine == *machine
+                    && p.session.session_id == session_id
+            });
+            if !matches {
+                return None;
+            }
+            let parked = state.parked.remove(reuse_key)?;
+            if parked.session.action_tx.is_closed() {
+                stale_to_drop = Some(parked);
+                None
+            } else {
+                // 单次 route 锁内完成存活校验、Refresh 触发和路由切换，避免拆锁间隙里
+                // 旧转发器的 emit_closed / emit_snapshot 串到新 sub_id 上。
+                let replayable = {
+                    let mut route = parked
+                        .session
+                        .route
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    if route.closed {
+                        None
+                    } else {
+                        let replayable = route.latest_snapshot.clone().filter(|snap| {
+                            !snap
+                                .get("envelope_omitted")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                                && snap
+                                    .get("entries_offset")
+                                    .and_then(Value::as_u64)
+                                    .unwrap_or(0)
+                                    == 0
+                        });
+                        if replayable.is_none()
+                            && matches!(
+                                parked.session.action_tx.try_send(AcpUserAction::Refresh),
+                                Err(smol::channel::TrySendError::Closed(_))
+                            )
+                        {
+                            None
+                        } else {
+                            route.active_sub_id = Some(new_sub_id.to_owned());
+                            route.envelope_sub_id =
+                                replayable.as_ref().map(|_| new_sub_id.to_owned());
+                            Some(replayable)
+                        }
+                    }
+                };
+                if let Some(replayable) = replayable {
+                    if let Some(old) = state.active.insert(new_sub_id.to_owned(), parked.session) {
+                        if let Ok(mut r) = old.route.lock() {
+                            r.active_sub_id = None;
+                        }
+                        old_active = Some(old);
+                    }
+                    Some(replayable)
+                } else {
+                    stale_to_drop = Some(parked);
+                    None
+                }
+            }
         };
-        let replayable = latest.filter(|snap| {
-            !snap
-                .get("envelope_omitted")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-                && snap
-                    .get("entries_offset")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0)
-                    == 0
-        });
-        if replayable.is_none() {
-            // 缓存帧是增量尾片或省略了信封时不能直接灌给新挂载组件，向守护请求完整权威快照。
-            let _ = parked.session.action_tx.try_send(AcpUserAction::Refresh);
-        } else if let Ok(mut route) = parked.session.route.lock() {
-            route.envelope_sub_id = Some(new_sub_id.to_owned());
-        }
-        if let Some(old) = state.active.insert(new_sub_id.to_owned(), parked.session)
-            && let Ok(mut r) = old.route.lock()
-        {
-            r.active_sub_id = None;
-        }
-        Some(replayable)
+        drop(stale_to_drop);
+        drop(old_active);
+        result
     }
 
-    /// 取消订阅。带 `reuse_key` 时暂存 [`PARK_GRACE`] 供分屏重构同帧认领，超时自动断开。
+    /// 取消订阅。带 `reuse_key` 且连接仍存活时暂存 [`PARK_GRACE`] 供分屏重构同帧认领，
+    /// 已断开的会话直接释放，绝不进入暂存池。
     pub fn unsubscribe(&self, owner: &str, sub_id: &str, reuse_key: Option<String>) {
         let removed = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -305,14 +348,19 @@ impl AcpHub {
             drop(session);
             return;
         };
+        if session.is_closed() {
+            drop(session);
+            return;
+        }
 
         let token = self.park_seq.fetch_add(1, Ordering::Relaxed);
-        {
+        let replaced = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state
                 .parked
-                .insert(reuse_key.clone(), ParkedEntry { token, session });
-        }
+                .insert(reuse_key.clone(), ParkedEntry { token, session })
+        };
+        drop(replaced);
         let state_ref = Arc::clone(&self.state);
         let _ = std::thread::Builder::new()
             .name("smelt-acp-park-gc".into())
@@ -332,6 +380,22 @@ impl AcpHub {
                 };
                 drop(dropped);
             });
+    }
+
+    /// 某台机器重新连上后，丢弃该机器暂存池里基于旧传输链路的连接，避免被新订阅误认领。
+    pub fn drop_parked_for_machine(&self, machine: &RuntimeKey) {
+        let dropped = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let keys: Vec<String> = state
+                .parked
+                .iter()
+                .filter_map(|(k, p)| (p.session.machine == *machine).then_some(k.clone()))
+                .collect();
+            keys.into_iter()
+                .filter_map(|key| state.parked.remove(&key))
+                .collect::<Vec<_>>()
+        };
+        drop(dropped);
     }
 
     /// 插件热重载 / 卸载 / 崩溃时，立即释放该插件拥有的全部活跃与暂存连接。
@@ -462,6 +526,7 @@ async fn run_forwarder(
             if let Some(snap) = pending.take() {
                 emit_snapshot(&route, &images, &sink, &snap);
             }
+            emit_closed(&route, &sink);
             break;
         };
 
@@ -510,6 +575,26 @@ async fn run_forwarder(
                 }
             }
         }
+    }
+}
+
+fn emit_closed(route: &Arc<Mutex<RouteState>>, sink: &AcpEventSink) {
+    let target = {
+        let mut guard = route.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.closed = true;
+        guard
+            .active_sub_id
+            .clone()
+            .map(|sub_id| (guard.owner.clone(), sub_id))
+    };
+    if let Some((owner, sub_id)) = target {
+        sink(
+            &owner,
+            json!({
+                "sub_id": sub_id,
+                "kind": "closed",
+            }),
+        );
     }
 }
 
@@ -825,6 +910,345 @@ mod tests {
         assert!(
             hub.send_action("smelt.sessions", "sub-1", json!("Cancel"), &[])
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn closed_stream_emits_closed_event_and_is_not_reclaimed() {
+        let received = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let recv_clone = Arc::clone(&received);
+        let sink: AcpEventSink = Arc::new(move |owner, val| {
+            recv_clone.lock().unwrap().push((owner.to_owned(), val));
+        });
+        let hub = AcpHub::new(ImageStore::new(), sink);
+        let (handle, _action_rx, event_tx) = ConversationClientHandle::detached();
+
+        hub.attach_handle(
+            "sub-old".into(),
+            "smelt.sessions".into(),
+            RuntimeKey::Local,
+            "s-dead".into(),
+            handle,
+        );
+        let disconnected = fallback_snapshot("disconnected", 5);
+        event_tx
+            .try_send(ConversationClientEvent::Snapshot(Box::new(disconnected)))
+            .unwrap();
+        drop(event_tx);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if received
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, v)| v["kind"] == "closed")
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let events = received.lock().unwrap().clone();
+        assert!(
+            events.len() >= 2,
+            "expected snapshot followed by closed event, got {events:?}"
+        );
+        assert_eq!(events[0].1["kind"], "snapshot");
+        assert_eq!(events[1].1["kind"], "closed");
+        assert_eq!(events[1].1["sub_id"], "sub-old");
+
+        hub.unsubscribe("smelt.sessions", "sub-old", Some("pane-dead".into()));
+        let reclaimed = hub.try_reclaim(
+            "pane-dead",
+            "smelt.sessions",
+            &RuntimeKey::Local,
+            "s-dead",
+            "sub-new",
+        );
+        assert!(
+            reclaimed.is_none(),
+            "closed session must never be reclaimed through reuse_key"
+        );
+    }
+
+    #[test]
+    fn parked_session_that_closes_during_grace_is_not_reclaimed() {
+        let received = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let recv_clone = Arc::clone(&received);
+        let sink: AcpEventSink = Arc::new(move |owner, val| {
+            recv_clone.lock().unwrap().push((owner.to_owned(), val));
+        });
+        let hub = AcpHub::new(ImageStore::new(), sink);
+        let (handle, _action_rx, event_tx) = ConversationClientHandle::detached();
+
+        hub.attach_handle(
+            "sub-old".into(),
+            "smelt.sessions".into(),
+            RuntimeKey::Local,
+            "s-parked".into(),
+            handle,
+        );
+        let mut snap = fallback_snapshot("", 0);
+        snap.phase = DaemonPhase::Idle;
+        event_tx
+            .try_send(ConversationClientEvent::Snapshot(Box::new(snap)))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+
+        hub.unsubscribe("smelt.sessions", "sub-old", Some("pane-parked".into()));
+        // 暂存期间底层连接断了
+        drop(event_tx);
+        std::thread::sleep(Duration::from_millis(40));
+
+        assert!(
+            !received
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, v)| v["kind"] == "closed"),
+            "unsubscribed parked session must not emit closed to old sub_id"
+        );
+        let reclaimed = hub.try_reclaim(
+            "pane-parked",
+            "smelt.sessions",
+            &RuntimeKey::Local,
+            "s-parked",
+            "sub-new",
+        );
+        assert!(
+            reclaimed.is_none(),
+            "parked session whose stream closed during grace must not be reclaimed"
+        );
+    }
+
+    #[test]
+    fn drop_parked_for_machine_clears_only_that_machine() {
+        let sink: AcpEventSink = Arc::new(|_, _| {});
+        let hub = AcpHub::new(ImageStore::new(), sink);
+        let (local_handle, _local_action_rx, _local_event_tx) =
+            ConversationClientHandle::detached();
+        let (remote_handle, _remote_action_rx, _remote_event_tx) =
+            ConversationClientHandle::detached();
+        let remote = RuntimeKey::Remote("peer-a".into());
+
+        hub.attach_handle(
+            "sub-local".into(),
+            "smelt.sessions".into(),
+            RuntimeKey::Local,
+            "s-local".into(),
+            local_handle,
+        );
+        hub.attach_handle(
+            "sub-remote".into(),
+            "smelt.sessions".into(),
+            remote.clone(),
+            "s-remote".into(),
+            remote_handle,
+        );
+        hub.unsubscribe("smelt.sessions", "sub-local", Some("pane-local".into()));
+        hub.unsubscribe("smelt.sessions", "sub-remote", Some("pane-remote".into()));
+
+        hub.drop_parked_for_machine(&remote);
+
+        assert!(
+            hub.try_reclaim(
+                "pane-remote",
+                "smelt.sessions",
+                &remote,
+                "s-remote",
+                "sub-r2"
+            )
+            .is_none(),
+            "parked sessions for reconnected remote must be dropped"
+        );
+        assert!(
+            hub.try_reclaim(
+                "pane-local",
+                "smelt.sessions",
+                &RuntimeKey::Local,
+                "s-local",
+                "sub-l2",
+            )
+            .is_some(),
+            "parked sessions for other machines must remain intact"
+        );
+    }
+
+    #[test]
+    fn subscribe_after_stream_eof_opens_fresh_connection_despite_same_reuse_key() {
+        use smelt_plugin_api::client::RuntimeStream;
+        use smelt_plugin_api::model::acp_session::{AcpSnapshotFrame, SessionLive};
+        use smelt_plugin_api::model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
+        use smelt_plugin_api::model::conversation::ConversationBinding;
+        use std::collections::BTreeMap;
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::sync::atomic::AtomicI32;
+
+        fn wait_for(
+            received: &Mutex<Vec<(String, Value)>>,
+            pred: impl Fn(&[(String, Value)]) -> bool,
+        ) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                if pred(&received.lock().unwrap()) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        }
+
+        let connects = Arc::new(AtomicI32::new(0));
+        let connects_for_conn = Arc::clone(&connects);
+        let runtime = RuntimeClient::new(move || {
+            let attempt = connects_for_conn.fetch_add(1, Ordering::SeqCst) + 1;
+            let (client_stream, server_stream) = RuntimeStream::pair()?;
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(server_stream.try_clone().expect("clone"));
+                let mut open_line = String::new();
+                let _ = reader.read_line(&mut open_line);
+
+                let mut snap = fallback_snapshot("", 5);
+                snap.phase = DaemonPhase::Idle;
+                snap.entries_total = 5;
+                snap.session_title = Some(format!("attempt-{attempt}"));
+                let live = SessionLive::from_snapshot(&snap);
+                let frame = serde_json::to_value(AcpSnapshotFrame {
+                    live: &live,
+                    snapshot: &snap,
+                    provider_pid: Some(attempt),
+                    initial_ack: false,
+                })
+                .unwrap();
+                let mut writer = server_stream;
+                let _ = writeln!(writer, "{frame}");
+                if attempt == 1 {
+                    // 第一次连接模拟休眠断流
+                    drop(writer);
+                    drop(reader);
+                } else {
+                    // 第二次连接保持存活直到客户端断开
+                    let mut hold = String::new();
+                    let _ = reader.read_line(&mut hold);
+                }
+            });
+            Ok(client_stream)
+        });
+
+        let received = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let recv_clone = Arc::clone(&received);
+        let sink: AcpEventSink = Arc::new(move |owner, val| {
+            recv_clone.lock().unwrap().push((owner.to_owned(), val));
+        });
+        let hub = AcpHub::new(ImageStore::new(), sink);
+        let launch = || ConversationClientLaunch {
+            id: "acp-remote-1".into(),
+            cwd: Some("/repo".into()),
+            launch: ConversationLaunchSpec::from_command("pi"),
+            engine_kind: ConversationAgentKind::Pi,
+            ephemeral_env: BTreeMap::default(),
+            resume_id: None,
+            fork_id: None,
+            fork_cut: None,
+            retained_entries_end: 5,
+            conversation_binding: ConversationBinding::Direct,
+            pending_agent_preset: None,
+            initial_config: Vec::new(),
+            initial_prompt: None,
+        };
+
+        hub.subscribe(
+            runtime.clone(),
+            SubscribeRequest {
+                sub_id: "sub-1".into(),
+                owner: "smelt.sessions".into(),
+                machine: RuntimeKey::Remote("peer-1".into()),
+                reuse_key: Some("pane-1".into()),
+                launch: launch(),
+            },
+        );
+
+        assert!(
+            wait_for(&received, |evs| evs
+                .iter()
+                .any(|(_, v)| v["sub_id"] == "sub-1" && v["kind"] == "closed")),
+            "first stream should emit closed after remote EOF"
+        );
+
+        // 即使退订和重订都带着同一个 reuse_key，也不能认领已断流连接，必须重新建连。
+        hub.unsubscribe("smelt.sessions", "sub-1", Some("pane-1".into()));
+        hub.subscribe(
+            runtime,
+            SubscribeRequest {
+                sub_id: "sub-2".into(),
+                owner: "smelt.sessions".into(),
+                machine: RuntimeKey::Remote("peer-1".into()),
+                reuse_key: Some("pane-1".into()),
+                launch: launch(),
+            },
+        );
+
+        assert!(
+            wait_for(&received, |evs| evs.iter().any(|(_, v)| {
+                v["sub_id"] == "sub-2"
+                    && v["kind"] == "snapshot"
+                    && v["snapshot"]["phase"] == "idle"
+                    && v["snapshot"]["session_title"] == "attempt-2"
+            })),
+            "second subscribe must open a fresh stream and receive live snapshot, got {:?}",
+            received.lock().unwrap()
+        );
+        assert_eq!(connects.load(Ordering::SeqCst), 2);
+        hub.remove_owner("smelt.sessions");
+    }
+
+    #[test]
+    fn failed_reclaim_on_closed_action_channel_never_leaks_closed_to_new_sub_id() {
+        let received = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let recv_clone = Arc::clone(&received);
+        let sink: AcpEventSink = Arc::new(move |owner, val| {
+            recv_clone.lock().unwrap().push((owner.to_owned(), val));
+        });
+        let hub = AcpHub::new(ImageStore::new(), sink);
+        let (handle, action_rx, event_tx) = ConversationClientHandle::detached();
+
+        hub.attach_handle(
+            "sub-old".into(),
+            "smelt.sessions".into(),
+            RuntimeKey::Local,
+            "s-race".into(),
+            handle,
+        );
+        let mut snap = fallback_snapshot("", 5);
+        snap.phase = DaemonPhase::Idle;
+        event_tx
+            .try_send(ConversationClientEvent::Snapshot(Box::new(snap)))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+
+        hub.unsubscribe("smelt.sessions", "sub-old", Some("pane-race".into()));
+        // 写端先关，但读端还没关：try_reclaim 应拒绝认领且绝不把 active_sub_id 改成 sub-new。
+        drop(action_rx);
+        assert!(
+            hub.try_reclaim(
+                "pane-race",
+                "smelt.sessions",
+                &RuntimeKey::Local,
+                "s-race",
+                "sub-new",
+            )
+            .is_none()
+        );
+        // 随后读端关闭触发 emit_closed，绝不能发到 sub-new 上。
+        drop(event_tx);
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(
+            !received
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, v)| v["sub_id"] == "sub-new"),
+            "rejected reclaim must never leak closed event to new_sub_id"
         );
     }
 }

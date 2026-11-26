@@ -455,6 +455,9 @@ impl MainShell {
             ) {
                 this.bridge.sync_clients(cx);
             }
+            if let HostEvent::Reconnected(machine) = event {
+                this.bridge.drop_parked_acp_for_machine(machine);
+            }
             let dirty = host::dirty_slices_for_event(event);
             if !dirty.is_empty() {
                 if dirty.intersects(host::SliceMask::SHELL | host::SliceMask::SAFE_AREAS) {

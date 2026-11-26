@@ -3,9 +3,82 @@
 export const MAX_COMPLETION_ITEMS = 12;
 export const PROMPT_RAIL_MAX_TICKS = 11;
 export const PROMPT_RAIL_EDGE_FADE = 2;
+/** 快照流撑过这么久再断，重新订阅的退避计数回到起点（对齐旧版 AcpView）。 */
+export const RESUBSCRIBE_STABLE_AFTER_MS = 30_000;
+/** 运行时在线却连续这么多次没订稳，停止自动重试并等待用户或下一次 `reconnected`。 */
+export const RESUBSCRIBE_MAX_ATTEMPTS = 6;
 
 export function isNewConversationCommand(text) {
   return typeof text === "string" && text.trim().toLowerCase() === "/clear";
+}
+
+/** 对话已结束的终态相位（`dead` / 兼容旧快照的 `failed`）。 */
+export function isEndedPhase(phase) {
+  return phase === "dead" || phase === "failed";
+}
+
+/** 仅是传输链路断开（远端会话本身仍可能存活），应当自动或手动重新 `acp_open`，不该杀进程重启。 */
+export function isTransientDisconnect(snap) {
+  return Boolean(snap && isEndedPhase(snap.phase) && snap.end_kind === "transport_disconnected");
+}
+
+/** 快照流关闭后是否应当自动等待上线并重新订阅。真实 provider 失败或显式终结不自动重订。 */
+export function shouldAutoResubscribe(snap) {
+  if (!snap) return true;
+  if (!isEndedPhase(snap.phase)) return true;
+  return snap.end_kind === "transport_disconnected";
+}
+
+/** 宿主通知某台机器重新连上时，这条对话是否应当重新 `acp_open`（恢复断流/半开连接，不拉起失败或终结会话）。 */
+export function shouldReconnectOnMachineReconnected(snap) {
+  return shouldAutoResubscribe(snap);
+}
+
+/** 快照流关闭时的下一步重订决策：`retry`、`exhausted` 或 `stop`。 */
+export function nextResubscribeDecision({
+  snapshot,
+  previousFailures,
+  elapsedMs,
+  stableAfterMs = RESUBSCRIBE_STABLE_AFTER_MS,
+  maxAttempts = RESUBSCRIBE_MAX_ATTEMPTS,
+}) {
+  if (!shouldAutoResubscribe(snapshot)) {
+    return { action: "stop", failures: previousFailures };
+  }
+  const baseFailures = elapsedMs >= stableAfterMs ? 0 : previousFailures;
+  if (baseFailures >= maxAttempts) {
+    return { action: "exhausted", failures: baseFailures };
+  }
+  return { action: "retry", failures: baseFailures + 1 };
+}
+
+/**
+ * 底部/空态连接结束横幅的展示状态：
+ * - `none`：正常连接中或运行中，不展示；
+ * - `reconnecting`：传输断流自动重连中（本地重连或 smeltd 自动拉起 provider），安静提示；
+ * - `ended`：已停止，按原因区分 `reconnect`（仅重订，不杀进程）、`restart`（重拼规格并重启）或 `none`（已终结）。
+ */
+export function endedBannerState({ snapshot, reconnecting, reconnectExhausted, streamClosed }) {
+  if (reconnecting) {
+    return { kind: "reconnecting" };
+  }
+  if (!snapshot || !isEndedPhase(snapshot.phase)) {
+    return { kind: "none" };
+  }
+  if (isTransientDisconnect(snapshot)) {
+    if (!streamClosed && !reconnectExhausted) {
+      return { kind: "reconnecting" };
+    }
+    return {
+      kind: "ended",
+      action: "reconnect",
+      exhausted: Boolean(reconnectExhausted),
+    };
+  }
+  if (snapshot.end_kind === "session_terminated") {
+    return { kind: "ended", action: "none", exhausted: false };
+  }
+  return { kind: "ended", action: "restart", exhausted: false };
 }
 
 /** 回合在跑。`connecting` 是智能体还在启动，不是回合：这时发的提问运行时会排队，连上再送。 */
@@ -758,6 +831,9 @@ export function buildAcpLaunchPayload({
   directSpec = null,
   start = null,
   initialConfig = [],
+  resumeId = null,
+  retainedEntriesEnd = 0,
+  hasLiveHistory = false,
 }) {
   const cfgMap = new Map();
   for (const [k, v] of initialConfig ?? []) cfgMap.set(k, v);
@@ -769,14 +845,14 @@ export function buildAcpLaunchPayload({
     launch: launchSpec,
     engine_kind: agentId,
     ephemeral_env: {},
-    resume_id: dirAcp?.history_session_id ?? null,
-    fork_id: start?.fork?.provider_session_id ?? null,
-    fork_cut: start?.fork?.cut ?? null,
-    retained_entries_end: 0,
+    resume_id: resumeId ?? dirAcp?.history_session_id ?? null,
+    fork_id: hasLiveHistory ? null : (start?.fork?.provider_session_id ?? null),
+    fork_cut: hasLiveHistory ? null : (start?.fork?.cut ?? null),
+    retained_entries_end: retainedEntriesEnd,
     conversation_binding: directSpec?.binding ?? { type: "direct" },
     pending_agent_preset: dirAcp?.pending_agent_preset ?? null,
     initial_config: [...cfgMap.entries()],
-    initial_prompt: buildInitialPrompt(dirAcp?.pending_prompt),
+    initial_prompt: hasLiveHistory ? null : buildInitialPrompt(dirAcp?.pending_prompt),
   };
 }
 
@@ -1171,7 +1247,7 @@ export function showsEmptyWelcome({
   loadedOffset,
 }) {
   if (embedded || connectFailed || loadingOlder || entryCount > 0 || loadedOffset > 0) return false;
-  if (phase === "dead" || isTurnActive(phase)) return false;
+  if (isEndedPhase(phase) || isTurnActive(phase)) return false;
   return !(bringsContent && (phase === "connecting" || replayingHistory));
 }
 

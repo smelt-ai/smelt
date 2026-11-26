@@ -500,7 +500,8 @@ pub fn spawn_acp_client(
     let conn_cell_for_thread = Arc::clone(&conn_cell);
     let refresh_tx = action_tx.clone();
 
-    let thread_name = format!("smelt-acp-cli-{}", &launch.id[..launch.id.len().min(12)]);
+    let short_id = launch.id[..launch.id.len().min(12)].to_owned();
+    let thread_name = format!("smelt-acp-cli-{short_id}");
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
@@ -534,19 +535,43 @@ pub fn spawn_acp_client(
             if let Ok(mut cell) = conn_cell_for_thread.lock() {
                 *cell = conn.try_clone().ok();
             }
+            // 读线程无论因何退出（含早退和 unwind），都自动关闭并释放死 socket。
+            let _shutdown_guard = ShutdownOnDrop(Arc::clone(&conn_cell_for_thread));
 
-            std::thread::spawn(move || {
-                smol::block_on(async move {
-                    while let Ok(action) = action_rx.recv().await {
-                        let Ok(line) = serde_json::to_string(&action) else {
-                            continue;
-                        };
-                        if writeln!(writer, "{line}").is_err() {
-                            return;
+            let (writer_stop_tx, writer_stop_rx) = smol::channel::bounded::<()>(1);
+            let conn_cell_for_writer = Arc::clone(&conn_cell_for_thread);
+            let writer_spawn = std::thread::Builder::new()
+                .name(format!("smelt-acp-wr-{short_id}"))
+                .spawn(move || {
+                    smol::block_on(async move {
+                        loop {
+                            let next =
+                                smol::future::or(async { action_rx.recv().await.ok() }, async {
+                                    let _ = writer_stop_rx.recv().await;
+                                    None
+                                })
+                                .await;
+                            let Some(action) = next else {
+                                return;
+                            };
+                            let Ok(line) = serde_json::to_string(&action) else {
+                                continue;
+                            };
+                            if writeln!(writer, "{line}").is_err() {
+                                shutdown_conn(&conn_cell_for_writer);
+                                return;
+                            }
                         }
-                    }
+                    });
                 });
-            });
+            if writer_spawn.is_err() {
+                let _ = event_tx.try_send(ConversationClientEvent::Snapshot(Box::new(
+                    fallback_snapshot("failed to spawn writer thread", known_entries_end),
+                )));
+                return;
+            }
+            // 读线程无论因何退出，都立刻通知写线程退出并释放死 socket。
+            let _writer_stop = writer_stop_tx;
 
             let mut reader = BufReader::new(conn);
             let mut line = String::new();
@@ -612,6 +637,20 @@ pub fn spawn_acp_client(
         action_tx,
         event_rx,
         conn_cell,
+    }
+}
+
+fn shutdown_conn(cell: &Mutex<Option<RuntimeStream>>) {
+    if let Some(conn) = cell.lock().ok().and_then(|mut g| g.take()) {
+        let _ = conn.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+struct ShutdownOnDrop(Arc<Mutex<Option<RuntimeStream>>>);
+
+impl Drop for ShutdownOnDrop {
+    fn drop(&mut self) {
+        shutdown_conn(&self.0);
     }
 }
 
@@ -796,5 +835,83 @@ mod tests {
         assert_eq!(second.entries_total, 2);
         assert_eq!(second.entries.len(), 1);
         assert_eq!(second.snapshot_revision, 2);
+    }
+
+    #[test]
+    fn stream_eof_exits_writer_thread_and_closes_action_channel() {
+        let (client_stream, server_stream) = RuntimeStream::pair().expect("pair");
+        let client_cell = Arc::new(Mutex::new(Some(client_stream)));
+        let runtime = RuntimeClient::new(move || {
+            client_cell
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or_else(|| std::io::Error::other("only one connect expected"))
+        });
+
+        let server = std::thread::spawn(move || {
+            let mut reader = BufReader::new(server_stream.try_clone().expect("clone server"));
+            let mut open_line = String::new();
+            reader.read_line(&mut open_line).expect("read acp_open");
+            assert!(open_line.contains("acp_open"));
+
+            let mut snap = fallback_snapshot("", 0);
+            snap.phase = DaemonPhase::Idle;
+            snap.entries = vec![AcpEntry::User("hi".into())];
+            snap.entries_total = 1;
+            let mut sender = FrameMirror::default();
+            let frame = wire_frame(&mut sender, &snap, true);
+            let mut writer = server_stream;
+            writeln!(writer, "{frame}").expect("write snapshot");
+            // 模拟对端断流（EOF）
+            drop(writer);
+            drop(reader);
+        });
+
+        let handle = spawn_acp_client(
+            runtime,
+            ConversationClientLaunch {
+                id: "acp-eof".into(),
+                cwd: Some("/repo".into()),
+                launch: ConversationLaunchSpec::from_command("pi"),
+                engine_kind: ConversationAgentKind::Pi,
+                ephemeral_env: BTreeMap::new(),
+                resume_id: None,
+                fork_id: None,
+                fork_cut: None,
+                retained_entries_end: 0,
+                conversation_binding: ConversationBinding::Direct,
+                pending_agent_preset: None,
+                initial_config: Vec::new(),
+                initial_prompt: None,
+            },
+        );
+
+        let first = smol::block_on(handle.event_rx.recv()).expect("initial snapshot");
+        let ConversationClientEvent::Snapshot(first_snap) = first else {
+            panic!("expected snapshot");
+        };
+        assert_eq!(first_snap.phase, DaemonPhase::Idle);
+
+        let second = smol::block_on(handle.event_rx.recv()).expect("disconnect snapshot");
+        let ConversationClientEvent::Snapshot(disc_snap) = second else {
+            panic!("expected disconnected snapshot");
+        };
+        assert_eq!(disc_snap.phase, DaemonPhase::Dead);
+        assert_eq!(disc_snap.end_kind, AcpEndKind::TransportDisconnected);
+        assert_eq!(disc_snap.entries_offset, 1);
+
+        assert!(smol::block_on(handle.event_rx.recv()).is_err());
+
+        // 读线程退出后，写线程必须随之退出并关闭 action_tx（不依赖 drop handle）。
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !handle.action_tx.is_closed() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            handle.action_tx.is_closed(),
+            "writer thread must exit and close action_tx when stream disconnects"
+        );
+        server.join().unwrap();
     }
 }

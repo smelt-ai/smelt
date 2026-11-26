@@ -17,6 +17,7 @@ import {
   mergeEntryWindow,
   newSessionId,
   onAcpEvent,
+  onEvent,
   pathFileName,
   pathStartsWith,
   pathStyle,
@@ -25,6 +26,7 @@ import {
   SmeltIcon,
   SmeltNativeWindowDrag,
   theme,
+  waitOnline,
   workspaceDirectory,
 } from "smelt/sdk";
 import { MemoryChangesCard } from "./cards.tsx";
@@ -39,18 +41,23 @@ import {
   confirmedConfigValue,
   consumeComposerRestore,
   EMPTY_ENTRY_WINDOW,
+  endedBannerState,
   entryUserText,
   entryWindowOf,
   extractTurnAnswerPreview,
+  isEndedPhase,
   isStreamingMetaUnchanged,
+  isTransientDisconnect,
   isTurnActive,
   isUserEntry,
   launchBringsContent,
   mergeEnvelope,
+  nextResubscribeDecision,
   overlayModelState,
   overlaySessionConfigs,
   reconcilePendingConfigValues,
   sessionSkills,
+  shouldReconnectOnMachineReconnected,
   showsEmptyWelcome,
   spliceEntries,
   turnTimingsEqual,
@@ -200,6 +207,9 @@ export function SmeltConversation(props: SmeltConversationProps) {
   let imagePreviewCopyTimer: ReturnType<typeof setTimeout> | null = null;
   const restoreDraft = signal<{ seq: number; text: string; images: AttachedImage[] } | null>(null);
   const quickInsert = signal<{ seq: number; text: string } | null>(null);
+  const reconnecting = signal(false);
+  const reconnectExhausted = signal(false);
+  const streamClosed = signal(false);
   const reconnectSeq = signal(0);
 
   let listApi: any = null;
@@ -207,6 +217,40 @@ export function SmeltConversation(props: SmeltConversationProps) {
   let restoreSeq = 0;
   let quickInsertSeq = 0;
   let lastExternalInsertSeq = 0;
+  let resubscribeFailures = 0;
+  let hasLiveHistory = false;
+  let knownHistorySessionId: string | null = null;
+  let preparedLaunchSpec: { command: string; env: Record<string, string> } | null = null;
+  let prefillAppliedSessionKey: string | null = null;
+  let pendingOpenMode: "initial" | "reconnect" | "restart" = "initial";
+  let bypassReuseOnce = false;
+  let retryWaitCancel: (() => void) | null = null;
+
+  const cancelPendingRetryWait = () => {
+    if (retryWaitCancel) {
+      retryWaitCancel();
+      retryWaitCancel = null;
+    }
+  };
+
+  const triggerReconnect = (
+    mode: "reconnect" | "restart",
+    { resetFailures = true, showBanner = true } = {},
+  ) => {
+    cancelPendingRetryWait();
+    if (resetFailures) {
+      resubscribeFailures = 0;
+    }
+    pendingOpenMode = mode;
+    bypassReuseOnce = true;
+    connectError.set(null);
+    reconnectExhausted.set(false);
+    streamClosed.set(false);
+    if (showBanner) {
+      reconnecting.set(true);
+    }
+    reconnectSeq.set(reconnectSeq() + 1);
+  };
 
   effect(() => {
     const ext = props.insertText;
@@ -252,7 +296,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
   const connecting = computed(() => phase() === "connecting");
   const turnActive = computed(() => isTurnActive(phase()));
   const settled = computed(() => !connecting() && !turnActive());
-  const dead = computed(() => phase() === "dead");
+  const dead = computed(() => isEndedPhase(phase()));
   const capabilitiesByAgent = computed(() => Boolean(props.directoryAcp?.agent_definition_id));
 
   const effectiveModel = computed(() =>
@@ -324,6 +368,20 @@ export function SmeltConversation(props: SmeltConversationProps) {
     const merged = mergeEnvelope(prevSnap, rawSnap);
     latestSnapshot = merged;
     if (permissionSubmitting()) permissionSubmitting.set(false);
+
+    if (merged.history_abandoned) {
+      knownHistorySessionId = null;
+    } else if (
+      typeof merged.history_session_id === "string" &&
+      merged.history_session_id.length > 0
+    ) {
+      knownHistorySessionId = merged.history_session_id;
+    }
+    if (!isTransientDisconnect(merged)) {
+      reconnecting.set(false);
+      reconnectExhausted.set(false);
+      connectError.set(null);
+    }
 
     // 热路径快判：流式阶段绝大多数帧只更新最后一条活跃 Assistant 正文；
     // 先在 JS 侧确认单条尾部补丁，直接跳过 `mergeEntryWindow` 同步 FFI 与 `spliceEntries` 整表拷贝。
@@ -414,6 +472,10 @@ export function SmeltConversation(props: SmeltConversationProps) {
           prevEs.window = nextEs.window;
         }
       }
+    }
+
+    if (!isEndedPhase(merged.phase) || nextEs.entries.length > 0 || nextEs.window.offset > 0) {
+      hasLiveHistory = true;
     }
 
     // 窗口停在末尾却是空的（`acp_open` 默认 `omit_history: true` 的首帧、对面回退到窗口之前），
@@ -509,7 +571,11 @@ export function SmeltConversation(props: SmeltConversationProps) {
   // 建立与维护 ACP 订阅生命周期
   effect(() => {
     const targetKey = launchTargetKey();
-    if (!targetKey) return;
+    if (!targetKey) {
+      pendingOpenMode = "initial";
+      bypassReuseOnce = false;
+      return;
+    }
     const machine = props.machine ?? null;
     const sessionId = props.sessionId;
     const dirAcp = latestDirAcp;
@@ -517,10 +583,20 @@ export function SmeltConversation(props: SmeltConversationProps) {
     const start = latestStart;
     const initialConfig = latestInitialConfig;
     const reuseKey = latestReuseKey;
-    if (!dirAcp && !directSpec) return;
+    if (!dirAcp && !directSpec) {
+      pendingOpenMode = "initial";
+      bypassReuseOnce = false;
+      return;
+    }
 
     const sessionKey = `${machine ?? ""}\0${sessionId}`;
-    if (activeSessionKey !== null && activeSessionKey !== sessionKey) {
+    const sessionChanged = activeSessionKey !== null && activeSessionKey !== sessionKey;
+    const openMode = sessionChanged ? "initial" : pendingOpenMode;
+    const claimReuseKey = !bypassReuseOnce && openMode === "initial" ? reuseKey : undefined;
+    pendingOpenMode = "initial";
+    bypassReuseOnce = false;
+
+    if (sessionChanged) {
       latestSnapshot = null;
       snapshot.set(null);
       turnTimings.set([]);
@@ -539,29 +615,74 @@ export function SmeltConversation(props: SmeltConversationProps) {
       readingGlobalIndex.set(null);
       atLatest.set(true);
       loadingOlder.set(false);
+      reconnecting.set(false);
+      reconnectExhausted.set(false);
       lastRestoreRev = 0;
       backfilledAt = null;
       lastRejectedNoticeId = null;
       lastInitialPromptText = null;
+      resubscribeFailures = 0;
+      hasLiveHistory = false;
+      knownHistorySessionId = null;
+      preparedLaunchSpec = null;
     }
     activeSessionKey = sessionKey;
 
     let cancelled = false;
     let firstFrame = true;
+    // 只在收到首帧真实（非断流兜底）快照时记下建连时刻：避免远端拨号 30s 超时失败被误判为「已稳定运行 30s」从而无限重试。
+    let connectedAt: number | null = null;
     const currentSubId = `sub-${newSessionId()}`;
     subId.set(currentSubId);
     connectError.set(null);
+    streamClosed.set(false);
 
     const unsubEvent = onAcpEvent((ev: any) => {
       if (cancelled || !ev || ev.sub_id !== currentSubId) return;
       if (ev.kind === "snapshot" && ev.snapshot) {
         applyIncomingSnapshot(ev.snapshot, firstFrame);
+        if (connectedAt === null && !isTransientDisconnect(latestSnapshot)) {
+          connectedAt = Date.now();
+        }
         firstFrame = false;
       } else if (ev.kind === "initial_prompt_unsupported" && lastInitialPromptText) {
         const text = lastInitialPromptText;
         lastInitialPromptText = null;
         restoreSeq += 1;
         restoreDraft.set({ seq: restoreSeq, text, images: [] });
+      } else if (ev.kind === "closed") {
+        streamClosed.set(true);
+        const decision = nextResubscribeDecision({
+          snapshot: latestSnapshot,
+          previousFailures: resubscribeFailures,
+          elapsedMs: connectedAt !== null ? Date.now() - connectedAt : 0,
+        });
+        if (decision.action === "stop") {
+          reconnecting.set(false);
+          return;
+        }
+        resubscribeFailures = decision.failures;
+        if (decision.action === "exhausted") {
+          reconnecting.set(false);
+          reconnectExhausted.set(true);
+          return;
+        }
+        reconnecting.set(true);
+        reconnectExhausted.set(false);
+        let waitCancelled = false;
+        cancelPendingRetryWait();
+        retryWaitCancel = () => {
+          waitCancelled = true;
+        };
+        void waitOnline(machine, decision.failures).then((online) => {
+          if (cancelled || waitCancelled) return;
+          retryWaitCancel = null;
+          if (!online) {
+            reconnecting.set(false);
+            return;
+          }
+          triggerReconnect("reconnect", { resetFailures: false });
+        });
       }
     });
 
@@ -579,22 +700,37 @@ export function SmeltConversation(props: SmeltConversationProps) {
 
     const startLaunch = async () => {
       try {
-        let launchSpec = dirAcp?.launch
+        const baseLaunchSpec = dirAcp?.launch
           ? { command: String(dirAcp.launch.command ?? ""), env: dirAcp.launch.env ?? {} }
           : { command: defaultLaunchCommandFor(resolvedAgent), env: {} };
+        let launchSpec =
+          openMode === "reconnect" && preparedLaunchSpec ? preparedLaunchSpec : baseLaunchSpec;
 
-        if (dirAcp) {
+        if (dirAcp && (openMode === "restart" || !preparedLaunchSpec)) {
           try {
             const prepared = await call(machine, "session.launch.prepare", {
-              launch: launchSpec,
-              prep: {
-                agent_definition_id: dirAcp.agent_definition_id ?? null,
-                restore: !start,
-                restart: null,
-              },
+              launch: baseLaunchSpec,
+              prep:
+                openMode === "restart"
+                  ? {
+                      agent_definition_id: dirAcp.agent_definition_id ?? null,
+                      restore: true,
+                      restart: {
+                        engine_kind: resolvedAgent,
+                        profile_id: dirAcp.profile_id ?? null,
+                      },
+                    }
+                  : {
+                      agent_definition_id: dirAcp.agent_definition_id ?? null,
+                      restore: !start,
+                      restart: null,
+                    },
             });
             if (cancelled) return;
-            if (prepared?.launch) launchSpec = prepared.launch;
+            if (prepared?.launch) {
+              launchSpec = prepared.launch;
+              preparedLaunchSpec = prepared.launch;
+            }
           } catch {
             // 旧运行时或离线时直接沿用原始 launchSpec
           }
@@ -602,10 +738,17 @@ export function SmeltConversation(props: SmeltConversationProps) {
 
         if (cancelled) return;
 
-        if (start?.prefill) {
+        if (start?.prefill && prefillAppliedSessionKey !== sessionKey) {
+          prefillAppliedSessionKey = sessionKey;
           restoreSeq += 1;
           restoreDraft.set({ seq: restoreSeq, text: start.prefill, images: [] });
         }
+
+        const es = entriesState();
+        const retainedEntriesEnd = es.window.offset + es.entries.length;
+        const resumeId = latestSnapshot?.history_abandoned
+          ? null
+          : (knownHistorySessionId ?? dirAcp?.history_session_id ?? null);
 
         const launchPayload = buildAcpLaunchPayload({
           sessionId,
@@ -616,17 +759,25 @@ export function SmeltConversation(props: SmeltConversationProps) {
           directSpec,
           start,
           initialConfig,
+          resumeId,
+          retainedEntriesEnd,
+          hasLiveHistory,
         });
         lastInitialPromptText = launchPayload.initial_prompt?.text ?? null;
 
         await acpSubscribe({
           subId: currentSubId,
           machine,
-          reuseKey,
+          reuseKey: claimReuseKey,
           launch: launchPayload,
         });
+        if (cancelled) {
+          void acpUnsubscribe(currentSubId).catch(() => {});
+          return;
+        }
       } catch (err: any) {
         if (!cancelled) {
+          reconnecting.set(false);
           connectError.set(err?.message ?? String(err));
         }
       }
@@ -636,10 +787,36 @@ export function SmeltConversation(props: SmeltConversationProps) {
 
     cleanup(() => {
       cancelled = true;
+      cancelPendingRetryWait();
       unsubEvent();
       if (subId() === currentSubId) subId.set(null);
-      void acpUnsubscribe(currentSubId, reuseKey).catch(() => {});
+      const parkKey = bypassReuseOnce ? undefined : reuseKey;
+      void acpUnsubscribe(currentSubId, parkKey).catch(() => {});
     });
+  });
+
+  // 运行时重新连上时主动续订：既恢复休眠/断网后已断开（甚至耗尽重试）的对话，
+  // 也切掉旧链路上的半开僵尸 socket；明确失败或已终结的对话不自动拉起。
+  effect(() => {
+    const machine = props.machine ?? null;
+    const sessionId = props.sessionId;
+    if (!sessionId) return;
+    const unsub = onEvent(
+      (event: any) => {
+        if (event?.type !== "reconnected") return;
+        if ((event.machine ?? null) !== machine) return;
+        if (!launchTargetKey()) return;
+        if (!shouldReconnectOnMachineReconnected(latestSnapshot)) return;
+        const alreadyVisiblyDisconnected =
+          streamClosed() || dead() || reconnecting() || reconnectExhausted();
+        triggerReconnect("reconnect", {
+          resetFailures: true,
+          showBanner: alreadyVisiblyDisconnected,
+        });
+      },
+      ["reconnected"],
+    );
+    cleanup(unsub);
   });
 
   // 响应外部模型刷新信号（如 Pi 配置变化）
@@ -872,9 +1049,37 @@ export function SmeltConversation(props: SmeltConversationProps) {
       LayoutAnimation.configureNext(WELCOME_LAYOUT_TRANSITION);
     }
   });
-  const showEndedEmpty = computed(
-    () => dead() && entriesState().entries.length === 0 && entriesState().window.offset === 0,
+  const bannerState = computed(() =>
+    endedBannerState({
+      snapshot: snapshot(),
+      reconnecting: reconnecting(),
+      reconnectExhausted: reconnectExhausted(),
+      streamClosed: streamClosed(),
+    }),
   );
+  const hasEntries = computed(
+    () => entriesState().entries.length > 0 || entriesState().window.offset > 0,
+  );
+  const showEndedEmpty = computed(() => !hasEntries() && bannerState().kind === "ended");
+  const showReconnectingEmpty = computed(
+    () => !hasEntries() && bannerState().kind === "reconnecting",
+  );
+  const endedMessage = computed(() => {
+    const state = bannerState();
+    if (state.kind === "ended" && state.exhausted) {
+      return ct("status.resubscribe_exhausted");
+    }
+    return snapshot()?.end_reason || ct("status.disconnected");
+  });
+  const handleEndedAction = () => {
+    const state = bannerState();
+    if (state.kind !== "ended") return;
+    if (state.action === "reconnect") {
+      triggerReconnect("reconnect");
+    } else if (state.action === "restart") {
+      triggerReconnect("restart");
+    }
+  };
 
   return (
     <View
@@ -993,7 +1198,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
         {/* 消息流主体或启动 / 结束 */}
         <If when={!showEmptyWelcome()}>
           <If
-            when={(entriesState().entries.length > 0 || snapshot() != null) && !showEndedEmpty()}
+            when={(hasEntries() || snapshot() != null) && !showEndedEmpty() && !showReconnectingEmpty()}
             else={
               <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 12, padding: 24 }}>
                 <If
@@ -1019,14 +1224,16 @@ export function SmeltConversation(props: SmeltConversationProps) {
                             primary
                             small
                             label={ct("action.retry")}
-                            onPress={() => reconnectSeq.set(reconnectSeq() + 1)}
+                            onPress={() => triggerReconnect("reconnect")}
                           />
                         </View>
                       }
                     >
                       <SmeltIcon spin={visible()} size={16} color={look().palette.muted} />
                       <Text style={{ fontSize: look().type.ui.size, color: look().palette.muted }}>
-                        {props.placeholder || ct("status.opening")}
+                        {showReconnectingEmpty()
+                          ? ct("status.reconnecting")
+                          : props.placeholder || ct("status.opening")}
                       </Text>
                     </If>
                   }
@@ -1052,17 +1259,21 @@ export function SmeltConversation(props: SmeltConversationProps) {
                         textAlign: "center",
                       }}
                     >
-                      {snapshot()?.end_reason || ct("status.disconnected")}
+                      {endedMessage()}
                     </Text>
-                    <SmeltButton
-                      primary
-                      label={snapshot()?.history_session_id ? ct("ended.resume") : ct("ended.new")}
-                      onPress={() => {
-                        acpRestart(props.machine ?? null, props.sessionId)
-                          .catch(() => {})
-                          .finally(() => reconnectSeq.set(reconnectSeq() + 1));
-                      }}
-                    />
+                    <If when={bannerState().kind === "ended" && (bannerState() as any).action !== "none"}>
+                      <SmeltButton
+                        primary
+                        label={
+                          (bannerState() as any).action === "reconnect"
+                            ? ct("action.reconnect")
+                            : snapshot()?.history_session_id
+                              ? ct("ended.resume")
+                              : ct("ended.new")
+                        }
+                        onPress={handleEndedAction}
+                      />
+                    </If>
                   </View>
                 </If>
               </View>
@@ -1206,7 +1417,21 @@ export function SmeltConversation(props: SmeltConversationProps) {
           </View>
         </If>
 
-        <If when={dead() && !showEndedEmpty()}>
+        <If when={bannerState().kind === "reconnecting" && !showReconnectingEmpty()}>
+          <View style={{ width: "100%", alignItems: "center", paddingHorizontal: 16, paddingBottom: 6 }}>
+            <View
+              class="w-full px-3 py-2 rounded-[10px] bg-soft border border-border flex-row items-center gap-2"
+              style={{ maxWidth: 768 }}
+            >
+              <SmeltIcon spin={visible()} size={12} color={look().palette.muted} />
+              <Text style={{ flex: 1, fontSize: look().type.text_xsmall.size, color: look().palette.text }}>
+                {ct("status.reconnecting")}
+              </Text>
+            </View>
+          </View>
+        </If>
+
+        <If when={bannerState().kind === "ended" && !showEndedEmpty()}>
           <View style={{ width: "100%", alignItems: "center", paddingHorizontal: 16, paddingBottom: 6 }}>
             <View
               class="w-full px-3.5 py-2 rounded-xl bg-bad/12 border border-bad flex-row items-center gap-2.5"
@@ -1214,18 +1439,20 @@ export function SmeltConversation(props: SmeltConversationProps) {
             >
               <SmeltIcon path="icons/circle-x.svg" size={14} color={look().palette.bad} />
               <Text style={{ flex: 1, fontSize: look().type.ui.size, color: look().palette.text }}>
-                {snapshot()?.end_reason || ct("status.disconnected")}
+                {endedMessage()}
               </Text>
-              <SmeltButton
-                primary
-                small
-                label={ct("action.restart")}
-                onPress={() => {
-                  acpRestart(props.machine ?? null, props.sessionId)
-                    .catch(() => {})
-                    .finally(() => reconnectSeq.set(reconnectSeq() + 1));
-                }}
-              />
+              <If when={bannerState().kind === "ended" && (bannerState() as any).action !== "none"}>
+                <SmeltButton
+                  primary
+                  small
+                  label={
+                    (bannerState() as any).action === "reconnect"
+                      ? ct("action.reconnect")
+                      : ct("action.restart")
+                  }
+                  onPress={handleEndedAction}
+                />
+              </If>
             </View>
           </View>
         </If>
@@ -1282,7 +1509,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
           onForceRestart={() => {
             void acpRestart(props.machine ?? null, props.sessionId)
               .catch(() => {})
-              .finally(() => reconnectSeq.set(reconnectSeq() + 1));
+              .finally(() => triggerReconnect("reconnect"));
           }}
           onSelectConfig={handleSelectConfig}
           onCompact={() => sendAction("Compact")}

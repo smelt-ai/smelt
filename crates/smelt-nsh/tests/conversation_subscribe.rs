@@ -87,6 +87,7 @@ export default function Probe() {
             },
             prefill: null,
           }}
+          reuseKey="pane-ws-1"
           embedded={false}
           title="新对话"
         />
@@ -99,8 +100,15 @@ export default function Probe() {
 #[derive(Debug, Clone)]
 struct SubscribeRecord {
     sub_id: String,
+    reuse_key: Option<String>,
     raw_launch: Value,
     parsed: Result<ConversationClientLaunch, String>,
+}
+
+#[derive(Debug, Clone)]
+struct UnsubscribeRecord {
+    sub_id: String,
+    reuse_key: Option<String>,
 }
 
 #[gpui::test]
@@ -123,7 +131,8 @@ fn conversation_subscribe_wire_contract(cx: &mut TestAppContext) {
     });
 
     let subscribes: Arc<Mutex<Vec<SubscribeRecord>>> = Arc::new(Mutex::new(Vec::new()));
-    let unsubscribes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let unsubscribes: Arc<Mutex<Vec<UnsubscribeRecord>>> = Arc::new(Mutex::new(Vec::new()));
+    let restarts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let app_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     host.handle("state", |_plugin, call| {
@@ -131,9 +140,20 @@ fn conversation_subscribe_wire_contract(cx: &mut TestAppContext) {
             "revision": 1,
             "locale": "zh-CN",
             "theme": smelt_nsh::testing::theme_state(16.),
-            "machines_meta": [],
+            "machines_meta": [
+                {
+                    "machine": null,
+                    "name": "Local",
+                    "online": true,
+                    "unavailable": false,
+                    "path_style": "posix",
+                }
+            ],
             "sessions_data": [],
         }));
+    });
+    host.handle("subscribe", |_plugin, call| {
+        call.resolve(json!({ "revision": 1, "patch": {} }));
     });
     host.handle("call", |_plugin, call| {
         let data = call.data();
@@ -151,11 +171,13 @@ fn conversation_subscribe_wire_contract(cx: &mut TestAppContext) {
         host.handle("acp.subscribe", move |_plugin, mut call| {
             let mut data = call.take_data();
             let sub_id = data["sub_id"].as_str().unwrap_or_default().to_owned();
+            let reuse_key = data["reuse_key"].as_str().map(str::to_owned);
             let raw_launch = data["launch"].take();
             let parsed = serde_json::from_value::<ConversationClientLaunch>(raw_launch.clone())
                 .map_err(|e| format!("acp.subscribe：launch 参数不对：{e}"));
             subscribes.lock().unwrap().push(SubscribeRecord {
                 sub_id,
+                reuse_key,
                 raw_launch,
                 parsed: parsed.clone(),
             });
@@ -172,7 +194,22 @@ fn conversation_subscribe_wire_contract(cx: &mut TestAppContext) {
                 .as_str()
                 .unwrap_or_default()
                 .to_owned();
-            unsubscribes.lock().unwrap().push(sub_id);
+            let reuse_key = call.data()["reuse_key"].as_str().map(str::to_owned);
+            unsubscribes
+                .lock()
+                .unwrap()
+                .push(UnsubscribeRecord { sub_id, reuse_key });
+            call.resolve(Value::Null);
+        });
+    }
+    {
+        let restarts = Arc::clone(&restarts);
+        host.handle("acp.restart", move |_plugin, call| {
+            let sid = call.data()["session_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            restarts.lock().unwrap().push(sid);
             call.resolve(Value::Null);
         });
     }
@@ -378,12 +415,108 @@ fn conversation_subscribe_wire_contract(cx: &mut TestAppContext) {
         "directoryAcp 引用变化不应触发 acp.unsubscribe"
     );
 
+    // 2b. 模拟已有消息后发生传输断流（休眠/断网）再重新连上：
+    //     收到 transport_disconnected + closed 后，宿主的 reconnected 事件应触发全新 acp.subscribe：
+    //     - 退订与重订都不带 reuse_key（绝不复用死连接）；
+    //     - 不调 acp.restart（不误杀远端健康会话）；
+    //     - 保留 retained_entries_end 和 history_session_id，且不再重复发送 fork / initial_prompt。
+    host.send_to(
+        "probe",
+        "smelt.acp.event",
+        json!({
+            "sub_id": first.sub_id,
+            "kind": "snapshot",
+            "snapshot": {
+                "phase": "idle",
+                "replaying_history": false,
+                "entries": [{ "User": "hello" }],
+                "entries_offset": 0,
+                "entries_total": 1,
+                "snapshot_revision": 5,
+                "history_session_id": "hist-live-1",
+                "config_options": [],
+                "model": null,
+            },
+        }),
+    );
+    host.send_to(
+        "probe",
+        "smelt.acp.event",
+        json!({
+            "sub_id": first.sub_id,
+            "kind": "snapshot",
+            "snapshot": {
+                "phase": "dead",
+                "end_reason": "disconnected",
+                "end_kind": "transport_disconnected",
+                "replaying_history": false,
+                "entries": [],
+                "entries_offset": 1,
+                "entries_total": 1,
+                "snapshot_revision": 0,
+                "config_options": [],
+                "model": null,
+            },
+        }),
+    );
+    host.send_to(
+        "probe",
+        "smelt.acp.event",
+        json!({
+            "sub_id": first.sub_id,
+            "kind": "closed",
+        }),
+    );
+    host.send_to(
+        "probe",
+        "smelt.event",
+        json!({
+            "type": "reconnected",
+            "machine": null,
+        }),
+    );
+    wait_until(cx, "workspace auto reconnect acp.subscribe", &|| {
+        subscribes.lock().unwrap().len() >= 2
+    });
+    let reconnected_sub = subscribes.lock().unwrap()[1].clone();
+    assert_eq!(
+        reconnected_sub.reuse_key, None,
+        "显式/自动重连的 acp.subscribe 不得携带 reuse_key"
+    );
+    let reconnect_unsub = unsubscribes
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|u| u.sub_id == first.sub_id)
+        .cloned()
+        .expect("重连前应退订旧 sub_id");
+    assert_eq!(
+        reconnect_unsub.reuse_key, None,
+        "重连退订旧连接时不得携带 reuse_key 使其进入 park"
+    );
+    assert!(
+        restarts.lock().unwrap().is_empty(),
+        "传输断流重连绝不能调 acp.restart 杀远端进程"
+    );
+    let reconn_launch = reconnected_sub.parsed.unwrap_or_else(|err| {
+        panic!(
+            "reconnect launch 反序列化失败：{err}\nraw={}",
+            reconnected_sub.raw_launch
+        )
+    });
+    assert_eq!(reconn_launch.id, "acp-ws-1");
+    assert_eq!(reconn_launch.retained_entries_end, 1);
+    assert_eq!(reconn_launch.resume_id.as_deref(), Some("hist-live-1"));
+    assert!(reconn_launch.fork_id.is_none());
+    assert!(reconn_launch.fork_cut.is_none());
+    assert!(reconn_launch.initial_prompt.is_none());
+
     // 3. 切到自动化现场会话：spec.binding 应正确反序列化为 Automation { run_id }。
     host.broadcast("test.mode", json!("automation"));
     wait_until(cx, "automation acp.subscribe", &|| {
-        subscribes.lock().unwrap().len() >= 2
+        subscribes.lock().unwrap().len() >= 3
     });
-    let second = subscribes.lock().unwrap()[1].clone();
+    let second = subscribes.lock().unwrap()[2].clone();
     let auto_launch = second.parsed.unwrap_or_else(|err| {
         panic!(
             "automation launch 反序列化失败：{err}\nraw={}",
