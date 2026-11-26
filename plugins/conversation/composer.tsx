@@ -66,8 +66,8 @@ export function Composer(props: {
   configs: () => any[];
   pendingConfigCount: () => number;
   availableCommands: () => any[];
-  skills: () => any[];
-  mcpServers: () => any[];
+  skills: () => { command: string; name: string; description: string }[];
+  mcpServers: () => string[];
   capabilitiesByAgent: () => boolean;
   permissions: () => any[];
   permissionSubmitting: () => boolean;
@@ -821,8 +821,8 @@ export function Composer(props: {
               skills={props.skills}
               mcpServers={props.mcpServers}
               byAgent={props.capabilitiesByAgent}
-              onUseSkill={(name) => {
-                const prefix = `/${name} `;
+              onUseSkill={(command) => {
+                const prefix = `/${command} `;
                 draft.set(draft() ? `${draft()} ${prefix}` : prefix);
                 inputApi?.focus?.();
               }}

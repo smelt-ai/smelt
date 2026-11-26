@@ -411,6 +411,8 @@ pub enum ConversationEvent {
     /// 会话当前可用的斜杠命令（`/compact` 这类，不是「工具」）：(名字, 说明)。
     /// 以前只存数量——一个光秃秃的「47 条命令」既点不开也没法用，等于没有。
     AvailableCommands(Vec<(String, String)>),
+    /// 这场会话真正起了连接的 MCP 服务器名（全量）。只有 Pi 报得出来。
+    McpServers(Vec<String>),
     /// 上下文用量：已用 / 窗口大小（token），外加本轮缓存读取量（agent 给才有）。
     /// UI 据此显示「上下文 32%」这类指示。
     Usage {

@@ -33,31 +33,11 @@ pub struct LaunchRestart {
 pub struct LaunchPrepareParams {
     pub launch: ConversationLaunchSpec,
     pub prep: LaunchPrep,
-    pub cwd: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LaunchPrepareResult {
     pub launch: ConversationLaunchSpec,
-    /// 这场会话会加载的技能，供对话头部展示。
-    pub skills: Vec<crate::pi_plugin_catalog::PiPlugin>,
-    /// 这场会话会连的 MCP 服务器。旧运行时不回这一项，按没有处理。
-    #[serde(default)]
-    pub mcp_servers: Vec<crate::pi_mcp::PiMcpServer>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct LoadedSkillsParams {
-    pub launch: ConversationLaunchSpec,
-    pub cwd: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct LoadedSkillsResult {
-    pub skills: Vec<crate::pi_plugin_catalog::PiPlugin>,
-    /// 同 [`LaunchPrepareResult::mcp_servers`]。
-    #[serde(default)]
-    pub mcp_servers: Vec<crate::pi_mcp::PiMcpServer>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

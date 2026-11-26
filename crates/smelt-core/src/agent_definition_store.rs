@@ -193,7 +193,7 @@ fn resolve_agent_execution_definition(
 /// `session.launch.prepare`：注入智能体的长期指令、插件与 MCP 勾选、模型、记忆目录。
 /// 插件目录和记忆目录都在运行时那台机器上，所以由运行时来补。
 pub fn prepare_launch(params: LaunchPrepareParams) -> LaunchPrepareResult {
-    let LaunchPrepareParams { launch, prep, cwd } = params;
+    let LaunchPrepareParams { launch, prep } = params;
     let definition = prep.agent_definition_id.as_deref().and_then(|id| {
         load_agent_definitions()
             .into_iter()
@@ -225,14 +225,7 @@ pub fn prepare_launch(params: LaunchPrepareParams) -> LaunchPrepareResult {
     } else {
         prepare_agent_definition_launch(launch, definition.as_ref())
     };
-    let skills =
-        crate::pi_plugin_catalog::loaded_skills_for_launch(&launch, cwd.as_deref().map(Path::new));
-    let mcp_servers = crate::pi_mcp::loaded_mcp_servers_for_launch(&launch);
-    LaunchPrepareResult {
-        launch,
-        skills,
-        mcp_servers,
-    }
+    LaunchPrepareResult { launch }
 }
 
 /// 重新开始：按运行时当前的设置和智能体定义重拼整份启动规格。设置里改过的命令、环境
@@ -299,17 +292,6 @@ fn copy_env<'a>(
                 to.env.remove(name);
             }
         }
-    }
-}
-
-/// `session.loaded_skills`：一场 Pi 会话按启动规格和工作目录会加载哪些技能、连哪些 MCP。
-pub fn loaded_skills(params: LoadedSkillsParams) -> LoadedSkillsResult {
-    LoadedSkillsResult {
-        skills: crate::pi_plugin_catalog::loaded_skills_for_launch(
-            &params.launch,
-            params.cwd.as_deref().map(Path::new),
-        ),
-        mcp_servers: crate::pi_mcp::loaded_mcp_servers_for_launch(&params.launch),
     }
 }
 

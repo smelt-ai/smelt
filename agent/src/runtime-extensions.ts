@@ -11,6 +11,11 @@ import {
 	smeltElicitationExtension,
 } from "./elicitation.ts";
 import { SMELT_MCP_EXTENSION_NAME, smeltMcpExtension } from "./mcp-selection.ts";
+import {
+	recordingStarts,
+	SMELT_MCP_SERVERS_EXTENSION_NAME,
+	smeltMcpServersExtension,
+} from "./mcp-servers-report.ts";
 import smeltMemoryExtension, { SMELT_MEMORY_EXTENSION_NAME } from "./memory-extension.ts";
 import smeltModelRefreshExtension from "./model-refresh.ts";
 import { SMELT_NOTIFY_EXTENSION_NAME, smeltNotifyExtension } from "./notify-user.ts";
@@ -27,6 +32,7 @@ export const SMELT_EXTENSION_FACTORIES = [
 	// 放在 context-usage 前面：用量面板看到的就是裁过图片、真正发出去的内容
 	{ name: "smelt-image-limit", factory: smeltImageLimitExtension, hidden: true },
 	{ name: "smelt-context-usage", factory: smeltContextUsageExtension, hidden: true },
+	{ name: SMELT_MCP_SERVERS_EXTENSION_NAME, factory: smeltMcpServersExtension, hidden: true },
 	{ name: SMELT_SUBAGENT_EXTENSION_NAME, factory: smeltSubagentExtension, hidden: true },
 	{ name: SMELT_BACKGROUND_TASK_EXTENSION_NAME, factory: smeltBackgroundTaskExtension, hidden: true },
 	{ name: SMELT_SESSION_PEERS_EXTENSION_NAME, factory: smeltSessionPeersExtension, hidden: true },
@@ -65,7 +71,7 @@ export function withAgentMcp(
  */
 export const SMELT_BUILTIN_MCP_EXTENSION = {
 	name: "mcp",
-	factory: createMcpExtension({ createTransport: createSmeltMcpTransport }),
+	factory: createMcpExtension({ createTransport: recordingStarts(createSmeltMcpTransport) }),
 	replaceable: true,
 	builtin: true,
 } satisfies InlineExtension;

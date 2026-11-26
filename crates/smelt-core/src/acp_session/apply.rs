@@ -148,6 +148,7 @@ pub fn apply_event(state: &mut AcpSessionState, ev: ConversationEvent) -> ApplyO
 
     match ev {
         ConversationEvent::AvailableCommands(list) => state.available_commands = list,
+        ConversationEvent::McpServers(servers) => state.mcp_servers = servers,
         ConversationEvent::Usage {
             used,
             size,
@@ -493,6 +494,7 @@ fn is_streaming_event(ev: &ConversationEvent) -> bool {
             | ConversationEvent::ToolOutputDelta { .. }
             | ConversationEvent::Plan(_)
             | ConversationEvent::BackgroundTasks(_)
+            | ConversationEvent::McpServers(_)
             | ConversationEvent::Subagents(_)
             | ConversationEvent::PeerInbox(_)
             | ConversationEvent::Model(_)
@@ -520,6 +522,7 @@ fn clears_user_echo(ev: &ConversationEvent) -> bool {
             | ConversationEvent::RuntimeNotice(_)
             | ConversationEvent::ConfigRejected(_)
             | ConversationEvent::AvailableCommands(_)
+            | ConversationEvent::McpServers(_)
             | ConversationEvent::Usage { .. }
             | ConversationEvent::RuntimeDebug(_)
             | ConversationEvent::SessionControls { .. }

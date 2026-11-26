@@ -71,7 +71,6 @@ const TABLE: Record<string, { en: string; zh: string }> = {
   "capabilities.title": { en: "Capabilities", zh: "能力" },
   "capabilities.skills": { en: "Skills", zh: "技能" },
   "capabilities.mcp": { en: "MCP", zh: "MCP" },
-  "capabilities.none": { en: "No skills or MCP servers loaded", zh: "当前对话未加载技能或 MCP" },
   "subagent.title": { en: "Subagents", zh: "子智能体" },
   "subagent.summary": { en: "%{count} subagents", zh: "%{count} 个子智能体" },
   "subagent.stop_all": { en: "Stop all", zh: "全部停止" },

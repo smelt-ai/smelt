@@ -48,6 +48,7 @@ import {
   overlayModelState,
   overlaySessionConfigs,
   reconcilePendingConfigValues,
+  sessionSkills,
   showsEmptyWelcome,
   spliceEntries,
   turnTimingsEqual,
@@ -184,8 +185,9 @@ export function SmeltConversation(props: SmeltConversationProps) {
   const readingGlobalIndex = signal<number | null>(null);
   const pinnedPrompt = signal<string | null>(null);
 
-  const loadedSkills = signal<any[]>([]);
-  const loadedMcpServers = signal<any[]>([]);
+  // 都是会话自己报的：技能取命令列表里的 `skill:` 条目，MCP 是真正起了连接的服务器。
+  const loadedSkills = computed(() => sessionSkills(snapshot()?.available_commands));
+  const loadedMcpServers = computed<string[]>(() => snapshot()?.mcp_servers ?? []);
   const diffDialog = signal<EditDiffDialogState | null>(null);
   const inspectedSubagent = signal<{ id: string; title: string } | null>(null);
   const imagePreview = signal<{ uri: string; loading: boolean } | null>(null);
@@ -472,8 +474,6 @@ export function SmeltConversation(props: SmeltConversationProps) {
       expandedTurnFolds.set(new Set());
       expandedProcessGroups.set(new Set());
       dismissedNoticeId.set(null);
-      loadedSkills.set([]);
-      loadedMcpServers.set([]);
       inspectedSubagent.set(null);
       diffDialog.set(null);
       imagePreview.set(null);
@@ -534,12 +534,9 @@ export function SmeltConversation(props: SmeltConversationProps) {
                 restore: !start,
                 restart: null,
               },
-              cwd: dirAcp.cwd ?? null,
             });
             if (cancelled) return;
             if (prepared?.launch) launchSpec = prepared.launch;
-            if (Array.isArray(prepared?.skills)) loadedSkills.set(prepared.skills);
-            if (Array.isArray(prepared?.mcp_servers)) loadedMcpServers.set(prepared.mcp_servers);
           } catch {
             // 旧运行时或离线时直接沿用原始 launchSpec
           }

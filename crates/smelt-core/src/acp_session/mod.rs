@@ -159,6 +159,8 @@ pub struct AcpSessionState {
     /// 不能被当成「会话现在没有消息」。
     replay_baseline: Option<Vec<AcpEntry>>,
     pub available_commands: Vec<(String, String)>,
+    /// 这场会话真正起了连接的 MCP 服务器名，Pi 每多一个推一次全量。
+    pub mcp_servers: Vec<String>,
     pub usage: Option<(u64, u64)>,
     pub usage_cached_read: Option<u64>,
     pub usage_cost: Option<f64>,
@@ -240,6 +242,7 @@ impl Default for AcpSessionState {
             replaying_history: false,
             replay_baseline: None,
             available_commands: Vec::new(),
+            mcp_servers: Vec::new(),
             usage: None,
             usage_cached_read: None,
             usage_cost: None,
@@ -338,6 +341,7 @@ impl AcpSessionState {
             replaying_history: false,
             replay_baseline: None,
             available_commands: snap.available_commands,
+            mcp_servers: snap.mcp_servers,
             usage: snap.usage,
             usage_cached_read: snap.usage_cached_read,
             usage_cost: snap.usage_cost,
@@ -417,6 +421,7 @@ impl AcpSessionState {
             history_abandoned,
             supports_image,
             available_commands,
+            mcp_servers,
             usage,
             usage_cached_read,
             usage_cost,
@@ -527,6 +532,7 @@ impl AcpSessionState {
             });
             self.status_line = status_line;
             self.available_commands = available_commands;
+            self.mcp_servers = mcp_servers;
             self.usage = usage;
             self.usage_cached_read = usage_cached_read;
             self.usage_cost = usage_cost;
@@ -878,6 +884,11 @@ impl AcpSessionState {
             supports_image: self.supports_image,
             available_commands: if include_envelope {
                 self.available_commands.clone()
+            } else {
+                Vec::new()
+            },
+            mcp_servers: if include_envelope {
+                self.mcp_servers.clone()
             } else {
                 Vec::new()
             },

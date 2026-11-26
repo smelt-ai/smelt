@@ -2862,68 +2862,44 @@ fn skills_on_a_session_that_is_not_running_are_reported_as_unsupported() {
     assert_eq!(response["skills"].as_array().unwrap().len(), 0);
 }
 
-#[test]
-fn skills_are_only_a_pi_concept() {
+fn session_skills(commands: Vec<(String, String)>) -> serde_json::Value {
     let acp_sessions = new_test_acp_sessions();
-    acp_sessions.reserve_with("acp-claude", || {
-        let session = make_acp_session_value("acp-claude", AcpSessionState::default());
-        *session.launch_spec.lock() =
-            Some(smelt_core::agent_kind::ConversationLaunchSpec::from_command("claude --acp"));
-        session
+    let mut reduced = AcpSessionState::default();
+    reduced.available_commands = commands;
+    acp_sessions.reserve_with("acp-skills", || {
+        make_acp_session_value("acp-skills", reduced)
     });
     let (server, client) = RuntimeStream::pair().unwrap();
-
     handle_acp_skills(
         server,
-        &serde_json::json!({"id": "acp-claude"}),
+        &serde_json::json!({"id": "acp-skills"}),
         &acp_sessions,
     );
-
     let mut response = String::new();
     BufReader::new(client).read_line(&mut response).unwrap();
-    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
-    assert_eq!(response["ok"], true);
-    assert_eq!(response["agent"], "claude");
-    assert_eq!(response["supported"], false);
+    serde_json::from_str(&response).unwrap()
 }
 
+/// 技能取自会话自己报的命令：Pi 的 `skill:` 条目去掉前缀，别的命令不算。
 #[test]
-fn pi_skills_come_from_the_launch_spec_plugin_args() {
-    let temp = std::env::temp_dir().join(format!("smelt-daemon-skills-{}", uuid::Uuid::new_v4()));
-    let skill_dir = temp.join("deploy");
-    std::fs::create_dir_all(&skill_dir).unwrap();
-    std::fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\nname: deploy\ndescription: 把构建推上去\n---\n",
-    )
-    .unwrap();
-
-    let acp_sessions = new_test_acp_sessions();
-    acp_sessions.reserve_with("acp-pi", || {
-        let session = make_acp_session_value("acp-pi", AcpSessionState::default());
-        *session.launch_spec.lock() = Some(
-            smelt_core::agent_kind::ConversationLaunchSpec::from_command("pi acp").with_env(
-                smelt_core::agent_kind::SMELT_AGENT_PLUGIN_ARGS_ENV,
-                serde_json::json!(["--no-skills", "--skill", skill_dir.to_str().unwrap()])
-                    .to_string(),
-            ),
-        );
-        session
-    });
-    let (server, client) = RuntimeStream::pair().unwrap();
-
-    handle_acp_skills(server, &serde_json::json!({"id": "acp-pi"}), &acp_sessions);
-
-    let mut response = String::new();
-    BufReader::new(client).read_line(&mut response).unwrap();
-    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+fn skills_are_the_skill_commands_the_session_reported() {
+    let response = session_skills(vec![
+        ("compact".into(), "压缩上下文".into()),
+        ("skill:deploy".into(), "把构建推上去".into()),
+    ]);
     assert_eq!(response["supported"], true);
-    let skills = response["skills"].as_array().unwrap();
-    assert_eq!(skills.len(), 1);
-    assert_eq!(skills[0]["name"], "deploy");
-    assert_eq!(skills[0]["description"], "把构建推上去");
+    assert_eq!(
+        response["skills"],
+        serde_json::json!([{ "name": "deploy", "description": "把构建推上去" }])
+    );
+}
 
-    std::fs::remove_dir_all(&temp).ok();
+/// 报不出技能的引擎（命令里没有 `skill:`）收起入口。
+#[test]
+fn sessions_without_skill_commands_hide_the_entry() {
+    let response = session_skills(vec![("review".into(), "Review".into())]);
+    assert_eq!(response["supported"], false);
+    assert_eq!(response["skills"], serde_json::json!([]));
 }
 
 fn read_watch_unavailable(client: RuntimeStream) -> String {

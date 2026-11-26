@@ -224,7 +224,6 @@ define_control_methods! {
     TerminalThemePublish => (TERMINAL_THEME_PUBLISH_METHOD, "terminal_theme.publish"),
     DesktopTypeText => (DESKTOP_TYPE_TEXT_METHOD, "desktop.type_text"),
     SessionLaunchPrepare => (SESSION_LAUNCH_PREPARE_METHOD, "session.launch.prepare"),
-    SessionLoadedSkills => (SESSION_LOADED_SKILLS_METHOD, "session.loaded_skills"),
     AgentMemoryEnsureDir => (AGENT_MEMORY_ENSURE_DIR_METHOD, "agent.memory.ensure_dir"),
     AgentMemoryWatch => (AGENT_MEMORY_WATCH_METHOD, "agent.memory.watch"),
     ProjectWatch => (PROJECT_WATCH_METHOD, "project.watch"),
