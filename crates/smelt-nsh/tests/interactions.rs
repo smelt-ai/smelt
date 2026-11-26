@@ -370,7 +370,6 @@ fn main_shell_hover_toggle_and_quota_regressions(cx: &mut TestAppContext) {
                 title: "Open view".into(),
                 key: None,
                 context: "Workspace".into(),
-                palette: false,
                 requires_args: false,
                 args: None,
                 cli: false,
