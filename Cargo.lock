@@ -4137,7 +4137,7 @@ dependencies = [
 [[package]]
 name = "gpui-fast"
 version = "0.1.19"
-source = "git+https://github.com/smelt-ai/gpui-fast?rev=9064725bfba934bc642646db6c871cbb1197c207#9064725bfba934bc642646db6c871cbb1197c207"
+source = "git+https://github.com/smelt-ai/gpui-fast?rev=e4472c25560734532744dbfe703653c0c44e502c#e4472c25560734532744dbfe703653c0c44e502c"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -4209,7 +4209,7 @@ dependencies = [
 [[package]]
 name = "gpui-fast-apple"
 version = "0.1.19"
-source = "git+https://github.com/smelt-ai/gpui-fast?rev=9064725bfba934bc642646db6c871cbb1197c207#9064725bfba934bc642646db6c871cbb1197c207"
+source = "git+https://github.com/smelt-ai/gpui-fast?rev=e4472c25560734532744dbfe703653c0c44e502c#e4472c25560734532744dbfe703653c0c44e502c"
 dependencies = [
  "anyhow",
  "async-task",
@@ -4248,7 +4248,7 @@ dependencies = [
 [[package]]
 name = "gpui-fast-linux"
 version = "0.1.19"
-source = "git+https://github.com/smelt-ai/gpui-fast?rev=9064725bfba934bc642646db6c871cbb1197c207#9064725bfba934bc642646db6c871cbb1197c207"
+source = "git+https://github.com/smelt-ai/gpui-fast?rev=e4472c25560734532744dbfe703653c0c44e502c#e4472c25560734532744dbfe703653c0c44e502c"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -4292,7 +4292,7 @@ dependencies = [
 [[package]]
 name = "gpui-fast-macos"
 version = "0.1.19"
-source = "git+https://github.com/smelt-ai/gpui-fast?rev=9064725bfba934bc642646db6c871cbb1197c207#9064725bfba934bc642646db6c871cbb1197c207"
+source = "git+https://github.com/smelt-ai/gpui-fast?rev=e4472c25560734532744dbfe703653c0c44e502c#e4472c25560734532744dbfe703653c0c44e502c"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -4333,7 +4333,7 @@ dependencies = [
 [[package]]
 name = "gpui-fast-macros"
 version = "0.1.19"
-source = "git+https://github.com/smelt-ai/gpui-fast?rev=9064725bfba934bc642646db6c871cbb1197c207#9064725bfba934bc642646db6c871cbb1197c207"
+source = "git+https://github.com/smelt-ai/gpui-fast?rev=e4472c25560734532744dbfe703653c0c44e502c#e4472c25560734532744dbfe703653c0c44e502c"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -4344,7 +4344,7 @@ dependencies = [
 [[package]]
 name = "gpui-fast-platform"
 version = "0.1.19"
-source = "git+https://github.com/smelt-ai/gpui-fast?rev=9064725bfba934bc642646db6c871cbb1197c207#9064725bfba934bc642646db6c871cbb1197c207"
+source = "git+https://github.com/smelt-ai/gpui-fast?rev=e4472c25560734532744dbfe703653c0c44e502c#e4472c25560734532744dbfe703653c0c44e502c"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -4359,7 +4359,7 @@ dependencies = [
 [[package]]
 name = "gpui-fast-scheduler"
 version = "0.1.19"
-source = "git+https://github.com/smelt-ai/gpui-fast?rev=9064725bfba934bc642646db6c871cbb1197c207#9064725bfba934bc642646db6c871cbb1197c207"
+source = "git+https://github.com/smelt-ai/gpui-fast?rev=e4472c25560734532744dbfe703653c0c44e502c#e4472c25560734532744dbfe703653c0c44e502c"
 dependencies = [
  "async-task",
  "backtrace",
@@ -4374,7 +4374,7 @@ dependencies = [
 [[package]]
 name = "gpui-fast-web"
 version = "0.1.19"
-source = "git+https://github.com/smelt-ai/gpui-fast?rev=9064725bfba934bc642646db6c871cbb1197c207#9064725bfba934bc642646db6c871cbb1197c207"
+source = "git+https://github.com/smelt-ai/gpui-fast?rev=e4472c25560734532744dbfe703653c0c44e502c#e4472c25560734532744dbfe703653c0c44e502c"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -4403,7 +4403,7 @@ dependencies = [
 [[package]]
 name = "gpui-fast-wgpu"
 version = "0.1.19"
-source = "git+https://github.com/smelt-ai/gpui-fast?rev=9064725bfba934bc642646db6c871cbb1197c207#9064725bfba934bc642646db6c871cbb1197c207"
+source = "git+https://github.com/smelt-ai/gpui-fast?rev=e4472c25560734532744dbfe703653c0c44e502c#e4472c25560734532744dbfe703653c0c44e502c"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -4430,7 +4430,7 @@ dependencies = [
 [[package]]
 name = "gpui-fast-windows"
 version = "0.1.19"
-source = "git+https://github.com/smelt-ai/gpui-fast?rev=9064725bfba934bc642646db6c871cbb1197c207#9064725bfba934bc642646db6c871cbb1197c207"
+source = "git+https://github.com/smelt-ai/gpui-fast?rev=e4472c25560734532744dbfe703653c0c44e502c#e4472c25560734532744dbfe703653c0c44e502c"
 dependencies = [
  "accesskit",
  "accesskit_windows",
