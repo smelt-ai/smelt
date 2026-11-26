@@ -22,6 +22,7 @@ import {
   mergeEnvelope,
   overlayModelState,
   reconcilePendingConfigValues,
+  sessionSkills,
   selectedConfigIndex,
   spliceEntries,
   subsequenceScore,
@@ -429,5 +430,18 @@ describe("showsEmptyWelcome", () => {
     expect(shows({ loadingOlder: true })).toBe(false);
     expect(shows({ phase: "idle", entryCount: 1 })).toBe(false);
     expect(shows({ phase: "idle", loadedOffset: 3 })).toBe(false);
+  });
+});
+
+describe("sessionSkills", () => {
+  test("keeps only the skill commands the session reported", () => {
+    expect(
+      sessionSkills([
+        ["compact", "压缩上下文"],
+        ["skill:deploy", "把构建推上去"],
+      ]),
+    ).toEqual([{ command: "skill:deploy", name: "deploy", description: "把构建推上去" }]);
+    expect(sessionSkills([["review", "Review"]])).toEqual([]);
+    expect(sessionSkills(undefined)).toEqual([]);
   });
 });

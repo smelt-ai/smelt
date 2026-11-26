@@ -7,6 +7,7 @@ import {
 	type McpServerConfig,
 } from "@earendil-works/pi-coding-agent";
 import { sharedTransportFactory } from "./mcp-gateway-client.ts";
+import { recordingStarts } from "./mcp-servers-report.ts";
 import { createSmeltMcpTransport } from "./pi-mcp-runtime.ts";
 
 /**
@@ -90,7 +91,7 @@ export function smeltMcpExtension(selection: ReadonlySet<string>) {
 	const configPath = resolve(getAgentDir(), "mcp.json");
 	const connectRegistered = createMcpExtension({
 		loadConfig: () => ({ servers: [], errors: [] }),
-		createTransport: sharedTransportFactory(createSmeltMcpTransport, configPath),
+		createTransport: recordingStarts(sharedTransportFactory(createSmeltMcpTransport, configPath)),
 	});
 	return (pi: ExtensionAPI) => {
 		connectRegistered(pi);

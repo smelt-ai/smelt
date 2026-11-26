@@ -130,6 +130,7 @@ mod menubar;
 mod peer_mcp;
 mod peer_messages;
 mod peer_nodes;
+mod peer_tools;
 mod pi_control;
 mod presence;
 mod push;

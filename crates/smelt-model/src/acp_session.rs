@@ -1203,6 +1203,10 @@ pub struct ConversationSnapshot {
     pub history_abandoned: bool,
     pub supports_image: bool,
     pub available_commands: Vec<(String, String)>,
+    /// 这场会话真正起了连接的 MCP 服务器名（Pi 上报）。拿不到实况的引擎恒为空。
+    /// 旧快照缺省为空。
+    #[serde(default)]
+    pub mcp_servers: Vec<String>,
     pub usage: Option<(u64, u64)>,
     /// 本会话累计 cache read tokens。旧快照缺省为 None。
     #[serde(default)]
@@ -1313,6 +1317,7 @@ impl ConversationSnapshot {
         "pending_elicitation",
         "status_line",
         "available_commands",
+        "mcp_servers",
         "usage_breakdown",
         "plan",
         "background_tasks",
@@ -1348,6 +1353,7 @@ impl ConversationSnapshot {
         self.pending_elicitation = previous.pending_elicitation;
         self.status_line = previous.status_line;
         self.available_commands = previous.available_commands;
+        self.mcp_servers = previous.mcp_servers;
         self.usage_breakdown = previous.usage_breakdown;
         self.plan = previous.plan;
         self.background_tasks = previous.background_tasks;
@@ -1419,6 +1425,8 @@ pub struct ConversationSnapshotDe {
     pub history_abandoned: bool,
     pub supports_image: bool,
     pub available_commands: Vec<(String, String)>,
+    #[serde(default)]
+    pub mcp_servers: Vec<String>,
     pub usage: Option<(u64, u64)>,
     #[serde(default)]
     pub usage_cached_read: Option<u64>,
@@ -1509,6 +1517,7 @@ impl From<ConversationSnapshotDe> for ConversationSnapshot {
             history_abandoned: de.history_abandoned,
             supports_image: de.supports_image,
             available_commands: de.available_commands,
+            mcp_servers: de.mcp_servers,
             usage: de.usage,
             usage_cached_read: de.usage_cached_read,
             usage_cost: de.usage_cost,
@@ -1574,6 +1583,7 @@ impl From<ConversationSnapshot> for ConversationSnapshotDe {
             history_abandoned: snap.history_abandoned,
             supports_image: snap.supports_image,
             available_commands: snap.available_commands,
+            mcp_servers: snap.mcp_servers,
             usage: snap.usage,
             usage_cached_read: snap.usage_cached_read,
             usage_cost: snap.usage_cost,

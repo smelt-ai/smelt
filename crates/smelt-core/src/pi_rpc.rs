@@ -36,6 +36,8 @@ const SMELT_PERMISSION_TITLE: &str = "smelt.permission.v1";
 const SMELT_CONTEXT_USAGE_WIDGET: &str = "smelt-context-usage";
 const SMELT_RUNTIME_DEBUG_WIDGET: &str = "smelt-runtime-debug";
 const SMELT_BACKGROUND_TASK_WIDGET: &str = "smelt-background-tasks";
+/// 真正起了连接的 MCP 服务器名（`agent/src/mcp-servers-report.ts`），JSON 字符串数组。
+const SMELT_MCP_SERVERS_WIDGET: &str = "smelt-mcp-servers";
 const SMELT_CODEMODE_COMMAND: &str = "smelt-codemode";
 /// 脚本工具那一项配置的 id。
 const SMELT_CODEMODE_CONFIG_ID: &str = "codemode";
@@ -4434,6 +4436,12 @@ fn publish_extension_widget(
             };
             let _ = event_tx.try_send(ConversationEvent::BackgroundTasks(tasks));
         }
+        SMELT_MCP_SERVERS_WIDGET => {
+            let Ok(servers) = serde_json::from_str::<Vec<String>>(line) else {
+                return;
+            };
+            let _ = event_tx.try_send(ConversationEvent::McpServers(servers));
+        }
         _ => {}
     }
 }
@@ -6445,6 +6453,22 @@ mod tests {
         );
         assert_eq!(tasks[0].output, "hi");
         assert_eq!(tasks[0].exit_code, None);
+    }
+
+    #[test]
+    fn mcp_servers_widget_publishes_the_started_servers() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        publish_extension_widget(
+            &serde_json::json!({
+                "widgetKey": "smelt-mcp-servers",
+                "widgetLines": ["[\"figma\",\"rea\"]"]
+            }),
+            &event_tx,
+        );
+        let Ok(ConversationEvent::McpServers(servers)) = event_rx.try_recv() else {
+            panic!("expected MCP servers");
+        };
+        assert_eq!(servers, ["figma", "rea"]);
     }
 
     #[test]

@@ -1117,13 +1117,9 @@ pi_calls! {
     /// 这台运行时的资源占用：守护进程自己和每个活会话的进程树。CPU 是跟上一次调用比的，
     /// 第一次调用全是 0；隔一两秒调一次。
     ResourceUsage => ResourceUsage(EmptyParams) -> ResourceUsageResult;
-    /// 打开一段对话前补齐启动规格（智能体指令、插件、MCP、模型、记忆目录），顺带给出
-    /// 会加载的技能。
+    /// 打开一段对话前补齐启动规格（智能体指令、插件、MCP、模型、记忆目录）。
     SessionLaunchPrepare => SessionLaunchPrepare(crate::agent_definition_store::LaunchPrepareParams)
         -> crate::agent_definition_store::LaunchPrepareResult;
-    /// 一场 Pi 会话会加载哪些技能。
-    SessionLoadedSkills => SessionLoadedSkills(crate::agent_definition_store::LoadedSkillsParams)
-        -> crate::agent_definition_store::LoadedSkillsResult;
     /// 本机开着的 Smelt App 里开给命令行调用的命令（`smelt app commands`）。运行时转给
     /// App，只收本机调用。
     AppCommandList => AppCommandList(EmptyParams) -> AppCommandListResult;

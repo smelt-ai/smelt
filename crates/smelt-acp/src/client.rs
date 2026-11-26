@@ -247,6 +247,7 @@ pub(crate) fn fallback_snapshot(reason: &str, entries_offset: usize) -> Conversa
         history_abandoned: false,
         supports_image: true,
         available_commands: Vec::new(),
+        mcp_servers: Vec::new(),
         usage: None,
         usage_cached_read: None,
         usage_cost: None,

@@ -927,6 +927,21 @@ export function runningSubagents(subagents) {
   return (subagents ?? []).filter((s) => s?.status === "running" || s?.status === "pending");
 }
 
+/** Pi 会话命令列表里技能条目的前缀：技能 `foo` 的命令是 `/skill:foo`。 */
+const SKILL_COMMAND_PREFIX = "skill:";
+
+/**
+ * 会话实际加载的技能：会话自己报的命令（`[名字, 说明]`）里 `skill:` 开头的那些。
+ * 别家引擎的命令不分技能和普通命令，一条也不算。
+ */
+export function sessionSkills(commands) {
+  return (commands ?? []).flatMap(([command, description]) =>
+    typeof command === "string" && command.startsWith(SKILL_COMMAND_PREFIX)
+      ? [{ command, name: command.slice(SKILL_COMMAND_PREFIX.length), description }]
+      : [],
+  );
+}
+
 export function runningBackgroundTasks(tasks) {
   return (tasks ?? []).filter((t) => t?.status === "running");
 }

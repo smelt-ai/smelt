@@ -4997,58 +4997,35 @@ pub(crate) fn read_history_page(
         .ok_or(HistoryReadError::SessionMissing)
 }
 
-/// 按需列出这场对话实际加载的技能。
-///
-/// 故意不塞进会话快照：快照每次状态变化都要推给所有观察者，而技能得扫一遍
-/// 磁盘；两者的频率和代价对不上。手机打开对话时问一次即可，和桌面每次渲染
-/// 输入栏重算是同一份来源（`loaded_skills_for_launch`）。
+/// 按需列出这场对话实际加载的技能：会话自己报的命令里 `skill:` 开头的那些（Pi 的约定）。
+/// 报不出技能的引擎回 `supported: false`，让客户端收起入口，而不是画一个永远空的列表。
 pub(crate) fn handle_acp_skills<C: ClientSocket>(
     mut conn: C,
     v: &serde_json::Value,
     acp_sessions: &AcpSessions,
 ) {
     let id = v["id"].as_str().unwrap_or_default();
-    let launch = acp_sessions.get(id).and_then(|slot| {
-        acp_sessions.with_current(id, &slot, |session| {
-            (session.launch_spec.lock().clone(), session.cwd.clone())
-        })
-    });
-    let Some((Some(launch), cwd)) = launch else {
-        // 会话没在运行（已结束 / 仅历史）就没有「这场对话加载了什么」可言。这不是错误，
-        // 回 supported=false 让客户端收起入口，而不是弹一个用户无法处理的报错。
-        let _ = smelt_runtime_client::protocol::write_json_line(
-            &mut conn,
-            &serde_json::json!({ "ok": true, "supported": false, "skills": [] }),
-        );
-        return;
-    };
-    // 技能是 Pi 的概念。别家 agent 如实回 `supported: false`，让客户端不画这个入口，
-    // 而不是画一个永远空的列表。
-    let agent = smelt_core::agent_kind::ConversationAgentKind::from_command_loose(&launch.command);
-    let supported = agent == Some(smelt_core::agent_kind::ConversationAgentKind::Pi);
-    let skills = if supported {
-        smelt_core::pi_plugin_catalog::loaded_skills_for_launch(
-            &launch,
-            cwd.as_deref().map(std::path::Path::new),
-        )
-    } else {
-        Vec::new()
-    };
-    let skills: Vec<_> = skills
-        .into_iter()
-        .map(|skill| {
-            serde_json::json!({
-                "name": skill.name,
-                "description": skill.description,
+    // 会话没在运行（已结束 / 仅历史）就没有「这场对话加载了什么」可言，同样回空。
+    let commands = acp_sessions
+        .get(id)
+        .and_then(|slot| {
+            acp_sessions.with_current(id, &slot, |session| {
+                session.reduced.lock().available_commands.clone()
             })
+        })
+        .unwrap_or_default();
+    let skills: Vec<_> = commands
+        .iter()
+        .filter_map(|(name, description)| {
+            let name = name.strip_prefix(smelt_core::pi_plugin_catalog::PI_SKILL_COMMAND_PREFIX)?;
+            Some(serde_json::json!({ "name": name, "description": description }))
         })
         .collect();
     let _ = smelt_runtime_client::protocol::write_json_line(
         &mut conn,
         &serde_json::json!({
             "ok": true,
-            "agent": agent.map(|kind| kind.id()),
-            "supported": supported,
+            "supported": !skills.is_empty(),
             "skills": skills,
         }),
     );

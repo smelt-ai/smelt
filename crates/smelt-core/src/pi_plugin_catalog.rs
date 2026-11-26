@@ -15,8 +15,11 @@ pub use smelt_model::pi_plugin_catalog::*;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::agent_kind::{ConversationLaunchSpec, SMELT_AGENT_PLUGIN_ARGS_ENV};
 use crate::skill_home::SkillHome;
+
+/// Pi 会话命令列表（`get_commands`）里技能条目的名字前缀：技能 `foo` 的命令是 `/skill:foo`。
+/// 会话实际加载了哪些技能，以这份列表为准。
+pub const PI_SKILL_COMMAND_PREFIX: &str = "skill:";
 
 /// 把工作区自带的技能目录换成 Pi 的显式加载参数。
 ///
@@ -445,102 +448,6 @@ pub fn remove_plugin(plugin: &PiPlugin) -> Result<(), String> {
     Ok(())
 }
 
-/// 这场 Pi 会话会加载哪些技能。推断自启动参数，不是 agent 运行时回执。
-///
-/// 产品智能体把勾选结果写进 `SMELT_AGENT_PLUGIN_ARGS`（先 `--no-skills` 再逐条
-/// `--skill`）；没有这份参数时就是裸 Pi，走全局自动发现，并附带 cwd 下的项目级技能。
-pub fn loaded_skills_for_launch(
-    launch: &ConversationLaunchSpec,
-    cwd: Option<&Path>,
-) -> Vec<PiPlugin> {
-    let mut plugins = match launch
-        .env
-        .get(SMELT_AGENT_PLUGIN_ARGS_ENV)
-        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
-    {
-        Some(args) => skill_paths_from_plugin_args(&args)
-            .into_iter()
-            .flat_map(|path| skills_at_load_path(&path))
-            .collect(),
-        None => {
-            let mut plugins = discover_plugins();
-            if let Some(cwd) = cwd {
-                collect_pi_project_skills(cwd, &mut plugins);
-            }
-            plugins
-        }
-    };
-    plugins.retain(|plugin| plugin.kind == PiPluginKind::Skill && plugin.is_usable());
-    dedupe(plugins)
-}
-
-/// 收集 Pi 裸会话按自身约定自动发现的项目技能。
-///
-/// Pi 从 cwd 到 Git 仓库根（没有仓库时到文件系统根）逐层找 `.agents/skills`，
-/// `.pi/skills` 则只从当前工作目录发现。不要把 Smelt 的兼容目录混进来：它们只有在
-/// 产品智能体显式传 `--skill` 时才会加载。
-fn collect_pi_project_skills(cwd: &Path, out: &mut Vec<PiPlugin>) {
-    collect_skills(&cwd.join(".pi/skills"), out);
-
-    let git_root = cwd
-        .ancestors()
-        .find(|ancestor| ancestor.join(".git").exists());
-    for ancestor in cwd.ancestors() {
-        collect_skills(&ancestor.join(".agents/skills"), out);
-        if git_root == Some(ancestor) {
-            break;
-        }
-    }
-}
-
-fn skill_paths_from_plugin_args(args: &[String]) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    let mut index = 0;
-    while index < args.len() {
-        if args[index] == PiPluginKind::Skill.load_flag()
-            && let Some(path) = args.get(index + 1)
-        {
-            paths.push(PathBuf::from(path));
-            index += 2;
-            continue;
-        }
-        index += 1;
-    }
-    paths
-}
-
-/// `--skill` 既可能指向单个技能目录 / `SKILL.md`，也可能指向整包技能根。
-fn skills_at_load_path(path: &Path) -> Vec<PiPlugin> {
-    let mut out = Vec::new();
-    if path.is_file() {
-        collect_skills(path.parent().unwrap_or_else(|| Path::new(".")), &mut out);
-        out.retain(|plugin| plugin.path == path);
-        return out;
-    }
-    if path.join("SKILL.md").is_file() {
-        let dir_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "skill".to_string());
-        let (name, description) = read_skill_manifest(&path.join("SKILL.md"), &dir_name);
-        out.push(PiPlugin {
-            id: plugin_id(PiPluginKind::Skill, &dir_name),
-            kind: PiPluginKind::Skill,
-            name,
-            description,
-            path: path.to_path_buf(),
-            origin: display_path(path.parent().unwrap_or(path)),
-            broken: None,
-            builtin: false,
-            legacy_location: false,
-            duplicates: Vec::new(),
-        });
-        return out;
-    }
-    collect_skills(path, &mut out);
-    out
-}
-
 /// 把勾选结果翻译成 Pi 启动参数。
 ///
 /// 关键语义：只要智能体走勾选式加载，就必须先关掉两类自动发现，否则用户
@@ -807,111 +714,5 @@ mod tests {
             "{args:?}"
         );
         std::fs::remove_dir_all(&temp).ok();
-    }
-
-    fn launch_with_plugin_args(args: &[&str]) -> ConversationLaunchSpec {
-        let mut launch = ConversationLaunchSpec::from_command("pi");
-        launch.env.insert(
-            SMELT_AGENT_PLUGIN_ARGS_ENV.into(),
-            serde_json::to_string(&args).unwrap(),
-        );
-        launch
-    }
-
-    #[test]
-    fn explicit_plugin_args_list_only_selected_skills() {
-        let temp =
-            std::env::temp_dir().join(format!("smelt-loaded-skills-{}", uuid::Uuid::new_v4()));
-        write(&temp.join("keep/SKILL.md"), &skill_manifest("keep", "留下"));
-        write(
-            &temp.join("skip/SKILL.md"),
-            &skill_manifest("skip", "不该出现"),
-        );
-
-        let loaded = loaded_skills_for_launch(
-            &launch_with_plugin_args(&[
-                "--no-skills",
-                "--no-extensions",
-                "--skill",
-                temp.join("keep").to_str().unwrap(),
-            ]),
-            None,
-        );
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].name, "keep");
-
-        let empty = loaded_skills_for_launch(
-            &launch_with_plugin_args(&["--no-skills", "--no-extensions"]),
-            None,
-        );
-        assert!(empty.is_empty());
-
-        std::fs::remove_dir_all(&temp).ok();
-    }
-
-    #[test]
-    fn skills_root_argument_expands_each_child_skill() {
-        let temp = std::env::temp_dir().join(format!("smelt-loaded-root-{}", uuid::Uuid::new_v4()));
-        write(&temp.join("one/SKILL.md"), &skill_manifest("one", "第一个"));
-        write(&temp.join("two/SKILL.md"), &skill_manifest("two", "第二个"));
-
-        let loaded = loaded_skills_for_launch(
-            &launch_with_plugin_args(&["--skill", temp.to_str().unwrap()]),
-            None,
-        );
-        let mut names: Vec<_> = loaded.iter().map(|skill| skill.name.as_str()).collect();
-        names.sort_unstable();
-        assert_eq!(names, ["one", "two"]);
-
-        std::fs::remove_dir_all(&temp).ok();
-    }
-
-    #[test]
-    fn bare_pi_discovers_native_project_skill_locations() {
-        let root = std::env::temp_dir().join(format!("smelt-loaded-cwd-{}", uuid::Uuid::new_v4()));
-        let repo = root.join("repo");
-        let cwd = repo.join("nested");
-        std::fs::create_dir_all(root.join(".agents/skills/outside-repo")).unwrap();
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        std::fs::create_dir_all(&cwd).unwrap();
-        write(
-            &repo.join(".agents/skills/from-repo/SKILL.md"),
-            &skill_manifest("from-repo", "仓库级"),
-        );
-        write(
-            &cwd.join(".agents/skills/from-nested/SKILL.md"),
-            &skill_manifest("from-nested", "子目录级"),
-        );
-        write(
-            &cwd.join(".pi/skills/from-pi/SKILL.md"),
-            &skill_manifest("from-pi", "Pi 原生"),
-        );
-        write(
-            &cwd.join(".claude/skills/not-native/SKILL.md"),
-            &skill_manifest("not-native", "需要显式加载"),
-        );
-        write(
-            &cwd.join(".skills/not-native/SKILL.md"),
-            &skill_manifest("not-native-shortcut", "需要显式加载"),
-        );
-        write(
-            &root.join(".agents/skills/outside-repo/SKILL.md"),
-            &skill_manifest("outside-repo", "仓库外"),
-        );
-
-        let loaded = loaded_skills_for_launch(
-            &ConversationLaunchSpec::from_command("pi"),
-            Some(cwd.as_path()),
-        );
-        let names: std::collections::BTreeSet<_> =
-            loaded.iter().map(|skill| skill.name.as_str()).collect();
-        assert!(names.contains("from-repo"), "{names:?}");
-        assert!(names.contains("from-nested"), "{names:?}");
-        assert!(names.contains("from-pi"), "{names:?}");
-        assert!(!names.contains("outside-repo"), "{names:?}");
-        assert!(!names.contains("not-native"), "{names:?}");
-        assert!(!names.contains("not-native-shortcut"), "{names:?}");
-
-        std::fs::remove_dir_all(&root).ok();
     }
 }

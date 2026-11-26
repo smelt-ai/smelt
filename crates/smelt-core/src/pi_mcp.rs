@@ -15,9 +15,6 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 use smelt_model::redact::{redact_args, redact_secrets};
 
-use crate::agent_kind::{
-    ConversationLaunchSpec, SMELT_AGENT_MCP_SERVERS_ENV, SMELT_AGENT_PLUGIN_ARGS_ENV,
-};
 use crate::pi_model_settings::{pi_agent_dir, read_or_create_json, write_json_file};
 
 pub fn pi_mcp_path() -> PathBuf {
@@ -89,52 +86,6 @@ fn parse_servers(doc: &Value, signed_in: &HashSet<String>) -> Vec<PiMcpServer> {
                 description: text("description"),
                 signed_in,
             }
-        })
-        .collect()
-}
-
-/// 这场 Pi 会话会连哪些 MCP 服务器。和 `loaded_skills_for_launch` 一样推断自启动参数，
-/// 不是会话里的连接结果：连没连上、要不要登录要等 Pi 报上来。
-///
-/// 产品智能体（带 `SMELT_AGENT_PLUGIN_ARGS`）只连 `SMELT_AGENT_MCP_SERVERS` 里勾了、`mcp.json`
-/// 里还在且没停用的，规则同 `agent/src/mcp-selection.ts`；裸 Pi 连 `mcp.json` 里
-/// 所有启用的。受信任项目里的 `.pi/mcp.json` 不算：项目受不受信任只有 Pi 自己知道。
-pub fn loaded_mcp_servers_for_launch(launch: &ConversationLaunchSpec) -> Vec<PiMcpServer> {
-    loaded_mcp_servers_for_launch_at(launch, &pi_agent_dir())
-}
-
-fn loaded_mcp_servers_for_launch_at(
-    launch: &ConversationLaunchSpec,
-    agent_dir: &Path,
-) -> Vec<PiMcpServer> {
-    let selection: Option<HashSet<String>> = launch
-        .env
-        .contains_key(SMELT_AGENT_PLUGIN_ARGS_ENV)
-        .then(|| {
-            launch
-                .env
-                .get(SMELT_AGENT_MCP_SERVERS_ENV)
-                .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
-                .unwrap_or_default()
-                .into_iter()
-                .collect()
-        });
-    if selection.as_ref().is_some_and(HashSet::is_empty) {
-        return Vec::new();
-    }
-    // 读不出来的 mcp.json，Pi 那边也一个都连不上。
-    let Ok(servers) = load_pi_mcp_servers_at(agent_dir) else {
-        return Vec::new();
-    };
-    servers
-        .into_iter()
-        .filter(|server| {
-            // 没有地址也没有命令的条目 Pi 注册不了。
-            server.enabled
-                && server.transport != PiMcpTransport::Unknown
-                && selection
-                    .as_ref()
-                    .is_none_or(|names| names.contains(&server.name))
         })
         .collect()
 }
@@ -541,49 +492,6 @@ mod tests {
 
     fn read(dir: &Path) -> Value {
         serde_json::from_str(&std::fs::read_to_string(dir.join("mcp.json")).unwrap()).unwrap()
-    }
-
-    fn loaded_names(launch: &ConversationLaunchSpec, dir: &Path) -> Vec<String> {
-        // serde_json 的对象顺序取决于有没有开 preserve_order，排一下再比。
-        let mut names: Vec<String> = loaded_mcp_servers_for_launch_at(launch, dir)
-            .into_iter()
-            .map(|server| server.name)
-            .collect();
-        names.sort();
-        names
-    }
-
-    /// 裸 Pi 连所有启用的；产品智能体只连勾了的，没勾就一个不连。
-    #[test]
-    fn loaded_servers_follow_the_agent_selection() {
-        let dir = temp_dir();
-        std::fs::write(
-            dir.join("mcp.json"),
-            r#"{"mcpServers":{
-                "rea":{"command":"rea-mcp"},
-                "figma":{"url":"https://mcp.figma.com/mcp"},
-                "off":{"url":"https://example.com/mcp","enabled":false},
-                "override-only":{"enabled":true}
-            }}"#,
-        )
-        .unwrap();
-
-        let bare = ConversationLaunchSpec::from_command("pi");
-        assert_eq!(loaded_names(&bare, &dir), ["figma", "rea"]);
-
-        let agent = bare
-            .clone()
-            .with_env(SMELT_AGENT_PLUGIN_ARGS_ENV, "[]")
-            .with_env(SMELT_AGENT_MCP_SERVERS_ENV, r#"["rea","off","gone"]"#);
-        assert_eq!(
-            loaded_names(&agent, &dir),
-            ["rea"],
-            "停用的和 mcp.json 里已经没有的都连不上"
-        );
-
-        let unchecked = bare.with_env(SMELT_AGENT_PLUGIN_ARGS_ENV, "[]");
-        assert!(loaded_names(&unchecked, &dir).is_empty());
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

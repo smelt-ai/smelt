@@ -19,6 +19,10 @@ import smeltModelRefreshExtension from "../src/model-refresh.ts";
 import smeltContextUsageExtension from "../src/context-usage.ts";
 import smeltImageLimitExtension from "../src/image-limit.ts";
 import {
+	SMELT_MCP_SERVERS_EXTENSION_NAME,
+	smeltMcpServersExtension,
+} from "../src/mcp-servers-report.ts";
+import {
 	SMELT_ELICITATION_TOOL_NAME,
 	smeltElicitationExtension,
 } from "../src/elicitation.ts";
@@ -71,6 +75,7 @@ describe("Smelt Pi extension ordering", () => {
 			{ name: "smelt-elicitation", factory: smeltElicitationExtension, hidden: true },
 			{ name: "smelt-image-limit", factory: smeltImageLimitExtension, hidden: true },
 			{ name: "smelt-context-usage", factory: smeltContextUsageExtension, hidden: true },
+			{ name: SMELT_MCP_SERVERS_EXTENSION_NAME, factory: smeltMcpServersExtension, hidden: true },
 			{ name: SMELT_SUBAGENT_EXTENSION_NAME, factory: smeltSubagentExtension, hidden: true },
 			{ name: SMELT_BACKGROUND_TASK_EXTENSION_NAME, factory: smeltBackgroundTaskExtension, hidden: true },
 			{ name: SMELT_SESSION_PEERS_EXTENSION_NAME, factory: smeltSessionPeersExtension, hidden: true },

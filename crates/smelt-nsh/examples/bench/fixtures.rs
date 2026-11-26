@@ -300,8 +300,6 @@ pub fn setup_real_conv(
             let launch = data["params"]["launch"].clone();
             call.resolve(json!({
                 "launch": launch,
-                "skills": [],
-                "mcp_servers": [],
             }));
         } else {
             call.resolve(Value::Null);

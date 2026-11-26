@@ -453,58 +453,45 @@ function ConfigSegments(props: {
 }
 
 export function CapabilitiesPopover(props: {
-  skills: () => any[];
-  mcpServers: () => any[];
+  skills: () => { command: string; name: string; description: string }[];
+  mcpServers: () => string[];
   byAgent: () => boolean;
-  onUseSkill: (name: string) => void;
+  /** 插入技能命令（不带斜杠），例如 Pi 的 `skill:foo`。 */
+  onUseSkill: (command: string) => void;
   onManage?: () => void;
 }) {
   const look = theme;
   const open = signal(false);
-  const total = computed(() => (props.skills()?.length ?? 0) + (props.mcpServers()?.length ?? 0));
+  const total = computed(() => props.skills().length + props.mcpServers().length);
 
+  // 会话什么都没报（还在启动、或引擎报不出来）就不画入口。
   return (
-    <SmeltPopover
-      open={open()}
-      onOpenChange={({ open: next }: any) => open.set(Boolean(next))}
-      placement="top"
-      align="start"
-      offset={8}
-      popupClass="rounded-xl border border-border bg-popover p-0 shadow-md overflow-hidden"
-      popupStyle={{ width: 320 }}
-      trigger={
-        <SmeltButton
-          quiet
-          small
-          selected={open()}
-          icon="icons/puzzle.svg"
-          label={total() > 0 ? String(total()) : undefined}
-          tooltip={ct("capabilities.title")}
-          accessibilityLabel={ct("capabilities.title")}
-          style={{ borderRadius: 999 }}
-        />
-      }
-    >
-      <View>
-        <If
-          when={total() > 0}
-          else={
-            <Text
-              style={{
-                paddingHorizontal: 14,
-                paddingVertical: 18,
-                fontSize: look().type.ui.size,
-                color: look().palette.muted,
-                textAlign: "center",
-              }}
-            >
-              {ct("capabilities.none")}
-            </Text>
-          }
-        >
+    <If when={total() > 0}>
+      <SmeltPopover
+        open={open()}
+        onOpenChange={({ open: next }: any) => open.set(Boolean(next))}
+        placement="top"
+        align="start"
+        offset={8}
+        popupClass="rounded-xl border border-border bg-popover p-0 shadow-md overflow-hidden"
+        popupStyle={{ width: 320 }}
+        trigger={
+          <SmeltButton
+            quiet
+            small
+            selected={open()}
+            icon="icons/puzzle.svg"
+            label={String(total())}
+            tooltip={ct("capabilities.title")}
+            accessibilityLabel={ct("capabilities.title")}
+            style={{ borderRadius: 999 }}
+          />
+        }
+      >
+        <View>
           <Scroll style={{ maxHeight: 340 }}>
             <View style={{ padding: 6 }}>
-              {/* 技能：点了把 /技能名 插进输入框，悬停时右边写出来 */}
+              {/* 技能：点了把它的斜杠命令插进输入框，悬停时右边写出来 */}
               <If when={props.skills().length > 0}>
                 <CapabilityHeader icon="icons/sparkles.svg" label={ct("capabilities.skills")} count={props.skills().length} />
                 <Each of={props.skills()}>
@@ -512,7 +499,7 @@ export function CapabilitiesPopover(props: {
                     <View
                       onPress={() => {
                         open.set(false);
-                        props.onUseSkill(skill().name);
+                        props.onUseSkill(skill().command);
                       }}
                       class="group/row hover:bg-accent"
                       role="button"
@@ -574,7 +561,7 @@ export function CapabilitiesPopover(props: {
                           numberOfLines: 1,
                         }}
                       >
-                        {srv().name}
+                        {srv()}
                       </Text>
                     )}
                   </Each>
@@ -582,39 +569,39 @@ export function CapabilitiesPopover(props: {
               </If>
             </View>
           </Scroll>
-        </If>
 
-        <If when={Boolean(props.onManage)}>
-          <View
-            style={{
-              borderTopWidth: 1,
-              borderTopColor: look().palette.hair,
-              paddingLeft: 14,
-              paddingRight: 6,
-              paddingVertical: 6,
-              flexDirection: "row",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 8,
-            }}
-          >
-            <Text style={{ flex: 1, fontSize: look().type.text_xsmall.size, color: look().palette.faint, numberOfLines: 1 }}>
-              {props.byAgent() ? ct("capabilities.by_agent") : ct("capabilities.by_pi")}
-            </Text>
-            <SmeltButton
-              quiet
-              small
-              trailingIcon="icons/arrow-right.svg"
-              label={props.byAgent() ? ct("capabilities.edit_agent") : ct("capabilities.manage_library")}
-              onPress={() => {
-                open.set(false);
-                if (props.onManage) props.onManage();
+          <If when={Boolean(props.onManage)}>
+            <View
+              style={{
+                borderTopWidth: 1,
+                borderTopColor: look().palette.hair,
+                paddingLeft: 14,
+                paddingRight: 6,
+                paddingVertical: 6,
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
               }}
-            />
-          </View>
-        </If>
-      </View>
-    </SmeltPopover>
+            >
+              <Text style={{ flex: 1, fontSize: look().type.text_xsmall.size, color: look().palette.faint, numberOfLines: 1 }}>
+                {props.byAgent() ? ct("capabilities.by_agent") : ct("capabilities.by_pi")}
+              </Text>
+              <SmeltButton
+                quiet
+                small
+                trailingIcon="icons/arrow-right.svg"
+                label={props.byAgent() ? ct("capabilities.edit_agent") : ct("capabilities.manage_library")}
+                onPress={() => {
+                  open.set(false);
+                  if (props.onManage) props.onManage();
+                }}
+              />
+            </View>
+          </If>
+        </View>
+      </SmeltPopover>
+    </If>
   );
 }
 

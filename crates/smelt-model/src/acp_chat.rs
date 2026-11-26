@@ -390,8 +390,8 @@ fn escape_xml_attr(value: &str) -> String {
         .collect()
 }
 
-/// 把一条跨对话来信格式化为发给非 Pi ACP 模型的 `<peer-message>` 正文。
-/// 与 `agent/src/peer-message.ts` 保持同一标签结构，便于冷恢复重放时确定性还原为事件行。
+/// 把一条跨对话来信格式化为发给模型的 `<peer-message>` 正文，所有引擎都用这一份（Pi 经会话
+/// 宿主交给扩展）。非 Pi ACP 冷恢复重放时据此标签结构确定性还原为事件行。
 #[must_use]
 pub fn format_peer_message_text(
     delivery: &crate::acp_session::PeerDelivery,

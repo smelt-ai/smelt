@@ -435,7 +435,8 @@ fn handle_client(inner: Arc<Inner>, stream: TaskStream, session_cwd: &str) {
         Some("subagent_dispatch") => subagents::serve_dispatch(inner, stream, &request, pending),
         Some("ask_user") => ask::serve(&inner, stream, &request),
         Some(
-            op @ ("session_list" | "session_read" | "session_send" | "session_spawn" | "notify"),
+            op @ ("session_tools" | "session_list" | "session_read" | "session_send"
+            | "session_spawn" | "notify"),
         ) => {
             peers::forward(&inner, stream, op, &request);
         }
@@ -3571,6 +3572,11 @@ mod tests {
         assert_eq!(notice["peer"]["sourceSessionId"], "acp-a");
         assert_eq!(notice["peer"]["kind"], "task");
         assert_eq!(notice["peer"]["hops"], 7);
+        // 写给模型的那段由这边写好，扩展原样交给会话。
+        let prompt = notice["peer"]["prompt"].as_str().unwrap();
+        assert!(prompt.starts_with("<peer-message "), "{prompt}");
+        assert!(prompt.contains("session_send"), "{prompt}");
+        assert!(prompt.contains("重跑 flaky e2e"), "{prompt}");
         assert!(
             subagent.try_next(Duration::from_millis(200)).is_none(),
             "子智能体的监听收不到别的对话的消息"

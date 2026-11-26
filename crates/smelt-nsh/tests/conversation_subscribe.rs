@@ -141,8 +141,6 @@ fn conversation_subscribe_wire_contract(cx: &mut TestAppContext) {
             let launch = data["params"]["launch"].clone();
             call.resolve(json!({
                 "launch": launch,
-                "skills": [],
-                "mcp_servers": [],
             }));
         } else {
             call.resolve(Value::Null);
