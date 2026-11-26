@@ -72,7 +72,6 @@ mod appearance_tests {
             std::env::temp_dir().join(format!("smelt-appearance-test-{}", uuid::Uuid::new_v4()));
         let store = smelt_client_store::ClientStore::open(dir.join("client.sqlite3")).unwrap();
         cx.update(|cx| {
-            gpui_base::init(cx);
             smelt_ui::init(cx);
         });
         cx.update(|cx| {
@@ -102,7 +101,6 @@ mod appearance_tests {
             std::env::temp_dir().join(format!("smelt-appearance-test-{}", uuid::Uuid::new_v4()));
         let store = smelt_client_store::ClientStore::open(dir.join("client.sqlite3")).unwrap();
         cx.update(|cx| {
-            gpui_base::init(cx);
             smelt_ui::init(cx);
         });
         cx.update(|cx| {
@@ -140,7 +138,6 @@ mod appearance_tests {
         connection.execute_batch("CREATE TRIGGER fail_appearance BEFORE INSERT ON appearance BEGIN SELECT RAISE(FAIL, 'save blocked'); END;").unwrap();
         drop(connection);
         cx.update(|cx| {
-            gpui_base::init(cx);
             smelt_ui::init(cx);
         });
         cx.update(|cx| {

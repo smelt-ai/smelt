@@ -31,8 +31,9 @@ pub use manifest::{
 };
 pub use plugins::{ModulePackage, source_fingerprint};
 pub use shell::{
-    DirPickerDialogState, DirPickerEntryState, HostDialogAction, HostDialogsState, MainShell,
-    MainShellEvent, OutletTarget, QuitDialogState, ShellConfig, ShellLabels,
+    ConfirmDialogState, DirPickerDialogState, DirPickerEntryState, HostDialogAction,
+    HostDialogsState, MainShell, MainShellEvent, OutletTarget, QuitDialogState, ShellConfig,
+    ShellLabels,
 };
 pub use shell_layout::{ComputedShellView, WindowCorners};
 pub use types::{

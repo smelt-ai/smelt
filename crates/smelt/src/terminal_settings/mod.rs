@@ -9,15 +9,22 @@ mod theme;
 
 use std::rc::Rc;
 
-use gpui::App;
+use gpui::{App, Global};
 use smelt_plugin_api as api;
 
+pub(crate) use page::{handle_action, snapshot};
+
 const OWNER: &str = "smelt.terminal";
+
+pub(crate) struct TerminalStoreGlobal(pub(crate) Rc<store::TerminalStore>);
+
+impl Global for TerminalStoreGlobal {}
 
 pub(crate) fn register(cx: &mut App) {
     let store = Rc::new(store::TerminalStore::open());
     smelt_terminal::set_font_px(store.font_px());
-    if let Err(error) = api::register_views(OWNER, vec![page::spec(store)], cx) {
+    cx.set_global(TerminalStoreGlobal(store));
+    if let Err(error) = api::register_views(OWNER, vec![page::spec()], cx) {
         eprintln!("[terminal] 设置页登记失败：{error}");
     }
     theme::register(cx);

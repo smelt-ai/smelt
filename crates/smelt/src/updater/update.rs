@@ -11,16 +11,10 @@
 use std::rc::Rc;
 
 use api::model::daemon_state::{DaemonPhase, DaemonSessionState};
-use api::ui::dialog::Confirm;
-#[cfg(target_os = "macos")]
-use api::ui::kit::{TYPE, TypeStyled as _};
-#[cfg(target_os = "macos")]
-use api::ui::ui_theme;
 use api::updater::{self, UpdateFailure, UpdateStatus};
-use gpui::prelude::*;
-use gpui::{App, AsyncApp, Context, Entity, Global, Window};
 #[cfg(target_os = "macos")]
-use gpui::{SharedString, div, rgb};
+use gpui::SharedString;
+use gpui::{App, AppContext as _, AsyncApp, Context, Entity, Global, Window};
 use rust_i18n::t;
 use smelt_plugin_api as api;
 
@@ -51,8 +45,24 @@ pub(crate) struct Updater {
     /// 上次没移成的原因，确认框和设置页都显示。
     #[cfg(target_os = "macos")]
     pub(crate) move_app_error: Option<SharedString>,
+    /// 当前等待用户确认的更新对话框（由 NSH 主壳 `<HostDialogs />` 渲染）。
+    pending_confirm: Option<PendingConfirm>,
     pub(crate) prefs: Prefs,
     store: UpdaterStore,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PendingConfirm {
+    Restart {
+        body: String,
+    },
+    Quit {
+        body: String,
+    },
+    #[cfg(target_os = "macos")]
+    MoveApp {
+        description: String,
+    },
 }
 
 struct UpdaterGlobal(Entity<Updater>);
@@ -77,6 +87,7 @@ pub(crate) fn register(cx: &mut App) {
         moving_app: false,
         #[cfg(target_os = "macos")]
         move_app_error: None,
+        pending_confirm: None,
         prefs,
         store,
     });
@@ -567,7 +578,7 @@ impl Updater {
 }
 
 /// 设置页「立即重启更新」：装更新会停掉本机守护。没有进行中的会话就直接装，否则先确认。
-pub(crate) fn begin_ready_update_install(window: &mut Window, cx: &mut App) {
+pub(crate) fn begin_ready_update_install(_window: &mut Window, cx: &mut App) {
     let Some(entity) = updater(cx) else {
         return;
     };
@@ -577,17 +588,11 @@ pub(crate) fn begin_ready_update_install(window: &mut Window, cx: &mut App) {
     }
     let names = local_busy_work_names(cx);
     if !names.is_empty() {
-        Confirm::new(
-            t!("updater.confirm.restart_title"),
-            t!("updater.confirm.restart"),
-            |_, cx| {
-                install_ready_update(Trigger::User, cx);
-                true
-            },
-        )
-        .danger()
-        .description(stop_prompt_body(&names))
-        .open(window, cx);
+        let body = stop_prompt_body(&names);
+        entity.update(cx, |this, cx| {
+            this.pending_confirm = Some(PendingConfirm::Restart { body });
+            cx.notify();
+        });
         return;
     }
     install_ready_update(Trigger::User, cx);
@@ -614,20 +619,9 @@ fn quit_guard(cx: &mut App) -> bool {
         return true;
     }
     let body = stop_prompt_body(&names);
-    cx.defer(move |cx| {
-        open_confirm(cx, move |window, cx| {
-            Confirm::new(
-                t!("updater.confirm.quit_title"),
-                t!("updater.confirm.quit"),
-                |_, cx| {
-                    install_ready_update(Trigger::Quit, cx);
-                    true
-                },
-            )
-            .danger()
-            .description(body)
-            .open(window, cx);
-        });
+    entity.update(cx, |this, cx| {
+        this.pending_confirm = Some(PendingConfirm::Quit { body });
+        cx.notify();
     });
     true
 }
@@ -706,45 +700,100 @@ fn offer_move_app(cx: &mut App) {
             t!("updater.move.translocated").into_owned()
         }
     };
-    open_confirm(cx, move |window, cx| {
-        let mover = entity.clone();
-        let state = entity.clone();
-        Confirm::new(
-            t!("updater.move.confirm_title"),
-            t!("updater.move.confirm"),
-            move |_, cx| {
-                mover.update(cx, |this, cx| this.move_app_to_applications(cx));
-                // 框留着：移好了 App 会退出，没移成在框里写原因。
-                false
-            },
-        )
-        .description(description)
-        .body(move |_, cx| {
-            let this = state.read(cx);
-            let (text, color) = match (&this.move_app_error, this.moving_app) {
-                (_, true) => (t!("updater.move.moving").into(), ui_theme::muted()),
-                (Some(error), false) => (error.clone(), ui_theme::bad()),
-                (None, false) => (SharedString::default(), ui_theme::muted()),
-            };
-            div()
-                .type_style(TYPE.ui)
-                .text_color(rgb(color))
-                .child(text)
-                .into_any_element()
-        })
-        .open(window, cx);
+    entity.update(cx, |this, cx| {
+        this.pending_confirm = Some(PendingConfirm::MoveApp { description });
+        cx.notify();
     });
 }
 
-/// 在主窗口里弹确认框。主窗口没开就算了：更新入口都还在「关于」页。
-fn open_confirm(cx: &mut App, open: impl FnOnce(&mut Window, &mut App) + 'static) {
-    let Some(window) = api::host(cx).main_window(cx) else {
-        api::app_log::warn("updater", "主窗口没开，确认框没地方弹");
+/// 构造推给 NSH 主壳 `<HostDialogs />` 的更新确认框快照。
+pub(crate) fn pending_confirm_dialog(cx: &App) -> Option<smelt_nsh::ConfirmDialogState> {
+    let entity = updater(cx)?;
+    let this = entity.read(cx);
+    match this.pending_confirm.as_ref()? {
+        PendingConfirm::Restart { body } => Some(smelt_nsh::ConfirmDialogState {
+            title: t!("updater.confirm.restart_title").into_owned(),
+            description: body.clone(),
+            note: None,
+            note_bad: false,
+            cancel_label: t!("action.cancel").into_owned(),
+            confirm_label: t!("updater.confirm.restart").into_owned(),
+            danger: true,
+            busy: false,
+        }),
+        PendingConfirm::Quit { body } => Some(smelt_nsh::ConfirmDialogState {
+            title: t!("updater.confirm.quit_title").into_owned(),
+            description: body.clone(),
+            note: None,
+            note_bad: false,
+            cancel_label: t!("action.cancel").into_owned(),
+            confirm_label: t!("updater.confirm.quit").into_owned(),
+            danger: true,
+            busy: false,
+        }),
+        #[cfg(target_os = "macos")]
+        PendingConfirm::MoveApp { description } => {
+            let (note, note_bad) = match (&this.move_app_error, this.moving_app) {
+                (_, true) => (Some(t!("updater.move.moving").into_owned()), false),
+                (Some(error), false) => (Some(error.to_string()), true),
+                (None, false) => (None, false),
+            };
+            Some(smelt_nsh::ConfirmDialogState {
+                title: t!("updater.move.confirm_title").into_owned(),
+                description: description.clone(),
+                note,
+                note_bad,
+                cancel_label: t!("action.cancel").into_owned(),
+                confirm_label: t!("updater.move.confirm").into_owned(),
+                danger: false,
+                busy: this.moving_app,
+            })
+        }
+    }
+}
+
+pub(crate) fn confirm_pending_dialog(cx: &mut App) {
+    let Some(entity) = updater(cx) else {
         return;
     };
-    if let Err(error) = window.update(cx, |_, window, cx| open(window, cx)) {
-        api::app_log::warn("updater", &format!("确认框没弹出来：{error:#}"));
+    let pending = entity.read(cx).pending_confirm.clone();
+    match pending {
+        Some(PendingConfirm::Restart { .. }) => {
+            entity.update(cx, |this, cx| {
+                this.pending_confirm = None;
+                cx.notify();
+            });
+            install_ready_update(Trigger::User, cx);
+        }
+        Some(PendingConfirm::Quit { .. }) => {
+            entity.update(cx, |this, cx| {
+                this.pending_confirm = None;
+                cx.notify();
+            });
+            install_ready_update(Trigger::Quit, cx);
+        }
+        #[cfg(target_os = "macos")]
+        Some(PendingConfirm::MoveApp { .. }) => {
+            // 框留着：移好了 App 会退出，没移成在框里写原因。
+            entity.update(cx, |this, cx| this.move_app_to_applications(cx));
+        }
+        None => {}
     }
+}
+
+pub(crate) fn cancel_pending_dialog(cx: &mut App) {
+    let Some(entity) = updater(cx) else {
+        return;
+    };
+    entity.update(cx, |this, cx| {
+        #[cfg(target_os = "macos")]
+        if this.moving_app {
+            return;
+        }
+        if this.pending_confirm.take().is_some() {
+            cx.notify();
+        }
+    });
 }
 
 /// 交给宿主退出，不再问退出守卫。

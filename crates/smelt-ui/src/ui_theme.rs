@@ -16,7 +16,6 @@ use std::sync::{Arc, LazyLock, RwLock};
 
 use gpui::{FontFeatures, Pixels, Rgba, px, rgb, rgba};
 
-
 use crate::theme_catalog;
 use crate::theme_config::{Elevation, ThemeColors, ThemeMode};
 
@@ -130,8 +129,6 @@ struct Installed {
     palette: Palette,
     colors: ThemeColors,
     elevation: Arc<Elevation>,
-    /// 窗口底叠出来的颜色，见 [`backdrop`]。
-    backdrop: u32,
 }
 
 static ACTIVE: RwLock<Option<Installed>> = RwLock::new(None);
@@ -213,12 +210,6 @@ pub fn glass_fill() -> Rgba {
         },
         None => Rgba { a: 1.0, ..bg },
     }
-}
-
-/// 窗口底透的地方叠出来的颜色：界面上的字、行底、交给组件库和插件的实色都按它配。和
-/// [`glass_fill`] 是同一份算法，读的是同一时刻装上的主题。实色的地方离字更远，对比只会更足。
-pub(crate) fn backdrop() -> u32 {
-    installed(|installed| installed.backdrop)
 }
 
 /// 正文压在窗口底上至少要的对比（WCAG AAA），和次要字拉开层次。
@@ -344,7 +335,6 @@ pub(crate) fn install_theme(colors: &ThemeColors, elevation: Arc<Elevation>, dar
         palette: palette_from_tokens(colors, backdrop),
         colors: *colors,
         elevation,
-        backdrop,
     };
     install(installed, !dark);
 }
@@ -370,7 +360,6 @@ fn builtin(light: bool) -> Installed {
         palette: palette_from_tokens(&colors, backdrop),
         colors,
         elevation: config.elevation().clone(),
-        backdrop,
     }
 }
 
@@ -551,11 +540,6 @@ fn over(top: Rgba, bottom: Rgba) -> Rgba {
         b: channel(top.b, bottom.b),
         a,
     }
-}
-
-/// 弹层正文来自主题的正文色，半透明时压到实际弹层底色上。
-pub(crate) fn popover_foreground(surface: u32) -> u32 {
-    flatten(palette().popover_text, surface)
 }
 
 /// 半透明色压在实底上取实色。

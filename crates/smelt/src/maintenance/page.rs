@@ -1,15 +1,12 @@
-//! 设置「系统 → 命令行」（macOS）：把 `smelt` 装进 `/usr/local/bin`，终端里直接用。
+//! 设置「系统 → 命令行」（macOS）：把 `smelt` 装进 `/usr/local/bin`，终端里直接用；渲染由 NSH 主壳承担。
 
-use std::rc::Rc;
-
-use gpui::{
-    App, AppContext as _, Context, IntoElement, ParentElement as _, Render, SharedString, Window,
-};
+use gpui::{App, Context, SharedString};
 use rust_i18n::t;
-use smelt_plugin_api::{
-    self as api, PluginView, SettingsEntry, SettingsGroup, ViewHandle, ViewSpec, text,
-};
-use smelt_ui::{Button, IconName, SettingsPage, SettingsRow, SettingsSection};
+use serde_json::{Value, json};
+use smelt_plugin_api::{self as api, SettingsEntry, SettingsGroup, ViewSpec, text};
+use smelt_ui::IconName;
+
+use crate::Workspace;
 
 use super::cli_command::{self, InstallError, SYSTEM_LINK, SystemCommand};
 
@@ -33,46 +30,85 @@ pub(crate) fn spec() -> ViewSpec {
             keywords: keywords.into_iter().map(SharedString::from).collect(),
         }),
         fills: Vec::new(),
-        build: Rc::new(|_, cx| Rc::new(cx.new(|_| CommandPage::default())) as Rc<dyn ViewHandle>),
+        build: crate::host_views::nsh_managed_view_builder(),
     }
 }
 
 #[derive(Default)]
-struct CommandPage {
+pub(crate) struct CliState {
     system: SystemCommand,
     installing: bool,
 }
 
-impl CommandPage {
-    fn check(cx: &mut Context<Self>) {
+impl CliState {
+    pub(crate) fn snapshot(&self) -> Value {
+        let description = match self.system {
+            SystemCommand::Unknown => t!("maintenance.cli.status.unknown").into_owned(),
+            SystemCommand::Installed => {
+                t!("maintenance.cli.status.installed", link = SYSTEM_LINK).into_owned()
+            }
+            SystemCommand::Missing => t!("maintenance.cli.status.missing").into_owned(),
+            SystemCommand::Stale => {
+                t!("maintenance.cli.status.stale", link = SYSTEM_LINK).into_owned()
+            }
+            SystemCommand::Taken => {
+                t!("maintenance.cli.status.taken", link = SYSTEM_LINK).into_owned()
+            }
+        };
+        let button_label = if self.installing {
+            t!("maintenance.cli.install.running").into_owned()
+        } else if self.system == SystemCommand::Installed {
+            t!("maintenance.cli.install.again").into_owned()
+        } else {
+            t!("maintenance.cli.install.action").into_owned()
+        };
+        let disabled = self.installing || self.system == SystemCommand::Taken;
+        json!({
+            "kind": "cli",
+            "row_title": t!("maintenance.cli.row").into_owned(),
+            "description": description,
+            "button_label": button_label,
+            "installing": self.installing,
+            "disabled": disabled,
+        })
+    }
+
+    pub(crate) fn check(
+        mut accessor: impl FnMut(&mut Workspace) -> &mut Self + 'static,
+        cx: &mut Context<Workspace>,
+    ) {
         let check = cx
             .background_executor()
             .spawn(async { cli_command::system_command() });
         cx.spawn(async move |this, cx| {
             let system = check.await;
-            let _ = this.update(cx, |page, cx| {
-                page.system = system;
-                cx.notify();
+            let _ = this.update(cx, |workspace, cx| {
+                accessor(workspace).system = system;
+                workspace.sync_host_settings(cx);
             });
         })
         .detach();
     }
 
-    fn install(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn install(
+        &mut self,
+        mut accessor: impl FnMut(&mut Workspace) -> &mut Self + 'static,
+        cx: &mut Context<Workspace>,
+    ) {
         if self.installing {
             return;
         }
         self.installing = true;
-        cx.notify();
         let install = cx.background_executor().spawn(async {
             let result = cli_command::install();
             (result, cli_command::system_command())
         });
         cx.spawn(async move |this, cx| {
             let (result, system) = install.await;
-            let _ = this.update(cx, |page, cx| {
-                page.system = system;
-                page.installing = false;
+            let _ = this.update(cx, |workspace, cx| {
+                let state = accessor(workspace);
+                state.system = system;
+                state.installing = false;
                 match result {
                     Ok(()) => notify(
                         &t!("maintenance.notify.done"),
@@ -89,7 +125,7 @@ impl CommandPage {
                         );
                     }
                 }
-                cx.notify();
+                workspace.sync_host_settings(cx);
             });
         })
         .detach();
@@ -108,49 +144,6 @@ fn format_install_error(error: &InstallError) -> String {
             t!("maintenance.cli.install.osascript_failed", error = err).into_owned()
         }
         InstallError::Failed(err) => err.clone(),
-    }
-}
-
-impl PluginView for CommandPage {
-    fn open(&mut self, _: &api::serde_json::Value, _: &mut Window, cx: &mut Context<Self>) {
-        Self::check(cx);
-    }
-}
-
-impl Render for CommandPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Self { system, installing } = *self;
-        let description: SharedString = match system {
-            SystemCommand::Unknown => t!("maintenance.cli.status.unknown").into(),
-            SystemCommand::Installed => {
-                t!("maintenance.cli.status.installed", link = SYSTEM_LINK).into()
-            }
-            SystemCommand::Missing => t!("maintenance.cli.status.missing").into(),
-            SystemCommand::Stale => t!("maintenance.cli.status.stale", link = SYSTEM_LINK).into(),
-            SystemCommand::Taken => t!("maintenance.cli.status.taken", link = SYSTEM_LINK).into(),
-        };
-        let label = if installing {
-            t!("maintenance.cli.install.running")
-        } else if system == SystemCommand::Installed {
-            t!("maintenance.cli.install.again")
-        } else {
-            t!("maintenance.cli.install.action")
-        };
-        let disabled = installing || system == SystemCommand::Taken;
-        let page = cx.entity();
-        let row = SettingsRow::new(t!("maintenance.cli.row"))
-            .description(description)
-            .child(
-                Button::new("install-cli-command")
-                    .small()
-                    .label(label)
-                    .loading(installing)
-                    .disabled(disabled)
-                    .on_click(move |_, _, cx: &mut App| {
-                        page.update(cx, |page, cx| page.install(cx));
-                    }),
-            );
-        SettingsPage::new("maintenance-cli").child(SettingsSection::new().child(row))
     }
 }
 

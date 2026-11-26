@@ -19,12 +19,31 @@ use crate::Workspace;
 /// 宿主自己登记视图、页和布局用的来源。
 pub(crate) const HOST_OWNER: &str = "smelt";
 
+/// 由 NSH 主壳（`MainShell.tsx` / `HostSettings.tsx`）直接渲染的宿主视图占位构造器：
+/// 视图仍登记在全局视图注册表里以参与导航、角标、路由与搜索，渲染由 NSH 主壳接管。
+pub(crate) fn nsh_managed_view_builder()
+-> Rc<dyn Fn(&mut Window, &mut gpui::App) -> Rc<dyn ViewHandle>> {
+    Rc::new(|_, cx| Rc::new(cx.new(|_| NshManagedView)) as Rc<dyn ViewHandle>)
+}
+
+struct NshManagedView;
+
+impl Render for NshManagedView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+impl PluginView for NshManagedView {
+    fn open(&mut self, _: &serde_json::Value, _: &mut Window, _: &mut Context<Self>) {}
+}
+
 /// 登记宿主的视图，和设置那一页。工作台建好时调；窗口重开时新工作台再登记一遍，替换掉
 /// 指着旧工作台的那份视图，页和布局没变就不动。
 pub(crate) fn register(workspace: WeakEntity<Workspace>, cx: &mut gpui::App) {
     crate::settings::register_page(cx);
-    let mut specs = vec![outlet_spec(workspace.clone())];
-    specs.extend(crate::settings::view_specs(workspace));
+    let mut specs = vec![outlet_spec(workspace)];
+    specs.extend(crate::settings::view_specs());
     if let Err(error) = api::register_views(HOST_OWNER, specs, cx) {
         eprintln!("[plugins] 宿主视图登记失败：{error}");
     }

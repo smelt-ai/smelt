@@ -12,6 +12,8 @@ use smelt_plugin_api::{self as api};
 
 use store::LanguageStore;
 
+pub(crate) use page::{handle_action, snapshot};
+
 const OWNER: &str = "smelt.language";
 
 #[derive(Clone)]
@@ -78,7 +80,7 @@ pub(crate) fn register(cx: &mut App) {
             .detach();
     })
     .detach();
-    if let Err(error) = api::register_views(OWNER, vec![page::spec(handle)], cx) {
+    if let Err(error) = api::register_views(OWNER, vec![page::spec()], cx) {
         eprintln!("[language] 语言页登记失败：{error}");
     }
 }

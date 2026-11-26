@@ -96,6 +96,7 @@ pub fn resolve_page<'a>(
 }
 
 /// 按标题和关键词过滤侧栏。空查询返回完整树。
+#[cfg(test)]
 pub fn filter_settings_nav(nav: &[SettingsNavCategory], query: &str) -> Vec<SettingsNavCategory> {
     let query = query.trim();
     if query.is_empty() {
@@ -132,6 +133,7 @@ pub fn filter_settings_nav(nav: &[SettingsNavCategory], query: &str) -> Vec<Sett
         .collect()
 }
 
+#[cfg(test)]
 fn category_matches_exact(category: &SettingsNavCategory, query: &str) -> bool {
     let query = query.trim().to_lowercase();
     std::iter::once(category.title.as_ref())
@@ -142,6 +144,7 @@ fn category_matches_exact(category: &SettingsNavCategory, query: &str) -> bool {
 /// 用户经常会混输中英文（`agent 通知`、`API key`），也会带连字符或空格。
 /// 每个词可以命中“分类语境 + 入口标题 + 同义词”的任意位置，但所有词都必须命中，
 /// 避免一个宽泛的 `agent` 把整棵树都留下。
+#[cfg(test)]
 fn query_terms(query: &str) -> Vec<String> {
     let lowered = query.to_lowercase();
     let terms = lowered
@@ -156,6 +159,7 @@ fn query_terms(query: &str) -> Vec<String> {
     }
 }
 
+#[cfg(test)]
 fn matches_query<'a>(values: impl IntoIterator<Item = &'a str>, terms: &[String]) -> bool {
     let haystack = values
         .into_iter()
@@ -176,6 +180,7 @@ fn matches_query<'a>(values: impl IntoIterator<Item = &'a str>, terms: &[String]
     })
 }
 
+#[cfg(test)]
 fn matches_any_term<'a>(values: impl IntoIterator<Item = &'a str>, terms: &[String]) -> bool {
     let values = values.into_iter().collect::<Vec<_>>();
     terms

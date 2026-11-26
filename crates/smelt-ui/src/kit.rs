@@ -1,15 +1,7 @@
-//! 设计令牌：组件的字体、尺寸、字、阴影、动效、图标只从这里取，颜色只从 [`crate::ui_theme`] 取。
-//!
-//! 分几块：调色板（[`crate::ui_theme::Palette`]，随主题整份换）、
-//! 浮起层级 [`elevation`]、字 [`TYPE`]、圆角 [`RADIUS`]、动效 [`MOTION`]、控件尺寸
-//! [`ControlSize`]、图标 [`GLYPHS`]。
-
-use std::time::Duration;
+//! 设计令牌：字体、字阶 [`TYPE`]、圆角 [`RADIUS`] 与浮起层级 [`elevation`]；
+//! 颜色只从 [`crate::ui_theme`] 取。
 
 use gpui::{FontWeight, Styled, rems};
-use gpui_base::motion::Spring;
-
-use crate::IconName;
 
 /// 界面字体族。随 app 带的静态字面见 [`UI_FONTS`]，由 [`crate::init`] 载入。
 pub const UI_FONT_FAMILY: &str = "Inter";
@@ -152,66 +144,6 @@ pub const TYPE: Type = Type {
     text_xsmall: TextStyle::new(12., 18., 400.),
     text_xsmall_medium: TextStyle::new(12., 18., 500.),
     mono: TextStyle::new(12., 18., 400.),
-};
-
-/// 动效：临界阻尼弹簧（不过冲），值是响应周期。替代网页上 85–170ms
-/// 的 ease-out。系统开了减弱动态效果时 gpui-base 的 `spring` 直接到位。
-#[derive(Clone, Copy, Debug)]
-pub struct Motion {
-    /// 控件自身的状态变化：开关滑块、分段指示、按下。
-    pub control: Spring,
-    /// 浮层出现：菜单、弹出卡片、对话框、提示。
-    pub overlay: Spring,
-    /// 展开收起。
-    pub disclosure: Spring,
-}
-
-impl Motion {
-    /// 浮层入场用的定时过渡：浮层每次打开都是新挂上的元素，弹簧首帧就到位，入场只能从 0
-    /// 播一段时间。时长取 overlay 的响应周期。组件经 [`crate::motion::overlay_enter`] 取用。
-    pub fn overlay_enter(&self) -> gpui_base::motion::Transition {
-        gpui_base::motion::Transition::new(OVERLAY_RESPONSE).ease(crate::motion::ease_snap)
-    }
-}
-
-const OVERLAY_RESPONSE: Duration = Duration::from_millis(240);
-
-pub const MOTION: Motion = Motion {
-    control: Spring::new(Duration::from_millis(200)),
-    overlay: Spring::new(OVERLAY_RESPONSE),
-    disclosure: Spring::new(Duration::from_millis(300)),
-};
-
-/// 组件用到的图标。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Glyphs {
-    pub check: IconName,
-    pub copy: IconName,
-    /// 关闭、清空。
-    pub close: IconName,
-    pub chevron_down: IconName,
-    /// 子菜单。
-    pub chevron_right: IconName,
-    pub loader: IconName,
-    /// 删除、移除。
-    pub trash: IconName,
-    pub eye: IconName,
-    pub eye_off: IconName,
-    /// 可搜索列表的搜索框。
-    pub search: IconName,
-}
-
-pub const GLYPHS: Glyphs = Glyphs {
-    check: IconName::Check,
-    copy: IconName::Copy,
-    close: IconName::Close,
-    chevron_down: IconName::ChevronDown,
-    chevron_right: IconName::ChevronRight,
-    loader: IconName::Loader,
-    trash: IconName::Trash,
-    eye: IconName::Eye,
-    eye_off: IconName::EyeOff,
-    search: IconName::Search,
 };
 
 /// 浮起层级：每档是几层投影叠起来，取自当前主题（主题文件的 `elevation` 一节，没写的档按

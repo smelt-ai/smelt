@@ -12,6 +12,23 @@ use std::rc::Rc;
 use gpui::App;
 use smelt_plugin_api::{self as api, CommandSpec, Handled, MenuEntry, MenuSlot, text};
 
+pub(crate) use page::{handle_action, snapshot};
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) use update::{
+    cancel_pending_dialog, confirm_pending_dialog, pending_confirm_dialog, updater,
+};
+
+#[cfg(not(any(target_os = "macos", windows)))]
+pub(crate) fn pending_confirm_dialog(_cx: &App) -> Option<smelt_nsh::ConfirmDialogState> {
+    None
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+pub(crate) fn confirm_pending_dialog(_cx: &mut App) {}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+pub(crate) fn cancel_pending_dialog(_cx: &mut App) {}
+
 /// 更新偏好库、视图与退出守卫的来源 id（沿用 `smelt.updater` 保留已有用户偏好库）。
 pub(crate) const OWNER: &str = "smelt.updater";
 #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]

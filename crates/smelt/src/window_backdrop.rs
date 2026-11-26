@@ -932,30 +932,39 @@ mod tests {
             _: &mut gpui::Context<Self>,
         ) -> impl gpui::IntoElement {
             use gpui::{ParentElement as _, Styled as _};
-            use gpui_base::ElementExt as _;
             let record = |placement| {
                 let regions = self.regions.clone();
-                move |bounds, _: &mut Window, _: &mut gpui::App| {
-                    regions.borrow_mut().record(placement, bounds)
-                }
+                gpui::canvas(
+                    move |bounds, _, _| regions.borrow_mut().record(placement, bounds),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0()
             };
             let regions = self.regions.clone();
             gpui::div()
+                .relative()
                 .size_full()
                 .flex()
                 .flex_row()
-                .on_prepaint(move |_, _, _| regions.borrow_mut().begin())
+                .child(
+                    gpui::canvas(move |_, _, _| regions.borrow_mut().begin(), |_, _, _, _| {})
+                        .absolute()
+                        .size_0(),
+                )
                 .children(self.left.then(|| {
                     gpui::div()
+                        .relative()
                         .w(px(30.))
                         .h_full()
-                        .on_prepaint(record(DockPlacement::Left))
+                        .child(record(DockPlacement::Left))
                 }))
                 .child(
                     gpui::div()
+                        .relative()
                         .flex_1()
                         .h_full()
-                        .on_prepaint(record(DockPlacement::Center)),
+                        .child(record(DockPlacement::Center)),
                 )
         }
     }

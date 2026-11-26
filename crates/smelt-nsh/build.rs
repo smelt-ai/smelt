@@ -45,10 +45,7 @@ fn main() {
 
     println!("cargo:rerun-if-changed={}", root.join("build.rs").display());
     println!("cargo:rerun-if-changed={}", root.join("bench").display());
-    println!(
-        "cargo:rerun-if-changed={}",
-        root.join("shell/MainShell.tsx").display()
-    );
+    println!("cargo:rerun-if-changed={}", root.join("shell").display());
     println!(
         "cargo:rerun-if-changed={}",
         root.join("src/plugins").display()
@@ -107,6 +104,7 @@ fn build_main_shell(root: &Path, out: &Path, release: bool) -> Result<(), String
         (plugins_dir.join("provider.tsx"), "provider.tsx"),
         (plugins_dir.join("slots.tsx"), "slots.tsx"),
         (plugins_dir.join("sdk.tsx"), "sdk.tsx"),
+        (root.join("shell/HostSettings.tsx"), "HostSettings.tsx"),
         (root.join("shell/MainShell.tsx"), "Shell.tsx"),
     ];
     for (src, rel) in copies {

@@ -5,6 +5,7 @@
 import { cleanup, computed, effect, host, Scroll, signal, Text, View } from "nsh";
 import { Button as BaseButton, DockArea } from "nsh/base";
 import { Slot } from "smelt/slots";
+import { HostSettingsPage, isHostSettingsPage, SettingsNavPanel } from "./HostSettings.tsx";
 import {
   DIALOG_SURFACE_CLASS,
   initHost,
@@ -146,9 +147,21 @@ interface DirPickerDialogSnapshot {
   list_rev: number;
 }
 
+interface ConfirmDialogSnapshot {
+  title: string;
+  description: string;
+  note: string | null;
+  note_bad: boolean;
+  cancel_label: string;
+  confirm_label: string;
+  danger: boolean;
+  busy: boolean;
+}
+
 interface HostDialogsSnapshot {
   quit: QuitDialogSnapshot | null;
   dir_picker: DirPickerDialogSnapshot | null;
+  confirm: ConfirmDialogSnapshot | null;
 }
 
 interface ShellSnapshot {
@@ -341,7 +354,12 @@ function SettingsContentPanel() {
             </View>
           }
         >
-          <HostView view={settingsId()} style={{ flex: 1, width: "100%", height: "100%" }} />
+          <If
+            when={isHostSettingsPage(settingsId())}
+            else={<HostView view={settingsId()} style={{ flex: 1, width: "100%", height: "100%" }} />}
+          >
+            <HostSettingsPage pageId={settingsId()} />
+          </If>
         </If>
       </View>
     </View>
@@ -365,6 +383,7 @@ function PanelBody(props: { pageKey: string; panelId: string }) {
         if (spec.kind === "stack") return <StackView node={spec.stack} />;
         if (spec.view === "smelt/outlet") return <OutletPanel pageKey={props.pageKey} />;
         if (spec.view === "smelt/settings") return <SettingsContentPanel />;
+        if (spec.view === "smelt/settings-nav") return <SettingsNavPanel />;
         return <HostView view={spec.view} style={{ flex: 1, width: "100%", height: "100%" }} />;
       })()}
     </View>
@@ -729,6 +748,7 @@ function HostDialogs() {
   const dialogs = computed(() => (shellState() as ShellSnapshot | undefined)?.host_dialogs);
   const quit = computed(() => dialogs()?.quit ?? null);
   const picker = computed(() => dialogs()?.dir_picker ?? null);
+  const confirm = computed(() => dialogs()?.confirm ?? null);
 
   let dirScrollRef: any = null;
   effect(() => {
@@ -1026,6 +1046,71 @@ function HostDialogs() {
               disabled={!picker()?.can_confirm}
               label={picker()?.confirm_label ?? ""}
               onPress={() => sendHostDialogAction("dir_picker_confirm")}
+            />
+          </View>
+        </If>
+      </SmeltDialog>
+
+      <SmeltDialog
+        open={confirm() != null}
+        role="alertdialog"
+        closeOnBackdropPress={false}
+        closeOnEscape={!confirm()?.busy}
+        accessibilityLabel={confirm()?.title ?? ""}
+        accessibilityDescription={confirm()?.description ?? ""}
+        onOpenChange={({ open }: { open: boolean }) => {
+          if (!open && !confirm()?.busy) sendHostDialogAction("confirm_cancel");
+        }}
+        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
+        style={{ width: 440, gap: 12 }}
+      >
+        <If when={confirm() != null}>
+          <Text
+            style={{
+              fontSize: theme().type.ui_medium.size,
+              lineHeight: theme().type.ui_medium.line_height,
+              fontWeight: theme().type.ui_medium.weight,
+              color: theme().palette.text,
+            }}
+          >
+            {confirm()?.title ?? ""}
+          </Text>
+          <Text
+            style={{
+              fontSize: theme().type.ui.size,
+              lineHeight: theme().type.ui.line_height,
+              color: theme().palette.muted,
+            }}
+          >
+            {confirm()?.description ?? ""}
+          </Text>
+          <If when={Boolean(confirm()?.note)}>
+            <Text
+              style={{
+                fontSize: theme().type.ui.size,
+                lineHeight: theme().type.ui.line_height,
+                color: confirm()?.note_bad ? theme().palette.bad : theme().palette.muted,
+              }}
+            >
+              {confirm()?.note ?? ""}
+            </Text>
+          </If>
+          <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
+            <SmeltButton
+              quiet={true}
+              small={true}
+              disabled={Boolean(confirm()?.busy)}
+              label={confirm()?.cancel_label ?? ""}
+              onPress={() => sendHostDialogAction("confirm_cancel")}
+            />
+            <SmeltButton
+              primary={!confirm()?.danger}
+              danger={Boolean(confirm()?.danger)}
+              small={true}
+              loading={Boolean(confirm()?.busy)}
+              disabled={Boolean(confirm()?.busy)}
+              label={confirm()?.confirm_label ?? ""}
+              onPress={() => sendHostDialogAction("confirm_accept")}
             />
           </View>
         </If>

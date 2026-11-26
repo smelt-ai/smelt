@@ -33,6 +33,7 @@ const APP: &str = include_str!("plugins/App.tsx");
 const PROVIDER: &str = include_str!("plugins/provider.tsx");
 const SLOTS: &str = include_str!("plugins/slots.tsx");
 const SDK: &str = include_str!("plugins/sdk.tsx");
+const HOST_SETTINGS: &str = include_str!("../shell/HostSettings.tsx");
 /// 外壳和插件的打包配置：手写的部分加上 [`crate::theme::build_theme_config`] 生成的令牌名。
 static SHELL_NSH_CONFIG: LazyLock<String> =
     LazyLock::new(|| with_theme_config(include_str!("plugins/shell.nsh.json")));
@@ -295,6 +296,7 @@ impl Plugins {
             ("provider.tsx", PROVIDER),
             ("slots.tsx", SLOTS),
             ("sdk.tsx", SDK),
+            ("HostSettings.tsx", HOST_SETTINGS),
             ("Shell.tsx", shell),
         ];
         write_dir(

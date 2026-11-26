@@ -1,9 +1,8 @@
-//! 主窗口的框架：标题栏、窗口底、拖窗口区和宿主页的标题行。
+//! 主窗口的框架：标题栏与窗口底。
 
 use gpui::*;
 use smelt_ui::window_bar::{
-    Adapt, NATIVE_TITLEBAR, SafeArea, TOP_BAR_HEIGHT, TRAFFIC_LIGHTS_ORIGIN, TRAFFIC_LIGHTS_WIDTH,
-    WINDOW_CORNER_INSET, with_window_drag,
+    NATIVE_TITLEBAR, TRAFFIC_LIGHTS_ORIGIN, TRAFFIC_LIGHTS_WIDTH, WINDOW_CORNER_INSET,
 };
 
 /// 窗口自己占掉的角，跟着窗口进出全屏变。宿主控件（停靠区开合按钮）另算，见
@@ -89,31 +88,6 @@ pub(crate) fn background_image_layer(path: &str, opacity: f32, cx: &App) -> Div 
                 smelt_ui::image::FileFit::Cover,
             )),
     )
-}
-
-/// 自己画顶上那条的宿主页（设置）的标题行。只放标题文字这类不比字高的东西：贴着窗口顶时
-/// 它就是 [`TOP_BAR_HEIGHT`] 高的标题栏，放不下按钮和分段控件，那些放进页面自己的工具行
-/// （`smelt_ui::page_toolbar`）。
-///
-/// `area` 是这个视图的 safe area（`smelt_plugin_api::safe_area`）。顶上是标题栏时两头给角上的
-/// 控件让位，空白处拖窗口；不是（在标签条下面）时顶上那条归标签条，这里只是一条常规内边距的
-/// 头。底边是发丝。
-pub(crate) fn page_chrome(area: &SafeArea) -> Div {
-    let insets = area.top_row().insets(Adapt::Horizontal);
-    let header = div()
-        .w_full()
-        .flex_shrink_0()
-        .pl(insets.left + px(20.))
-        .pr(insets.right + px(20.))
-        .border_b_1()
-        .border_color(crate::ui_theme::hair())
-        .flex()
-        .items_center();
-    if area.title_bar {
-        with_window_drag(header.min_h(TOP_BAR_HEIGHT))
-    } else {
-        header.py(px(8.))
-    }
 }
 
 #[cfg(test)]

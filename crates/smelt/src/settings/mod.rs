@@ -7,26 +7,18 @@
 //! 别的页（Agent、远程、终端、关于……）都是插件登记的。设置这一页只是摆设置视图的机制，
 //! 不认识具体哪一页。
 
-use std::rc::Rc;
-
-use gpui::prelude::FluentBuilder;
 use gpui::*;
-use smelt_ui::Button;
-use smelt_ui::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use smelt_ui::theme_config::ThemeMode;
 
 use crate::Workspace;
 use smelt_model::appearance_settings::MAX_BG_IMAGE_OPACITY;
 
-mod appearance_page;
-mod content_view;
+mod host_settings;
 mod nav;
-mod nav_view;
-mod panel_plugins_page;
-mod shortcuts_page;
 
-use nav::{SettingsNavCategory, filter_settings_nav, resolve_page, settings_nav};
-use smelt_plugin_api::{SettingsEntry, SettingsGroup, ViewHandle, ViewSpec};
+pub(crate) use host_settings::HostSettingsState;
+use nav::{resolve_page, settings_nav};
+use smelt_plugin_api::{SettingsEntry, SettingsGroup, ViewSpec};
 
 // ===================== 外观 =====================
 
@@ -160,7 +152,7 @@ fn apply_requested_appearance_on(
 
 /// 把一份完整外观套到所有层并重绘。外观的真源是客户端库，内存里的全局只是它的投影。
 fn install_appearance(appearance: Appearance, cx: &mut App) {
-    smelt_ui::set_code_font(&appearance.font_family, cx);
+    smelt_model::font_config::set_font_family(&appearance.font_family);
     cx.set_global(appearance.clone());
     apply_named_theme(&appearance.theme_name, cx);
     cx.refresh_windows();
@@ -388,7 +380,6 @@ struct HostPage {
     title: fn() -> smelt_plugin_api::Text,
     icon: smelt_ui::IconName,
     keywords: &'static [&'static str],
-    build: fn(&WeakEntity<Workspace>, &mut App) -> Rc<dyn ViewHandle>,
 }
 
 impl HostPage {
@@ -456,7 +447,6 @@ const HOST_PAGES: [HostPage; 3] = [
             "毛玻璃",
             "模糊",
         ],
-        build: build_appearance,
     },
     HostPage {
         name: "shortcuts",
@@ -477,7 +467,6 @@ const HOST_PAGES: [HostPage; 3] = [
             "cmd",
             "command",
         ],
-        build: build_shortcuts,
     },
     HostPage {
         name: "panel-plugins",
@@ -497,22 +486,8 @@ const HOST_PAGES: [HostPage; 3] = [
             "卸载插件",
             "nsh",
         ],
-        build: build_panel_plugins,
     },
 ];
-
-fn build_appearance(workspace: &WeakEntity<Workspace>, cx: &mut App) -> Rc<dyn ViewHandle> {
-    let workspace = workspace.clone();
-    Rc::new(cx.new(|cx| appearance_page::AppearancePage::new(workspace, cx)))
-}
-
-fn build_shortcuts(_: &WeakEntity<Workspace>, cx: &mut App) -> Rc<dyn ViewHandle> {
-    Rc::new(cx.new(shortcuts_page::ShortcutsPage::new))
-}
-
-fn build_panel_plugins(_: &WeakEntity<Workspace>, cx: &mut App) -> Rc<dyn ViewHandle> {
-    Rc::new(cx.new(panel_plugins_page::PanelPluginsPage::new))
-}
 
 /// 是宿主自己登记的视图。导航里宿主的页排在同组插件的页前面。
 fn is_host_view(id: &str) -> bool {
@@ -520,9 +495,8 @@ fn is_host_view(id: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// 设置的视图：导航、内容，和宿主自己的几页设置。
-pub(crate) fn view_specs(workspace: WeakEntity<Workspace>) -> Vec<ViewSpec> {
-    let nav = workspace.clone();
+/// 设置的视图：导航、内容，和宿主自己的几页设置（均由 NSH 主壳 `HostSettings.tsx` 直接渲染）。
+pub(crate) fn view_specs() -> Vec<ViewSpec> {
     let mut specs = vec![
         ViewSpec {
             name: "settings-nav".into(),
@@ -533,10 +507,7 @@ pub(crate) fn view_specs(workspace: WeakEntity<Workspace>) -> Vec<ViewSpec> {
             instances: false,
             settings: None,
             fills: Vec::new(),
-            build: Rc::new(move |window, cx| -> Rc<dyn ViewHandle> {
-                let workspace = nav.clone();
-                Rc::new(cx.new(|cx| nav_view::SettingsNavView::new(workspace, window, cx)))
-            }),
+            build: crate::host_views::nsh_managed_view_builder(),
         },
         ViewSpec {
             name: "settings".into(),
@@ -547,24 +518,18 @@ pub(crate) fn view_specs(workspace: WeakEntity<Workspace>) -> Vec<ViewSpec> {
             instances: false,
             settings: None,
             fills: Vec::new(),
-            build: Rc::new(|window, cx| -> Rc<dyn ViewHandle> {
-                Rc::new(cx.new(|cx| content_view::SettingsContentView::new(window, cx)))
-            }),
+            build: crate::host_views::nsh_managed_view_builder(),
         },
     ];
-    specs.extend(HOST_PAGES.iter().map(|page| {
-        let workspace = workspace.clone();
-        let build = page.build;
-        ViewSpec {
-            name: page.name.into(),
-            title: (page.title)(),
-            icon: page.icon.path(),
-            draws_top_bar: false,
-            instances: false,
-            settings: Some(page.entry()),
-            fills: Vec::new(),
-            build: Rc::new(move |_, cx| build(&workspace, cx)),
-        }
+    specs.extend(HOST_PAGES.iter().map(|page| ViewSpec {
+        name: page.name.into(),
+        title: (page.title)(),
+        icon: page.icon.path(),
+        draws_top_bar: false,
+        instances: false,
+        settings: Some(page.entry()),
+        fills: Vec::new(),
+        build: crate::host_views::nsh_managed_view_builder(),
     }));
     specs
 }
