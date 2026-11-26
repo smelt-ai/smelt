@@ -74,8 +74,16 @@ export const SmeltNativeDesktop = nativeComponent("smelt.desktop", {
 }) as any;
 
 export const SmeltNativeTerminal = nativeComponent("smelt.terminal", {
-  props: ["spec", "contextMenu", "labels", "focusSeq", "retrySeq", "sendText"],
-  events: ["stateChange", "reconnecting", "writeError", "focusIn"],
+  props: ["spec", "focusSeq", "retrySeq", "sendText", "searchQuery", "searchStep"],
+  events: [
+    "stateChange",
+    "reconnecting",
+    "writeError",
+    "focusIn",
+    "searchOpen",
+    "searchStatus",
+    "selectionChange",
+  ],
 }) as any;
 
 // ---- 纯同步宿主模块 ----
@@ -1252,6 +1260,10 @@ export function contextMenuItems(menu: string, machine: string | null, context: 
 
 export function clipboardWrite(value: string): Promise<void> {
   return host.call("clipboard.write", { text: value });
+}
+
+export function clipboardRead(): Promise<string | null> {
+  return host.call("clipboard.read", {});
 }
 
 export function revealPath(path: string): Promise<void> {

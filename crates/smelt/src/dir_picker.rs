@@ -8,17 +8,12 @@
 use rust_i18n::t;
 use std::collections::BTreeSet;
 
-use gpui::prelude::FluentBuilder;
-use gpui::*;
+use gpui::{App, Context, PathPromptOptions, Task};
 use smelt_runtime_client::protocol::workspace::{
     BrowseDirsParams, BrowseDirsResult, WorkspaceBrowseDirsCall,
 };
-use smelt_ui::scrollbar::{Scrollable, ScrollbarAxis};
-use smelt_ui::truncated_line::truncated_line;
-use smelt_ui::{Icon, IconName};
 
-use crate::{Workspace, ui_theme};
-use smelt_ui::kit::{TYPE, TypeStyled as _};
+use crate::Workspace;
 
 /// 一次选路径：怎么选由插件说，选好从 `done` 交回；取消时它随选择框扔掉。
 pub(crate) struct PathPick {
@@ -35,10 +30,10 @@ pub(crate) struct DirPickerState {
     loading: bool,
     /// 每次导航加一；晚回来的旧列表不能盖掉新的。
     generation: u64,
+    /// 每次成功切到新目录加一；通知前端把列表滚回顶部。
+    list_rev: u64,
     /// 多选时勾上的目录；单选导入扩展时选中的那个文件。
     selected: BTreeSet<String>,
-    /// 目录列表的滚动位置。
-    scroll: ScrollHandle,
 }
 
 impl Workspace {
@@ -56,8 +51,8 @@ impl Workspace {
             listing: None,
             loading: false,
             generation: 0,
+            list_rev: 0,
             selected: BTreeSet::new(),
-            scroll: ScrollHandle::new(),
         });
         self.dir_picker_navigate(None, cx);
     }
@@ -67,7 +62,19 @@ impl Workspace {
         cx.notify();
     }
 
-    fn dir_picker_navigate(&mut self, path: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn dir_picker_go_up(&mut self, cx: &mut Context<Self>) {
+        let parent = self
+            .dir_picker
+            .as_ref()
+            .and_then(|picker| picker.listing.as_ref())
+            .and_then(|listing| listing.as_ref().ok())
+            .and_then(|listing| listing.parent.clone());
+        if parent.is_some() {
+            self.dir_picker_navigate(parent, cx);
+        }
+    }
+
+    pub(crate) fn dir_picker_navigate(&mut self, path: Option<String>, cx: &mut Context<Self>) {
         let Some(picker) = self.dir_picker.as_mut() else {
             return;
         };
@@ -104,7 +111,7 @@ impl Workspace {
                     Ok(listing) => {
                         picker.listing = Some(Ok(listing));
                         // 新目录从顶上看起，不沿用上一层滚到的位置。
-                        picker.scroll.set_offset(Point::default());
+                        picker.list_rev += 1;
                     }
                     // 进不去的目录：留在原地，把原因显示出来。
                     Err(error) => {
@@ -121,7 +128,7 @@ impl Workspace {
         .detach();
     }
 
-    fn dir_picker_toggle(&mut self, path: String, cx: &mut Context<Self>) {
+    pub(crate) fn dir_picker_toggle(&mut self, path: String, cx: &mut Context<Self>) {
         let Some(picker) = self.dir_picker.as_mut() else {
             return;
         };
@@ -156,204 +163,69 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn render_dir_picker(
+    /// 构造推给 NSH 主壳的远程目录选择器对话框快照。
+    pub(crate) fn dir_picker_dialog_state(
         &self,
-        card: smelt_ui::dialog::Card,
-        cx: &mut Context<Self>,
-    ) -> smelt_ui::dialog::Card {
-        let Some(picker) = self.dir_picker.as_ref() else {
-            return card;
-        };
-        let fg = rgb(ui_theme::text());
-        let muted = rgb(ui_theme::muted());
-        let multiple = picker.pick.request.multiple;
+        cx: &App,
+    ) -> Option<smelt_nsh::DirPickerDialogState> {
+        let picker = self.dir_picker.as_ref()?;
         let listing = picker.listing.as_ref();
         let current = listing.and_then(|listing| listing.as_ref().ok());
-
-        let toolbar = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(
-                smelt_ui::Button::new("dir-picker-up")
-                    .quiet()
-                    .small()
-                    .icon(IconName::ArrowUp)
-                    .tooltip(t!("picker.up"))
-                    .disabled(current.is_none_or(|listing| listing.parent.is_none()))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let parent = this
-                            .dir_picker
-                            .as_ref()
-                            .and_then(|picker| picker.listing.as_ref())
-                            .and_then(|listing| listing.as_ref().ok())
-                            .and_then(|listing| listing.parent.clone());
-                        if parent.is_some() {
-                            this.dir_picker_navigate(parent, cx);
-                        }
-                    })),
-            )
-            .child(
-                smelt_ui::Button::new("dir-picker-home")
-                    .quiet()
-                    .small()
-                    .label(t!("picker.home"))
-                    .on_click(cx.listener(|this, _, _, cx| this.dir_picker_navigate(None, cx))),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .type_style(TYPE.text_xsmall)
-                    .text_color(muted)
-                    .child(truncated_line(
-                        current
-                            .map(|listing| listing.path.clone())
-                            .unwrap_or_else(|| "…".to_string()),
-                    )),
-            );
-
-        let body: AnyElement = match listing {
-            None => div()
-                .py_6()
-                .type_style(TYPE.ui)
-                .text_color(muted)
-                .child(t!("picker.loading"))
-                .into_any_element(),
-            Some(Err(error)) => div()
-                .py_6()
-                .type_style(TYPE.ui)
-                .text_color(rgb(ui_theme::bad()))
-                .child(error.clone())
-                .into_any_element(),
-            Some(Ok(listing)) if listing.entries.is_empty() => div()
-                .py_6()
-                .type_style(TYPE.ui)
-                .text_color(muted)
-                .child(t!("picker.empty"))
-                .into_any_element(),
-            Some(Ok(listing)) => {
-                let rows = listing.entries.iter().enumerate().map(|(ix, entry)| {
-                    let selected = picker.selected.contains(&entry.path);
-                    let path = entry.path.clone();
-                    let is_dir = entry.is_dir;
-                    let toggle_path = entry.path.clone();
-                    smelt_ui::ListRow::new(("dir-picker-entry", ix))
-                        .selected(selected)
-                        .flex()
-                        .px_3()
-                        .py_1p5()
-                        .gap_2()
-                        .items_center()
-                        .child(
-                            Icon::new(if is_dir {
-                                IconName::Folder
-                            } else {
-                                IconName::File
-                            })
-                            .size(px(14.))
-                            .text_color(muted),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .type_style(TYPE.ui)
-                                .text_color(fg)
-                                .child(truncated_line(entry.name.clone())),
-                        )
-                        // 多选时目录行右侧单独一个勾选；点名字进入目录。
-                        .when(multiple && is_dir, |row| {
-                            row.child(
-                                smelt_ui::Button::new(("dir-picker-pick", ix))
-                                    .quiet()
-                                    .small()
-                                    .icon(if selected {
-                                        IconName::Check
-                                    } else {
-                                        IconName::Plus
-                                    })
-                                    .tooltip(if selected {
-                                        t!("picker.deselect")
-                                    } else {
-                                        t!("picker.select")
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        // 整行点击是进入目录；勾选不能冒泡上去，否则选中的同时就进去了。
-                                        cx.stop_propagation();
-                                        this.dir_picker_toggle(toggle_path.clone(), cx);
-                                    })),
-                            )
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if is_dir {
-                                this.dir_picker_navigate(Some(path.clone()), cx);
-                            } else {
-                                this.dir_picker_toggle(path.clone(), cx);
-                            }
-                        }))
-                });
-                // 边框和圆角在外框上；滚动区填满它，内容滚动时边框不跟着走。
-                div()
-                    .h(px(320.))
-                    .flex()
-                    .flex_col()
-                    .overflow_hidden()
-                    .border_1()
-                    .border_color(ui_theme::hair())
-                    .rounded(ui_theme::row_radius())
-                    .child(Scrollable::new(
-                        "dir-picker-list",
-                        div().flex().flex_col().children(rows),
-                        &picker.scroll,
-                        ScrollbarAxis::Vertical,
-                    ))
-                    .into_any_element()
-            }
-        };
-
+        let error = listing.and_then(|listing| listing.as_ref().err().cloned());
+        let entries = current
+            .map(|listing| {
+                listing
+                    .entries
+                    .iter()
+                    .map(|entry| smelt_nsh::DirPickerEntryState {
+                        name: entry.name.clone(),
+                        path: entry.path.clone(),
+                        is_dir: entry.is_dir,
+                        selected: picker.selected.contains(&entry.path),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let request = &picker.pick.request;
-        let confirm_label: SharedString = if picker.selected.is_empty() {
-            t!("picker.confirm_current", action = request.confirm).into()
+        let multiple = request.multiple;
+        let selected_summary = (multiple && !picker.selected.is_empty()).then(|| {
+            if picker.selected.len() == 1 {
+                t!("picker.selected.one").into_owned()
+            } else {
+                t!("picker.selected.other", count = picker.selected.len()).into_owned()
+            }
+        });
+        let confirm_label = if picker.selected.is_empty() {
+            t!("picker.confirm_current", action = request.confirm).into_owned()
         } else {
-            t!("picker.confirm_selected", action = request.confirm).into()
+            t!("picker.confirm_selected", action = request.confirm).into_owned()
         };
         let title = t!(
             "picker.title",
             title = request.title,
             machine = crate::runtimes::runtime_name(picker.runtime.key(), cx)
-        );
-        let content = smelt_ui::dialog::content(title, None)
-            .child(toolbar)
-            .child(body)
-            .when(multiple && !picker.selected.is_empty(), |content| {
-                content.child(div().type_style(TYPE.text_xsmall).text_color(muted).child(
-                    SharedString::from(if picker.selected.len() == 1 {
-                        t!("picker.selected.one")
-                    } else {
-                        t!("picker.selected.other", count = picker.selected.len())
-                    }),
-                ))
-            });
-        let footer = smelt_ui::dialog::footer()
-            .child(Self::modal_cancel_button(
-                "cancel-dir-picker",
-                t!("action.cancel"),
-                |this, _, _, cx| this.cancel_dir_picker(cx),
-                cx,
-            ))
-            .child(
-                Self::modal_primary_button(
-                    "confirm-dir-picker",
-                    confirm_label,
-                    |this, _, _, cx| this.dir_picker_confirm(cx),
-                    cx,
-                )
-                .disabled(current.is_none() || picker.loading),
-            );
-        card.w(px(520.)).child(content).footer(footer)
+        )
+        .into_owned();
+        Some(smelt_nsh::DirPickerDialogState {
+            title,
+            current_path: current.map(|listing| listing.path.clone()),
+            can_go_up: current.is_some_and(|listing| listing.parent.is_some()),
+            loading: picker.loading,
+            error,
+            entries,
+            multiple,
+            selected_summary,
+            confirm_label,
+            can_confirm: current.is_some() && !picker.loading,
+            cancel_label: t!("action.cancel").into_owned(),
+            up_tooltip: t!("picker.up").into_owned(),
+            home_label: t!("picker.home").into_owned(),
+            loading_label: t!("picker.loading").into_owned(),
+            empty_label: t!("picker.empty").into_owned(),
+            select_tooltip: t!("picker.select").into_owned(),
+            deselect_tooltip: t!("picker.deselect").into_owned(),
+            list_rev: picker.list_rev,
+        })
     }
 }
 

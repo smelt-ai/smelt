@@ -588,6 +588,7 @@ impl Workspace {
                 HostEvent::LocaleChanged => {
                     this.sync_nsh_chrome(cx);
                     this.sync_nsh_settings_page(cx);
+                    this.sync_host_dialogs(cx);
                 }
                 HostEvent::LayoutsChanged | HostEvent::PagesChanged => this.sync_pages(window, cx),
                 HostEvent::ThemesChanged => {

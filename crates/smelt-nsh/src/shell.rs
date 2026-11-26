@@ -18,6 +18,7 @@ use gpui::{
     ParentElement as _, Render, Styled as _, Subscription, Task, Window, canvas, div,
 };
 use nsh_platform_gpui::{AppOptions, AppView};
+use serde::Serialize;
 use serde_json::{Value, json};
 use smelt_plugin_api::{self as api, HostEvent};
 use tokio::sync::mpsc;
@@ -85,6 +86,69 @@ pub struct ShellConfig {
     pub labels: ShellLabels,
 }
 
+/// 宿主退出确认对话框状态（推给主壳渲染）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct QuitDialogState {
+    pub title: String,
+    pub body: String,
+    pub cancel_label: String,
+    pub confirm_label: String,
+    pub quitting: bool,
+}
+
+/// 远程目录选择器里的一行条目。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DirPickerEntryState {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub selected: bool,
+}
+
+/// 宿主远程目录选择器对话框状态（推给主壳渲染）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DirPickerDialogState {
+    pub title: String,
+    pub current_path: Option<String>,
+    pub can_go_up: bool,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub entries: Vec<DirPickerEntryState>,
+    pub multiple: bool,
+    pub selected_summary: Option<String>,
+    pub confirm_label: String,
+    pub can_confirm: bool,
+    pub cancel_label: String,
+    pub up_tooltip: String,
+    pub home_label: String,
+    pub loading_label: String,
+    pub empty_label: String,
+    pub select_tooltip: String,
+    pub deselect_tooltip: String,
+    /// 每次成功切到新目录递增，让前端列表滚回顶部。
+    pub list_rev: u64,
+}
+
+/// 宿主对话框快照（退出确认、远程目录选择器）。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct HostDialogsState {
+    pub quit: Option<QuitDialogState>,
+    pub dir_picker: Option<DirPickerDialogState>,
+}
+
+/// 主壳向宿主回报的对话框操作。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostDialogAction {
+    QuitConfirm,
+    QuitCancel,
+    DirPickerUp,
+    DirPickerHome,
+    DirPickerNavigate(String),
+    DirPickerToggle(String),
+    DirPickerConfirm,
+    DirPickerCancel,
+}
+
 /// 主壳向 `Workspace` 汇报的事件。
 #[derive(Clone, Debug)]
 pub enum MainShellEvent {
@@ -96,6 +160,8 @@ pub enum MainShellEvent {
     PluginsChanged,
     /// 启动扫描发现的首批脚本插件全部完成初始化（或失败 / 数量为零），可安全落位首页。
     InitialReady,
+    /// 用户在宿主对话框里触发的操作。
+    HostDialogAction(HostDialogAction),
 }
 
 struct PageEntry {
@@ -116,6 +182,7 @@ enum ShellInput {
         page_key: String,
         group: Option<u64>,
     },
+    HostDialog(HostDialogAction),
     Lifecycle(PluginLifecycle),
 }
 
@@ -127,6 +194,7 @@ pub struct MainShell {
     pages: Vec<PageEntry>,
     active_page: String,
     settings_page: Option<(String, String)>,
+    host_dialogs: HostDialogsState,
     corners: WindowCorners,
     padding: f32,
     labels: ShellLabels,
@@ -223,6 +291,40 @@ impl MainShell {
                 };
                 let group = call.data()["group"].as_u64();
                 let _ = tx.send(ShellInput::ZoomChanged { page_key, group });
+                call.resolve(Value::Null);
+            });
+        }
+        {
+            let tx = shell_tx.clone();
+            plugins.handle("shell.host_dialog_action", move |plugin, call| {
+                if plugin != crate::plugins::SHELL_OWNER {
+                    return call.reject("shell.host_dialog_action：仅允许主壳调用");
+                }
+                let data = call.data();
+                let Some(kind) = data["kind"].as_str() else {
+                    return call.reject("shell.host_dialog_action：缺 kind");
+                };
+                let action = match kind {
+                    "quit_confirm" => HostDialogAction::QuitConfirm,
+                    "quit_cancel" => HostDialogAction::QuitCancel,
+                    "dir_picker_up" => HostDialogAction::DirPickerUp,
+                    "dir_picker_home" => HostDialogAction::DirPickerHome,
+                    "dir_picker_navigate" => match data["path"].as_str() {
+                        Some(path) => HostDialogAction::DirPickerNavigate(path.to_owned()),
+                        None => return call.reject("shell.host_dialog_action：缺 path"),
+                    },
+                    "dir_picker_toggle" => match data["path"].as_str() {
+                        Some(path) => HostDialogAction::DirPickerToggle(path.to_owned()),
+                        None => return call.reject("shell.host_dialog_action：缺 path"),
+                    },
+                    "dir_picker_confirm" => HostDialogAction::DirPickerConfirm,
+                    "dir_picker_cancel" => HostDialogAction::DirPickerCancel,
+                    other => {
+                        let message = format!("shell.host_dialog_action：未知 kind {other}");
+                        return call.reject(message);
+                    }
+                };
+                let _ = tx.send(ShellInput::HostDialog(action));
                 call.resolve(Value::Null);
             });
         }
@@ -348,6 +450,7 @@ impl MainShell {
             pages: Vec::new(),
             active_page: String::new(),
             settings_page: None,
+            host_dialogs: HostDialogsState::default(),
             corners: config.corners,
             padding: config.padding,
             labels: config.labels,
@@ -421,6 +524,7 @@ impl MainShell {
         self.pages.clear();
         self.active_page.clear();
         self.settings_page = None;
+        self.host_dialogs = HostDialogsState::default();
         self.recompute_shell_view(cx);
         self.publish_dirty(host::SliceMask::SHELL | host::SliceMask::SAFE_AREAS, cx);
     }
@@ -636,6 +740,9 @@ impl MainShell {
                 );
                 cx.emit(MainShellEvent::StateChanged);
             }
+            ShellInput::HostDialog(action) => {
+                cx.emit(MainShellEvent::HostDialogAction(action));
+            }
             ShellInput::Lifecycle(PluginLifecycle::Ready { plugin, views }) => {
                 let cleared_error = self.runtime_errors.remove(&plugin).is_some();
                 let has_root = views.iter().any(|v| v == "root");
@@ -787,6 +894,15 @@ impl MainShell {
             return;
         }
         self.settings_page = page;
+        self.schedule_publish_slices(host::SliceMask::SHELL, cx);
+    }
+
+    /// 更新宿主对话框状态（退出确认、远程目录选择器）。状态未变时直接返回。
+    pub fn set_host_dialogs(&mut self, dialogs: HostDialogsState, cx: &mut Context<Self>) {
+        if self.host_dialogs == dialogs {
+            return;
+        }
+        self.host_dialogs = dialogs;
         self.schedule_publish_slices(host::SliceMask::SHELL, cx);
     }
 
@@ -1043,6 +1159,7 @@ impl MainShell {
                     "id": id,
                     "title": title,
                 })),
+                "host_dialogs": self.host_dialogs,
                 "plugin_roots": self.plugin_roots.iter().cloned().collect::<Vec<_>>(),
                 "labels": {
                     "collapse_left": self.labels.collapse_left,

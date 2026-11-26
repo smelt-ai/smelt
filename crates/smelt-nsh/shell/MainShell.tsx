@@ -2,16 +2,19 @@
 // - 单引擎线程 + 单界面树（Core）承载全部页面、DockArea、浮动的左右停靠区开关与插件无头根；
 // - 每个面板通过外壳专用的 `<HostView>` 挂载（JS 插件走内部 `<Slot>`，Rust 视图走 `smelt.view`）；
 // - 不含任何具体功能或插件名称，完全按宿主推送的 `smelt.state.shell` 驱动。
-import { cleanup, computed, effect, host, signal, Text, View } from "nsh";
-import { DockArea } from "nsh/base";
+import { cleanup, computed, effect, host, Scroll, signal, Text, View } from "nsh";
+import { Button as BaseButton, DockArea } from "nsh/base";
 import { Slot } from "smelt/slots";
 import {
+  DIALOG_SURFACE_CLASS,
   initHost,
   jsViews,
   safeArea,
   shellState,
   SmeltBackdropRegion,
   SmeltButton,
+  SmeltDialog,
+  SmeltIcon,
   SmeltNativeView,
   SmeltNativeWindowBar,
   SmeltNativeWindowDrag,
@@ -107,10 +110,52 @@ interface PageSnapshot {
   zoomed: number | null;
 }
 
+interface QuitDialogSnapshot {
+  title: string;
+  body: string;
+  cancel_label: string;
+  confirm_label: string;
+  quitting: boolean;
+}
+
+interface DirPickerEntrySnapshot {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  selected: boolean;
+}
+
+interface DirPickerDialogSnapshot {
+  title: string;
+  current_path: string | null;
+  can_go_up: boolean;
+  loading: boolean;
+  error: string | null;
+  entries: DirPickerEntrySnapshot[];
+  multiple: boolean;
+  selected_summary: string | null;
+  confirm_label: string;
+  can_confirm: boolean;
+  cancel_label: string;
+  up_tooltip: string;
+  home_label: string;
+  loading_label: string;
+  empty_label: string;
+  select_tooltip: string;
+  deselect_tooltip: string;
+  list_rev: number;
+}
+
+interface HostDialogsSnapshot {
+  quit: QuitDialogSnapshot | null;
+  dir_picker: DirPickerDialogSnapshot | null;
+}
+
 interface ShellSnapshot {
   padding: number;
   pages: PageSnapshot[];
   settings_page: { id: string; title: string } | null;
+  host_dialogs?: HostDialogsSnapshot;
   plugin_roots: string[];
   labels: {
     collapse_left: string;
@@ -673,6 +718,322 @@ function PageWorkspace(props: { pageKey: string }) {
   );
 }
 
+function sendHostDialogAction(kind: string, path?: string) {
+  host
+    .call("shell.host_dialog_action", path === undefined ? { kind } : { kind, path })
+    .catch(() => {});
+}
+
+function HostDialogs() {
+  const theme = currentTheme;
+  const dialogs = computed(() => (shellState() as ShellSnapshot | undefined)?.host_dialogs);
+  const quit = computed(() => dialogs()?.quit ?? null);
+  const picker = computed(() => dialogs()?.dir_picker ?? null);
+
+  let dirScrollRef: any = null;
+  effect(() => {
+    const rev = picker()?.list_rev ?? 0;
+    if (rev > 0) {
+      dirScrollRef?.scrollTo?.({ y: 0, animated: false });
+    }
+  });
+
+  const dirBodyKind = computed(() => {
+    const p = picker();
+    if (!p) return "none";
+    if (p.error != null) return "error";
+    if (p.current_path == null) return "loading";
+    if (p.entries.length === 0) return "empty";
+    return "list";
+  });
+
+  return (
+    <>
+      <SmeltDialog
+        open={quit() != null}
+        role="alertdialog"
+        closeOnBackdropPress={false}
+        closeOnEscape={!quit()?.quitting}
+        accessibilityLabel={quit()?.title ?? ""}
+        accessibilityDescription={quit()?.body ?? ""}
+        onOpenChange={({ open }: { open: boolean }) => {
+          if (!open && !quit()?.quitting) sendHostDialogAction("quit_cancel");
+        }}
+        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
+        style={{ width: 440, gap: 12 }}
+      >
+        <If when={quit() != null}>
+          <Text
+            style={{
+              fontSize: theme().type.ui_medium.size,
+              lineHeight: theme().type.ui_medium.line_height,
+              fontWeight: theme().type.ui_medium.weight,
+              color: theme().palette.text,
+            }}
+          >
+            {quit()?.title ?? ""}
+          </Text>
+          <Text
+            style={{
+              fontSize: theme().type.ui.size,
+              lineHeight: theme().type.ui.line_height,
+              color: theme().palette.muted,
+            }}
+          >
+            {quit()?.body ?? ""}
+          </Text>
+          <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
+            <SmeltButton
+              quiet={true}
+              small={true}
+              disabled={Boolean(quit()?.quitting)}
+              label={quit()?.cancel_label ?? ""}
+              onPress={() => sendHostDialogAction("quit_cancel")}
+            />
+            <SmeltButton
+              primary={true}
+              small={true}
+              loading={Boolean(quit()?.quitting)}
+              disabled={Boolean(quit()?.quitting)}
+              label={quit()?.confirm_label ?? ""}
+              onPress={() => sendHostDialogAction("quit_confirm")}
+            />
+          </View>
+        </If>
+      </SmeltDialog>
+
+      <SmeltDialog
+        open={picker() != null}
+        role="dialog"
+        closeOnBackdropPress={false}
+        closeOnEscape={true}
+        accessibilityLabel={picker()?.title ?? ""}
+        onOpenChange={({ open }: { open: boolean }) => {
+          if (!open) sendHostDialogAction("dir_picker_cancel");
+        }}
+        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
+        style={{ width: 520, gap: 12 }}
+      >
+        <If when={picker() != null}>
+          <Text
+            style={{
+              fontSize: theme().type.ui_medium.size,
+              lineHeight: theme().type.ui_medium.line_height,
+              fontWeight: theme().type.ui_medium.weight,
+              color: theme().palette.text,
+            }}
+          >
+            {picker()?.title ?? ""}
+          </Text>
+
+          <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <SmeltButton
+              quiet={true}
+              small={true}
+              icon="icons/arrow-up.svg"
+              tooltip={picker()?.up_tooltip ?? ""}
+              disabled={!picker()?.can_go_up}
+              onPress={() => sendHostDialogAction("dir_picker_up")}
+            />
+            <SmeltButton
+              quiet={true}
+              small={true}
+              label={picker()?.home_label ?? ""}
+              onPress={() => sendHostDialogAction("dir_picker_home")}
+            />
+            <Text
+              style={{
+                flex: 1,
+                minWidth: 0,
+                fontSize: theme().type.text_xsmall.size,
+                lineHeight: theme().type.text_xsmall.line_height,
+                color: theme().palette.muted,
+                numberOfLines: 1,
+              }}
+            >
+              {picker()?.current_path ?? "…"}
+            </Text>
+          </View>
+
+          <If when={dirBodyKind() === "loading"}>
+            <View style={{ paddingTop: 24, paddingBottom: 24 }}>
+              <Text
+                style={{
+                  fontSize: theme().type.ui.size,
+                  lineHeight: theme().type.ui.line_height,
+                  color: theme().palette.muted,
+                }}
+              >
+                {picker()?.loading_label ?? ""}
+              </Text>
+            </View>
+          </If>
+
+          <If when={dirBodyKind() === "error"}>
+            <View style={{ paddingTop: 24, paddingBottom: 24 }}>
+              <Text
+                style={{
+                  fontSize: theme().type.ui.size,
+                  lineHeight: theme().type.ui.line_height,
+                  color: theme().palette.bad,
+                }}
+              >
+                {picker()?.error ?? ""}
+              </Text>
+            </View>
+          </If>
+
+          <If when={dirBodyKind() === "empty"}>
+            <View style={{ paddingTop: 24, paddingBottom: 24 }}>
+              <Text
+                style={{
+                  fontSize: theme().type.ui.size,
+                  lineHeight: theme().type.ui.line_height,
+                  color: theme().palette.muted,
+                }}
+              >
+                {picker()?.empty_label ?? ""}
+              </Text>
+            </View>
+          </If>
+
+          <If when={dirBodyKind() === "list"}>
+            <View
+              style={{
+                height: 320,
+                display: "flex",
+                flexDirection: "column",
+                overflow: "hidden",
+                borderWidth: 1,
+                borderColor: theme().palette.hair,
+                borderRadius: theme().radius.row,
+              }}
+            >
+              <Scroll
+                ref={(api: any) => {
+                  dirScrollRef = api;
+                }}
+                style={{ flex: 1, width: "100%", height: "100%" }}
+              >
+                <View style={{ display: "flex", flexDirection: "column", width: "100%" }}>
+                  <Each of={picker()?.entries ?? []} key={(e: DirPickerEntrySnapshot) => e.path}>
+                    {(entry: () => DirPickerEntrySnapshot) => (
+                      <View
+                        style={{
+                          display: "flex",
+                          flexDirection: "row",
+                          alignItems: "center",
+                          width: "100%",
+                          backgroundColor: entry().selected
+                            ? theme().palette.row_selected
+                            : "transparent",
+                        }}
+                      >
+                        <BaseButton
+                          onPress={() => {
+                            const item = entry();
+                            sendHostDialogAction(
+                              item.is_dir ? "dir_picker_navigate" : "dir_picker_toggle",
+                              item.path,
+                            );
+                          }}
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                            display: "flex",
+                            flexDirection: "row",
+                            alignItems: "center",
+                            gap: 8,
+                            paddingLeft: 12,
+                            paddingRight: 12,
+                            paddingTop: 6,
+                            paddingBottom: 6,
+                            backgroundColor: "transparent",
+                            cursor: "default",
+                          }}
+                          hoverStyle={{
+                            backgroundColor: entry().selected
+                              ? theme().palette.row_selected
+                              : theme().palette.row_hover,
+                          }}
+                          activeStyle={{
+                            backgroundColor: theme().palette.row_selected,
+                          }}
+                        >
+                          <SmeltIcon
+                            path={entry().is_dir ? "icons/folder.svg" : "icons/file.svg"}
+                            size={14}
+                            color={theme().palette.muted}
+                          />
+                          <Text
+                            style={{
+                              flex: 1,
+                              minWidth: 0,
+                              fontSize: theme().type.ui.size,
+                              lineHeight: theme().type.ui.line_height,
+                              color: theme().palette.text,
+                              numberOfLines: 1,
+                            }}
+                          >
+                            {entry().name}
+                          </Text>
+                        </BaseButton>
+                        <If when={Boolean(picker()?.multiple && entry().is_dir)}>
+                          <View style={{ flexShrink: 0, paddingRight: 8 }}>
+                            <SmeltButton
+                              quiet={true}
+                              small={true}
+                              icon={entry().selected ? "icons/check.svg" : "icons/plus.svg"}
+                              tooltip={
+                                entry().selected
+                                  ? picker()?.deselect_tooltip ?? ""
+                                  : picker()?.select_tooltip ?? ""
+                              }
+                              onPress={() => sendHostDialogAction("dir_picker_toggle", entry().path)}
+                            />
+                          </View>
+                        </If>
+                      </View>
+                    )}
+                  </Each>
+                </View>
+              </Scroll>
+            </View>
+          </If>
+
+          <If when={picker()?.selected_summary != null}>
+            <Text
+              style={{
+                fontSize: theme().type.text_xsmall.size,
+                lineHeight: theme().type.text_xsmall.line_height,
+                color: theme().palette.muted,
+              }}
+            >
+              {picker()?.selected_summary ?? ""}
+            </Text>
+          </If>
+
+          <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
+            <SmeltButton
+              quiet={true}
+              small={true}
+              label={picker()?.cancel_label ?? ""}
+              onPress={() => sendHostDialogAction("dir_picker_cancel")}
+            />
+            <SmeltButton
+              primary={true}
+              small={true}
+              disabled={!picker()?.can_confirm}
+              label={picker()?.confirm_label ?? ""}
+              onPress={() => sendHostDialogAction("dir_picker_confirm")}
+            />
+          </View>
+        </If>
+      </SmeltDialog>
+    </>
+  );
+}
+
 export function Shell() {
   const pageKeys = stableMemo(() =>
     ((shellState() as ShellSnapshot | undefined)?.pages ?? []).map((p) => p.key),
@@ -687,6 +1048,10 @@ export function Shell() {
       <Each of={currentTheme() ? pageKeys() : []} key={(key: string) => key}>
         {(key: () => string) => <PageWorkspace pageKey={key()} />}
       </Each>
+
+      <If when={Boolean(currentTheme())}>
+        <HostDialogs />
+      </If>
 
       {/* 插件无头根：不占空间，承载命令弹出的对话框（⌘N、仓库管理）及后台事件循环 */}
       <View

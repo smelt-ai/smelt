@@ -11,9 +11,6 @@ command.missing:
 command.not_applicable:
   en: The command "%{id}" doesn't apply right now
   zh-CN: 命令「%{id}」眼下不适用
-command.failed:
-  en: "“%{command}” didn't work: %{error}"
-  zh-CN: "「%{command}」没做成：%{error}"
 command.unfinished:
   en: The command didn't finish
   zh-CN: 命令没有执行完

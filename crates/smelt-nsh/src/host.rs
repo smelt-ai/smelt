@@ -75,6 +75,9 @@ pub(crate) enum Action {
         text: String,
         call: HostCall,
     },
+    ClipboardRead {
+        call: HostCall,
+    },
     SetActiveContext {
         context: api::ActiveContext,
         call: HostCall,
@@ -827,6 +830,13 @@ impl Bridge {
                     return call.reject("clipboard.write：缺 text 字符串");
                 };
                 send_action(&actions, Action::ClipboardWrite { text, call });
+            });
+        }
+
+        {
+            let actions = actions.clone();
+            plugins.handle("clipboard.read", move |_plugin, call| {
+                send_action(&actions, Action::ClipboardRead { call });
             });
         }
 
@@ -2060,6 +2070,14 @@ pub(crate) fn handle_action(action: Action, bridge: &Bridge, plugins: &PluginHos
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             call.resolve(Value::Null);
         }
+        Action::ClipboardRead { call } => {
+            let text = cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .map(Value::String)
+                .unwrap_or(Value::Null);
+            call.resolve(text);
+        }
         Action::SetActiveContext { context, call } => {
             api::set_active_context(context, cx);
             call.resolve(Value::Null);
@@ -2645,6 +2663,7 @@ fn send_action(sender: &mpsc::UnboundedSender<Action>, action: Action) {
             | Action::Request { call, .. }
             | Action::ContextMenuItems { call, .. }
             | Action::ClipboardWrite { call, .. }
+            | Action::ClipboardRead { call }
             | Action::SetActiveContext { call, .. }
             | Action::OpenFile { call, .. }
             | Action::OpenUrl { call, .. }

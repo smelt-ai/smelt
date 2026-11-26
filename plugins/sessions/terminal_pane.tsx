@@ -1,15 +1,23 @@
 // 会话内终端分屏格：直接使用原子能力 `<SmeltNativeTerminal>`（`crates/smelt-terminal`），
-// 零跨 VM 插槽跳转，同时承载连接态/失败重试、断线提示、写入错误通知与 `send-text` 直投。
+// 零跨 VM 插槽跳转；在 NSH 侧承载连接态/失败重试、断线提示、Cmd+F 搜索条、右键菜单、
+// 写入错误通知与 `send-text` 直投。
 
-import { cleanup, computed, effect, signal, Text, View } from "nsh";
+import { cleanup, computed, effect, Image, signal, Text, View } from "nsh";
+import { Input, MenuItem, MenuSeparator, Submenu } from "nsh/base";
 import {
+  clipboardRead,
+  clipboardWrite,
+  contextMenuItems,
+  currentTheme,
   machineMetaEntry,
+  MENU_ITEM_CLASS,
   run,
   SmeltButton,
+  SmeltContextMenu,
+  SmeltIcon,
   SmeltNativeTerminal,
+  SmeltTooltip,
   stableMemo,
-  currentTheme,
-  locale,
   t,
 } from "smelt/sdk";
 import { terminalPaneKey, terminalWriteErrorKey } from "./model.js";
@@ -17,9 +25,17 @@ import { terminalPaneKey, terminalWriteErrorKey } from "./model.js";
 const TERMINAL_MENU = "smelt.terminal/menu";
 const NOTIFY_CMD = "smelt.app/notify";
 
-
 const openTerminals = new Map<string, Set<(chunk: string) => void>>();
 let nextSendSeq = 0;
+
+interface ContributedMenuItem {
+  label: string;
+  image?: string | null;
+  icon?: string | null;
+  command?: string;
+  args?: unknown;
+  submenu?: ContributedMenuItem[];
+}
 
 function registerOpenTerminal(key: string, send: (chunk: string) => void): () => void {
   let set = openTerminals.get(key);
@@ -49,6 +65,108 @@ export function sendTextToTerminal(machine: string | null, sessionId: string, te
   }
 }
 
+function errText(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error ?? "");
+}
+
+function TerminalMenuEntry(props: {
+  label: string;
+  image?: string | null;
+  iconPath?: string | null;
+  disabled?: boolean;
+  onSelect: () => void;
+}) {
+  const look = currentTheme;
+  return (
+    <MenuItem
+      disabled={props.disabled}
+      closeOnSelect={true}
+      onSelect={props.onSelect}
+      class={MENU_ITEM_CLASS}
+      style={{ height: 28, gap: 8 }}
+    >
+      {props.image ? (
+        <View style={{ width: 14, height: 14, flexShrink: 0 }}>
+          <Image src={props.image} style={{ width: 14, height: 14, objectFit: "contain" }} />
+        </View>
+      ) : props.iconPath ? (
+        <View style={{ width: 14, height: 14, flexShrink: 0 }}>
+          <SmeltIcon path={props.iconPath} size={14} color={look().palette.muted} />
+        </View>
+      ) : null}
+      <Text
+        class="flex-1 min-w-0"
+        style={{
+          color: props.disabled ? look().palette.faint : look().palette.text,
+          fontSize: look().type.ui.size,
+          lineHeight: look().type.ui.line_height,
+          numberOfLines: 1,
+        }}
+      >
+        {props.label}
+      </Text>
+    </MenuItem>
+  );
+}
+
+function ContributedEntries(props: {
+  items: ContributedMenuItem[];
+  onRun: (item: ContributedMenuItem) => void;
+}) {
+  const look = currentTheme;
+  return (
+    <>
+      <Each of={props.items} key={(item: ContributedMenuItem, idx: number) => `${item.label}:${idx}`}>
+        {(item: () => ContributedMenuItem) => {
+          const cur = item();
+          if (cur.submenu && cur.submenu.length > 0) {
+            return (
+              <Submenu
+                trigger={
+                  <View class={MENU_ITEM_CLASS} style={{ height: 28, gap: 8 }}>
+                    {cur.image ? (
+                      <View style={{ width: 14, height: 14, flexShrink: 0 }}>
+                        <Image src={cur.image} style={{ width: 14, height: 14, objectFit: "contain" }} />
+                      </View>
+                    ) : cur.icon ? (
+                      <View style={{ width: 14, height: 14, flexShrink: 0 }}>
+                        <SmeltIcon path={cur.icon} size={14} color={look().palette.muted} />
+                      </View>
+                    ) : null}
+                    <Text
+                      class="flex-1 min-w-0"
+                      style={{
+                        color: look().palette.text,
+                        fontSize: look().type.ui.size,
+                        lineHeight: look().type.ui.line_height,
+                        numberOfLines: 1,
+                      }}
+                    >
+                      {cur.label}
+                    </Text>
+                    <SmeltIcon path="icons/chevron-right.svg" size={12} color={look().palette.muted} />
+                  </View>
+                }
+              >
+                <ContributedEntries items={cur.submenu} onRun={props.onRun} />
+              </Submenu>
+            );
+          }
+          return (
+            <TerminalMenuEntry
+              label={cur.label}
+              image={cur.image}
+              iconPath={cur.icon}
+              onSelect={() => props.onRun(cur)}
+            />
+          );
+        }}
+      </Each>
+    </>
+  );
+}
+
 export function TerminalPane(props: {
   args: { machine?: string | null; session_id?: string; cwd?: string | null; launch?: string | null } | null;
   reuseKey?: string;
@@ -60,7 +178,22 @@ export function TerminalPane(props: {
   const connectError = signal<string | null>(null);
   const reconnecting = signal(false);
   const retrySeq = signal(0);
+  const localFocusSeq = signal(0);
   const sendTextProp = signal<{ seq: number; text: string } | null>(null);
+
+  // 搜索条状态（Cmd+F 打开，Enter / Shift+Enter 跳转，Esc 关闭并归还焦点）
+  const searchOpen = signal(false);
+  const searchQuery = signal("");
+  const searchStatus = signal<{ current: number; total: number }>({ current: 0, total: 0 });
+  const searchStepProp = signal<{ seq: number; query: string; backward: boolean } | null>(null);
+  let nextSearchStepSeq = 0;
+  let searchInputEl: any = null;
+
+  // 右键菜单状态
+  const selection = signal<string | null>(null);
+  const clipboardText = signal<string | null>(null);
+  const contributedItems = signal<ContributedMenuItem[]>([]);
+  const menuFailure = signal<string | null>(null);
 
   const spec = stableMemo(() => {
     const raw = props.args;
@@ -76,15 +209,12 @@ export function TerminalPane(props: {
     };
   });
 
-  const labels = stableMemo(() => {
-    void locale();
-    return {
-      copy: t("terminal.copy"),
-      paste: t("terminal.paste"),
-      search_placeholder: t("terminal.search_placeholder"),
-      search_none: t("terminal.search_none"),
-    };
-  });
+  const effectiveFocusSeq = computed(() => (props.focusSeq ?? 0) + localFocusSeq());
+
+  const searchQueryProp = stableMemo(() => ({
+    open: searchOpen(),
+    query: searchQuery(),
+  }));
 
   const runtimeName = computed(() => {
     const s = spec();
@@ -94,8 +224,49 @@ export function TerminalPane(props: {
     return typeof s.machine === "string" ? s.machine : "";
   });
 
+  const closeSearch = () => {
+    searchOpen.set(false);
+    searchQuery.set("");
+    searchStatus.set({ current: 0, total: 0 });
+    localFocusSeq.set(localFocusSeq() + 1);
+  };
+
+  const stepSearch = (backward: boolean) => {
+    const q = searchQuery();
+    searchStepProp.set({ seq: ++nextSearchStepSeq, query: q, backward });
+  };
+
+  const loadContextMenu = async () => {
+    const s = spec();
+    const [clip, items] = await Promise.all([
+      clipboardRead().catch(() => null),
+      s
+        ? contextMenuItems(TERMINAL_MENU, s.machine, {
+            machine: s.machine,
+            session_id: s.session_id,
+            selection: selection(),
+          }).catch(() => [])
+        : Promise.resolve([]),
+    ]);
+    clipboardText.set(typeof clip === "string" && clip.length > 0 ? clip : null);
+    contributedItems.set(Array.isArray(items) ? (items as ContributedMenuItem[]) : []);
+  };
+
+  const runContributed = (item: ContributedMenuItem) => {
+    if (!item.command) return;
+    menuFailure.set(null);
+    void run(item.command, item.args ?? null).catch((error) => {
+      menuFailure.set(t("error.failed", { what: item.label || item.command, error: errText(error) }));
+    });
+  };
+
   effect(() => {
     const s = spec();
+    searchOpen.set(false);
+    searchQuery.set("");
+    searchStatus.set({ current: 0, total: 0 });
+    selection.set(null);
+    menuFailure.set(null);
     if (!s) return;
     const key = terminalPaneKey(s.machine, s.session_id);
     const unreg = registerOpenTerminal(key, (chunk) => {
@@ -117,36 +288,162 @@ export function TerminalPane(props: {
       }}
     >
       <If when={spec() != null}>
-        <SmeltNativeTerminal
-          spec={spec()}
-          contextMenu={TERMINAL_MENU}
-          labels={labels()}
-          focusSeq={props.focusSeq ?? 0}
-          retrySeq={retrySeq()}
-          sendText={sendTextProp()}
-          onStateChange={(ev: { state?: string; error?: string | null }) => {
-            const next = ev?.state;
-            if (next === "idle" || next === "connecting" || next === "live" || next === "failed") {
-              status.set(next);
-            }
-            connectError.set(typeof ev?.error === "string" ? ev.error : null);
+        <SmeltContextMenu
+          popupStyle={{ minWidth: 168 }}
+          onOpenChange={({ open }: { open: boolean }) => {
+            if (open) void loadContextMenu();
           }}
-          onReconnecting={(ev: { active?: boolean }) => {
-            reconnecting.set(Boolean(ev?.active));
-          }}
-          onWriteError={(ev: { kind?: string }) => {
-            const key = terminalWriteErrorKey(ev?.kind);
-            if (!key) return;
-            void run(NOTIFY_CMD, {
-              subtitle: t("error.title"),
-              body: t(key),
-            }).catch(() => {});
-          }}
-          onFocusIn={() => {
-            props.onFocusIn?.();
-          }}
-          style={{ flex: 1, width: "100%", height: "100%" }}
-        />
+          trigger={
+            <View style={{ flex: 1, width: "100%", height: "100%", minWidth: 0, minHeight: 0 }}>
+              <SmeltNativeTerminal
+                spec={spec()}
+                focusSeq={effectiveFocusSeq()}
+                retrySeq={retrySeq()}
+                sendText={sendTextProp()}
+                searchQuery={searchQueryProp()}
+                searchStep={searchStepProp()}
+                onStateChange={(ev: { state?: string; error?: string | null }) => {
+                  const next = ev?.state;
+                  if (next === "idle" || next === "connecting" || next === "live" || next === "failed") {
+                    status.set(next);
+                  }
+                  connectError.set(typeof ev?.error === "string" ? ev.error : null);
+                }}
+                onReconnecting={(ev: { active?: boolean }) => {
+                  reconnecting.set(Boolean(ev?.active));
+                }}
+                onWriteError={(ev: { kind?: string }) => {
+                  const key = terminalWriteErrorKey(ev?.kind);
+                  if (!key) return;
+                  void run(NOTIFY_CMD, {
+                    subtitle: t("error.title"),
+                    body: t(key),
+                  }).catch(() => {});
+                }}
+                onFocusIn={() => {
+                  props.onFocusIn?.();
+                }}
+                onSearchOpen={() => {
+                  if (searchOpen()) {
+                    searchInputEl?.focus?.();
+                  } else {
+                    searchStatus.set({ current: 0, total: 0 });
+                    searchOpen.set(true);
+                  }
+                }}
+                onSearchStatus={(ev: { current?: number; total?: number }) => {
+                  searchStatus.set({
+                    current: typeof ev?.current === "number" ? ev.current : 0,
+                    total: typeof ev?.total === "number" ? ev.total : 0,
+                  });
+                }}
+                onSelectionChange={(ev: { text?: string | null }) => {
+                  selection.set(typeof ev?.text === "string" && ev.text.length > 0 ? ev.text : null);
+                }}
+                style={{ flex: 1, width: "100%", height: "100%" }}
+              />
+            </View>
+          }
+        >
+          <TerminalMenuEntry
+            label={t("terminal.copy")}
+            disabled={selection() == null}
+            onSelect={() => {
+              const text = selection();
+              if (text) void clipboardWrite(text).catch(() => {});
+            }}
+          />
+          <TerminalMenuEntry
+            label={t("terminal.paste")}
+            disabled={clipboardText() == null}
+            onSelect={() => {
+              const text = clipboardText();
+              if (text != null) {
+                sendTextProp.set({ seq: ++nextSendSeq, text });
+              }
+            }}
+          />
+          <If when={contributedItems().length > 0}>
+            <MenuSeparator style={{ height: 1, backgroundColor: look().palette.hair, marginVertical: 2 }} />
+            <ContributedEntries items={contributedItems()} onRun={runContributed} />
+          </If>
+        </SmeltContextMenu>
+
+        {/* Cmd+F 终端内搜索条：叠在右上角，不抢网格布局 */}
+        <If when={searchOpen()}>
+          <View
+            class="shadow-floating"
+            onPressDown={(e: any) => e?.stopPropagation?.()}
+            style={{
+              position: "absolute",
+              top: 8,
+              right: 8,
+              width: 300,
+              display: "flex",
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 6,
+              paddingLeft: 8,
+              paddingRight: 8,
+              paddingTop: 4,
+              paddingBottom: 4,
+              borderRadius: look().radius.md,
+              backgroundColor: look().palette.surface,
+              borderWidth: 1,
+              borderColor: look().palette.hair,
+            }}
+          >
+            <Input
+              ref={(el: any) => {
+                searchInputEl = el ?? null;
+                el?.focus?.();
+              }}
+              autoFocus={true}
+              value={searchQuery()}
+              placeholder={t("terminal.search_placeholder")}
+              accessibilityLabel={t("terminal.search_placeholder")}
+              onChange={({ value }: { value: string }) => searchQuery.set(value)}
+              captureKeys={["enter", "shift+enter", "escape"]}
+              onKeyDown={(ev: any) => {
+                if (ev?.key === "Escape") {
+                  closeSearch();
+                } else if (ev?.key === "Enter") {
+                  stepSearch(Boolean(ev?.modifiers?.shift));
+                }
+              }}
+              class="flex-1 min-w-0 rounded-(--radius) border border-input bg-card px-2 text-foreground"
+              style={{
+                height: 24,
+                fontSize: look().type.ui_compact.size,
+                lineHeight: look().type.ui_compact.line_height,
+              }}
+            />
+            <If when={searchQuery().length > 0}>
+              <SmeltButton
+                quiet={true}
+                small={true}
+                icon="icons/x.svg"
+                accessibilityLabel={t("split.cancel")}
+                onPress={() => {
+                  searchQuery.set("");
+                  searchInputEl?.focus?.();
+                }}
+              />
+            </If>
+            <Text
+              style={{
+                fontSize: look().type.text_xsmall.size,
+                lineHeight: look().type.text_xsmall.line_height,
+                color: look().palette.muted,
+                flexShrink: 0,
+              }}
+            >
+              {searchStatus().total === 0
+                ? t("terminal.search_none")
+                : `${searchStatus().current}/${searchStatus().total}`}
+            </Text>
+          </View>
+        </If>
 
         <If when={status() === "idle" || status() === "connecting"}>
           <View
@@ -233,6 +530,45 @@ export function TerminalPane(props: {
             >
               {t("terminal.reconnecting", { runtime: runtimeName() })}
             </Text>
+          </View>
+        </If>
+
+        {/* 右键菜单命令失败提示：挂在右下角，悬停看原因，点一下收起 */}
+        <If when={menuFailure() != null}>
+          <View
+            class="shadow-floating"
+            onPressDown={(e: any) => e?.stopPropagation?.()}
+            tooltip={
+              <SmeltTooltip>
+                <Text
+                  style={{
+                    color: look().palette.text,
+                    fontSize: look().type.text_xsmall.size,
+                    lineHeight: look().type.text_xsmall.line_height,
+                  }}
+                >
+                  {menuFailure() ?? ""}
+                </Text>
+              </SmeltTooltip>
+            }
+            style={{
+              position: "absolute",
+              bottom: 8,
+              right: 16,
+              borderRadius: look().radius.md,
+              backgroundColor: look().palette.surface,
+              borderWidth: 1,
+              borderColor: look().palette.hair,
+            }}
+          >
+            <SmeltButton
+              danger={true}
+              quiet={true}
+              small={true}
+              icon="icons/circle-alert.svg"
+              accessibilityLabel={menuFailure() ?? t("split.dismiss_failure")}
+              onPress={() => menuFailure.set(null)}
+            />
           </View>
         </If>
       </If>

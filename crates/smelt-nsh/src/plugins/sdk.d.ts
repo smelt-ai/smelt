@@ -168,16 +168,19 @@ export declare const SmeltNativeDesktop: (props: {
 
 export declare const SmeltNativeTerminal: (props: {
   spec: unknown;
-  contextMenu?: unknown;
-  labels?: unknown;
   focusSeq?: number;
   retrySeq?: number;
   sendText?: unknown;
+  searchQuery?: { open: boolean; query: string } | null;
+  searchStep?: { seq: number; query: string; backward: boolean } | null;
   style?: StyleProp<ViewStyle>;
   onStateChange?: (event: unknown) => void;
   onReconnecting?: (event: unknown) => void;
   onWriteError?: (event: unknown) => void;
   onFocusIn?: (event: unknown) => void;
+  onSearchOpen?: (event: unknown) => void;
+  onSearchStatus?: (event: { current?: number; total?: number }) => void;
+  onSelectionChange?: (event: { text?: string | null }) => void;
 }) => JSX.Element;
 
 export declare const nativeApi: typeof import("./host").Smelt;
@@ -564,6 +567,7 @@ export declare function contextMenuItems(
   context: unknown,
 ): Promise<any[]>;
 export declare function clipboardWrite(value: string): Promise<void>;
+export declare function clipboardRead(): Promise<string | null>;
 export declare function revealPath(path: string): Promise<void>;
 
 export interface ProcessMemoryBreakdown {

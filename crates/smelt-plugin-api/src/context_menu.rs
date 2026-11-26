@@ -11,11 +11,9 @@
 //! 一次；变了发 [`HostEvent::ContextMenuItemsChanged`]。画菜单的一方在打开时取项，下次打开
 //! 就是新的；已经开着的不跟着变，点到撤下的命令照常报失败。
 
-use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{App, Global, SharedString};
-use smelt_ui::menu::{Menu, MenuItem};
 
 use crate::{HostEvent, RuntimeKey, Text};
 
@@ -43,7 +41,7 @@ pub enum MenuImage {
 }
 
 impl MenuImage {
-    /// 交给 `img()`、[`MenuItem::image`] 的图源。
+    /// 交给 `img()` 的图源。
     pub fn source(&self) -> gpui::ImageSource {
         match self {
             Self::Decoded(image) => image.clone().into(),
@@ -239,83 +237,6 @@ pub fn context_menu_args(
         return serde_json::Value::Null;
     }
     serde_json::Value::Object(merged)
-}
-
-/// 点了一项之后怎么报：点下时 `None`（上次的失败收起，这是新的一次），没做成时是给人看的
-/// 原因。失败挂在发起的地方（那条消息、那格终端），不发系统通知。
-pub type MenuReport = Rc<dyn Fn(Option<SharedString>, &mut App)>;
-
-/// Rust 插件画自己的右键菜单时，在 `menu` 后面接上别的插件往 `id` 登记、给机器 `machine`
-/// 的项，前面隔一道线；一项都没有原样交回。`context` 是这个菜单带的上下文（并进命令参数，
-/// 见 [`context_menu_args`]），点了的结果交给 `report`。
-pub fn with_context_menu_items(
-    menu: Menu,
-    id: &str,
-    machine: &RuntimeKey,
-    context: &impl serde::Serialize,
-    report: MenuReport,
-    cx: &App,
-) -> Menu {
-    let context = match serde_json::to_value(context) {
-        Ok(context) => context,
-        Err(error) => {
-            eprintln!("[plugins] 菜单 {id} 的上下文转不成 JSON：{error}");
-            return menu;
-        }
-    };
-    let items = context_menu_items(id, machine, cx);
-    if items.is_empty() {
-        return menu;
-    }
-    items
-        .into_iter()
-        .map(|item| menu_item(item, &context, &report, cx))
-        .fold(menu.separator(), Menu::item)
-}
-
-/// 一项登记的菜单项。有彩色图标画它，没有画线性图标。
-fn menu_item(
-    item: ContextMenuItem,
-    context: &serde_json::Value,
-    report: &MenuReport,
-    cx: &App,
-) -> MenuItem {
-    let mut entry = MenuItem::new(item.label.get());
-    if let Some(icon) = item.icon {
-        entry = entry.icon_path(icon);
-    }
-    if let Some(image) = &item.image {
-        entry = entry.image(image.source());
-    }
-    match item.action {
-        ContextMenuAction::Run { command, args } => {
-            let args = context_menu_args(&command, &args, context, cx);
-            let report = report.clone();
-            entry.on_click(move |_, _, cx| run(&command, args.clone(), report.clone(), cx))
-        }
-        ContextMenuAction::Submenu(items) => entry.submenu(
-            items
-                .into_iter()
-                .map(|item| menu_item(item, context, report, cx))
-                .fold(Menu::new(), Menu::item),
-        ),
-    }
-}
-
-/// 执行点中的那项，结果交给 `report`。
-fn run(command: &str, args: serde_json::Value, report: MenuReport, cx: &mut App) {
-    report(None, cx);
-    let command: SharedString = command.to_string().into();
-    let ran = crate::run(&command, args, cx);
-    cx.spawn(async move |cx| {
-        let Err(error) = ran.await else {
-            return;
-        };
-        let reason = rust_i18n::t!("command.failed", command = command, error = error).into_owned();
-        eprintln!("[plugins] {reason}");
-        cx.update(|cx| report(Some(reason.into()), cx));
-    })
-    .detach();
 }
 
 #[cfg(test)]

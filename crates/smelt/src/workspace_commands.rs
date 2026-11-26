@@ -184,4 +184,14 @@ impl Workspace {
         self.show_quit_confirm = true;
         cx.notify();
     }
+
+    /// 确认退出。后台守护和里面的会话照常跑着，只是这个窗口断开。
+    pub(crate) fn confirm_quit(&mut self, cx: &mut Context<Self>) {
+        if self.quit_requested {
+            return;
+        }
+        self.quit_requested = true;
+        cx.notify();
+        crate::request_app_quit(cx);
+    }
 }

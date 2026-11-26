@@ -88,9 +88,8 @@ pub use connections::{
 };
 pub use context::{ActiveContext, ViewedSession, active_context, set_active_context};
 pub use context_menu::{
-    ContextMenuAction, ContextMenuItem, MenuImage, MenuReport, context_menu_args,
-    context_menu_items, register_context_menu_items, unregister_context_menu_items,
-    with_context_menu_items,
+    ContextMenuAction, ContextMenuItem, MenuImage, context_menu_args, context_menu_items,
+    register_context_menu_items, unregister_context_menu_items,
 };
 pub use event::Event;
 pub use facts::{

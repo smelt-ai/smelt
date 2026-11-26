@@ -30,7 +30,10 @@ pub use manifest::{
     stage_builtin_plugins,
 };
 pub use plugins::{ModulePackage, source_fingerprint};
-pub use shell::{MainShell, MainShellEvent, OutletTarget, ShellConfig, ShellLabels};
+pub use shell::{
+    DirPickerDialogState, DirPickerEntryState, HostDialogAction, HostDialogsState, MainShell,
+    MainShellEvent, OutletTarget, QuitDialogState, ShellConfig, ShellLabels,
+};
 pub use shell_layout::{ComputedShellView, WindowCorners};
 pub use types::{
     PLUGIN_TSCONFIG, PLUGIN_TSCONFIG_BASE, TypesWriteReport, plugin_type_definitions,

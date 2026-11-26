@@ -2,17 +2,20 @@
 //!
 //! Props：
 //! - `spec`: `{ machine: null | string, session_id: string, cwd?: string | null, launch?: string | null, reuseKey?: string | null }`
-//! - `contextMenu`: `string | null`（可选右键菜单扩展点 id）
-//! - `labels`: `{ copy?, paste?, search_placeholder?, search_none? }`
 //! - `focusSeq`: `number`（递增时把焦点交给终端）
 //! - `retrySeq`: `number`（递增时重试连接）
 //! - `sendText`: `{ seq: number, text: string } | null`（递增 `seq` 时往终端写入文本）
+//! - `searchQuery`: `{ open: boolean, query: string } | null`（终端内搜索开关与关键词）
+//! - `searchStep`: `{ seq: number, query: string, backward: boolean } | null`（递增 `seq` 时跳转上/下一处匹配）
 //!
 //! Events：
 //! - `stateChange`: `{ state: "idle" | "connecting" | "live" | "failed", error: string | null }`
 //! - `reconnecting`: `{ active: boolean }`
 //! - `writeError`: `{ kind: "overflow" | "session_ended" | "reopened" }`
 //! - `focusIn`: `{}`
+//! - `searchOpen`: `{}`
+//! - `searchStatus`: `{ current: number, total: number }`
+//! - `selectionChange`: `{ text: string | null }`
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -25,9 +28,7 @@ use gpui::{
 use nsh_platform_gpui::{ComponentContext, NativeComponent};
 use serde_json::{Value, json};
 use smelt_plugin_api::{self as api, RuntimeKey};
-use smelt_terminal::{
-    TerminalCanvas, TerminalCanvasEvent, TerminalEventHandler, TerminalLabels, TerminalSpec,
-};
+use smelt_terminal::{TerminalCanvas, TerminalCanvasEvent, TerminalEventHandler, TerminalSpec};
 
 pub(crate) const NAME: &str = "smelt.terminal";
 
@@ -82,27 +83,19 @@ fn event_handler(cx: ComponentContext) -> TerminalEventHandler {
         TerminalCanvasEvent::FocusIn => {
             cx.emit("focusIn", json!({}));
         }
+        TerminalCanvasEvent::SearchOpen => {
+            cx.emit("searchOpen", json!({}));
+        }
+        TerminalCanvasEvent::SearchStatus { current, total } => {
+            cx.emit(
+                "searchStatus",
+                json!({ "current": current, "total": total }),
+            );
+        }
+        TerminalCanvasEvent::SelectionChanged(text) => {
+            cx.emit("selectionChange", json!({ "text": text }));
+        }
     })
-}
-
-fn parse_labels(value: Option<&Value>) -> TerminalLabels {
-    let mut labels = TerminalLabels::default();
-    let Some(obj) = value.and_then(Value::as_object) else {
-        return labels;
-    };
-    if let Some(v) = obj.get("copy").and_then(Value::as_str) {
-        labels.copy = v.to_owned().into();
-    }
-    if let Some(v) = obj.get("paste").and_then(Value::as_str) {
-        labels.paste = v.to_owned().into();
-    }
-    if let Some(v) = obj.get("search_placeholder").and_then(Value::as_str) {
-        labels.search_placeholder = v.to_owned().into();
-    }
-    if let Some(v) = obj.get("search_none").and_then(Value::as_str) {
-        labels.search_none = v.to_owned().into();
-    }
-    labels
 }
 
 fn parse_spec(value: &Value) -> Option<(TerminalSpec, Option<String>)> {
@@ -147,14 +140,14 @@ pub(crate) struct SmeltTerminal {
     async_app: Option<AsyncApp>,
     spec: Option<TerminalSpec>,
     reuse_key: Option<String>,
-    labels: TerminalLabels,
-    context_menu: Option<gpui::SharedString>,
     canvas: Option<Entity<TerminalCanvas>>,
     focus: Option<FocusHandle>,
     focus_seq: u64,
     pending_focus: bool,
     retry_seq: u64,
     send_text_seq: u64,
+    search_step_seq: u64,
+    last_search: (bool, String),
 }
 
 impl SmeltTerminal {
@@ -164,14 +157,14 @@ impl SmeltTerminal {
             async_app: None,
             spec: None,
             reuse_key: None,
-            labels: TerminalLabels::default(),
-            context_menu: None,
             canvas: None,
             focus: None,
             focus_seq: 0,
             pending_focus: false,
             retry_seq: 0,
             send_text_seq: 0,
+            search_step_seq: 0,
+            last_search: (false, String::new()),
         })
     }
 
@@ -201,11 +194,7 @@ impl SmeltTerminal {
             && let Some(reclaimed) = claim_canvas(key)
         {
             let handler = event_handler(self.cx.clone());
-            let labels = self.labels.clone();
-            let menu = self.context_menu.clone();
             reclaimed.update(cx, |canvas, cx| {
-                canvas.set_labels(labels, cx);
-                canvas.set_context_menu(menu, cx);
                 canvas.rebind_event_handler(Some(handler), cx);
             });
             let target = reclaimed.read(cx).focus_target(cx);
@@ -220,9 +209,7 @@ impl SmeltTerminal {
         }
 
         let handler = event_handler(self.cx.clone());
-        let labels = self.labels.clone();
-        let menu = self.context_menu.clone();
-        let canvas = cx.new(|cx| TerminalCanvas::new(labels, menu, Some(handler), window, cx));
+        let canvas = cx.new(|cx| TerminalCanvas::new(Some(handler), window, cx));
         canvas.update(cx, |canvas, cx| canvas.open(spec, window, cx));
         let target = canvas.read(cx).focus_target(cx);
         self.focus = Some(target.clone());
@@ -253,23 +240,6 @@ impl NativeComponent for SmeltTerminal {
         smelt_terminal::bind_keys(cx);
         match name {
             "spec" => self.apply_spec(value, window, cx),
-            "labels" => {
-                let labels = parse_labels(value);
-                self.labels = labels.clone();
-                if let Some(canvas) = &self.canvas {
-                    canvas.update(cx, |canvas, cx| canvas.set_labels(labels, cx));
-                }
-            }
-            "contextMenu" => {
-                let menu = value
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| gpui::SharedString::from(s.to_owned()));
-                self.context_menu = menu.clone();
-                if let Some(canvas) = &self.canvas {
-                    canvas.update(cx, |canvas, cx| canvas.set_context_menu(menu, cx));
-                }
-            }
             "focusSeq" => {
                 let seq = value.and_then(Value::as_u64).unwrap_or(0);
                 if seq > self.focus_seq {
@@ -301,6 +271,44 @@ impl NativeComponent for SmeltTerminal {
                     if let Some(canvas) = &self.canvas {
                         canvas.update(cx, |canvas, cx| {
                             canvas.send_text(text, cx);
+                        });
+                    }
+                }
+            }
+            "searchQuery" => {
+                let next = match value.and_then(Value::as_object) {
+                    Some(obj) => (
+                        obj.get("open").and_then(Value::as_bool).unwrap_or(false),
+                        obj.get("query")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
+                    ),
+                    None => (false, String::new()),
+                };
+                if next != self.last_search {
+                    self.last_search = next.clone();
+                    if let Some(canvas) = &self.canvas {
+                        canvas.update(cx, |canvas, cx| {
+                            canvas.set_search(next.0, &next.1, cx);
+                        });
+                    }
+                }
+            }
+            "searchStep" => {
+                if let Some(obj) = value.and_then(Value::as_object)
+                    && let Some(seq) = obj.get("seq").and_then(Value::as_u64)
+                    && seq > self.search_step_seq
+                {
+                    self.search_step_seq = seq;
+                    let query = obj.get("query").and_then(Value::as_str).unwrap_or("");
+                    let backward = obj
+                        .get("backward")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    if let Some(canvas) = &self.canvas {
+                        canvas.update(cx, |canvas, cx| {
+                            canvas.find_next(query, backward, cx);
                         });
                     }
                 }

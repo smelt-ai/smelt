@@ -11,15 +11,11 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use smelt_plugin_api::RuntimeKey;
 use smelt_plugin_api::model::daemon_state::RuntimePresence;
-use smelt_plugin_api::ui::IconAction as _;
-use smelt_plugin_api::ui::TextInput;
-use smelt_plugin_api::ui::menu::{Menu, MenuItem, MenuTrigger};
 use smol::Timer;
 
 use crate::terminal::{self, Terminal};
-use crate::{TerminalCanvasEvent, TerminalEventHandler, TerminalLabels};
+use crate::{TerminalCanvasEvent, TerminalEventHandler};
 use smelt_plugin_api::model::kitty_graphics::{MILLI_CELLS, source_size};
-use smelt_plugin_api::ui::kit::{TYPE, TypeStyled as _};
 
 /// 选区高亮背景色：跟终端主题一起切换（深色用暗蓝，浅色换成不刺眼的浅蓝，
 /// 否则深色定死的暗蓝铺在浅底上，选中文字会糊在一起看不清）。
@@ -88,15 +84,7 @@ fn terminal_font() -> Font {
 // 要先拿到它。
 gpui::actions!(
     smelt_terminal,
-    [
-        TerminalTab,
-        TerminalBackTab,
-        TerminalEscape,
-        TerminalFind,
-        TerminalFindNext,
-        TerminalFindPrev,
-        TerminalFindClose
-    ]
+    [TerminalTab, TerminalBackTab, TerminalEscape]
 );
 
 /// 终端字号（px）：本插件的设置页改它（见 [`crate::settings_page`]），存在本插件的库里。
@@ -164,14 +152,14 @@ pub(crate) struct TerminalView {
     /// 应用鼠标上报模式：mousedown 时已把 press 转发给 TUI，后续 drag/release 也走
     /// 应用路径，不再做本地框选。按住 Shift 强制本地选区（xterm 约定旁路）。
     app_mouse: bool,
-    /// 终端内搜索：打开时顶部出输入条（Cmd+F）；命中高亮在 paint 里画。
+    /// 终端内搜索：由外层 NSH 搜索条驱动；命中高亮在 paint 里画。
     search_open: bool,
-    search_input: Option<Entity<smelt_plugin_api::ui::field::InputState>>,
-    _search_sub: Option<Subscription>,
     /// 当前可视区内所有搜索命中（含 active）；关搜索时清空。
     search_hits: Vec<terminal::SearchHit>,
     /// 「3/12」；total=0 表示无结果。
     search_status: terminal::SearchStatus,
+    /// 上次发给外层的非空选区文本，用于避免无变化时重复发事件。
+    last_selection: Option<String>,
     /// 滚动条拖动中：记录按下时 thumb 内偏移（像素），None = 没在拖。
     scrollbar_drag: Option<f32>,
     /// 拖到可视区上/下边缘时的自动滚动方向：0 不滚，正=向上看历史，负=向下。
@@ -210,17 +198,10 @@ pub(crate) struct TerminalView {
     /// 的输入，重连后按原顺序补发，不能把用户键入当成一次可丢的 UI 事件。
     recovery_input: VecDeque<RecoveryInput>,
     recovery_input_bytes: usize,
-    /// 右键菜单里别的插件的命令刚失败了：为什么。挂在终端右下角，点一下收起，再点一项菜单
-    /// 也收起。只在内存里。
-    menu_failure: Option<SharedString>,
     /// 当前 epoch 已确认没有 runtime。之后不再重连、不再把按键放进恢复队列，
     /// 避免 make install / 守护换代后连弹「未发送的输入已取消」。
     session_runtime_gone: bool,
-    /// 右键菜单与内置搜索条文案（由外层 JS 插件按当前语言传入）。
-    labels: TerminalLabels,
-    /// 可选右键菜单扩展点 id（由外层 JS 插件传入，能力层不硬编码插件名）。
-    context_menu: Option<SharedString>,
-    /// 重连状态与输入取消事件回调（通知外层 JS 插件展示文案与系统通知）。
+    /// 重连、搜索、选区与输入取消事件回调（通知外层 JS 插件）。
     on_event: Option<TerminalEventHandler>,
 }
 
@@ -258,8 +239,6 @@ impl TerminalView {
         cx: &mut Context<Self>,
         spec: crate::TerminalSpec,
         mut terminal: Terminal,
-        labels: TerminalLabels,
-        context_menu: Option<SharedString>,
         on_event: Option<TerminalEventHandler>,
     ) -> Self {
         // Zed 式事件驱动重绘：读线程一有新内容就唤醒这里 cx.notify()（见 drive_redraws）。
@@ -277,10 +256,9 @@ impl TerminalView {
             selecting: false,
             app_mouse: false,
             search_open: false,
-            search_input: None,
-            _search_sub: None,
             search_hits: Vec::new(),
             search_status: terminal::SearchStatus::default(),
+            last_selection: None,
             scrollbar_drag: None,
             drag_scroll: 0,
             drag_scroll_col: 0,
@@ -297,29 +275,8 @@ impl TerminalView {
             reconnect_notice: false,
             recovery_input: VecDeque::new(),
             recovery_input_bytes: 0,
-            menu_failure: None,
             session_runtime_gone: false,
-            labels,
-            context_menu,
             on_event,
-        }
-    }
-
-    pub(crate) fn set_labels(&mut self, labels: TerminalLabels, cx: &mut Context<Self>) {
-        if self.labels != labels {
-            self.labels = labels;
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn set_context_menu(
-        &mut self,
-        context_menu: Option<SharedString>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.context_menu != context_menu {
-            self.context_menu = context_menu;
-            cx.notify();
         }
     }
 
@@ -549,85 +506,16 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// 右键菜单：复制选中的文字、粘贴，再是外层指定的扩展点菜单项（若有）。
-    /// 右键时才建，不在 render 里。
-    fn menu(&self, view: &Entity<Self>, cx: &App) -> Menu {
-        let selection = self
+    /// 同步当前非空选区文本给外层 JS（供右键菜单复制与菜单上下文使用）。
+    fn sync_selection(&mut self) {
+        let current = self
             .terminal
             .selection_text()
             .filter(|text| !text.is_empty());
-        let copy = MenuItem::new(self.labels.copy.clone()).disabled(selection.is_none());
-        let copy = match selection.clone() {
-            Some(text) => copy.on_click(move |_, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-            }),
-            None => copy,
-        };
-        // 剪贴板里没有字（空的、是图片）时粘贴是灰的，和复制一样。
-        let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
-        let paste = MenuItem::new(self.labels.paste.clone()).disabled(clipboard.is_none());
-        let paste = match clipboard {
-            Some(text) => {
-                let view = view.downgrade();
-                paste.on_click(move |_, _, cx| {
-                    view.update(cx, |this, cx| this.paste_text(&text, cx)).ok();
-                })
-            }
-            None => paste,
-        };
-        let base = Menu::new().item(copy).item(paste);
-        let Some(menu_id) = &self.context_menu else {
-            return base;
-        };
-        let context = serde_json::json!({
-            "machine": smelt_plugin_api::machine_to_json(&self.machine),
-            "session_id": self.session_id,
-            "selection": selection,
-        });
-        let weak = view.downgrade();
-        let report: smelt_plugin_api::MenuReport = Rc::new(move |reason, cx| {
-            weak.update(cx, |this, cx| {
-                this.menu_failure = reason;
-                cx.notify();
-            })
-            .ok();
-        });
-        smelt_plugin_api::with_context_menu_items(
-            base,
-            menu_id,
-            &self.machine,
-            &context,
-            report,
-            cx,
-        )
-    }
-
-    /// 右键菜单里刚失败的命令：右下角（右上角是搜索条）一个 `bad` 色的叹号，悬停看为什么，点一下收起。按下
-    /// 不往终端传，免得开始框选或转给应用。
-    fn render_menu_failure(&self, reason: SharedString, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .absolute()
-            .bottom_2()
-            .right_4()
-            .rounded_md()
-            .bg(rgb(smelt_plugin_api::ui::ui_theme::surface()))
-            .border_1()
-            .border_color(smelt_plugin_api::ui::ui_theme::hair())
-            .shadow_md()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-            .child(
-                smelt_plugin_api::ui::Button::new("terminal-menu-failure")
-                    .danger_quiet()
-                    .small()
-                    .icon(smelt_plugin_api::ui::IconName::CircleAlert)
-                    .icon_action(reason)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.menu_failure = None;
-                        cx.notify();
-                    })),
-            )
-            .into_any_element()
+        if current != self.last_selection {
+            self.last_selection = current.clone();
+            self.emit_event(TerminalCanvasEvent::SelectionChanged(current));
+        }
     }
 
     fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -709,61 +597,45 @@ impl TerminalView {
         self.emit_event(TerminalCanvasEvent::WriteError { kind });
     }
 
-    /// 打开终端内搜索条（Cmd+F）。输入框获焦；Enter 下一个，Shift+Enter 上一个，Esc 关闭。
-    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        use smelt_plugin_api::ui::field::{InputEvent, InputState};
-        if self.search_open {
-            if let Some(input) = &self.search_input {
-                input.update(cx, |s, cx| s.focus(window, cx));
-            }
-            return;
-        }
-        let placeholder = self.labels.search_placeholder.clone();
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
-        input.update(cx, |s, cx| s.focus(window, cx));
-        self._search_sub = Some(cx.subscribe_in(
-            &input,
-            window,
-            |this, input, ev: &InputEvent, _window, cx| {
-                match ev {
-                    InputEvent::PressEnter { shift, .. } => {
-                        let q = input.read(cx).value().to_string();
-                        this.run_search(&q, *shift, cx);
-                    }
-                    InputEvent::Change => {
-                        let q = input.read(cx).value().to_string();
-                        // 边输入边重建命中列表，全部高亮；不滚动（等 Enter 再跳）。
-                        this.search_status = this.terminal.set_search_query(&q);
-                        this.search_hits = this.terminal.viewport_search_hits();
-                        cx.notify();
-                    }
-                    _ => {}
-                }
-            },
-        ));
-        self.search_input = Some(input);
+    /// 通知外层 NSH 搜索条打开或聚焦（Cmd+F）。
+    fn request_search_open(&mut self) {
         self.search_open = true;
-        self.search_hits.clear();
-        self.search_status = terminal::SearchStatus::default();
-        self.terminal.clear_search();
-        cx.notify();
+        self.emit_event(TerminalCanvasEvent::SearchOpen);
     }
 
-    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.search_open = false;
-        self.search_input = None;
-        self._search_sub = None;
-        self.search_hits.clear();
-        self.search_status = terminal::SearchStatus::default();
-        self.terminal.clear_search();
-        window.focus(&self.focus_handle, cx);
-        cx.notify();
-    }
-
-    fn run_search(&mut self, query: &str, backward: bool, cx: &mut Context<Self>) {
-        self.search_status = self.terminal.find_next(query, backward);
+    pub(crate) fn set_search_query(&mut self, query: &str, cx: &mut Context<Self>) {
+        self.search_open = true;
+        // 边输入边重建命中列表，全部高亮；不滚动（等 Enter 再跳）。
+        let status = self.terminal.set_search_query(query);
         self.search_hits = self.terminal.viewport_search_hits();
+        self.update_search_status(status);
         cx.notify();
+    }
+
+    pub(crate) fn clear_search(&mut self, cx: &mut Context<Self>) {
+        self.search_open = false;
+        self.search_hits.clear();
+        self.terminal.clear_search();
+        self.update_search_status(terminal::SearchStatus::default());
+        cx.notify();
+    }
+
+    pub(crate) fn run_search(&mut self, query: &str, backward: bool, cx: &mut Context<Self>) {
+        self.search_open = true;
+        let status = self.terminal.find_next(query, backward);
+        self.search_hits = self.terminal.viewport_search_hits();
+        self.update_search_status(status);
+        cx.notify();
+    }
+
+    fn update_search_status(&mut self, next: terminal::SearchStatus) {
+        if next != self.search_status {
+            self.search_status = next;
+            self.emit_event(TerminalCanvasEvent::SearchStatus {
+                current: next.current,
+                total: next.total,
+            });
+        }
     }
 
     fn refresh_search_highlights(&mut self) {
@@ -773,7 +645,8 @@ impl TerminalView {
                 self.terminal.set_search_query(&q);
             }
             self.search_hits = self.terminal.viewport_search_hits();
-            self.search_status = self.terminal.search_status();
+            let status = self.terminal.search_status();
+            self.update_search_status(status);
         }
     }
 
@@ -1183,15 +1056,15 @@ impl Render for TerminalView {
         // 滚动会改 display_offset：每帧按当前 offset 把绝对命中映到可视区。
         if self.search_open {
             // 后台搜索任务的结果落地后，本帧数据已更新；但结果到达本身可能没有
-            // 其他事件触发 render，这里请求下一帧把新高亮画出来。
+            // 其他事件触发 render，这里请求下一帧把新高亮画出来，并回报最新命中计数。
             if self.terminal.poll_search_results() {
                 cx.notify();
             }
             self.search_hits = self.terminal.viewport_search_hits();
-            self.search_status = self.terminal.search_status();
+            let status = self.terminal.search_status();
+            self.update_search_status(status);
         }
         let search_hits = self.search_hits.clone();
-        let search_status = self.search_status;
         let base_font = terminal_font();
         // 网格列宽：paint_row 用它把每一批文本钉到 col * cell_w 上（见 paint_row 头注）。
         let cell_w = self.cell_w;
@@ -1206,16 +1079,13 @@ impl Render for TerminalView {
         let origin_cell = self.grid_origin.clone();
         let size_cell = self.grid_size.clone();
         let size_cell_prepaint = size_cell.clone();
-        let search_open = self.search_open;
-        let search_input = self.search_input.clone();
         let scroll_info = self.terminal.scroll_info();
 
         // 从访达拖文件进来 = 把引好的路径打进去，跟系统终端一样。只认本机终端：别的机器上
         // 本机路径没有意义。默认底是透明的，悬停时整块铺选区色，表示「放这里」。
         let accepts_drop = self.machine == RuntimeKey::Local;
-        let menu_view = cx.entity().downgrade();
 
-        let root = div()
+        div()
             .relative()
             .track_focus(&self.focus_handle)
             // 见 TerminalTab/TerminalBackTab 上的注释：让 Tab/Shift-Tab 在终端聚焦时
@@ -1266,29 +1136,10 @@ impl Render for TerminalView {
                     cx.notify();
                 }
             }))
-            .on_action(cx.listener(|this, _: &TerminalFind, window, cx| {
-                this.open_search(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &TerminalFindNext, _window, cx| {
-                if let Some(input) = &this.search_input {
-                    let q = input.read(cx).value().to_string();
-                    this.run_search(&q, false, cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &TerminalFindPrev, _window, cx| {
-                if let Some(input) = &this.search_input {
-                    let q = input.read(cx).value().to_string();
-                    this.run_search(&q, true, cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &TerminalFindClose, window, cx| {
-                this.close_search(window, cx);
-            }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 let ks = &ev.keystroke;
                 let m = &ks.modifiers;
-                // 只处理终端本身获焦时的按键；从子元素（搜索框）冒泡上来的按键由它自己处理，
-                // 不能灌进 PTY。搜索条开着与否不影响终端输入。
+                // 只处理终端本身获焦时的按键。
                 if !this.focus_handle.is_focused(window) {
                     return;
                 }
@@ -1299,10 +1150,10 @@ impl Render for TerminalView {
                     cx.stop_propagation();
                     return;
                 }
-                // Cmd+F 打开搜索（action 也会绑，这里兜底）。
+                // Cmd+F 打开外层 NSH 搜索条。
                 // 只认纯 Cmd+F：Cmd+Shift+F 是工作区的调试 HUD 开关，不能被这里截走。
                 if m.platform && !m.shift && !m.alt && !m.control && ks.key == "f" {
-                    this.open_search(window, cx);
+                    this.request_search_open();
                     cx.stop_propagation();
                     return;
                 }
@@ -1519,21 +1370,21 @@ impl Render for TerminalView {
                     }
                 }),
             )
-            // 右键：TUI 开了鼠标上报时转发给应用，不出菜单；按住 Shift 旁路，出终端自己的
-            // 右键菜单（见 `menu`）。
+            // 右键：TUI 开了鼠标上报时转发给应用，不出菜单；按住 Shift 旁路，让事件冒泡到外层
+            // NSH `<SmeltContextMenu>` 弹出右键菜单。
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                     window.focus(&this.focus_handle, cx);
-                    if ev.modifiers.shift {
-                        return;
-                    }
-                    if this.terminal.mouse_mode()
+                    if !ev.modifiers.shift
+                        && this.terminal.mouse_mode()
                         && let Some(cell) = this.cell_in_grid(ev.position, window)
                     {
                         this.terminal.mouse_button(2, true, cell.0, cell.1);
                         cx.stop_propagation();
+                        return;
                     }
+                    this.sync_selection();
                 }),
             )
             .on_mouse_up(
@@ -1566,6 +1417,7 @@ impl Render for TerminalView {
                     // 会清掉 alacritty 选区，松手瞬间进剪贴板才稳。
                     if let Some(text) = this.terminal.selection_text() {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        this.sync_selection();
                         return;
                     }
                     // 未拖动的本地单击：若应用开了鼠标但 mousedown 没接管（比如当时
@@ -1573,6 +1425,7 @@ impl Render for TerminalView {
                     // 当前若 mouse_mode 且没 shift，mousedown 已经走 app 路径了。
                     // 这里只清空选区。
                     this.terminal.selection_clear();
+                    this.sync_selection();
                     cx.notify();
                 }),
             )
@@ -1685,74 +1538,10 @@ impl Render for TerminalView {
                 .absolute()
                 .inset_0(),
             )
-            // 搜索条：叠在顶部，不抢网格布局（absolute）
-            .when(search_open, |root| {
-                let status_label = if search_status.total == 0 {
-                    self.labels.search_none.to_string()
-                } else {
-                    format!("{}/{}", search_status.current, search_status.total)
-                };
-                let bar = div()
-                    .absolute()
-                    .top_2()
-                    .right_2()
-                    .w(px(300.))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    // 底色跟随全局色板（写死的深蓝在换色板后会突兀）。
-                    .bg(rgb(smelt_plugin_api::ui::ui_theme::surface()))
-                    .border_1()
-                    .border_color(smelt_plugin_api::ui::ui_theme::hair())
-                    .shadow_md()
-                    // 搜索框的按键在这里就地处理：Esc 关闭；其它键归输入框，
-                    // 不再冒泡给终端（会进 PTY）或工作区快捷键。
-                    .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
-                        if ev.keystroke.key == "escape" {
-                            this.close_search(window, cx);
-                        }
-                        cx.stop_propagation();
-                    }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(if let Some(input) = search_input {
-                                TextInput::new(&input).small().cleanable(true).into_any_element()
-                            } else {
-                                div().into_any_element()
-                            }),
-                    )
-                    .child(
-                        div()
-                            .type_style(TYPE.text_xsmall)
-                            .text_color(rgb(if terminal::is_dark() {
-                                0x0080_8a9a
-                            } else {
-                                0x0057_6069
-                            }))
-                            .child(status_label),
-                    );
-                root.child(bar)
-            })
             // 滚动条：有 scrollback 时画在右侧；拖 thumb / 点轨道跳转。
             .when(scroll_info.max_offset > 0, |root| {
                 root.child(self.render_scrollbar(scroll_info, cx))
             })
-            .when_some(self.menu_failure.clone(), |root, reason| {
-                root.child(self.render_menu_failure(reason, cx))
-            });
-        MenuTrigger::context("terminal-menu", root, move |_window, cx| {
-            match menu_view.upgrade() {
-                Some(view) => view.read(cx).menu(&view, cx),
-                None => Menu::new(),
-            }
-        })
-        .size_full()
     }
 }
 

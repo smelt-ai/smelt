@@ -13,7 +13,6 @@ mod bundled_helpers;
 mod daemon_states;
 mod dir_picker;
 mod dock;
-mod host_dialog;
 mod host_views;
 mod keymap;
 mod language;
@@ -40,7 +39,6 @@ mod workspace_persist;
 mod workspace_prepare;
 mod workspace_shell;
 mod workspace_update;
-mod workspace_view;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -282,8 +280,6 @@ struct Workspace {
     /// 切到这类页面时把 focus 显式认领到这个句柄上，保证 Workspace context 始终在 dispatch
     /// 路径上。
     focus_handle: FocusHandle,
-    /// 开着的宿主对话框，按打开先后（见 `host_dialog`）。
-    host_dialogs: Vec<(host_dialog::HostDialog, smelt_ui::dialog::DialogId)>,
     /// 主窗口唯一的 NSH A2 外壳（承载各页 `DockArea` 和所有 JS 插件 VM）。
     nsh_shell: Entity<smelt_nsh::MainShell>,
     /// 各页出口最近一次传入的 `(view_id, args, seq)`。
@@ -397,6 +393,9 @@ impl Workspace {
                     this.open_home_page(window, cx);
                     this.sync_nsh_settings_page(cx);
                 }
+                smelt_nsh::MainShellEvent::HostDialogAction(action) => {
+                    this.handle_host_dialog_action(action, cx);
+                }
             },
         );
         let settings_sel_sub = settings::observe_selection(window, cx, |this, _, cx| {
@@ -437,7 +436,6 @@ impl Workspace {
             _daemon_binary_watcher: None,
             daemon_restart_waiting_idle: false,
             focus_handle: cx.focus_handle(),
-            host_dialogs: Vec::new(),
             nsh_shell: shell,
             nsh_outlet_args: HashMap::new(),
             nsh_outlet_seq: 0,
@@ -637,6 +635,51 @@ impl Workspace {
         let page = resolved.map(|(id, title)| (id.to_string(), title.to_string()));
         self.nsh_shell
             .update(cx, |shell, cx| shell.set_settings_page(page, cx));
+    }
+
+    pub(crate) fn sync_host_dialogs(&mut self, cx: &mut Context<Self>) {
+        use rust_i18n::t;
+        let quit = self.show_quit_confirm.then(|| smelt_nsh::QuitDialogState {
+            title: t!("quit.title").into_owned(),
+            body: t!("quit.body").into_owned(),
+            cancel_label: t!("action.cancel").into_owned(),
+            confirm_label: if self.quit_requested {
+                t!("quit.quitting").into_owned()
+            } else {
+                t!("quit.quit").into_owned()
+            },
+            quitting: self.quit_requested,
+        });
+        let dir_picker = self.dir_picker_dialog_state(cx);
+        let state = smelt_nsh::HostDialogsState { quit, dir_picker };
+        self.nsh_shell
+            .update(cx, |shell, cx| shell.set_host_dialogs(state, cx));
+    }
+
+    fn handle_host_dialog_action(
+        &mut self,
+        action: &smelt_nsh::HostDialogAction,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            smelt_nsh::HostDialogAction::QuitConfirm => self.confirm_quit(cx),
+            smelt_nsh::HostDialogAction::QuitCancel => {
+                if !self.quit_requested && self.show_quit_confirm {
+                    self.show_quit_confirm = false;
+                    cx.notify();
+                }
+            }
+            smelt_nsh::HostDialogAction::DirPickerUp => self.dir_picker_go_up(cx),
+            smelt_nsh::HostDialogAction::DirPickerHome => self.dir_picker_navigate(None, cx),
+            smelt_nsh::HostDialogAction::DirPickerNavigate(path) => {
+                self.dir_picker_navigate(Some(path.clone()), cx);
+            }
+            smelt_nsh::HostDialogAction::DirPickerToggle(path) => {
+                self.dir_picker_toggle(path.clone(), cx);
+            }
+            smelt_nsh::HostDialogAction::DirPickerConfirm => self.dir_picker_confirm(cx),
+            smelt_nsh::HostDialogAction::DirPickerCancel => self.cancel_dir_picker(cx),
+        }
     }
 }
 

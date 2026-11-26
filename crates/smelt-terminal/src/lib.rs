@@ -13,8 +13,7 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Entity, FocusHandle, Global, KeyBinding, SharedString, Subscription, Task,
-    Window, div,
+    App, Context, Entity, FocusHandle, Global, KeyBinding, Subscription, Task, Window, div,
 };
 use smelt_plugin_api as api;
 use smelt_plugin_api::RuntimeKey;
@@ -72,27 +71,7 @@ pub struct TerminalSpec {
     pub launch: Option<String>,
 }
 
-/// 终端画布内部原生控件（右键复制/粘贴、内置搜索条）使用的本地化文案，由外层 JS 传入。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TerminalLabels {
-    pub copy: SharedString,
-    pub paste: SharedString,
-    pub search_placeholder: SharedString,
-    pub search_none: SharedString,
-}
-
-impl Default for TerminalLabels {
-    fn default() -> Self {
-        Self {
-            copy: "Copy".into(),
-            paste: "Paste".into(),
-            search_placeholder: "Find in terminal…".into(),
-            search_none: "No results".into(),
-        }
-    }
-}
-
-/// 终端画布发往外层的生命周期与状态事件。
+/// 终端画布发往外层的生命周期、搜索与选区事件。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalCanvasEvent {
     StateChanged {
@@ -104,6 +83,12 @@ pub enum TerminalCanvasEvent {
         kind: &'static str,
     },
     FocusIn,
+    SearchOpen,
+    SearchStatus {
+        current: usize,
+        total: usize,
+    },
+    SelectionChanged(Option<String>),
 }
 
 pub type TerminalEventHandler = Rc<dyn Fn(TerminalCanvasEvent)>;
@@ -116,13 +101,11 @@ enum State {
 }
 
 /// 一格终端的画布实体：管理连接、焦点接管与重连，只画活体终端网格；
-/// 连接中、失败重试、断线提示等外围界面交由外层 JS 绘制。
+/// 连接中、失败重试、断线提示、搜索条与右键菜单等外围界面交由外层 JS 绘制。
 pub struct TerminalCanvas {
     spec: Option<TerminalSpec>,
     state: State,
     focus_handle: FocusHandle,
-    labels: TerminalLabels,
-    context_menu: Option<SharedString>,
     on_event: Option<TerminalEventHandler>,
     connecting: Option<Task<()>>,
     _focus_sub: Subscription,
@@ -130,8 +113,6 @@ pub struct TerminalCanvas {
 
 impl TerminalCanvas {
     pub fn new(
-        labels: TerminalLabels,
-        context_menu: Option<SharedString>,
         on_event: Option<TerminalEventHandler>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -144,8 +125,6 @@ impl TerminalCanvas {
             spec: None,
             state: State::Idle,
             focus_handle,
-            labels,
-            context_menu,
             on_event,
             connecting: None,
             _focus_sub: focus_sub,
@@ -165,23 +144,24 @@ impl TerminalCanvas {
         self.emit_current_state(cx);
     }
 
-    pub fn set_labels(&mut self, labels: TerminalLabels, cx: &mut Context<Self>) {
-        if self.labels == labels {
-            return;
-        }
-        self.labels = labels.clone();
+    /// 更新终端内搜索状态：`open == false` 时关闭搜索并清空高亮；`open == true` 时按 `query`
+    /// 更新可视区命中高亮并通过 [`TerminalCanvasEvent::SearchStatus`] 回报结果数。
+    pub fn set_search(&mut self, open: bool, query: &str, cx: &mut Context<Self>) {
         if let State::Live(view) = &self.state {
-            view.update(cx, |view, cx| view.set_labels(labels, cx));
+            view.update(cx, |view, cx| {
+                if open {
+                    view.set_search_query(query, cx);
+                } else {
+                    view.clear_search(cx);
+                }
+            });
         }
     }
 
-    pub fn set_context_menu(&mut self, context_menu: Option<SharedString>, cx: &mut Context<Self>) {
-        if self.context_menu == context_menu {
-            return;
-        }
-        self.context_menu = context_menu.clone();
+    /// 在搜索结果中跳到下一个或上一个匹配。
+    pub fn find_next(&mut self, query: &str, backward: bool, cx: &mut Context<Self>) {
         if let State::Live(view) = &self.state {
-            view.update(cx, |view, cx| view.set_context_menu(context_menu, cx));
+            view.update(cx, |view, cx| view.run_search(query, backward, cx));
         }
     }
 
@@ -314,18 +294,9 @@ impl TerminalCanvas {
             let _ = this.update_in(cx, |this, window, cx| {
                 match terminal {
                     Ok(terminal) => {
-                        let labels = this.labels.clone();
-                        let context_menu = this.context_menu.clone();
                         let on_event = this.on_event.clone();
                         let view = cx.new(|cx| {
-                            TerminalView::from_terminal(
-                                cx,
-                                spec.clone(),
-                                terminal,
-                                labels,
-                                context_menu,
-                                on_event,
-                            )
+                            TerminalView::from_terminal(cx, spec.clone(), terminal, on_event)
                         });
                         if this.focus_handle.is_focused(window) {
                             window.focus(&view.read(cx).focus_handle(), cx);
