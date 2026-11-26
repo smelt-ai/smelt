@@ -64,10 +64,8 @@ import {
   fileTreeRowId,
   fileTreeRowPath,
   flattenSearchTree,
-  imageMimeForPath,
   isHtmlPath,
   isMarkdownPath,
-  isPreviewableImage,
   MAX_TREE_WIDTH,
   MIN_TREE_WIDTH,
   nameLikelyTruncated,
@@ -245,7 +243,6 @@ function currentRoots(): string[] {
 
 function isDirty(of: OpenFileState | null): boolean {
   if (!of || !of.readable || of.status.kind !== "ready") return false;
-  if (isPreviewableImage(of.path)) return false;
   return of.content !== of.savedContent;
 }
 
@@ -806,7 +803,8 @@ function openFileNow(machine: string | null, path: string, gotoLine: number | nu
       return;
     }
     if (content.kind === "image") {
-      const mime = imageMimeForPath(path);
+      // 格式由运行时按内容认（`mime`），不按扩展名猜；旧运行时不带就当预览不了。
+      const mime = typeof content.mime === "string" ? content.mime : "";
       const b64 = typeof content.data === "string" ? content.data : "";
       if (!mime || !b64) {
         unreadable(t("unreadable.image"));
@@ -859,7 +857,8 @@ function retryOpenFile() {
 async function saveOpenFile() {
   const cur = openFile();
   if (!cur) return;
-  if (isPreviewableImage(cur.path)) return;
+  // 图片和还在读的文件没有可存的文本。
+  if (cur.imageDataUri != null || cur.status.kind === "loading") return;
   if (isReadOnly(cur)) {
     openFile.set({ ...cur, saveError: t("save.read_only") });
     pendingSwitchAfterSave = null;
@@ -1581,7 +1580,7 @@ export function Main() {
 
   const canUnlock = computed(() => {
     const of = openFile();
-    return of != null && openFileReady() && isReadOnly(of) && of.imageDataUri == null && !isPreviewableImage(of.path);
+    return of != null && openFileReady() && of.readable && isReadOnly(of);
   });
 
   // 预览里的相对链接按文件所在目录、在文件那台机器上解析。

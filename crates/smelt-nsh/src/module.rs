@@ -27,7 +27,7 @@ use smelt_plugin_api::{
         copilot_quota::format_amount,
         daemon_state::DaemonSessionState,
         entry_window::{self, EntryWindow},
-        file_link::parse_file_link,
+        file_link::{self, parse_file_link},
         new_session::{LaunchEntry, NewSessionAction, default_launch_entries},
         pi_mcp::PI_MCP_PRESETS,
         pi_model_settings::{api_base_url_problem, custom_provider_id_problem},
@@ -319,11 +319,7 @@ impl Smelt {
 
     /// 拖进窗口的 `file://` 按本机规则解成路径；不是文件 URL 的原样返回。
     pub fn file_uri_to_path(uri: String) -> String {
-        url::Url::parse(&uri)
-            .ok()
-            .filter(|url| url.scheme() == "file")
-            .and_then(|url| url.to_file_path().ok())
-            .map_or(uri, |path| path.to_string_lossy().into_owned())
+        file_link::file_uri_to_path(&uri, PathStyle::LOCAL).unwrap_or(uri)
     }
 
     /// 一条日程哪里不对（`AutomationSchedule::validate`，和运行时保存时同一条规则）：

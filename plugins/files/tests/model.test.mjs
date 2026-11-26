@@ -9,10 +9,8 @@ import {
   fileTreeRowPath,
   flattenSearchTree,
   gitStatusMark,
-  imageMimeForPath,
   isHtmlPath,
   isMarkdownPath,
-  isPreviewableImage,
   pathToFileUrl,
   treeEntries,
   treeRoots,
@@ -266,14 +264,7 @@ describe("search tree", () => {
 });
 
 describe("file helpers", () => {
-  test("recognizes previewable images, markdown, html, language, and file URLs", () => {
-    expect(isPreviewableImage("/a/shot.PNG")).toBe(true);
-    expect(isPreviewableImage("/a/logo.svg")).toBe(true);
-    expect(isPreviewableImage("/a/app.icns")).toBe(false);
-    expect(isPreviewableImage("/a/README")).toBe(false);
-    expect(imageMimeForPath("/a/shot.JPG")).toBe("image/jpeg");
-    expect(imageMimeForPath("/a/logo.svg")).toBe("image/svg+xml");
-
+  test("recognizes markdown, html, language, and file URLs", () => {
     expect(isMarkdownPath("/a/README.md")).toBe(true);
     expect(isHtmlPath("/a/index.html")).toBe(true);
     expect(editorLanguageForPath("/a/Makefile")).toBe("makefile");

@@ -18,9 +18,9 @@ use agent_client_protocol::v1::schema::{
     ToolCallUpdate, ToolKind,
 };
 use base64::Engine as _;
-use smelt_runtime_client::protocol::files::PREVIEWABLE_IMAGE_EXTENSIONS;
+use smelt_runtime_client::protocol::files::is_previewable_image;
 
-use crate::project_files::IMAGE_OPEN_LIMIT;
+use crate::project_files::{IMAGE_OPEN_LIMIT, image_mime};
 
 /// `tracked` 的软上限：长会话超过该条数时先清理已收尾的记录，避免内存单调增长。
 const MAX_TRACKED_TOOLS: usize = 4096;
@@ -190,7 +190,8 @@ fn load_previewable_images(paths: &[PathBuf], cwd: &Path) -> Vec<ToolCallContent
 }
 
 fn read_image_content(path: &Path) -> Option<ToolCallContent> {
-    if !has_previewable_image_extension(path) {
+    let path_str = path.to_str()?;
+    if !is_previewable_image(path_str) {
         return None;
     }
     let meta = std::fs::metadata(path).ok()?;
@@ -206,74 +207,11 @@ fn read_image_content(path: &Path) -> Option<ToolCallContent> {
     if bytes.is_empty() || bytes.len() as u64 > IMAGE_OPEN_LIMIT {
         return None;
     }
-    let mime = detect_image_mime(&bytes, path)?;
+    let mime = image_mime(&bytes, path_str)?;
     let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Some(ToolCallContent::from(ContentBlock::Image(
         ImageContent::new(data_b64, mime),
     )))
-}
-
-fn has_previewable_image_extension(path: &Path) -> bool {
-    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-        return false;
-    };
-    if stem.is_empty() {
-        return false;
-    }
-    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-        return false;
-    };
-    PREVIEWABLE_IMAGE_EXTENSIONS
-        .iter()
-        .any(|known| ext.eq_ignore_ascii_case(known))
-}
-
-/// 按文件魔数判断实际图片 MIME，避免扩展名与实际编码不一致（例如 `.jpg` 实为 PNG）时
-/// 导致桌面端按格式严格解码失败。非有效图片内容返回 `None`。
-fn detect_image_mime(bytes: &[u8], path: &Path) -> Option<&'static str> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        return Some("image/png");
-    }
-    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        return Some("image/jpeg");
-    }
-    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return Some("image/webp");
-    }
-    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        return Some("image/gif");
-    }
-    if bytes.len() >= 14 && bytes.starts_with(b"BM") {
-        return Some("image/bmp");
-    }
-    if bytes.starts_with(&[b'I', b'I', 0x2A, 0x00]) || bytes.starts_with(&[b'M', b'M', 0x00, 0x2A])
-    {
-        return Some("image/tiff");
-    }
-    let is_svg_ext = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"));
-    if is_svg_ext && looks_like_svg(bytes) {
-        return Some("image/svg+xml");
-    }
-    None
-}
-
-fn looks_like_svg(bytes: &[u8]) -> bool {
-    let Ok(text) = std::str::from_utf8(bytes) else {
-        return false;
-    };
-    let trimmed = text.trim_start_matches('\u{feff}').trim_start();
-    if !trimmed.starts_with('<') {
-        return false;
-    }
-    let cap = trimmed.len().min(4096);
-    let head_end = (0..=cap)
-        .rev()
-        .find(|&idx| trimmed.is_char_boundary(idx))
-        .unwrap_or(0);
-    trimmed[..head_end].to_ascii_lowercase().contains("<svg")
 }
 
 #[cfg(test)]

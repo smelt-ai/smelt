@@ -47,7 +47,8 @@ async-process = "2"
 libc = "0.2"
 base64.workspace = true
 url = "2"
-percent-encoding = "2"
+# 按文件头认图片格式（`project_files::image_mime`），不需要解码器。
+image = { version = "0.25", default-features = false }
 uuid = { version = "1", features = ["v4"] }
 # 项目搜索（project_files）遵守 .gitignore 等忽略规则。
 ignore = "0.4"

@@ -22,6 +22,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use smelt_model::file_link::file_uri_to_path;
 use smelt_model::runtime_path::PathStyle;
 
 /// Antigravity CLI 的数据根目录。
@@ -175,9 +176,9 @@ pub(crate) fn workspace_matches_in(
 
 /// 从 `["file:///a/b", ...]` 这段 JSON 数组文本里取出路径。
 ///
-/// 解 JSON 数组（路径里的逗号、方括号、引号转义都由 JSON 管），每个 `file://` URI 交给 `url`
-/// 解析、再按 `style` 还原成那台机器的路径：Windows 盘符 `file:///E:/...`（含 `e%3A`）、
-/// `file://server/share` 的 UNC 路径都按 Windows 习惯写回反斜杠，本机是 macOS 也能测。
+/// 解 JSON 数组（路径里的逗号、方括号、引号转义都由 JSON 管），每个 `file://` URI 按 `style`
+/// 还原成那台机器的路径（[`file_uri_to_path`]，和对话里的文件链接同一条规则），本机是 macOS
+/// 也能测 Windows。
 pub fn workspace_uris_paths(workspace_uris: &str) -> Vec<String> {
     workspace_uris_paths_in(PathStyle::LOCAL, workspace_uris)
 }
@@ -187,38 +188,8 @@ pub(crate) fn workspace_uris_paths_in(style: PathStyle, workspace_uris: &str) ->
         return Vec::new();
     };
     uris.iter()
-        .filter_map(|uri| file_uri_to_path_in(style, uri.trim()))
+        .filter_map(|uri| file_uri_to_path(uri, style))
         .collect()
-}
-
-fn file_uri_to_path_in(style: PathStyle, uri: &str) -> Option<String> {
-    let url = url::Url::parse(uri).ok()?;
-    if url.scheme() != "file" {
-        return None;
-    }
-    let path = percent_encoding::percent_decode_str(url.path())
-        .decode_utf8()
-        .ok()?
-        .into_owned();
-    // `url` 按 WHATWG 规则把 `localhost` 主机归成空。
-    let host = url.host_str().filter(|host| !host.is_empty());
-    match (style, host) {
-        (PathStyle::Windows, None) if is_uri_windows_drive(&path) => {
-            Some(path[1..].replace('/', "\\"))
-        }
-        (PathStyle::Windows, Some(host)) => Some(format!(r"\\{host}{}", path.replace('/', "\\"))),
-        (_, None) => Some(path),
-        (PathStyle::Posix, Some(_)) => None,
-    }
-}
-
-fn is_uri_windows_drive(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    bytes.len() >= 3
-        && bytes[0] == b'/'
-        && bytes[1].is_ascii_alphabetic()
-        && bytes[2] == b':'
-        && (bytes.len() == 3 || bytes[3] == b'/')
 }
 
 // ===================== steps 正文 =====================

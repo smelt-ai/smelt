@@ -732,29 +732,6 @@ impl Render for Workspace {
     }
 }
 
-/// file:// URL → 本地路径（percent 解码，支持中文 / 空格目录名）。
-fn file_url_to_path(url: &str) -> Option<std::path::PathBuf> {
-    let rest = url.strip_prefix("file://")?;
-    // 跳过可能的 host 段（file://localhost/…），从首个 '/' 起才是路径。
-    let path = &rest[rest.find('/')?..];
-    let b = path.as_bytes();
-    let mut bytes = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%'
-            && i + 2 < b.len()
-            && let Ok(v) = u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).ok()?, 16)
-        {
-            bytes.push(v);
-            i += 3;
-            continue;
-        }
-        bytes.push(b[i]);
-        i += 1;
-    }
-    Some(std::path::PathBuf::from(String::from_utf8(bytes).ok()?))
-}
-
 /// 开一扇主工作台窗口（Workspace + Root 包装）。
 /// 首启和「点 Dock 图标重开」共用这一份：`Workspace::new` 本来就会从存档重新摆出布局，
 /// 功能的状态在插件和运行时里，跟正常重启应用效果一致。
@@ -1090,8 +1067,12 @@ fn main() {
             while let Ok(urls) = url_rx.recv().await {
                 let paths: Vec<String> = urls
                     .iter()
-                    .filter_map(|u| file_url_to_path(u))
-                    .map(|path| path.to_string_lossy().into_owned())
+                    .filter_map(|url| {
+                        smelt_model::file_link::file_uri_to_path(
+                            url,
+                            smelt_model::runtime_path::PathStyle::LOCAL,
+                        )
+                    })
                     .collect();
                 if paths.is_empty() {
                     continue;
