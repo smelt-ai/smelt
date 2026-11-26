@@ -16,6 +16,24 @@ if (!source) {
 }
 
 const dir = mkdtempSync(join(tmpdir(), "smelt-agent-smoke-"));
+
+// Windows 上子进程退出后，它的可执行文件和工作目录还要占一会儿才放开，紧跟着删会 EBUSY/EPERM。
+// 隔 200ms 重试，2 秒后仍删不掉只提示、不抛：删不掉临时目录不算冒烟失败，失败路径上抛了还会盖掉真正的原因。
+function removeDir() {
+	for (let attempt = 1; ; attempt++) {
+		try {
+			rmSync(dir, { recursive: true, force: true });
+			return;
+		} catch (error) {
+			if (attempt >= 10) {
+				console.warn(`临时目录没删掉，留给系统清理：${dir}（${error instanceof Error ? error.message : String(error)}）`);
+				return;
+			}
+			Bun.sleepSync(200);
+		}
+	}
+}
+
 const agentDir = join(dir, "agent");
 const extensionDir = join(agentDir, "extensions");
 mkdirSync(extensionDir, { recursive: true });
@@ -47,7 +65,7 @@ for (const [subcommand, name] of [
 	const output = `${result.stdout.toString()}${result.stderr.toString()}`;
 	if (result.exitCode !== 0 || !output.includes(expected)) {
 		console.error(`${subcommand} --version 应输出 ${expected}，退出码 ${result.exitCode}：${output}`);
-		rmSync(dir, { recursive: true, force: true });
+		removeDir();
 		process.exit(1);
 	}
 }
@@ -118,7 +136,7 @@ for (const [server, serverArgs] of [
 		console.log(`mcp-server ${server}: ${tools} tools`);
 	} catch (error) {
 		console.error(error instanceof Error ? error.message : String(error));
-		rmSync(dir, { recursive: true, force: true });
+		removeDir();
 		process.exit(1);
 	}
 }
@@ -157,7 +175,7 @@ if (
 	!probeResult.text.includes("codemode/worker.js ok")
 ) {
 	console.error(probeResult.text);
-	rmSync(dir, { recursive: true, force: true });
+	removeDir();
 	process.exit(1);
 }
 
@@ -188,7 +206,7 @@ function fail(message: string): never {
 	child.kill("SIGKILL");
 	console.error(message);
 	if (stderr.length) console.error(stderr.join(""));
-	rmSync(dir, { recursive: true, force: true });
+	removeDir();
 	process.exit(1);
 }
 
@@ -285,5 +303,5 @@ if (!REACHED_MODEL.test(trailed)) {
 
 child.kill("SIGTERM");
 await new Promise((resolve) => child.once("exit", resolve));
-rmSync(dir, { recursive: true, force: true });
+removeDir();
 console.log(`smelt-agent RPC get_state ${readyMs.toFixed(1)}ms`);
