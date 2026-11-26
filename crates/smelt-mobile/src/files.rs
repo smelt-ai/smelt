@@ -332,7 +332,7 @@ impl Files {
                 }
                 FilePreview::text(TextDocument::from_arc(document))
             }
-            FileContent::Image { data, version } => {
+            FileContent::Image { data, version, .. } => {
                 let svg = is_svg(path);
                 if !cancel.is_cancelled() {
                     let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());

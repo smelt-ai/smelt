@@ -222,6 +222,8 @@ const pickedSource = signal<{ kind: string; profile_id: string | null }>({
   kind: "claude",
   profile_id: null,
 });
+/** 当前来源是用户点标签选的：空着也不自动换走。 */
+let sourcePickedByUser = false;
 const listsMap = signal<Record<string, CachedList>>({});
 const filterText = signal("");
 const openedDetail = signal<{ path: string; detail: SessionDetail } | null>(null);
@@ -335,6 +337,7 @@ function fallbackSourceIfEmpty() {
     tabs,
     current,
     currentLoaded,
+    sourcePickedByUser,
     (tab) => (lists[keyOf(tab.kind, tab.profile_id)]?.sessions.length ?? 0) > 0,
   );
   if (next) selectSource(next.kind, next.profile_id);
@@ -1057,7 +1060,10 @@ export function Main() {
                     return (
                       <View
                         role="button"
-                        onPress={() => selectSource(tab().kind, tab().profile_id)}
+                        onPress={() => {
+                          sourcePickedByUser = true;
+                          selectSource(tab().kind, tab().profile_id);
+                        }}
                         style={{
                           paddingLeft: 8,
                           paddingRight: 8,

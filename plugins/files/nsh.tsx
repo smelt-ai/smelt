@@ -64,10 +64,8 @@ import {
   fileTreeRowId,
   fileTreeRowPath,
   flattenSearchTree,
-  imageMimeForPath,
   isHtmlPath,
   isMarkdownPath,
-  isPreviewableImage,
   MAX_TREE_WIDTH,
   MIN_TREE_WIDTH,
   nameLikelyTruncated,
@@ -122,9 +120,8 @@ interface OpenFileState {
   machine: string | null;
   path: string;
   status: OpenFileStatus;
-  /** 项目外的文件经链接打开时默认只读防误改，点「解锁编辑」才能改。 */
-  readOnly: boolean;
-  outsideProject: boolean;
+  /** 点过「解锁编辑」或已经改过：项目外也能改。在不在项目里随根目录实时算，不存。 */
+  unlocked: boolean;
   content: string;
   savedContent: string;
   savedVersion: string | null;
@@ -245,8 +242,7 @@ function currentRoots(): string[] {
 }
 
 function isDirty(of: OpenFileState | null): boolean {
-  if (!of || of.readOnly || !of.readable || of.status.kind !== "ready") return false;
-  if (isPreviewableImage(of.path)) return false;
+  if (!of || !of.readable || of.status.kind !== "ready") return false;
   return of.content !== of.savedContent;
 }
 
@@ -255,6 +251,11 @@ function isInsideProject(machine: string | null, path: string): boolean {
   if (machine !== treeMachine()) return false;
   const ops = styleOpsFor(machine);
   return currentRoots().some((root) => ops.startsWith(path, root));
+}
+
+/** 项目外的文件默认只读防误改；钉住或移走目录后跟着变，解锁过就一直能改。 */
+function isReadOnly(of: OpenFileState): boolean {
+  return !of.unlocked && !isInsideProject(of.machine, of.path);
 }
 
 function getDirMap(machine: string | null): Map<string, DirListing> {
@@ -694,7 +695,6 @@ function openFileNow(machine: string | null, path: string, gotoLine: number | nu
     revealInTree(path);
   }
   const id = nextFileId++;
-  const outsideProject = !isInsideProject(machine, path);
   const defaultPreview = isMarkdownPath(path) && gotoLine == null;
   if (previewTimer) {
     clearTimeout(previewTimer);
@@ -710,8 +710,7 @@ function openFileNow(machine: string | null, path: string, gotoLine: number | nu
     machine,
     path,
     status: hadCached ? { kind: "ready" } : { kind: "loading" },
-    readOnly: outsideProject,
-    outsideProject,
+    unlocked: false,
     content: cached?.kind === "text" ? cached.text : "",
     savedContent: cached?.kind === "text" ? cached.text : "",
     savedVersion: cached?.version ?? null,
@@ -729,6 +728,12 @@ function openFileNow(machine: string | null, path: string, gotoLine: number | nu
 
   const unreadable = (message: string, canRetry = false) => {
     fileCache.remove(machine, path);
+    const found = findOpenFileById(id);
+    // 从缓存秒开后已经改了：不换掉编辑器，改动留着、仍算未保存，由用户决定存回去还是放弃。
+    if (found && isDirty(found.file)) {
+      patchOpenFileById(id, (of) => ({ ...of, saveError: message }));
+      return;
+    }
     patchOpenFileById(id, (of) => ({
       ...of,
       status: { kind: "unreadable", message, canRetry },
@@ -798,7 +803,8 @@ function openFileNow(machine: string | null, path: string, gotoLine: number | nu
       return;
     }
     if (content.kind === "image") {
-      const mime = imageMimeForPath(path);
+      // 格式由运行时按内容认（`mime`），不按扩展名猜；旧运行时不带就当预览不了。
+      const mime = typeof content.mime === "string" ? content.mime : "";
       const b64 = typeof content.data === "string" ? content.data : "";
       if (!mime || !b64) {
         unreadable(t("unreadable.image"));
@@ -829,9 +835,9 @@ function openFileNow(machine: string | null, path: string, gotoLine: number | nu
 /** 项目外的文件点「解锁编辑」：能改能存，切回源码并把焦点给编辑器。 */
 function unlockOpenFile() {
   const cur = openFile();
-  if (!cur || !cur.readOnly) return;
+  if (!cur || !isReadOnly(cur)) return;
   const wasPreview = cur.preview;
-  openFile.set({ ...cur, readOnly: false, saveError: null, preview: false });
+  openFile.set({ ...cur, unlocked: true, saveError: null, preview: false });
   // 从预览切回时编辑器要等下一次挂上，在 editorRef 里再给焦点。
   if (wasPreview || !activeEditorApi) {
     focusEditorOnMount = true;
@@ -851,8 +857,9 @@ function retryOpenFile() {
 async function saveOpenFile() {
   const cur = openFile();
   if (!cur) return;
-  if (isPreviewableImage(cur.path)) return;
-  if (cur.readOnly) {
+  // 图片和还在读的文件没有可存的文本。
+  if (cur.imageDataUri != null || cur.status.kind === "loading") return;
+  if (isReadOnly(cur)) {
     openFile.set({ ...cur, saveError: t("save.read_only") });
     pendingSwitchAfterSave = null;
     return;
@@ -1556,7 +1563,7 @@ export function Main() {
   // 项目外的文件、或者只剩一段（看不出在哪）时，最后一段悬停给出完整路径。
   const showFullPathTip = computed(() => {
     const of = openFile();
-    return of != null && (of.outsideProject || breadcrumbs().length === 1);
+    return of != null && (!isInsideProject(of.machine, of.path) || breadcrumbs().length === 1);
   });
 
   const openFileReady = computed(() => openFile()?.status.kind === "ready");
@@ -1573,7 +1580,7 @@ export function Main() {
 
   const canUnlock = computed(() => {
     const of = openFile();
-    return of != null && openFileReady() && of.readOnly && of.imageDataUri == null && !isPreviewableImage(of.path);
+    return of != null && openFileReady() && of.readable && isReadOnly(of);
   });
 
   // 预览里的相对链接按文件所在目录、在文件那台机器上解析。
@@ -1600,7 +1607,7 @@ export function Main() {
     const api = activeEditorApi;
     const hasSelection = Boolean(api && String(api.selectedText?.() ?? "").trim().length > 0);
     const cur = openFile();
-    const readOnly = !cur || !cur.readable || cur.readOnly;
+    const readOnly = !cur || !cur.readable || isReadOnly(cur);
     void Menu.popup(
       [
         {
@@ -1864,15 +1871,16 @@ export function Main() {
                               }}
                               value={openFile()?.content ?? ""}
                               language={openFile() ? editorLanguageForPath(openFile()!.path) : "text"}
-                              readOnly={!openFile()?.readable || Boolean(openFile()?.readOnly)}
+                              readOnly={!openFile()?.readable || isReadOnly(openFile()!)}
                               lineNumbers={true}
                               softWrap={false}
                               accessibilityLabel={openFile()?.path ?? ""}
                               onChange={({ value }: { value: string }) => {
                                 const cur = openFile();
-                                if (!cur || !cur.readable || cur.readOnly) return;
+                                if (!cur || !cur.readable || isReadOnly(cur)) return;
                                 if (cur.content === value) return;
-                                openFile.set({ ...cur, content: value });
+                                // 改过就算解锁：之后移走根目录也不会把没存的改动锁住。
+                                openFile.set({ ...cur, content: value, unlocked: true });
                                 schedulePreviewRefresh();
                               }}
                               onContextMenu={handleEditorContextMenu}

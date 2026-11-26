@@ -1,21 +1,9 @@
-// 文件视图纯逻辑：路径/语言/图片 MIME/HTML file URL、目录树展平、面包屑、搜索树、git 状态简标。
+// 文件视图纯逻辑：路径/语言/HTML file URL、目录树展平、面包屑、搜索树、git 状态简标。
 // 不依赖 NSH 或宿主全局，供 bun test 直接单测。
 
 export const MIN_TREE_WIDTH = 190;
 export const MAX_TREE_WIDTH = 320;
 export const DEFAULT_TREE_WIDTH = 190;
-
-const IMAGE_MIME_BY_EXT = {
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  webp: "image/webp",
-  gif: "image/gif",
-  bmp: "image/bmp",
-  tif: "image/tiff",
-  tiff: "image/tiff",
-  svg: "image/svg+xml",
-};
 
 /** 从路径末尾取文件名（兼容 POSIX 与 Windows 分隔符）。 */
 export function lastPathSegment(path) {
@@ -31,16 +19,6 @@ export function pathExtLower(path) {
   const dot = name.lastIndexOf(".");
   if (dot <= 0 || dot === name.length - 1) return null;
   return name.slice(dot + 1).toLowerCase();
-}
-
-export function isPreviewableImage(path) {
-  const ext = pathExtLower(path);
-  return ext != null && Object.prototype.hasOwnProperty.call(IMAGE_MIME_BY_EXT, ext);
-}
-
-export function imageMimeForPath(path) {
-  const ext = pathExtLower(path);
-  return ext ? (IMAGE_MIME_BY_EXT[ext] ?? null) : null;
 }
 
 /** 扩展名或无扩展文件名（如 Makefile / Dockerfile）→ 编辑器语言标识。 */

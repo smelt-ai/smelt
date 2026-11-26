@@ -543,12 +543,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
-  List<RuntimeImport> dco_decode_list_runtime_import(dynamic raw);
-
-  @protected
-  List<RuntimeRecord> dco_decode_list_runtime_record(dynamic raw);
-
-  @protected
   List<SessionSkill> dco_decode_list_session_skill(dynamic raw);
 
   @protected
@@ -749,9 +743,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PushRegistration dco_decode_push_registration(dynamic raw);
-
-  @protected
-  RuntimeImport dco_decode_runtime_import(dynamic raw);
 
   @protected
   RuntimeRecord dco_decode_runtime_record(dynamic raw);
@@ -1473,16 +1464,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
-  List<RuntimeImport> sse_decode_list_runtime_import(
-    SseDeserializer deserializer,
-  );
-
-  @protected
-  List<RuntimeRecord> sse_decode_list_runtime_record(
-    SseDeserializer deserializer,
-  );
-
-  @protected
   List<SessionSkill> sse_decode_list_session_skill(
     SseDeserializer deserializer,
   );
@@ -1735,9 +1716,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PushRegistration sse_decode_push_registration(SseDeserializer deserializer);
-
-  @protected
-  RuntimeImport sse_decode_runtime_import(SseDeserializer deserializer);
 
   @protected
   RuntimeRecord sse_decode_runtime_record(SseDeserializer deserializer);
@@ -2660,18 +2638,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_list_runtime_import(
-    List<RuntimeImport> self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_list_runtime_record(
-    List<RuntimeRecord> self,
-    SseSerializer serializer,
-  );
-
-  @protected
   void sse_encode_list_session_skill(
     List<SessionSkill> self,
     SseSerializer serializer,
@@ -2992,9 +2958,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     PushRegistration self,
     SseSerializer serializer,
   );
-
-  @protected
-  void sse_encode_runtime_import(RuntimeImport self, SseSerializer serializer);
 
   @protected
   void sse_encode_runtime_record(RuntimeRecord self, SseSerializer serializer);

@@ -282,39 +282,19 @@ fn deleting_a_runtime_drops_its_drafts_only() {
 }
 
 #[test]
-fn import_skips_known_runtimes_and_refreshes_on_describe() {
+fn describe_refreshes_the_record_but_keeps_the_name() {
     let store = Store::in_memory();
     store.record_pairing(&info("r1", "e1", None), 1).unwrap();
-    assert!(
-        store
-            .import_runtime("r1", "other", None, "x", 2)
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        store
-            .import_runtime("other", "e1", None, "x", 2)
-            .unwrap()
-            .is_none()
-    );
-    let imported = store
-        .import_runtime("r2", "e2", Some("relay.example"), "  ", 2)
-        .unwrap()
-        .unwrap();
-    assert_eq!(imported.name, "Runtime e2");
-    assert_eq!(imported.version, "");
-    assert_eq!((imported.accent, imported.position), (1, 1));
 
     let described = store
-        .record_describe(&info("r2", "e2", Some("box")))
+        .record_describe(&info("r1", "e1", Some("box")))
         .unwrap()
         .unwrap();
     assert_eq!(described.hostname.as_deref(), Some("box"));
-    assert_eq!(described.version, "1.0.0");
-    assert_eq!(described.name, "Runtime e2", "名字不跟着主机名变");
+    assert_eq!(described.name, "Runtime e1", "名字不跟着主机名变");
     assert!(
         store
-            .record_describe(&info("r2", "e2", Some("box")))
+            .record_describe(&info("r1", "e1", Some("box")))
             .unwrap()
             .is_none(),
         "没变化不算更新"

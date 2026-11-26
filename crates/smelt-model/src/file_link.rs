@@ -40,12 +40,8 @@ pub fn parse_file_link(target: &str, cwd: Option<&str>, style: PathStyle) -> Opt
     }
     // 先按原始字符串拆 `#fragment`，再解码路径里的 `%23`，免得文件名里的 `#` 被误拆。
     let (raw_path, fragment) = target.split_once('#').unwrap_or((target, ""));
-    let path_str = if raw_path
-        .as_bytes()
-        .get(..7)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"file://"))
-    {
-        parse_file_uri(&raw_path[7..], style)?
+    let path_str = if let Some(rest) = strip_file_scheme(raw_path) {
+        parse_file_uri(rest, style)?
     } else if raw_path.contains("://") {
         return None;
     } else if raw_path.is_empty() {
@@ -77,6 +73,23 @@ pub fn parse_file_link(target: &str, cwd: Option<&str>, style: PathStyle) -> Opt
         path: style.clean(&absolute),
         fragment,
     })
+}
+
+/// `file://` URI 还原成 `style` 那台机器上规范化后的绝对路径：Windows 盘符（含 `E%3A`、
+/// 少打一条斜杠的 `file://E:/`）、`file://server/share` 的 UNC、`localhost` 主机都认。
+/// 不是 `file://`、POSIX 上指向别台主机、解不出来的返回 `None`。
+pub fn file_uri_to_path(uri: &str, style: PathStyle) -> Option<String> {
+    let rest = strip_file_scheme(uri.trim())?;
+    parse_file_uri(rest, style).map(|path| style.clean(&path))
+}
+
+/// 去掉开头的 `file://`（不区分大小写）。
+fn strip_file_scheme(target: &str) -> Option<&str> {
+    target
+        .as_bytes()
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"file://"))
+        .then(|| &target[7..])
 }
 
 /// 解析 `file://` 之后的部分，按目标机器的 [`PathStyle`] 还原成本地路径或 UNC 路径。
@@ -165,32 +178,12 @@ fn is_windows_drive_with_slash(path: &str) -> bool {
     b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
 }
 
+/// 解开 `%XX`，不成对的 `%` 原样留着；解出来不是 UTF-8 返回 `None`。
 fn percent_decode(input: &str) -> Option<String> {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
-        {
-            out.push((hi << 4) | lo);
-            i += 3;
-            continue;
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8(out).ok()
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
+    percent_encoding::percent_decode_str(input)
+        .decode_utf8()
+        .ok()
+        .map(std::borrow::Cow::into_owned)
 }
 
 /// 从 `path:行号` / `path:行号:列号` 里拆出末尾的行号：从右往左，只要是纯数字的一段就
@@ -374,6 +367,31 @@ mod tests {
             parse_file_link("https://example.com#L10", None, PathStyle::Windows),
             None
         );
+    }
+
+    #[test]
+    fn file_uri_to_path_cleans_per_style() {
+        let win = |uri| file_uri_to_path(uri, PathStyle::Windows);
+        let posix = |uri| file_uri_to_path(uri, PathStyle::Posix);
+        assert_eq!(
+            win("file:///e%3A/ai/my%20proj/").as_deref(),
+            Some(r"e:\ai\my proj")
+        );
+        assert_eq!(
+            win("FILE://server/share/smelt").as_deref(),
+            Some(r"\\server\share\smelt")
+        );
+        assert_eq!(
+            posix(" file://localhost/tmp/my%20shot%20%E6%88%AA%E5%9B%BE.png ").as_deref(),
+            Some("/tmp/my shot 截图.png")
+        );
+        assert_eq!(
+            posix("file:///Users/a/%5Bdraft%5D/").as_deref(),
+            Some("/Users/a/[draft]")
+        );
+        assert_eq!(posix("file://server/share/a"), None);
+        assert_eq!(posix("/plain/path.png"), None);
+        assert_eq!(posix("https://example.com/a"), None);
     }
 
     #[test]

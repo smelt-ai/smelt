@@ -173,50 +173,6 @@ impl Store {
         })
     }
 
-    /// 导入旧版存的一台机器。`runtime_id` 或 endpoint 已登记就跳过，返回 None。
-    pub(crate) fn import_runtime(
-        &self,
-        runtime_id: &str,
-        endpoint_id: &str,
-        relay_url: Option<&str>,
-        name: &str,
-        paired_at_ms: i64,
-    ) -> Result<Option<RuntimeRecord>, SmeltError> {
-        self.write(|tx| {
-            let exists: bool = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM runtime WHERE runtime_id = ?1 OR endpoint_id = ?2)",
-                    params![runtime_id, endpoint_id],
-                    |row| row.get(0),
-                )
-                .map_err(db_error)?;
-            if exists {
-                return Ok(None);
-            }
-            let name = name.trim();
-            let name = if name.is_empty() {
-                default_name(None, endpoint_id)
-            } else {
-                name.to_string()
-            };
-            insert_runtime(
-                tx,
-                &NewRuntime {
-                    runtime_id,
-                    name: &name,
-                    endpoint_id,
-                    relay_url,
-                    hostname: None,
-                    os: None,
-                    // 还没连上过，不知道版本；连上后由 `record_describe` 补上。
-                    version: "",
-                    paired_at_ms,
-                },
-            )?;
-            runtime(tx, runtime_id).map(Some)
-        })
-    }
-
     /// 连上后用 `system.describe` 的结果刷新主机名、系统和版本。有变化时返回新的登记。
     pub(crate) fn record_describe(
         &self,

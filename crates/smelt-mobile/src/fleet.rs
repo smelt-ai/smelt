@@ -28,9 +28,7 @@ use smelt_runtime_client::protocol::control::{ControlClientError, ControlErrorCo
 
 use crate::api::catalog::{CatalogEvent, CatalogEventKind, SessionList};
 use crate::api::error::{SmeltError, SmeltErrorKind, error};
-use crate::api::fleet::{
-    ConnectionState, FleetRuntime, FleetView, RuntimeImport, RuntimeRecord, RuntimeStatus,
-};
+use crate::api::fleet::{ConnectionState, FleetRuntime, FleetView, RuntimeRecord, RuntimeStatus};
 use crate::cache::Cache;
 use crate::agents::Agents;
 use crate::files::Files;
@@ -621,59 +619,6 @@ impl Fleet {
         for node in self.shared.nodes() {
             node.terminals.detach_all();
         }
-    }
-
-    pub(crate) fn import(
-        &self,
-        runtimes: Vec<RuntimeImport>,
-    ) -> Result<Vec<RuntimeRecord>, SmeltError> {
-        let shared = &self.shared;
-        let env = shared.env()?;
-        let _ops = lock(&shared.ops);
-        let mut imported = Vec::new();
-        for entry in runtimes {
-            let runtime_id = entry.runtime_id.trim();
-            let target = Target::new(entry.endpoint_id, entry.relay_url);
-            if runtime_id.is_empty() {
-                continue;
-            }
-            if let Err(invalid) =
-                crate::iroh_dialer::validate(&target.endpoint_id, target.relay_url.as_deref())
-            {
-                log::warn!("跳过不合法的旧登记 {runtime_id}：{}", invalid.message);
-                continue;
-            }
-            if let Some(record) = env.store.import_runtime(
-                runtime_id,
-                &target.endpoint_id,
-                target.relay_url.as_deref(),
-                &entry.name,
-                crate::store::now_ms(),
-            )? {
-                imported.push(record);
-            }
-        }
-        if imported.is_empty() {
-            return Ok(imported);
-        }
-        let mut nodes = Vec::new();
-        for record in &imported {
-            let target = Target::new(record.endpoint_id.clone(), record.relay_url.clone());
-            let hub = Arc::new(ConnectionHub::new(shared.timings.connection));
-            nodes.push(shared.add_node(env, record.runtime_id.clone(), target, hub));
-        }
-        shared.reload_records(env)?;
-        let relays = shared.relays();
-        // 形态变了会让所有节点（含新的）重新连；没变就只连新的。
-        if !shared.reshape(env, &relays).unwrap_or_else(|e| {
-            log::warn!("导入后调整 endpoint 形态失败：{}", e.message);
-            false
-        }) {
-            for node in &nodes {
-                shared.spawn_connect(node);
-            }
-        }
-        Ok(imported)
     }
 }
 

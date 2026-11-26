@@ -34,11 +34,55 @@ impl std::fmt::Display for ProjectFileError {
     }
 }
 
+/// 图片按内容认出的实际格式（MIME），客户端照它解码：扩展名和编码对不上（`.jpg` 实为
+/// PNG）也不会解码失败。只认客户端能解的那几种；SVG 是文本、没有魔数，扩展名是 `.svg` 且
+/// 开头是 `<svg` 才算。认不出返回 `None`。文件查看器和对话里读图的预览共用这一条。
+pub(crate) fn image_mime(bytes: &[u8], path: &str) -> Option<&'static str> {
+    use image::ImageFormat;
+    match image::guess_format(bytes) {
+        Ok(
+            format @ (ImageFormat::Png
+            | ImageFormat::Jpeg
+            | ImageFormat::Gif
+            | ImageFormat::WebP
+            | ImageFormat::Bmp
+            | ImageFormat::Tiff),
+        ) => Some(format.to_mime_type()),
+        Ok(_) => None,
+        Err(_) => (has_svg_extension(path) && looks_like_svg(bytes)).then_some("image/svg+xml"),
+    }
+}
+
+fn has_svg_extension(path: &str) -> bool {
+    path.rsplit(['/', '\\'])
+        .next()
+        .and_then(|name| name.rsplit_once('.'))
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("svg"))
+}
+
+/// 开头（跳过 BOM 和空白、只看前 4 KB）是不是 SVG 标记。
+fn looks_like_svg(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let trimmed = text.trim_start_matches('\u{feff}').trim_start();
+    if !trimmed.starts_with('<') {
+        return false;
+    }
+    let cap = trimmed.len().min(4096);
+    let head_end = (0..=cap)
+        .rev()
+        .find(|&idx| trimmed.is_char_boundary(idx))
+        .unwrap_or(0);
+    trimmed[..head_end].to_ascii_lowercase().contains("<svg")
+}
+
 fn content_version(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-/// 打开文件查看或编辑。可预览的图片按扩展名认，给原始字节。
+/// 打开文件查看或编辑。可预览的图片先按扩展名挑、再按内容认格式，给原始字节；扩展名像图片、
+/// 内容认不出的按二进制。
 pub fn open(path: &str) -> Result<FileContent, ProjectFileError> {
     open_if_changed(path, None)
 }
@@ -70,9 +114,13 @@ pub fn open_if_changed(
         return Ok(FileContent::NotModified { version });
     }
     if image {
-        return Ok(FileContent::Image {
-            data: Base64Bytes(bytes),
-            version: Some(version),
+        return Ok(match image_mime(&bytes, path) {
+            Some(mime) => FileContent::Image {
+                data: Base64Bytes(bytes),
+                mime: Some(mime.to_owned()),
+                version: Some(version),
+            },
+            None => FileContent::Binary,
         });
     }
     Ok(match String::from_utf8(bytes) {
@@ -374,6 +422,35 @@ pub fn browse_dirs(
 mod tests {
     use super::*;
 
+    /// PNG 文件头加 IHDR 开头：够 `image::guess_format` 认出来。
+    const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR";
+
+    #[test]
+    fn image_mime_follows_content_and_only_known_formats() {
+        assert_eq!(image_mime(PNG_BYTES, "/a/shot.jpg"), Some("image/png"));
+        assert_eq!(
+            image_mime(&[0xFF, 0xD8, 0xFF, 0xE0], "C:\\a\\b.JPG"),
+            Some("image/jpeg")
+        );
+        let svg = [
+            b"\xef\xbb\xbf  ".as_slice(),
+            br#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>"#,
+        ]
+        .concat();
+        assert_eq!(image_mime(&svg, "/a/icon.SVG"), Some("image/svg+xml"));
+        assert_eq!(
+            image_mime(&svg, "/a/icon.png"),
+            None,
+            "SVG 内容只在 .svg 上认"
+        );
+        assert_eq!(image_mime(b"not xml at all", "/a/broken.svg"), None);
+        assert_eq!(
+            image_mime(b"\x00\x00\x01\x00", "/a/app.ico"),
+            None,
+            "客户端解不了的格式不认"
+        );
+    }
+
     #[test]
     fn browsing_lists_visible_dirs_first_and_files_only_on_request() {
         use smelt_runtime_client::protocol::workspace::BrowseDirsParams;
@@ -448,15 +525,26 @@ mod tests {
         let binary = root.join("b.bin");
         std::fs::write(&text, "hello").unwrap();
         std::fs::write(&binary, [0xff, 0xfe, 0x00]).unwrap();
-        let picture = root.join("shot.png");
-        std::fs::write(&picture, [0x89, b'P', b'N', b'G']).unwrap();
-        assert!(matches!(
-            open(picture.to_str().unwrap()).unwrap(),
-            FileContent::Image {
-                data: Base64Bytes(ref bytes),
-                version: Some(_),
-            } if bytes == &[0x89, b'P', b'N', b'G']
-        ));
+        let picture = root.join("shot.jpg");
+        std::fs::write(&picture, PNG_BYTES).unwrap();
+        assert!(
+            matches!(
+                open(picture.to_str().unwrap()).unwrap(),
+                FileContent::Image {
+                    data: Base64Bytes(ref bytes),
+                    mime: Some(ref mime),
+                    version: Some(_),
+                } if bytes == PNG_BYTES && mime == "image/png"
+            ),
+            "扩展名是 .jpg、内容是 PNG：按内容报 image/png"
+        );
+        let not_image = root.join("error-page.png");
+        std::fs::write(&not_image, "<html>404</html>").unwrap();
+        assert_eq!(
+            open(not_image.to_str().unwrap()).unwrap(),
+            FileContent::Binary,
+            "扩展名像图片、内容认不出的不当图片给"
+        );
 
         let FileContent::Text { text: body, .. } = open(text.to_str().unwrap()).unwrap() else {
             panic!("UTF-8 文件应作为文本打开");
@@ -496,7 +584,7 @@ mod tests {
         ));
 
         let img = root.join("pic.png");
-        std::fs::write(&img, [0x89, b'P', b'N', b'G']).unwrap();
+        std::fs::write(&img, PNG_BYTES).unwrap();
         let img_path = img.to_str().unwrap();
         let FileContent::Image {
             version: Some(img_ver),

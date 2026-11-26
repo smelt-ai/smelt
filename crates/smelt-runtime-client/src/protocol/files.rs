@@ -94,9 +94,13 @@ pub enum FileContent {
         /// 内容版本，保存时原样带回来做冲突检测。客户端不解析它。
         version: String,
     },
-    /// 查看器能预览的图片（见 [`is_previewable_image`]），原始字节。
+    /// 查看器能预览的图片（扩展名见 [`is_previewable_image`]），原始字节。
     Image {
         data: Base64Bytes,
+        /// 按内容认出的实际格式（如 `image/png`），客户端照它解码、不再按扩展名猜。旧运行时
+        /// 不带。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         version: Option<String>,
     },
@@ -210,6 +214,7 @@ mod tests {
     fn image_bytes_travel_as_base64_text() {
         let content = FileContent::Image {
             data: Base64Bytes(vec![0x89, b'P', b'N', b'G']),
+            mime: None,
             version: None,
         };
         let wire = serde_json::to_value(&content).unwrap();
@@ -224,12 +229,18 @@ mod tests {
 
         let with_version = FileContent::Image {
             data: Base64Bytes(vec![0x89, b'P', b'N', b'G']),
+            mime: Some("image/png".into()),
             version: Some("abc".into()),
         };
         let wire = serde_json::to_value(&with_version).unwrap();
         assert_eq!(
             wire,
-            serde_json::json!({ "kind": "image", "data": "iVBORw==", "version": "abc" })
+            serde_json::json!({
+                "kind": "image",
+                "data": "iVBORw==",
+                "mime": "image/png",
+                "version": "abc"
+            })
         );
         assert_eq!(
             serde_json::from_value::<FileContent>(wire).unwrap(),

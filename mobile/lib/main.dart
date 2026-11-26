@@ -14,7 +14,6 @@ import 'data/demo_backend.dart';
 import 'data/preferences.dart';
 import 'data/push.dart';
 import 'data/stores.dart';
-import 'migration/legacy_import.dart';
 import 'rust_lib.dart';
 import 'src/rust/api/identity.dart' show initClient;
 import 'ui/agent_glyph.dart';
@@ -51,7 +50,6 @@ Future<void> main() async {
     final dataDir = await getApplicationSupportDirectory();
     deviceId = (await initClient(dataDir: dataDir.path)).endpointId;
     backend = const FrbBackend();
-    await importLegacyData(backend: backend, dataDir: dataDir, prefs: prefs);
     // 应用内更新只有安卓有（iOS 走 TestFlight / App Store）。下载的 APK 放缓存目录。
     if (Platform.isAndroid) {
       updater = AppUpdater(

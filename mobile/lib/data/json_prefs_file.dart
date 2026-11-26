@@ -5,12 +5,8 @@ import 'package:path_provider/path_provider.dart';
 
 /// 本地显示偏好的落盘细节：宽容读、串行写。
 ///
-/// 抽出来是因为「终端字号」和「主题」是两类互不相干的偏好，各自有各自的文件和
-/// 默认值，但读写规则完全一样。再来第三类偏好时只要给一组 `decode/encode/
-/// fallback`，不必第三次抄同一段容错逻辑。
-///
-/// 注意这里承载的都是**显示偏好**，不是凭据：换一台桌面、换一次配对码都不该把
-/// 用户调好的设置清掉，所以走普通文件而不是 `flutter_secure_storage`。
+/// 这里承载的都是**显示偏好**，不是凭据：换一台桌面、换一次配对码都不该把
+/// 用户调好的设置清掉，所以走 App Support 下的普通文件。
 class JsonPrefsFile<T> {
   JsonPrefsFile({
     required this.fileName,

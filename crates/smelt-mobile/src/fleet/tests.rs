@@ -776,49 +776,6 @@ fn rename_accent_and_order_show_up_in_the_view() {
     assert!(h.fleet.rename("nope", "x").is_err());
 }
 
-#[test]
-fn import_registers_new_runtimes_and_connects_them() {
-    let a = FakeRuntime::new("ra", "mac-a");
-    let b = FakeRuntime::new("rb", "mac-b");
-    b.paired.store(true, Ordering::SeqCst);
-    let h = harness(&[(&a, None)], &[&b]);
-
-    let imported = h
-        .fleet
-        .import(vec![
-            RuntimeImport {
-                runtime_id: "ra".to_string(),
-                endpoint_id: a.endpoint_id.clone(),
-                relay_url: None,
-                name: "已登记".to_string(),
-            },
-            RuntimeImport {
-                runtime_id: "bad".to_string(),
-                endpoint_id: "not-an-endpoint".to_string(),
-                relay_url: None,
-                name: "坏的".to_string(),
-            },
-            RuntimeImport {
-                runtime_id: "rb".to_string(),
-                endpoint_id: b.endpoint_id.clone(),
-                relay_url: Some(" ".to_string()),
-                name: "旧名字".to_string(),
-            },
-        ])
-        .unwrap();
-
-    assert_eq!(imported.len(), 1);
-    assert_eq!(imported[0].runtime_id, "rb");
-    assert_eq!(imported[0].name, "旧名字");
-    assert_eq!(imported[0].relay_url, None, "空 relay 当没有");
-    assert_eq!(h.ids(), ["ra", "rb"]);
-    h.wait_state("rb", ConnectionState::Connected);
-    wait_until("连上后补全描述", || {
-        h.view().runtimes[1].record.version == "9.9.9"
-    });
-    assert!(h.fleet.import(Vec::new()).unwrap().is_empty());
-}
-
 // ---------------------------------------------------------------------------
 // 事件流
 // ---------------------------------------------------------------------------
