@@ -290,7 +290,6 @@ fn session_wash_fades_out_after_interrupting_sessions_changed(cx: &mut TestAppCo
                 title: "Open view".into(),
                 key: None,
                 context: "Workspace".into(),
-                palette: false,
                 requires_args: false,
                 args: None,
                 cli: false,
