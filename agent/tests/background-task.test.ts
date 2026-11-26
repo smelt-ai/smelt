@@ -264,14 +264,14 @@ describe("background task host client", () => {
 				kind: "task" as const,
 				hops: 7,
 				replyTo: null,
+				prompt: '<peer-message from="修登录（acp-a）" id="pm-1a2b3c4d5e6f" kind="task">…</peer-message>',
 			},
 			wake: true,
 		};
 		const { message, options } = completionMessage(notice);
 		expect(message.customType).toBe("smelt.peer_message");
-		const text = JSON.stringify(message.content);
-		expect(text).toContain("不是用户的请求");
-		expect(text).toContain("session_send 发给 acp-a");
+		// 写给模型的那段由主 daemon 写好，这里原样放进去。
+		expect(message.content).toEqual([{ type: "text", text: notice.peer.prompt }]);
 		const details = (message as { details: Record<string, unknown> }).details;
 		expect(details).toMatchObject({
 			id: "pm-1a2b3c4d5e6f",
