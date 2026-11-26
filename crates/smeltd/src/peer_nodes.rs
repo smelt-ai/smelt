@@ -245,15 +245,51 @@ pub(crate) fn peer_by_endpoint(endpoint_id: &str) -> Result<Option<(String, bool
         .map(|peer| peer.map(|peer| (peer.runtime_id, peer.inbound)))
 }
 
-/// 不许连入的对端只能调这几个：配对、取消配对，和把消息交给本节点（`node.peer_deliver`
-/// 只收它回给本节点对话的）。
+/// 不许连入的对端只能调这几个：配对、取消配对、把消息交给本节点（`node.peer_deliver`
+/// 只收它回给本节点对话的），以及受白名单与零信任校验的群组回传/唤醒方法。
 pub(crate) fn outbound_only_peer_may_call(method: Option<&str>) -> bool {
     matches!(
         method,
         Some(method) if method == ControlMethod::NodePair.as_str()
             || method == ControlMethod::NodeUnpair.as_str()
             || method == ControlMethod::NodePeerDeliver.as_str()
+            || method == ControlMethod::NodeGroupCall.as_str()
+            || method == ControlMethod::NodeGroupDeliver.as_str()
     )
+}
+
+/// 经本节点 endpoint 调远端节点的 `node.group_deliver`。
+pub(crate) fn call_node_group_deliver(
+    runtime_id: &str,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let peer = peer_record(runtime_id)
+        .ok_or_else(|| format!("Unknown peer node `{runtime_id}`"))?;
+    peer_client(&peer)
+        .call::<smelt_core::control_api::NodeGroupDeliver>(&payload, PAIR_TIMEOUT)
+        .map_err(|e| e.to_string())
+}
+
+/// 经本节点 endpoint 调远端群主节点的 `node.group_call`。
+pub(crate) fn call_node_group_call(
+    runtime_id: &str,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let peer = peer_record(runtime_id)
+        .ok_or_else(|| format!("Unknown peer node `{runtime_id}`"))?;
+    peer_client(&peer)
+        .call::<smelt_core::control_api::NodeGroupCall>(&payload, PAIR_TIMEOUT)
+        .map_err(|e| e.to_string())
+}
+
+/// 在本节点到对端的复用 QUIC 连接上开一条双向长流（供 `op=node_group_attach` / `op=node_group_link` 使用）。
+pub(crate) fn open_peer_stream(
+    runtime_id: &str,
+) -> Result<smelt_runtime_client::RuntimeStream, String> {
+    let peer = peer_record(runtime_id)
+        .ok_or_else(|| format!("Unknown peer node `{runtime_id}`"))?;
+    let conn = connector(&peer)?;
+    smelt_runtime_client::Connector::connect(conn.as_ref()).map_err(|e| e.to_string())
 }
 
 /// 调用方是不是某个智能体会话（或它的子孙进程）。认不出是谁时按是处理。

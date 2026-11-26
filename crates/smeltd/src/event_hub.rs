@@ -14,13 +14,15 @@ use smelt_event_bus::{
 };
 use smelt_event_protocol::{
     AggregateRef, AttentionKind, CORE_SNAPSHOT_AGENT_HOST, CORE_SNAPSHOT_ATTENTION,
-    CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_NEW_SESSION_CATALOG, CORE_SNAPSHOT_SESSIONS,
-    CORE_SNAPSHOT_WORKSPACE, CORE_TOPIC_AGENT_HOST_CHANGED, CORE_TOPIC_AUTOMATIONS_CHANGED,
-    CORE_TOPIC_CONVERSATION_WAKE_REQUESTED, CORE_TOPIC_NEW_SESSION_CATALOG_CHANGED,
-    CORE_TOPIC_SESSION_REMOVED, CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_WORKSPACE_CHANGED,
-    Capability, ConversationWakeRequested, CoreProjectionEvent, CoreSessionPhase, CorrelationId,
-    EventEnvelope, EventId, EventSource, PluginId, PublisherIdentity, SessionStateChanged,
-    SessionStateRemoved, SessionStatesSnapshot, SnapshotKind, SubscriptionId, Topic,
+    CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_GROUPS, CORE_SNAPSHOT_NEW_SESSION_CATALOG,
+    CORE_SNAPSHOT_SESSIONS, CORE_SNAPSHOT_WORKSPACE, CORE_TOPIC_AGENT_HOST_CHANGED,
+    CORE_TOPIC_AUTOMATIONS_CHANGED, CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
+    CORE_TOPIC_GROUP_MESSAGE_APPENDED, CORE_TOPIC_GROUPS_CHANGED,
+    CORE_TOPIC_NEW_SESSION_CATALOG_CHANGED, CORE_TOPIC_SESSION_REMOVED,
+    CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_WORKSPACE_CHANGED, Capability,
+    ConversationWakeRequested, CoreProjectionEvent, CoreSessionPhase, CorrelationId, EventEnvelope,
+    EventId, EventSource, PluginId, PublisherIdentity, SessionStateChanged, SessionStateRemoved,
+    SessionStatesSnapshot, SnapshotKind, SubscriptionId, Topic,
 };
 
 use super::{
@@ -149,6 +151,24 @@ impl SnapshotProvider for AgentHostSnapshotProvider {
             revision: 0,
             payload: serde_json::to_value(settings)
                 .map_err(|error| EventBusError::new(error.to_string()))?,
+        })
+    }
+}
+
+/// 群组快照现读独立群组库 `~/.smelt/groups.sqlite3`。
+struct GroupsSnapshotProvider;
+
+impl SnapshotProvider for GroupsSnapshotProvider {
+    fn snapshot(&self, kind: &SnapshotKind, watermark: u64) -> Result<Snapshot, EventBusError> {
+        let payload = crate::protocol::SERVER
+            .get()
+            .map(|server| crate::group_runtime::snapshot_groups_json(&server.acp_sessions))
+            .unwrap_or_else(|| serde_json::json!({ "groups": [] }));
+        Ok(Snapshot {
+            kind: kind.clone(),
+            watermark,
+            revision: 0,
+            payload,
         })
     }
 }
@@ -676,6 +696,34 @@ impl DaemonEventHub {
         Ok(())
     }
 
+    /// 群组列表或成员状态变了。没人订阅就不发。
+    pub(crate) fn publish_groups_changed(
+        &self,
+        payload: serde_json::Value,
+    ) -> Result<(), EventBusError> {
+        let topic =
+            Topic::new(CORE_TOPIC_GROUPS_CHANGED).expect("registered core topic is valid");
+        if !self.hub.has_subscriber(&topic)? {
+            return Ok(());
+        }
+        self.publish_core(CORE_TOPIC_GROUPS_CHANGED, payload, None)?;
+        Ok(())
+    }
+
+    /// 群内追加了新消息或盲评揭晓。没人订阅就不发。
+    pub(crate) fn publish_group_message_appended(
+        &self,
+        payload: serde_json::Value,
+    ) -> Result<(), EventBusError> {
+        let topic = Topic::new(CORE_TOPIC_GROUP_MESSAGE_APPENDED)
+            .expect("registered core topic is valid");
+        if !self.hub.has_subscriber(&topic)? {
+            return Ok(());
+        }
+        self.publish_core(CORE_TOPIC_GROUP_MESSAGE_APPENDED, payload, None)?;
+        Ok(())
+    }
+
     /// 经运行时改了 Pi 的配置。没人订阅就不发。
     pub(crate) fn publish_pi_config_changed(&self) -> Result<(), EventBusError> {
         let topic = Topic::new(smelt_event_protocol::CORE_TOPIC_PI_CONFIG_CHANGED)
@@ -1098,6 +1146,10 @@ fn register_snapshot_providers(
         Arc::new(NewSessionCatalogSnapshotProvider {
             cache: new_session_catalog,
         }),
+    )?;
+    hub.register_snapshot_provider(
+        SnapshotKind(CORE_SNAPSHOT_GROUPS.to_string()),
+        Arc::new(GroupsSnapshotProvider),
     )?;
     let projection_provider: Arc<dyn SnapshotProvider> = Arc::new(ProjectionSnapshotProvider {
         projection: Arc::clone(projection),

@@ -473,6 +473,502 @@ fn dispatch_control(
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
+        ControlMethod::GroupCreate => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupCreateParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::create_group(
+                params,
+                sessions,
+                acp_sessions,
+                workspace_directory,
+                event_hub,
+            ) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupList => {
+            let params: smelt_core::control_api::GroupListParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::list_groups(params, acp_sessions) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupGet => {
+            let params: smelt_core::control_api::GroupIdParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::get_group(params, acp_sessions) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupUpdate => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupUpdateParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::update_group(params, acp_sessions, event_hub) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupArchive => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupArchiveParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::archive_group(
+                params,
+                sessions,
+                acp_sessions,
+                automations,
+                event_hub,
+            ) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupDelete => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupDeleteParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::delete_group(params, acp_sessions, event_hub) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupMemberAdd => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupMemberAddParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::add_member(
+                params,
+                sessions,
+                acp_sessions,
+                workspace_directory,
+                event_hub,
+            ) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupMemberUpdate => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupMemberUpdateParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::update_member(params, acp_sessions, event_hub) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupMemberRemove => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupMemberIdParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::remove_member(params, acp_sessions, event_hub) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupMemberWake => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupMemberIdParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::wake_member(params, acp_sessions, event_hub) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupRemoteGrantUpsert => {
+            // 零信任铁律：本机白名单授权只能由本机人类（非智能体进程树、非远端节点）修改。
+            let caller_is_agent = match peer_pid {
+                Some(pid) => {
+                    crate::memory_peer_auth::deny_agent_session_peer(acp_sessions, pid).is_err()
+                }
+                None => !desktop_authenticated,
+            };
+            if !matches!(principal, crate::Principal::Local) || caller_is_agent {
+                return error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(
+                        ControlErrorCode::PermissionDenied,
+                        "group.remote_grant.upsert is only permitted from local human controls",
+                    ),
+                );
+            }
+            let params: smelt_core::control_api::GroupRemoteGrantUpsertParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::upsert_remote_grant(params) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupRemoteGrantRevoke => {
+            let caller_is_agent = match peer_pid {
+                Some(pid) => {
+                    crate::memory_peer_auth::deny_agent_session_peer(acp_sessions, pid).is_err()
+                }
+                None => !desktop_authenticated,
+            };
+            if !matches!(principal, crate::Principal::Local) || caller_is_agent {
+                return error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(
+                        ControlErrorCode::PermissionDenied,
+                        "group.remote_grant.revoke is only permitted from local human controls",
+                    ),
+                );
+            }
+            let params: smelt_core::control_api::GroupRemoteGrantRevokeParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::revoke_remote_grant(params) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupMessageList => {
+            let params: smelt_core::control_api::GroupMessageListParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::list_messages(params) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupMessagePost => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupMessagePostParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::post_user_message(params, acp_sessions, event_hub) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupMessagePin => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupMessagePinParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::pin_message(params, acp_sessions, event_hub) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupMentionApprove => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupMentionDecisionParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::approve_mention(params, acp_sessions, event_hub) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupMentionReject => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupMentionDecisionParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::reject_mention(params, acp_sessions, event_hub) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupBlindStart => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupBlindStartParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::start_blind_round(params, acp_sessions, event_hub) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupBlindReveal => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupBlindRevealParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::reveal_blind_round(params, acp_sessions, event_hub) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupPause => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupPauseParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::pause_group(params, acp_sessions, event_hub) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupResume => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupResumeParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::resume_group(params, acp_sessions, event_hub) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupTaskUpdate => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupTaskUpdateParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::update_task_status(params, acp_sessions, event_hub) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupLeaseRelease => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupLeaseReleaseParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::release_file_lease(params) {
+                Ok(()) => success_value(control_version, &request_id, EmptyParams::default()),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupWorktreeDiff => {
+            let params: smelt_core::control_api::GroupMemberIdParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::diff_member_worktree(params) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupWorktreeMerge => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupWorktreeMergeParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::merge_member_worktree(params) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupWorktreeApplyPatch => {
+            if let Err(error) = deny_agent_group_control(principal, peer_pid, acp_sessions, &method)
+            {
+                return error_value(control_version, request_id, error);
+            }
+            let params: smelt_core::control_api::GroupWorktreeApplyPatchParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match crate::group_runtime::apply_member_patch(params) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupAgentTool => {
+            let reply = if !matches!(principal, crate::Principal::Local) {
+                Err(ControlError::new(
+                    ControlErrorCode::PermissionDenied,
+                    "group.agent_tool is only available to local agent session processes",
+                ))
+            } else if let Some(session_id) = peer_pid
+                .and_then(|pid| crate::memory_peer_auth::caller_session_id(acp_sessions, pid))
+            {
+                let op = params
+                    .get("op")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                Ok(crate::group_runtime::dispatch_agent_group_tool(
+                    op,
+                    &session_id,
+                    &params,
+                    acp_sessions,
+                    event_hub,
+                ))
+            } else {
+                Err(ControlError::new(
+                    ControlErrorCode::PermissionDenied,
+                    "smelt group must be invoked from inside an active Smelt agent conversation",
+                ))
+            };
+            match reply {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::NodeGroupCall => {
+            let crate::Principal::Peer { runtime_id, .. } = principal else {
+                return error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(
+                        ControlErrorCode::PermissionDenied,
+                        "node.group_call is only available to paired peer nodes",
+                    ),
+                );
+            };
+            match crate::group_runtime::handle_inbound_node_group_call(
+                runtime_id,
+                &params,
+                acp_sessions,
+                event_hub,
+            ) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::NodeGroupDeliver => {
+            let crate::Principal::Peer {
+                runtime_id,
+                inbound,
+                ..
+            } = principal
+            else {
+                return error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(
+                        ControlErrorCode::PermissionDenied,
+                        "node.group_deliver is only available to paired peer nodes",
+                    ),
+                );
+            };
+            match crate::group_runtime::handle_inbound_remote_deliver(
+                runtime_id,
+                *inbound,
+                &params,
+                acp_sessions,
+                event_hub,
+            ) {
+                Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
         device @ (ControlMethod::DevicePairBegin
         | ControlMethod::DevicePair
         | ControlMethod::DeviceList
@@ -1854,6 +2350,29 @@ pub(crate) fn handle_control<C: ClientSocket + crate::protocol::PeerSource>(
         Err(failure) => error_value(failure.response_version, failure.request_id, failure.error),
     };
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
+}
+
+/// 禁止本机 Agent 会话子进程伪装成人类直接调群组管理/发言/放行控制面方法。
+/// Agent 只能走由进程树或 `PeerSocket` 锁定 `caller_session_id` 的群工具通道（`group.agent_tool` / MCP）。
+fn deny_agent_group_control(
+    principal: &crate::devices::Principal,
+    peer_pid: Option<u32>,
+    acp_sessions: &AcpSessions,
+    method: &str,
+) -> Result<(), ControlError> {
+    if matches!(principal, crate::devices::Principal::Local)
+        && peer_pid.is_some_and(|pid| {
+            crate::memory_peer_auth::deny_agent_session_peer(acp_sessions, pid).is_err()
+        })
+    {
+        return Err(ControlError::new(
+            ControlErrorCode::PermissionDenied,
+            format!(
+                "`{method}` cannot be invoked from an agent session process; use group tools instead",
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// 对端节点之间的对话消息（`node.peer_*`），只收对端节点：调用方是哪台机器取自连接。

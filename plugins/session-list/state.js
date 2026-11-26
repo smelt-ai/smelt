@@ -44,6 +44,8 @@ import { message } from "./util.js";
 /** 运行时推「哪些会话有没看过的提醒」的话题。 */
 /** 运行时推「新建会话菜单可用目录变了」的话题。 */
 export const NEW_SESSION_CATALOG_TOPIC = "new_session.catalog_changed";
+/** 运行时推「智能体群组状态变了」的话题（用于隐藏群组私有 `group_owned` 会话）。 */
+export const GROUPS_CHANGED_TOPIC = "group.changed";
 
 /**
  * 列表里能挂失败的一行，键同那一行的滑动身份：
@@ -128,6 +130,8 @@ export class SessionList {
     this.failures = new Map();
     /** machine_key → { catalog, fetchedAt }：已缓存的新建会话目录。 */
     this.catalogs = new Map();
+    /** machine_key → Set<session_id>：群组私有的 `group_owned` 会话集合，主会话列表自动隐藏。 */
+    this.group_owned_sessions = new Map();
   }
 
   /** 库读回来了：侧栏的置顶、顺序、折叠和行首头像换成库里那份。起来时调一次，在 start 之前。 */
@@ -192,8 +196,18 @@ export class SessionList {
       connections: host.connections(),
       local_os: host.local_os,
       data: (machine) => {
-        const directory = host.workspace_directory(machine);
-        if (!directory) return null;
+        const rawDirectory = host.workspace_directory(machine);
+        if (!rawDirectory) return null;
+        const hidden = this.group_owned_sessions.get(machine_key(machine));
+        const directory =
+          hidden && hidden.size > 0 && Array.isArray(rawDirectory.conversations)
+            ? {
+                ...rawDirectory,
+                conversations: rawDirectory.conversations.filter(
+                  (conv) => !conv?.acp?.sid || !hidden.has(conv.acp.sid),
+                ),
+              }
+            : rawDirectory;
         return {
           style: host.path_style(machine),
           directory,
@@ -379,6 +393,8 @@ export class SessionList {
       case "runtime_topic":
         if (event.topic === NEW_SESSION_CATALOG_TOPIC) {
           this.on_catalog_topic(event.machine, event.message);
+        } else if (event.topic === GROUPS_CHANGED_TOPIC) {
+          this.on_groups_topic(event.machine, event.message);
         }
         return;
       case "open_paths":
@@ -421,6 +437,26 @@ export class SessionList {
   cache_catalog(machine, catalog) {
     if (!catalog || typeof catalog !== "object" || !catalog.sections) return;
     this.catalogs.set(machine_key(machine), { catalog, fetchedAt: Date.now() });
+  }
+
+  on_groups_topic(machine, message) {
+    const payload = message?.payload ?? message;
+    const ids = Array.isArray(payload?.group_owned_session_ids)
+      ? payload.group_owned_session_ids.filter((id) => typeof id === "string" && id.length > 0)
+      : null;
+    if (ids == null) return;
+    const key = machine_key(machine);
+    const prev = this.group_owned_sessions.get(key);
+    const next = new Set(ids);
+    if (prev && prev.size === next.size && [...next].every((id) => prev.has(id))) {
+      return;
+    }
+    if (next.size === 0) {
+      this.group_owned_sessions.delete(key);
+    } else {
+      this.group_owned_sessions.set(key, next);
+    }
+    this.rebuild();
   }
 
   apply_catalog(machine, catalog) {

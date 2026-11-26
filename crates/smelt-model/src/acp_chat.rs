@@ -509,6 +509,32 @@ pub fn parse_peer_message_envelope(text: &str) -> Option<TaskNote> {
     })
 }
 
+/// 解析一条严格符合 Smelt `<group-message>` 结构的文本，还原为 `TaskNote(PeerMessage)`。
+/// 这样成员私有会话（无论实时回显还是 `session/load` 冷恢复）都会把群消息折叠为紧凑事件行。
+#[must_use]
+pub fn parse_group_message_task_note(text: &str) -> Option<TaskNote> {
+    let env = crate::agent_group::parse_group_message_envelope(text)?;
+    let source_title = if env.group_title.is_empty() {
+        format!("[群组] {}", env.group_id)
+    } else {
+        format!("[群组] {}", env.group_title)
+    };
+    Some(TaskNote {
+        kind: TaskNoteKind::PeerMessage,
+        id: format!("gm-{}", env.seq_range),
+        title: String::new(),
+        status: String::new(),
+        exit_code: None,
+        output_tail: env.body,
+        runs: Vec::new(),
+        peer: Some(PeerNote {
+            source_session_id: env.group_id,
+            source_title,
+            kind: crate::acp_session::PeerMessageKind::Task,
+        }),
+    })
+}
+
 fn xml_attr<'a>(attrs: &'a str, key: &str) -> Option<&'a str> {
     let needle = format!("{key}=\"");
     let start = if let Some(rest) = attrs.strip_prefix(&needle) {

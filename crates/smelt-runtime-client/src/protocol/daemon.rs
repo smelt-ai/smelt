@@ -49,6 +49,11 @@ pub enum DaemonOperation {
     /// 盯着本机运行时到一个对端的连接路径：`{"runtime_id"}`，先回一行眼下的，之后换了
     /// 路径再回一行，连接断了回一行没有路径的再关掉。每行是 `peer.link` 的结果。
     PeerLinkWatch,
+    /// `inbound=0` / NAT 后成员节点主动向远端群主节点发起的双向 QUIC 反向附着流：
+    /// 群主下发 `attach_sync` / `deliver_wake`，成员回传 `member_rpc` / `member_status` / `turn_ended`。
+    NodeGroupAttach,
+    /// 群主向允许入站（`inbound=1`）成员节点建立的双向 QUIC 群组通信流。
+    NodeGroupLink,
 }
 
 /// 首帧只先解析操作名，其余字段原样留给对应 handler。
@@ -131,6 +136,8 @@ mod tests {
             (DaemonOperation::Resize, "resize"),
             (DaemonOperation::DesktopAttach, "desktop_attach"),
             (DaemonOperation::RuntimeUpgrade, "runtime_upgrade"),
+            (DaemonOperation::NodeGroupAttach, "node_group_attach"),
+            (DaemonOperation::NodeGroupLink, "node_group_link"),
         ];
 
         for (operation, wire_name) in operations {

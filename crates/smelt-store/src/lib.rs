@@ -24,6 +24,8 @@ mod config;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod devices;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod groups;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod history;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod launch;
@@ -55,6 +57,14 @@ pub use snapshots::{
 };
 
 pub const DATABASE_FILE_NAME: &str = "smelt.sqlite3";
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+pub use groups::{
+    GROUP_STORE_SCHEMA_VERSION, GROUPS_DATABASE_FILE_NAME, GroupMemberRecord,
+    GroupMemberUpdatePatch, GroupMentionRecord, GroupMessageQuery, GroupMessageRecord,
+    GroupRecord, GroupStore, GroupUpdatePatch, NewGroupMention, NewGroupMessage,
+    RemoteGroupMemberGrantRecord,
+};
 
 /// 智能体记忆元数据的 scope：某个智能体自己的那一层。
 pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {

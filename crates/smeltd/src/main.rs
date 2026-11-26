@@ -122,6 +122,7 @@ mod event_hub;
 mod files_control;
 mod fs_control;
 mod git_control;
+mod group_runtime;
 mod history_control;
 mod memory_peer_auth;
 mod memory_watch;
@@ -2736,6 +2737,12 @@ fn run_serve_loop(
 
     // 闲置会话挂起（见 acp_idle）。冷启动走到这里。
     acp_idle::spawn_acp_idle_reaper(Arc::clone(&server.acp_sessions));
+    // 群组会话持久化启动自愈（恢复未完成的 queued 投递，幂等 delivery_id 不重复执行）。
+    {
+        let acp_sessions = Arc::clone(&server.acp_sessions);
+        let event_hub = server.event_hub.clone();
+        thread::spawn(move || group_runtime::resume_on_startup(&acp_sessions, &event_hub));
+    }
 
     // thread-per-connection 的 accept 主循环。抽成闭包，好让主线程在 macOS 上腾出来
     // 跑菜单栏 runloop——AppKit 铁律：NSApplication/NSStatusItem 只能在主线程摸。

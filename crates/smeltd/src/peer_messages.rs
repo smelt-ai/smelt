@@ -737,9 +737,13 @@ pub(crate) fn bind_peer_handler(
     subscribers: EventHubHandle,
 ) -> smelt_core::background_tasks::PeerRequestHandler {
     Arc::new(move |op, body| {
-        // 工具定义不认来源，会话还没登记好时扩展就来要了。
+        // 工具定义不认来源，会话还没登记好时扩展就来要了；若该会话在群里则动态追加群工具。
         if op == crate::peer_tools::SESSION_TOOLS_OP {
-            return serde_json::json!({"ok": true, "tools": crate::peer_tools::definitions()});
+            let include_group = crate::group_runtime::session_in_any_group(&session_id);
+            return serde_json::json!({
+                "ok": true,
+                "tools": crate::peer_tools::definitions_for(include_group),
+            });
         }
         let courier = Courier {
             acp_sessions: Arc::clone(&acp_sessions),
@@ -758,6 +762,15 @@ pub(crate) fn bind_peer_handler(
             );
         }
         match op {
+            op if crate::peer_tools::is_group_tool(op) => {
+                crate::group_runtime::dispatch_agent_group_tool(
+                    op,
+                    &session_id,
+                    body,
+                    &courier.acp_sessions,
+                    &courier.subscribers,
+                )
+            }
             op if crate::peer_tools::is_tool(op) => {
                 answer_tool(op, &slot, &session_id, &courier, body)
             }
@@ -1087,6 +1100,13 @@ fn state_of(sess: &AcpSession) -> &'static str {
 fn approval_posture(id: &str, sess: &AcpSession) -> ApprovalPosture {
     let (kind, _) = agent_info_of(id, sess);
     approval_posture_for(kind, sess)
+}
+
+pub(crate) fn session_approval_posture(id: &str, acp_sessions: &AcpSessions) -> ApprovalPosture {
+    match acp_sessions.get(id) {
+        Some(slot) => approval_posture(id, &slot.value),
+        None => ApprovalPosture::Unknown,
+    }
 }
 
 /// 本机可供 `session_spawn` 使用的智能体选项：产品智能体、已安装的内置引擎、自定义 Profile。

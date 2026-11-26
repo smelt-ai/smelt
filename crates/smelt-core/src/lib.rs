@@ -10,6 +10,7 @@ pub mod acp_conn;
 pub mod acp_session;
 pub mod acp_terminal;
 pub use smelt_model::agent_definition;
+pub use smelt_model::agent_group;
 pub mod agent_definition_store;
 pub mod agent_event;
 pub mod agent_hooks;

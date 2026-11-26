@@ -2058,6 +2058,18 @@ pub(crate) fn start_acp_event_drain(
                         } else {
                             None
                         };
+                        let group_turn_snapshot = if turn_ended {
+                            let reduced = sess.reduced.lock();
+                            let done = matches!(
+                                reduced.phase,
+                                smelt_core::daemon_state::DaemonPhase::Idle
+                                    | smelt_core::daemon_state::DaemonPhase::Succeeded
+                                    | smelt_core::daemon_state::DaemonPhase::Failed
+                            ) && !reduced.background_work_running();
+                            done.then(|| (last_turn_reply(reduced.entries()), reduced.turn_outcome))
+                        } else {
+                            None
+                        };
                         // 其它 agent 在回合结束时放闸。Pi 还要等它自己声明空闲。
                         settle_acp_turn_locked(
                             sess,
@@ -2066,6 +2078,15 @@ pub(crate) fn start_acp_event_drain(
                             provider_idle,
                             &subscribers,
                         );
+                        if let Some((reply_text, outcome)) = group_turn_snapshot {
+                            crate::group_runtime::on_member_turn_ended(
+                                &session_id,
+                                reply_text,
+                                outcome,
+                                &acp_sessions,
+                                &subscribers,
+                            );
+                        }
                         if let Some((task, reply_text, outcome)) = auto_complete
                             && !task.replied
                             && task.hops > 0
@@ -3192,6 +3213,11 @@ fn send_acp_stop_subagent(sess: &AcpSession, id: String) -> Result<(), &'static 
 }
 
 /// 把门卫放行的消息交给这个对话：Pi 走会话宿主的 `smelt.peer_message`，非 Pi ACP 走
+/// 供群组引擎判定目标会话是否已连上内置群工具（Pi 扩展或 ACP `smelt-peers` MCP）。
+pub(crate) fn session_supports_group_tools(sess: &AcpSession) -> bool {
+    session_uses_pi_admission(sess) || sess.peer_mcp_connected.load(Ordering::Acquire)
+}
+
 /// 守护侧回合闸门和排队（并在派发成功时直接结算 `peer_inbox`）。
 pub(crate) fn deliver_peer_message(
     sess: &AcpSession,

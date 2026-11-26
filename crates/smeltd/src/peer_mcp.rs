@@ -104,7 +104,17 @@ pub(crate) fn handle_jsonrpc_line(
             ))
         }
         "ping" => Some(ok_response(id, json!({}))),
-        "tools/list" => Some(ok_response(id, json!({ "tools": tool_definitions() }))),
+        "tools/list" => {
+            let raw_tools = call_socket(&json!({ "op": peer_tools::SESSION_TOOLS_OP }))
+                .ok()
+                .and_then(|reply| reply.get("tools").cloned())
+                .filter(|v| v.is_array())
+                .unwrap_or_else(peer_tools::definitions);
+            Some(ok_response(
+                id,
+                json!({ "tools": format_mcp_tools(&raw_tools) }),
+            ))
+        }
         "tools/call" => Some(handle_tool_call(id, &params, call_socket)),
         other => Some(error_response(
             id,
@@ -197,9 +207,14 @@ fn tool_annotations(name: &str, title: &str) -> Value {
     })
 }
 
-/// MCP 没有 Pi 那样的「用法提示」位置：接在每个工具的说明后面。
+#[cfg(test)]
 fn tool_definitions() -> Value {
-    let tools = peer_tools::definitions()
+    format_mcp_tools(&peer_tools::definitions())
+}
+
+/// MCP 没有 Pi 那样的「用法提示」位置：接在每个工具的说明后面。
+fn format_mcp_tools(raw_tools: &Value) -> Value {
+    let tools = raw_tools
         .as_array()
         .into_iter()
         .flatten()
@@ -400,5 +415,47 @@ mod tests {
         let details: Value =
             serde_json::from_str(reply["result"]["content"][1]["text"].as_str().unwrap()).unwrap();
         assert_eq!(details["to"]["id"], "acp-b");
+    }
+
+    #[test]
+    fn tools_list_includes_group_tools_dynamically_for_group_member_sessions() {
+        let resp = handle_jsonrpc_line(
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/list","params":{}}"#,
+            |req| {
+                assert_eq!(req["op"], peer_tools::SESSION_TOOLS_OP);
+                Ok(json!({
+                    "ok": true,
+                    "tools": peer_tools::definitions_for(true),
+                }))
+            },
+        )
+        .expect("tools/list response");
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"group_post"));
+        assert!(names.contains(&"group_read"));
+        assert!(names.contains(&"group_blind_submit"));
+        assert!(names.contains(&"group_worktree_merge"));
+
+        let by_name = |name: &str| {
+            tools
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap_or_else(|| panic!("missing tool {name}"))
+        };
+        assert_eq!(by_name("group_read")["annotations"]["readOnlyHint"], true);
+        assert_eq!(
+            by_name("group_members")["annotations"]["readOnlyHint"],
+            true
+        );
+        assert_eq!(
+            by_name("group_artifact_fetch")["annotations"]["readOnlyHint"],
+            true
+        );
+        assert_eq!(by_name("group_post")["annotations"]["readOnlyHint"], false);
+        assert_eq!(
+            by_name("group_worktree_merge")["annotations"]["readOnlyHint"],
+            false
+        );
     }
 }

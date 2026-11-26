@@ -41,13 +41,22 @@ function isSmeltMemorySearchTool(tool: ToolIdentity): boolean {
 	);
 }
 
+const SMELT_PEER_READ_TOOLS = new Set([
+	SMELT_SESSION_LIST_TOOL_NAME,
+	SMELT_SESSION_READ_TOOL_NAME,
+	"group_read",
+	"group_members",
+	"group_artifact_fetch",
+]);
+
 /**
- * 列出别的对话、读它们最近的回复：只读，不改任何东西，免审批。发消息（`session_send`）照常审批。
+ * 列出别的对话/群成员、读对话或群消息、拉取显式发布的群产物：只读，不改任何东西，免审批。
+ * 发消息（`session_send` / `group_post` / `group_worktree_merge`）照常按规则审批。
  * 按身份认，同名的用户扩展工具不算。
  */
 function isSmeltSessionPeerReadTool(tool: ToolIdentity): boolean {
 	return (
-		(tool.name === SMELT_SESSION_LIST_TOOL_NAME || tool.name === SMELT_SESSION_READ_TOOL_NAME) &&
+		SMELT_PEER_READ_TOOLS.has(tool.name) &&
 		tool.sourceInfo.source === "inline" &&
 		tool.sourceInfo.path === SMELT_SESSION_PEERS_EXTENSION_PATH
 	);

@@ -1357,3 +1357,548 @@ pub struct SubagentTranscriptResult {
     /// 整段子会话一共多少条。
     pub total: u64,
 }
+
+// ============================================================================
+// Agent Group Chat (`group.*` / `node.group_*`)
+// ============================================================================
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupCreateMemberSpec {
+    pub alias: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub ownership: crate::agent_group::MemberOwnership,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_option_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workset_id: Option<String>,
+    #[serde(default)]
+    pub role_kind: crate::agent_group::MemberRoleKind,
+    #[serde(default)]
+    pub role_title: String,
+    #[serde(default)]
+    pub role_prompt: String,
+    #[serde(default)]
+    pub workspace_mode: crate::agent_group::WorkspaceMode,
+    #[serde(default)]
+    pub tool_restriction_profile: String,
+}
+
+pub enum GroupCreate {}
+impl ControlCall for GroupCreate {
+    type Params = GroupCreateParams;
+    type Result = GroupDetailResult;
+    const METHOD: ControlMethod = ControlMethod::GroupCreate;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupCreateParams {
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workset_id: Option<String>,
+    #[serde(default)]
+    pub mode: crate::agent_group::GroupMode,
+    #[serde(default)]
+    pub members: Vec<GroupCreateMemberSpec>,
+}
+
+pub enum GroupList {}
+impl ControlCall for GroupList {
+    type Params = GroupListParams;
+    type Result = GroupListResult;
+    const METHOD: ControlMethod = ControlMethod::GroupList;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupListParams {
+    #[serde(default)]
+    pub include_archived: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupListResult {
+    pub groups: Vec<crate::agent_group::GroupSummaryDto>,
+    /// 本机属于未归档群组的 `group_owned` 私有会话 ID 列表，供 `session-list` 隐藏群私有会话。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_owned_session_ids: Vec<String>,
+}
+
+pub enum GroupGet {}
+impl ControlCall for GroupGet {
+    type Params = GroupIdParams;
+    type Result = GroupDetailResult;
+    const METHOD: ControlMethod = ControlMethod::GroupGet;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupIdParams {
+    pub group_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupDetailResult {
+    pub group: crate::agent_group::AgentGroupDto,
+    pub members: Vec<crate::agent_group::AgentGroupMemberDto>,
+    pub open_tasks: Vec<crate::agent_group::AgentGroupMessageDto>,
+    pub active_blind_prompts: Vec<crate::agent_group::AgentGroupMessageDto>,
+    pub leases: Vec<crate::agent_group::GroupLeaseDto>,
+}
+
+pub enum GroupUpdate {}
+impl ControlCall for GroupUpdate {
+    type Params = GroupUpdateParams;
+    type Result = GroupDetailResult;
+    const METHOD: ControlMethod = ControlMethod::GroupUpdate;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupUpdateParams {
+    pub group_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workset_id: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<crate::agent_group::GroupMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_member_id: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_worker_cross_talk: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_chain_hops: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_chain_depth: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pair_ping_pong: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_bridge_mentions: Option<bool>,
+}
+
+pub enum GroupArchive {}
+impl ControlCall for GroupArchive {
+    type Params = GroupArchiveParams;
+    type Result = EmptyParams;
+    const METHOD: ControlMethod = ControlMethod::GroupArchive;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupArchiveParams {
+    pub group_id: String,
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub cleanup_worktrees: bool,
+}
+
+pub enum GroupDelete {}
+impl ControlCall for GroupDelete {
+    type Params = GroupDeleteParams;
+    type Result = EmptyParams;
+    const METHOD: ControlMethod = ControlMethod::GroupDelete;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupDeleteParams {
+    pub group_id: String,
+    #[serde(default)]
+    pub cleanup_worktrees: bool,
+}
+
+pub enum GroupMemberAdd {}
+impl ControlCall for GroupMemberAdd {
+    type Params = GroupMemberAddParams;
+    type Result = crate::agent_group::AgentGroupMemberDto;
+    const METHOD: ControlMethod = ControlMethod::GroupMemberAdd;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMemberAddParams {
+    pub group_id: String,
+    pub member: GroupCreateMemberSpec,
+}
+
+pub enum GroupMemberUpdate {}
+impl ControlCall for GroupMemberUpdate {
+    type Params = GroupMemberUpdateParams;
+    type Result = crate::agent_group::AgentGroupMemberDto;
+    const METHOD: ControlMethod = ControlMethod::GroupMemberUpdate;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMemberUpdateParams {
+    pub group_id: String,
+    pub member_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_kind: Option<crate::agent_group::MemberRoleKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_mode: Option<crate::agent_group::WorkspaceMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_restriction_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muted: Option<bool>,
+}
+
+pub enum GroupMemberRemove {}
+impl ControlCall for GroupMemberRemove {
+    type Params = GroupMemberIdParams;
+    type Result = EmptyParams;
+    const METHOD: ControlMethod = ControlMethod::GroupMemberRemove;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMemberIdParams {
+    pub group_id: String,
+    pub member_id: String,
+}
+
+pub enum GroupMemberWake {}
+impl ControlCall for GroupMemberWake {
+    type Params = GroupMemberIdParams;
+    type Result = GroupMemberWakeResult;
+    const METHOD: ControlMethod = ControlMethod::GroupMemberWake;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMemberWakeResult {
+    pub session_id: String,
+}
+
+pub enum GroupRemoteGrantUpsert {}
+impl ControlCall for GroupRemoteGrantUpsert {
+    type Params = GroupRemoteGrantUpsertParams;
+    type Result = crate::agent_group::RemoteGroupGrantDto;
+    const METHOD: ControlMethod = ControlMethod::GroupRemoteGrantUpsert;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupRemoteGrantUpsertParams {
+    pub host_runtime_id: String,
+    pub group_id: String,
+    pub member_id: String,
+    pub local_session_id: String,
+    #[serde(default)]
+    pub allow_remote_full_access: bool,
+}
+
+pub enum GroupRemoteGrantRevoke {}
+impl ControlCall for GroupRemoteGrantRevoke {
+    type Params = GroupRemoteGrantRevokeParams;
+    type Result = EmptyParams;
+    const METHOD: ControlMethod = ControlMethod::GroupRemoteGrantRevoke;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupRemoteGrantRevokeParams {
+    pub host_runtime_id: String,
+    pub group_id: String,
+    pub member_id: String,
+}
+
+pub enum GroupMessageList {}
+impl ControlCall for GroupMessageList {
+    type Params = GroupMessageListParams;
+    type Result = GroupMessageListResult;
+    const METHOD: ControlMethod = ControlMethod::GroupMessageList;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMessageListParams {
+    pub group_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_seq: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_seq: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_root_seq: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMessageListResult {
+    pub messages: Vec<crate::agent_group::AgentGroupMessageDto>,
+    pub has_more: bool,
+}
+
+pub enum GroupMessagePost {}
+impl ControlCall for GroupMessagePost {
+    type Params = GroupMessagePostParams;
+    type Result = crate::agent_group::AgentGroupMessageDto;
+    const METHOD: ControlMethod = ControlMethod::GroupMessagePost;
+}
+
+pub enum GroupMessagePin {}
+impl ControlCall for GroupMessagePin {
+    type Params = GroupMessagePinParams;
+    type Result = crate::agent_group::AgentGroupMessageDto;
+    const METHOD: ControlMethod = ControlMethod::GroupMessagePin;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMessagePinParams {
+    pub group_id: String,
+    pub seq: i64,
+    pub pinned: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMessagePostParams {
+    pub group_id: String,
+    pub content: String,
+    #[serde(default)]
+    pub mentions: Vec<String>,
+    #[serde(default)]
+    pub kind: crate::agent_group::GroupMessageKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_seq: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_root_seq: Option<i64>,
+    #[serde(default)]
+    pub attachments: Vec<crate::agent_group::GroupAttachment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+pub enum GroupMentionApprove {}
+impl ControlCall for GroupMentionApprove {
+    type Params = GroupMentionDecisionParams;
+    type Result = EmptyParams;
+    const METHOD: ControlMethod = ControlMethod::GroupMentionApprove;
+}
+
+pub enum GroupMentionReject {}
+impl ControlCall for GroupMentionReject {
+    type Params = GroupMentionDecisionParams;
+    type Result = EmptyParams;
+    const METHOD: ControlMethod = ControlMethod::GroupMentionReject;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMentionDecisionParams {
+    pub group_id: String,
+    pub message_id: String,
+    pub target_member_id: String,
+    #[serde(default)]
+    pub allow_chain: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+pub enum GroupBlindStart {}
+impl ControlCall for GroupBlindStart {
+    type Params = GroupBlindStartParams;
+    type Result = crate::agent_group::AgentGroupMessageDto;
+    const METHOD: ControlMethod = ControlMethod::GroupBlindStart;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupBlindStartParams {
+    pub group_id: String,
+    pub prompt: String,
+    pub participant_member_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+pub enum GroupBlindReveal {}
+impl ControlCall for GroupBlindReveal {
+    type Params = GroupBlindRevealParams;
+    type Result = GroupBlindRevealResult;
+    const METHOD: ControlMethod = ControlMethod::GroupBlindReveal;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupBlindRevealParams {
+    pub group_id: String,
+    pub prompt_seq: i64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupBlindRevealResult {
+    pub prompt_seq: i64,
+    pub submissions: Vec<crate::agent_group::AgentGroupMessageDto>,
+}
+
+pub enum GroupPause {}
+impl ControlCall for GroupPause {
+    type Params = GroupPauseParams;
+    type Result = EmptyParams;
+    const METHOD: ControlMethod = ControlMethod::GroupPause;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupPauseParams {
+    pub group_id: String,
+    #[serde(default)]
+    pub abort_running: bool,
+}
+
+pub enum GroupResume {}
+impl ControlCall for GroupResume {
+    type Params = GroupResumeParams;
+    type Result = EmptyParams;
+    const METHOD: ControlMethod = ControlMethod::GroupResume;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupResumeParams {
+    pub group_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_hops: Option<u32>,
+}
+
+pub enum GroupTaskUpdate {}
+impl ControlCall for GroupTaskUpdate {
+    type Params = GroupTaskUpdateParams;
+    type Result = crate::agent_group::AgentGroupMessageDto;
+    const METHOD: ControlMethod = ControlMethod::GroupTaskUpdate;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupTaskUpdateParams {
+    pub group_id: String,
+    pub seq: i64,
+    pub task_status: crate::agent_group::GroupTaskStatus,
+}
+
+pub enum GroupLeaseRelease {}
+impl ControlCall for GroupLeaseRelease {
+    type Params = GroupLeaseReleaseParams;
+    type Result = EmptyParams;
+    const METHOD: ControlMethod = ControlMethod::GroupLeaseRelease;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupLeaseReleaseParams {
+    pub group_id: String,
+    pub lease_id: String,
+}
+
+pub enum GroupWorktreeDiff {}
+impl ControlCall for GroupWorktreeDiff {
+    type Params = GroupMemberIdParams;
+    type Result = GroupWorktreeDiffResult;
+    const METHOD: ControlMethod = ControlMethod::GroupWorktreeDiff;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupWorktreeDiffResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
+    pub base_branch: String,
+    pub branch: String,
+    pub diff_stat: String,
+    pub patch: String,
+}
+
+pub enum GroupWorktreeMerge {}
+impl ControlCall for GroupWorktreeMerge {
+    type Params = GroupWorktreeMergeParams;
+    type Result = GroupWorktreeMergeResult;
+    const METHOD: ControlMethod = ControlMethod::GroupWorktreeMerge;
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupMergeStrategy {
+    #[default]
+    Merge,
+    Squash,
+    CherryPick,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupMergeTarget {
+    #[default]
+    Integration,
+    Base,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupWorktreeMergeParams {
+    pub group_id: String,
+    pub member_id: String,
+    #[serde(default)]
+    pub target: GroupMergeTarget,
+    #[serde(default)]
+    pub strategy: GroupMergeStrategy,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupWorktreeMergeResult {
+    pub commit_sha: String,
+    pub target_branch: String,
+}
+
+pub enum GroupWorktreeApplyPatch {}
+impl ControlCall for GroupWorktreeApplyPatch {
+    type Params = GroupWorktreeApplyPatchParams;
+    type Result = GroupWorktreeApplyPatchResult;
+    const METHOD: ControlMethod = ControlMethod::GroupWorktreeApplyPatch;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupWorktreeApplyPatchParams {
+    pub group_id: String,
+    pub source_member_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_runtime_id: Option<String>,
+    pub target_cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_branch: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupWorktreeApplyPatchResult {
+    pub applied_branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
+}
+
+/// 供 `smelt group` CLI 兜底通道调用的统一群工具 RPC（来源由 `smeltd` 按 peer_pid 进程树认定）。
+pub enum GroupAgentTool {}
+impl ControlCall for GroupAgentTool {
+    type Params = serde_json::Value;
+    type Result = serde_json::Value;
+    const METHOD: ControlMethod = ControlMethod::GroupAgentTool;
+}
+
+/// 跨机器短连接兜底：成员节点向群主节点补发群工具调用（按 `agent_group_member` 精确白名单鉴权）。
+pub enum NodeGroupCall {}
+impl ControlCall for NodeGroupCall {
+    type Params = serde_json::Value;
+    type Result = serde_json::Value;
+    const METHOD: ControlMethod = ControlMethod::NodeGroupCall;
+}
+
+/// 跨机器短连接投递：群主节点向成员节点下发群唤醒或产物读取请求（受 §7.3 零信任规则约束）。
+pub enum NodeGroupDeliver {}
+impl ControlCall for NodeGroupDeliver {
+    type Params = serde_json::Value;
+    type Result = serde_json::Value;
+    const METHOD: ControlMethod = ControlMethod::NodeGroupDeliver;
+}

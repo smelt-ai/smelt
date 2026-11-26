@@ -598,8 +598,12 @@ fn apply_user_chunk(state: &mut AcpSessionState, outcome: &mut ApplyOutcome, tex
         }
     }
     if let Some(AcpEntry::User(existing)) = state.entries.last()
-        && existing.trim_end().ends_with("</peer-message>")
+        && ((existing.trim_end().ends_with("</peer-message>")
+            && crate::acp_chat::parse_peer_message_envelope(existing).is_some())
+            || (existing.trim_end().ends_with("</group-message>")
+                && crate::acp_chat::parse_group_message_task_note(existing).is_some()))
         && let Some(note) = crate::acp_chat::parse_peer_message_envelope(existing)
+            .or_else(|| crate::acp_chat::parse_group_message_task_note(existing))
         && let Some(last) = state.entries.last_mut()
     {
         *last = AcpEntry::TaskNote(note);

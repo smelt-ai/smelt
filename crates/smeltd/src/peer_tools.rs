@@ -18,14 +18,224 @@ const READ: &str = "session_read";
 const SEND: &str = "session_send";
 const SPAWN: &str = "session_spawn";
 
-/// 应答函数答的工具，按定义的先后。
+const GROUP_POST: &str = "group_post";
+const GROUP_YIELD: &str = "group_yield";
+const GROUP_READ: &str = "group_read";
+const GROUP_MEMBERS: &str = "group_members";
+const GROUP_BLIND_SUBMIT: &str = "group_blind_submit";
+const GROUP_TASK_UPDATE: &str = "group_task_update";
+const GROUP_LEASE_ACQUIRE: &str = "group_lease_acquire";
+const GROUP_LEASE_RELEASE: &str = "group_lease_release";
+const GROUP_ARTIFACT_FETCH: &str = "group_artifact_fetch";
+const GROUP_WORKTREE_MERGE: &str = "group_worktree_merge";
+
+/// 应答函数答的工具，按定义的先后（含动态群组工具）。
 pub(crate) fn is_tool(op: &str) -> bool {
-    matches!(op, LIST | READ | SEND | SPAWN)
+    matches!(op, LIST | READ | SEND | SPAWN) || is_group_tool(op)
+}
+
+pub(crate) fn is_group_tool(op: &str) -> bool {
+    matches!(
+        op,
+        GROUP_POST
+            | GROUP_YIELD
+            | GROUP_READ
+            | GROUP_MEMBERS
+            | GROUP_BLIND_SUBMIT
+            | GROUP_TASK_UPDATE
+            | GROUP_LEASE_ACQUIRE
+            | GROUP_LEASE_RELEASE
+            | GROUP_ARTIFACT_FETCH
+            | GROUP_WORKTREE_MERGE
+    )
 }
 
 /// 只读工具：不修改任何会话状态，也不唤醒对方（与 Pi 侧 `smelt-permission.ts` 的免审批边界一致）。
 pub(crate) fn is_read_only(op: &str) -> bool {
-    matches!(op, LIST | READ)
+    matches!(op, LIST | READ | GROUP_READ | GROUP_MEMBERS | GROUP_ARTIFACT_FETCH)
+}
+
+/// 动态返回工具定义：普通单聊只拿 4 个跨对话工具；加入群组后追加群组工具，不污染普通会话。
+pub(crate) fn definitions_for(include_group_tools: bool) -> Value {
+    let mut base = definitions()
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if include_group_tools
+        && let Some(extra) = group_definitions().as_array()
+    {
+        base.extend(extra.iter().cloned());
+    }
+    Value::Array(base)
+}
+
+pub(crate) fn group_definitions() -> Value {
+    json!([
+        {
+            "name": GROUP_POST,
+            "label": "群内发言",
+            "description": "向当前所属的 Smelt 智能体群组发消息、任务或拍板结论。正文里可用 @alias 或 @all 点名唤醒其他成员。",
+            "promptSnippet": "Post a message, task, or decision to the Smelt agent group",
+            "promptGuidelines": [
+                "Use group_post to share concise conclusions, handoffs, or @mention another member in the group.",
+                "Keep heavy logs and diffs in your own session; reference files via artifacts instead of pasting huge dumps."
+            ],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_id": { "type": "string", "description": "群组 id（只在一个群里时可省略）" },
+                    "content": { "type": "string", "description": "群消息正文，可用 @alias 点名下一人" },
+                    "mentions": { "type": "array", "items": { "type": "string" }, "description": "显式点名的成员 alias 列表" },
+                    "kind": { "type": "string", "enum": ["chat", "task", "decision"], "description": "消息类型，默认 chat" },
+                    "reply_to_seq": { "type": "integer", "description": "回复的目标消息序号" },
+                    "thread_root_seq": { "type": "integer", "description": "子话题根消息序号" },
+                    "artifacts": { "type": "array", "items": { "type": "object" }, "description": "产物引用列表（如文件行号区间、commit）" }
+                },
+                "required": ["content"]
+            }
+        },
+        {
+            "name": GROUP_YIELD,
+            "label": "群内静默",
+            "description": "确认已读本轮群消息且无需在群里发言，避免客套死循环。",
+            "promptSnippet": "Acknowledge group messages without posting a reply",
+            "promptGuidelines": ["Call group_yield when no reply is needed so the turn does not auto-bridge chatter into the group."],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_id": { "type": "string", "description": "群组 id" },
+                    "reason": { "type": "string", "description": "简短原因（可选）" }
+                }
+            }
+        },
+        {
+            "name": GROUP_READ,
+            "label": "翻阅群消息",
+            "description": "按序号游标读取群历史或子话题消息（自动隐藏未揭晓的他人盲评答卷）。",
+            "promptSnippet": "Read earlier messages or a specific thread in the group",
+            "promptGuidelines": ["Use group_read when an incoming <group-message> folded earlier discussion."],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_id": { "type": "string" },
+                    "after_seq": { "type": "integer" },
+                    "before_seq": { "type": "integer" },
+                    "thread_root_seq": { "type": "integer" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+                }
+            }
+        },
+        {
+            "name": GROUP_MEMBERS,
+            "label": "查看群成员",
+            "description": "查看群内成员名册、角色、引擎、实时状态以及各自工作目录与分支。",
+            "promptSnippet": "List members, roles, statuses, and workspaces in the group",
+            "promptGuidelines": ["Call group_members to check member aliases and statuses before mentioning them."],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_id": { "type": "string" }
+                }
+            }
+        },
+        {
+            "name": GROUP_BLIND_SUBMIT,
+            "label": "提交盲评",
+            "description": "向进行中的并发盲评轮次提交独立评审答卷。揭晓前其他参与者不可见。",
+            "promptSnippet": "Submit an independent blind-round response",
+            "promptGuidelines": ["During a blind_round trigger, always submit via group_blind_submit with the given prompt_seq."],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_id": { "type": "string" },
+                    "prompt_seq": { "type": "integer", "description": "盲评出题消息的 seq" },
+                    "content": { "type": "string", "description": "你的独立评审内容" },
+                    "artifacts": { "type": "array", "items": { "type": "object" } }
+                },
+                "required": ["prompt_seq", "content"]
+            }
+        },
+        {
+            "name": GROUP_TASK_UPDATE,
+            "label": "更新群任务状态",
+            "description": "更新群内一条 kind=task 消息的任务状态（open / in_progress / done / blocked）。",
+            "promptSnippet": "Update the status of a task message in the group",
+            "promptGuidelines": ["Keep group tasks up to date so other agents see accurate progress in <active-tasks>."],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_id": { "type": "string" },
+                    "seq": { "type": "integer", "description": "任务消息 seq" },
+                    "task_status": { "type": "string", "enum": ["open", "in_progress", "done", "blocked"] }
+                },
+                "required": ["seq", "task_status"]
+            }
+        },
+        {
+            "name": GROUP_LEASE_ACQUIRE,
+            "label": "申请文件锁",
+            "description": "在 shared_leased 同目录协作模式下申请路径 glob 顾问式文件锁，避免并发写冲突。",
+            "promptSnippet": "Acquire advisory file leases before editing shared workspace files",
+            "promptGuidelines": ["Acquire a lease before editing shared files and release it when done."],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_id": { "type": "string" },
+                    "path_globs": { "type": "array", "items": { "type": "string" } },
+                    "reason": { "type": "string" },
+                    "ttl_sec": { "type": "integer", "minimum": 30, "maximum": 3600 }
+                },
+                "required": ["path_globs"]
+            }
+        },
+        {
+            "name": GROUP_LEASE_RELEASE,
+            "label": "释放文件锁",
+            "description": "释放已持有的顾问式文件锁。",
+            "promptSnippet": "Release a held advisory file lease",
+            "promptGuidelines": [],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_id": { "type": "string" },
+                    "lease_id": { "type": "string" }
+                },
+                "required": ["lease_id"]
+            }
+        },
+        {
+            "name": GROUP_ARTIFACT_FETCH,
+            "label": "读取群产物",
+            "description": "按需读取其他成员通过 artifacts 发布的文件片段或 diff（支持跨机器安全只读拉取）。",
+            "promptSnippet": "Fetch a published artifact referenced in a group message",
+            "promptGuidelines": [],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_id": { "type": "string" },
+                    "artifact_id": { "type": "string" }
+                },
+                "required": ["artifact_id"]
+            }
+        },
+        {
+            "name": GROUP_WORKTREE_MERGE,
+            "label": "合并成员分支",
+            "description": "将指定写手成员的 worktree 分支合并到群级集成分支（integration）或基分支（base）。",
+            "promptSnippet": "Merge a worker's worktree branch into the integration or base branch",
+            "promptGuidelines": [],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_id": { "type": "string" },
+                    "source_alias": { "type": "string", "description": "来源写手成员的 alias" },
+                    "target": { "type": "string", "enum": ["integration", "base"] },
+                    "strategy": { "type": "string", "enum": ["merge", "squash", "cherry_pick"] }
+                },
+                "required": ["source_alias"]
+            }
+        }
+    ])
 }
 
 /// 四个工具的定义：`name`、`label`、`description`、`promptSnippet`、`promptGuidelines`、

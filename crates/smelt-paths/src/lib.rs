@@ -42,6 +42,8 @@ pub const SMELTD_SOCK: &str = "smeltd.sock";
 pub const DECLARED_ENTRIES: &[&str] = &[
     // 运行时主库（smelt-store）。
     "smelt.sqlite3",
+    // 群组会话独立运行时库（smelt-store `GroupStore`，由 smeltd 独占写入）。
+    "groups.sqlite3",
     // 客户端库（smelt-client-store），也存自更新状态。
     "client.sqlite3",
     // 应用日志和它轮转出来的上一代（smelt-sys `app_log`）。

@@ -696,6 +696,7 @@ impl AcpSessionState {
         for entry in &mut self.entries {
             if let AcpEntry::User(text) = entry
                 && let Some(note) = crate::acp_chat::parse_peer_message_envelope(text)
+                    .or_else(|| crate::acp_chat::parse_group_message_task_note(text))
             {
                 *entry = AcpEntry::TaskNote(note);
             }

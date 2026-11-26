@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static SQLITE_STATE_ENABLED: AtomicBool = AtomicBool::new(false);
 static DEFAULT_SQLITE_STORE: OnceLock<(PathBuf, smelt_store::Store)> = OnceLock::new();
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+static DEFAULT_GROUP_STORE: OnceLock<(PathBuf, smelt_store::GroupStore)> = OnceLock::new();
 /// 为当前桌面进程启用 `~/.smelt` 下的 SQLite 主库路由。
 ///
 /// 真实入口在启动最早阶段显式调用；库和测试进程默认保持普通文件语义，避免仅仅调用
@@ -61,6 +63,35 @@ pub fn open_sqlite_store(database: &Path) -> Result<smelt_store::Store, String> 
     let store = smelt_store::Store::open_or_create(database)?;
     let _ = DEFAULT_SQLITE_STORE.set((database.to_path_buf(), store.clone()));
     Ok(DEFAULT_SQLITE_STORE
+        .get()
+        .filter(|(cached_path, _)| cached_path == database)
+        .map_or(store, |(_, cached)| cached.clone()))
+}
+
+/// 当前进程的默认群组独立 SQLite 库（`~/.smelt/groups.sqlite3`）。
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[track_caller]
+pub fn default_group_store() -> Result<smelt_store::GroupStore, String> {
+    let root = default_smelt_root().ok_or_else(|| "SQLite state isn't enabled".to_string())?;
+    open_group_store(&root.join(smelt_store::GROUPS_DATABASE_FILE_NAME))
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[track_caller]
+pub fn open_group_store(database: &Path) -> Result<smelt_store::GroupStore, String> {
+    let default_database =
+        default_smelt_root().map(|root| root.join(smelt_store::GROUPS_DATABASE_FILE_NAME));
+    if default_database.as_deref() != Some(database) {
+        return smelt_store::GroupStore::open_or_create(database).map_err(Into::into);
+    }
+    if let Some((cached_path, store)) = DEFAULT_GROUP_STORE.get()
+        && cached_path == database
+    {
+        return Ok(store.clone());
+    }
+    let store = smelt_store::GroupStore::open_or_create(database)?;
+    let _ = DEFAULT_GROUP_STORE.set((database.to_path_buf(), store.clone()));
+    Ok(DEFAULT_GROUP_STORE
         .get()
         .filter(|(cached_path, _)| cached_path == database)
         .map_or(store, |(_, cached)| cached.clone()))

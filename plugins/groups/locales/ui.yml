@@ -1,0 +1,148 @@
+_version: 2
+view:
+  main:
+    en: "Agent Groups"
+    zh-CN: "智能体群组"
+  sidebar:
+    en: "Active Groups"
+    zh-CN: "活跃群组"
+menu:
+  new_group:
+    en: "New Agent Group…"
+    zh-CN: "新建智能体群组…"
+  add_to_group:
+    en: "Add to Agent Group…"
+    zh-CN: "加入群组…"
+sidebar:
+  title:
+    en: "GROUPS"
+    zh-CN: "群组"
+  empty:
+    en: "No groups yet"
+    zh-CN: "暂无群组"
+  new:
+    en: "New"
+    zh-CN: "新建"
+  local_host:
+    en: "Local"
+    zh-CN: "本机"
+header:
+  pause:
+    en: "Pause"
+    zh-CN: "暂停"
+  resume:
+    en: "Resume"
+    zh-CN: "继续"
+  add_member:
+    en: "+ Member"
+    zh-CN: "+ 成员"
+  hops_left:
+    en: "%{hops} hops left"
+    zh-CN: "剩 %{hops} 跳"
+  mode_mention:
+    en: "@mention"
+    zh-CN: "@点名模式"
+  mode_coordinator:
+    en: "Coordinator"
+    zh-CN: "群主调度"
+timeline:
+  empty_select:
+    en: "Select or create a multi-agent group to start collaborating."
+    zh-CN: "选择或新建一个异构智能体群组开始协作。"
+  no_messages:
+    en: "No messages yet. Mention @alias, or use /blind to start a parallel blind review."
+    zh-CN: "还没有消息。输入 @成员 点名唤醒，或使用 /blind 发起并发盲评。"
+  auto_bridged:
+    en: "Auto-synced"
+    zh-CN: "自动同步"
+  view_session:
+    en: "Inspect"
+    zh-CN: "看过程"
+  wake_chip:
+    en: "Wake:"
+    zh-CN: "点名唤醒："
+  blind_collecting:
+    en: "Blind review in progress (hidden from peers)"
+    zh-CN: "并发盲评进行中（揭晓前彼此不可见）"
+  blind_revealed:
+    en: "Blind review revealed"
+    zh-CN: "盲评已揭晓"
+  reveal_now:
+    en: "Reveal Now"
+    zh-CN: "立即揭晓"
+  approval_title:
+    en: "Permission approval required to wake @%{target}"
+    zh-CN: "需要确认是否唤醒高权限成员 @%{target}"
+  approve_once:
+    en: "Approve Once"
+    zh-CN: "批准本次"
+  approve_chain:
+    en: "Allow This Chain"
+    zh-CN: "本轮免问"
+  reject:
+    en: "Reject"
+    zh-CN: "拒绝"
+composer:
+  placeholder:
+    en: "Message group… (@alias to wake, /blind for parallel blind review, /task for task)"
+    zh-CN: "发群消息…（@成员 唤醒，/blind 发起并发盲评，/task 发布任务）"
+  send:
+    en: "Send"
+    zh-CN: "发送"
+drawer:
+  tab_session:
+    en: "Session"
+    zh-CN: "私有会话"
+  tab_tasks:
+    en: "Tasks"
+    zh-CN: "任务"
+  tab_branches:
+    en: "Branches"
+    zh-CN: "分支变更"
+  close:
+    en: "Close"
+    zh-CN: "收起"
+  no_tasks:
+    en: "No open tasks."
+    zh-CN: "暂无进行中的任务。"
+  load_diff:
+    en: "View Diff"
+    zh-CN: "查看 Diff"
+  merge_integration:
+    en: "Merge → Integration"
+    zh-CN: "合入集成分支"
+  merge_base:
+    en: "Merge → Base"
+    zh-CN: "合入基分支"
+create:
+  title:
+    en: "Create Agent Group"
+    zh-CN: "新建智能体群组"
+  name_label:
+    en: "Group Title"
+    zh-CN: "群名称"
+  host_label:
+    en: "Host Machine (Group Authority)"
+    zh-CN: "群主机器（权威落库与常驻调度节点）"
+  mode_label:
+    en: "Mode"
+    zh-CN: "协作模式"
+  template_label:
+    en: "Quick Preset"
+    zh-CN: "快捷阵容"
+  template_dev_trio:
+    en: "Architect + Builder + Reviewer"
+    zh-CN: "架构 + 实现 + 审查铁三角"
+  template_blind:
+    en: "Cross-Model Blind Panel"
+    zh-CN: "跨模型盲评评审团"
+  submit:
+    en: "Create Group"
+    zh-CN: "创建群组"
+  cancel:
+    en: "Cancel"
+    zh-CN: "取消"
+notify:
+  error:
+    en: "Agent Group Error"
+    zh-CN: "群组操作失败"

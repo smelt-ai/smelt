@@ -20,6 +20,7 @@ mod app;
 mod automation;
 mod conversation;
 mod engine;
+mod group;
 mod history;
 mod peer;
 mod pi;
@@ -46,9 +47,10 @@ where
         .collect();
     match args.get(1).map(String::as_str) {
         Some(
-            "--machine" | "machine" | "agent" | "app" | "conversation" | "peer" | "project"
-            | "worktree" | "history" | "automation" | "mcp" | "pi" | "model" | "quota" | "engine"
-            | "hooks" | "settings" | "notify" | "help" | "-h" | "--help" | "--version" | "-V",
+            "--machine" | "machine" | "agent" | "app" | "conversation" | "group" | "peer"
+            | "project" | "worktree" | "history" | "automation" | "mcp" | "pi" | "model" | "quota"
+            | "engine" | "hooks" | "settings" | "notify" | "help" | "-h" | "--help" | "--version"
+            | "-V",
         ) => Some(run(&args)),
         _ => None,
     }
@@ -94,6 +96,7 @@ fn run(args: &[String]) -> i32 {
         }
         Some("agent") => agent::run(rest),
         Some("conversation") => conversation::run(rest),
+        Some("group") => group::run(rest),
         Some("peer") => peer::run(rest),
         Some("project") => workspace::run_project(rest),
         Some("worktree") => workspace::run_worktree(rest),

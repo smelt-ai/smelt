@@ -29,6 +29,7 @@
               "axis": "vertical",
               "items": [
                 { "view": "smelt.launcher/nav", "fit": true },
+                { "view": "smelt.groups/sidebar", "fit": true },
                 { "view": "smelt.session-list/main" },
                 {
                   "stack": {

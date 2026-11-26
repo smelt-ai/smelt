@@ -108,12 +108,13 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
         );
         return;
     }
-    // 本节点没允许连入的对端：只能配对、取消配对、交回信（见 `peer_nodes`）。
+    // 本节点没允许连入的对端：只能配对、取消配对、交回信（见 `peer_nodes`），或发起受白名单约束的群组反向附着流。
     if matches!(principal, Principal::Peer { inbound: false, .. })
-        && !(operation == DaemonOperation::Control
-            && crate::peer_nodes::outbound_only_peer_may_call(
-                v.get("method").and_then(serde_json::Value::as_str),
-            ))
+        && !(operation == DaemonOperation::NodeGroupAttach
+            || (operation == DaemonOperation::Control
+                && crate::peer_nodes::outbound_only_peer_may_call(
+                    v.get("method").and_then(serde_json::Value::as_str),
+                )))
     {
         reject(
             conn,
@@ -255,6 +256,20 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
         DaemonOperation::PeerLinkWatch => {
             crate::peer_nodes::handle_link_watch(conn, &v, &principal)
         }
+        DaemonOperation::NodeGroupAttach => crate::group_runtime::handle_node_group_attach(
+            conn,
+            reader,
+            &principal,
+            &acp_sessions,
+            &event_hub,
+        ),
+        DaemonOperation::NodeGroupLink => crate::group_runtime::handle_node_group_link(
+            conn,
+            reader,
+            &principal,
+            &acp_sessions,
+            &event_hub,
+        ),
     }
 }
 

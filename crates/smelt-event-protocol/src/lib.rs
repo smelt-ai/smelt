@@ -132,6 +132,11 @@ pub const CORE_TOPIC_FS_USAGE_PROGRESS: &str = "fs.usage.progress";
 /// 加在事件协议 v7 之后、没有升版本，同 [`CORE_TOPIC_AGENT_HOST_CHANGED`] 只放在单独的一条
 /// 订阅里；不认识该话题的旧运行时只会拒掉那一条。
 pub const CORE_TOPIC_NEW_SESSION_CATALOG_CHANGED: &str = "new_session.catalog_changed";
+/// 群组列表、成员实时状态、暂停态、剩余跳数与盲评/任务进度变更，带快照 [`CORE_SNAPSHOT_GROUPS`]。
+/// 加在 v7 之后、不升版本，走独立订阅。
+pub const CORE_TOPIC_GROUPS_CHANGED: &str = "group.changed";
+/// 群组内追加了新消息、盲评批量揭晓或权限放行卡状态更新。不带快照，走独立订阅。
+pub const CORE_TOPIC_GROUP_MESSAGE_APPENDED: &str = "group.message_appended";
 
 pub const CORE_CAPABILITY_SESSION_READ: &str = "session.read";
 pub const CORE_CAPABILITY_WORKSPACE_READ: &str = "workspace.read";
@@ -150,6 +155,7 @@ pub const CORE_SNAPSHOT_AUTOMATIONS: &str = "core.automations.v1";
 pub const CORE_SNAPSHOT_ATTENTION: &str = "core.attention.v1";
 pub const CORE_SNAPSHOT_AGENT_HOST: &str = "core.agent_host.v1";
 pub const CORE_SNAPSHOT_NEW_SESSION_CATALOG: &str = "core.new_session_catalog.v1";
+pub const CORE_SNAPSHOT_GROUPS: &str = "core.groups.v1";
 
 pub const FIRST_PARTY_DESKTOP_PLUGIN_ID: &str = "core.desktop";
 
@@ -954,6 +960,20 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
             Some(CORE_SNAPSHOT_NEW_SESSION_CATALOG),
             512 * 1024,
         )?,
+        // 群组列表与成员运行态快照。
+        descriptor(
+            CORE_TOPIC_GROUPS_CHANGED,
+            CORE_CAPABILITY_SESSION_READ,
+            Some(CORE_SNAPSHOT_GROUPS),
+            512 * 1024,
+        )?,
+        // 群组增量消息、盲评揭晓与放行卡事件。
+        descriptor(
+            CORE_TOPIC_GROUP_MESSAGE_APPENDED,
+            CORE_CAPABILITY_SESSION_READ,
+            None,
+            256 * 1024,
+        )?,
     ])
 }
 
@@ -1268,6 +1288,8 @@ mod tests {
                 Some(CORE_SNAPSHOT_NEW_SESSION_CATALOG),
                 1,
             ),
+            (CORE_TOPIC_GROUPS_CHANGED, Some(CORE_SNAPSHOT_GROUPS), 1),
+            (CORE_TOPIC_GROUP_MESSAGE_APPENDED, None, 1),
         ];
         assert_eq!(descriptors.len(), expected.len());
         for (topic, snapshot, schema_version) in expected {
