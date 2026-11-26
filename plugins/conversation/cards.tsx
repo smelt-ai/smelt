@@ -161,7 +161,7 @@ export function PermissionTray(props: {
           }
         >
           <View style={{ paddingLeft: 12, gap: 3 }}>
-            <Each of={first()?.options ?? []}>
+            <Each of={first()?.options ?? []} key="index">
               {(opt, idx) => {
                 const isPrimary = computed(() => idx() === primaryIndex());
                 return (
@@ -219,8 +219,11 @@ export function ElicitationCard(props: {
   const look = theme;
   const item = () => props.elicitation();
 
+  // 每次改动都会回来一份新快照、新对象：按对象认行会整卡重建，输入框随之丢焦点。
+  // 卡按 id 认（换卡才重建），字段、选项按位置认。
   return (
-    <If when={item() != null}>
+    <Each of={item() ? [String(item()?.id ?? "")] : []}>
+      {() => (
       <View
         style={{
           width: "100%",
@@ -256,7 +259,7 @@ export function ElicitationCard(props: {
 
         <Scroll style={{ maxHeight: 260 }}>
           <View style={{ gap: 10, paddingLeft: 14 }}>
-            <Each of={item()?.fields ?? []}>
+            <Each of={item()?.fields ?? []} key="index">
               {(field, fieldIdx) => {
                 const optGroup = computed(() => elicitFieldOptions(field()));
                 const isTextKind = computed(() => Boolean(field()?.kind?.Text));
@@ -268,10 +271,10 @@ export function ElicitationCard(props: {
                   const arr = chosen[String(fieldIdx())] ?? chosen[fieldIdx()];
                   return Array.isArray(arr) ? arr : [];
                 });
-                const currentText = computed(() => {
-                  const tv = item()?.text_values ?? {};
-                  return String(tv[String(fieldIdx())] ?? tv[fieldIdx()] ?? "");
-                });
+                // 输入以本地为准，快照只给初值（重连后恢复）：回传有延迟，
+                // 绑快照会把还没回来的字冲掉。
+                const tv = item()?.text_values ?? {};
+                const text = signal(String(tv[String(fieldIdx())] ?? tv[fieldIdx()] ?? ""));
                 return (
                   <View style={{ gap: 6 }}>
                     <If when={Boolean(field().title || field().key)}>
@@ -293,7 +296,7 @@ export function ElicitationCard(props: {
                     </If>
                     <If when={optGroup() != null}>
                       <View style={{ gap: 3 }}>
-                        <Each of={optGroup()?.options ?? []}>
+                        <Each of={optGroup()?.options ?? []} key="index">
                           {(opt, optIdx) => {
                             const selected = computed(() => chosenList().includes(optIdx()));
                             return (
@@ -325,10 +328,13 @@ export function ElicitationCard(props: {
                     </If>
                     <If when={isTextKind() || Boolean(field().allow_custom_input)}>
                       <Input
-                        value={currentText()}
+                        value={text()}
                         placeholder={ct("elicit.custom_placeholder")}
                         masked={Boolean(field()?.kind?.Text?.secret)}
-                        onChange={({ value }: any) => props.onText(fieldIdx(), value)}
+                        onChange={({ value }: any) => {
+                          text.set(value);
+                          props.onText(fieldIdx(), value);
+                        }}
                         style={{
                           height: 32,
                           paddingHorizontal: 10,
@@ -353,7 +359,8 @@ export function ElicitationCard(props: {
           <SmeltButton primary small label={ct("elicit.submit")} onPress={props.onSubmit} />
         </View>
       </View>
-    </If>
+      )}
+    </Each>
   );
 }
 
