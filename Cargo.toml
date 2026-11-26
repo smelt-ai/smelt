@@ -123,6 +123,11 @@ significant_drop_in_scrutinee = "warn"
 dbg_macro = "deny"
 todo = "deny"
 
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
+
 # proc-macro 和 build script 只在构建机上用，不发布，不用 strip。
 # rustc 1.97 在 macOS 上用 `rust-objcopy --strip-debug` 实现默认的 strip=debuginfo，处理后的
 # dylib 有时 LINKEDIT 字符串表不对齐（跟产物内容有关），macOS 27 的 dyld 拒绝加载，rustc 就报

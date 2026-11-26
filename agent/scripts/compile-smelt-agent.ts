@@ -123,6 +123,7 @@ const result = await Bun.build({
 	],
 	target: "bun",
 	format: "esm",
+	minify: true,
 	bytecode: true,
 	splitting: true,
 	plugins: [bunfsPaths, packageBins],

@@ -634,6 +634,7 @@ export function UsagePopover(props: {
   usage: () => [number, number] | null;
   breakdown: () => any | null;
   compacting: () => boolean;
+  visible?: () => boolean;
   supportsCompaction: () => boolean;
   onCompact: () => void;
 }) {
@@ -709,7 +710,11 @@ export function UsagePopover(props: {
                   />
                 }
               >
-                <SmeltIcon spin size={12} color={look().palette.muted} />
+                <SmeltIcon
+                  spin={props.visible ? props.visible() : true}
+                  size={12}
+                  color={look().palette.muted}
+                />
               </If>
               {/* 快满了才把百分比写出来；压缩中写「压缩中」 */}
               <If when={props.compacting() || pct() >= USAGE_WARN_PCT}>

@@ -34,6 +34,8 @@ impl PluginStore {
         let connection = Connection::open(&path)
             .map_err(|error| ClientStoreError(format!("{}：{error}", path.display())))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "synchronous", "NORMAL")?;
+        connection.pragma_update(None, "journal_size_limit", 4 * 1024 * 1024)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(Self {
             path,

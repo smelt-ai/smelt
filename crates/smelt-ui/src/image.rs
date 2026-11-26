@@ -22,7 +22,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::SystemTime;
 
 use gpui::*;
 
@@ -282,19 +281,12 @@ enum FilePaint {
     Failed,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct FileStamp {
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
 enum PathOutcome {
     Ready(u64),
     Failed,
 }
 
 struct PathSlot {
-    stamp: Option<FileStamp>,
     outcome: PathOutcome,
 }
 
@@ -329,37 +321,23 @@ pub fn format_for_extension(ext: &str) -> Option<gpui::ImageFormat> {
     })
 }
 
-fn file_stamp(path: &Path) -> Option<FileStamp> {
-    let meta = std::fs::metadata(path).ok()?;
-    if !meta.is_file() {
-        return None;
-    }
-    Some(FileStamp {
-        len: meta.len(),
-        modified: meta.modified().ok(),
-    })
-}
-
-fn remember_path(path: &Path, stamp: Option<FileStamp>, outcome: PathOutcome) {
+fn remember_path(path: &Path, outcome: PathOutcome) {
     path_slots()
         .lock()
         .unwrap()
-        .insert(path.to_path_buf(), PathSlot { stamp, outcome });
+        .insert(path.to_path_buf(), PathSlot { outcome });
 }
 
+/// 渲染路径只读内存缓存，绝不做 `std::fs::metadata` 等同步磁盘 IO。
 fn file_paint(path: &Path) -> FilePaint {
     if format_for_path(path) == Some(gpui::ImageFormat::Svg) {
         return FilePaint::Svg;
     }
-    let stamp = file_stamp(path);
     let hash = {
         let slots = path_slots().lock().unwrap();
         let Some(slot) = slots.get(path) else {
             return FilePaint::Placeholder;
         };
-        if slot.stamp != stamp {
-            return FilePaint::Placeholder;
-        }
         match slot.outcome {
             PathOutcome::Failed => return FilePaint::Failed,
             PathOutcome::Ready(hash) => hash,
@@ -371,49 +349,52 @@ fn file_paint(path: &Path) -> FilePaint {
     }
 }
 
+/// 使指定路径的文件预览缓存失效（用户重选壁纸或已知文件变更时调用，下次绘制走后台重载）。
+pub fn invalidate_file_preview(path: &Path) {
+    path_slots().lock().unwrap().remove(path);
+}
+
 /// 读文件、降采样、写入和缩略图共用的缓存。认不出或解不开就记失败，不回退 `img()`。
 fn load_file_preview(path: &Path) -> FilePaint {
     if format_for_path(path) == Some(gpui::ImageFormat::Svg) {
         return FilePaint::Svg;
     }
-    let Some(stamp) = file_stamp(path) else {
-        remember_path(path, None, PathOutcome::Failed);
+    if !std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
+        remember_path(path, PathOutcome::Failed);
         return FilePaint::Failed;
-    };
+    }
     let Some(format) = format_for_path(path).filter(|format| *format != gpui::ImageFormat::Svg)
     else {
-        remember_path(path, Some(stamp), PathOutcome::Failed);
+        remember_path(path, PathOutcome::Failed);
         return FilePaint::Failed;
     };
     let Ok(bytes) = std::fs::read(path) else {
-        remember_path(path, Some(stamp), PathOutcome::Failed);
+        remember_path(path, PathOutcome::Failed);
         return FilePaint::Failed;
     };
     let image = gpui::Image::from_bytes(format, bytes);
     match decode_preview(&image) {
         Some(render) => {
             put(image.id, Arc::clone(&render));
-            remember_path(path, Some(stamp), PathOutcome::Ready(image.id));
+            remember_path(path, PathOutcome::Ready(image.id));
             FilePaint::Preview(render)
         }
         None => {
-            remember_path(path, Some(stamp), PathOutcome::Failed);
+            remember_path(path, PathOutcome::Failed);
             FilePaint::Failed
         }
     }
 }
 
-/// 这一帧要不要再排队解码。已有预览、已经失败、或已有任务在飞时返回 false。
+/// 这一帧要不要再排队解码。只读内存缓存（不做同步 `std::fs::metadata`）；已有预览、
+/// 已经失败、或已有任务在飞时返回 false。
 fn begin_file_fetch(path: &Path) -> bool {
     if format_for_path(path) == Some(gpui::ImageFormat::Svg) {
         return false;
     }
-    let stamp = file_stamp(path);
     {
         let slots = path_slots().lock().unwrap();
-        if let Some(slot) = slots.get(path)
-            && slot.stamp == stamp
-        {
+        if let Some(slot) = slots.get(path) {
             match slot.outcome {
                 PathOutcome::Failed => return false,
                 PathOutcome::Ready(hash)

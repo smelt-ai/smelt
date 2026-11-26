@@ -41,6 +41,7 @@ fn test_acp_attachment(sess: &Arc<AcpSession>, stream: RuntimeStream, id: &str) 
         Vec::new(),
         nothing_sent(),
         tool_debug_generation_sent,
+        true,
         id,
         "acp-test",
         Arc::new(

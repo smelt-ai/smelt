@@ -330,6 +330,7 @@ function MessageContextWrapper(props: {
 
 function ToolCallRow(props: {
   tc: () => any;
+  visible: () => boolean;
   cwd: () => string | null;
   machine: () => string | null;
   liveSubagents: () => any[];
@@ -610,7 +611,7 @@ function ToolCallRow(props: {
                 />
               }
             >
-              <SmeltIcon spin size={12} color={look().palette.muted} />
+              <SmeltIcon spin={props.visible()} size={12} color={look().palette.muted} />
             </If>
             <Text
               style={{
@@ -682,7 +683,7 @@ function ToolCallRow(props: {
                         when={isRunning()}
                         else={<SmeltIcon path="icons/bot.svg" size={13} color={look().palette.muted} />}
                       >
-                        <SmeltIcon spin size={12} color={look().palette.muted} />
+                        <SmeltIcon spin={props.visible()} size={12} color={look().palette.muted} />
                       </If>
                       <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
                         <Text style={{ fontSize: look().type.small.size, color: look().palette.text, numberOfLines: 1 }}>
@@ -735,6 +736,7 @@ export function diffPartStats(diff: any): { added: number; removed: number } {
 
 export function MessageList(props: {
   rows: () => any[];
+  visible?: () => boolean;
   machine: () => string | null;
   sessionId: () => string;
   cwd: () => string | null;
@@ -766,6 +768,7 @@ export function MessageList(props: {
   topPadding?: () => number;
 }) {
   const look = theme;
+  const isVisible = () => (props.visible ? props.visible() : true);
   const expandedTools = signal<Set<string>>(new Set());
   const expandedThoughts = signal<Set<string>>(new Set());
   const expandedTaskNotes = signal<Set<string>>(new Set());
@@ -928,7 +931,7 @@ export function MessageList(props: {
                         />
                       }
                     >
-                      <SmeltIcon spin size={12} color={look().palette.muted} />
+                      <SmeltIcon spin={isVisible()} size={12} color={look().palette.muted} />
                     </If>
                     <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.muted }}>
                       {summarizeTally(r().group?.tally)}
@@ -1199,6 +1202,7 @@ export function MessageList(props: {
                   <If when={Boolean(entry()?.ToolCall)}>
                     <ToolCallRow
                       tc={() => entry()?.ToolCall}
+                      visible={isVisible}
                       cwd={props.cwd}
                       machine={props.machine}
                       liveSubagents={props.liveSubagents}

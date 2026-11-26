@@ -7,8 +7,10 @@ import {
   effect,
   host,
   Image,
+  lifecycle,
   nativeComponent,
   nativeModule,
+  reduceMotion,
   signal,
   Text,
   View,
@@ -1524,7 +1526,8 @@ export function SmeltIcon(props: {
 }) {
   const iconClass = () => {
     const parts: string[] = [];
-    if (props.spin) parts.push("animate-spin");
+    // 窗口失焦或开启系统「减弱动态效果」时暂停旋转动画，避免后台空转 60/120Hz 重绘。
+    if (props.spin && lifecycle() === "active" && !reduceMotion()) parts.push("animate-spin");
     if (props.class) parts.push(props.class);
     return parts.length > 0 ? parts.join(" ") : undefined;
   };

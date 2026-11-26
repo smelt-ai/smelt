@@ -87,6 +87,8 @@ export interface SmeltConversationProps {
   placeholder?: string | null;
   /** 嵌入模式（如自动化运行页）：隐藏浮动标题胶囊。 */
   embedded?: boolean;
+  /** 是否可见（在 `display: none` 隐藏会话或非活动页时传 false，暂停所有旋转动画）。 */
+  active?: boolean;
   /** 浮动标题胶囊显示的会话名（非嵌入模式使用）。 */
   title?: string | null;
   /** 顶栏安全区信息（非嵌入模式避让窗口按钮/拖曳区）。 */
@@ -162,6 +164,7 @@ const WELCOME_LAYOUT_TRANSITION = {
 
 export function SmeltConversation(props: SmeltConversationProps) {
   const look = theme;
+  const visible = computed(() => props.active !== false);
 
   const subId = signal<string | null>(null);
   const connectError = signal<string | null>(null);
@@ -950,7 +953,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
                         </View>
                       }
                     >
-                      <SmeltIcon spin size={16} color={look().palette.muted} />
+                      <SmeltIcon spin={visible()} size={16} color={look().palette.muted} />
                       <Text style={{ fontSize: look().type.ui.size, color: look().palette.muted }}>
                         {props.placeholder || ct("status.opening")}
                       </Text>
@@ -997,6 +1000,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
             <View style={{ position: "relative", flex: 1, width: "100%", minHeight: 0 }}>
               <MessageList
                 rows={displayRows}
+                visible={visible}
                 machine={() => props.machine ?? null}
                 sessionId={() => props.sessionId}
                 cwd={cwd}
@@ -1075,7 +1079,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
         <If when={Boolean(snapshot()?.status_line) && (connecting() || turnActive())}>
           <View style={{ width: "100%", alignItems: "center", paddingHorizontal: 16, paddingBottom: 6 }}>
             <View style={{ width: "100%", maxWidth: 768, paddingHorizontal: 6, flexDirection: "row", alignItems: "center", gap: 6 }}>
-              <SmeltIcon spin size={12} color={look().palette.muted} />
+              <SmeltIcon spin={visible()} size={12} color={look().palette.muted} />
               <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.muted }}>
                 {snapshot()?.status_line ?? ""}
               </Text>
@@ -1089,7 +1093,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
               class="w-full px-3 py-2 rounded-[10px] bg-soft border border-border flex-row items-center gap-2"
               style={{ maxWidth: 768 }}
             >
-              <SmeltIcon spin size={12} color={look().palette.muted} />
+              <SmeltIcon spin={visible()} size={12} color={look().palette.muted} />
               <Text style={{ flex: 1, fontSize: look().type.text_xsmall.size, color: look().palette.text }}>
                 {ct("status.retrying", {
                   attempt: retryInfo()?.attempt ?? 1,
@@ -1158,6 +1162,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
         <Composer
           machine={() => props.machine ?? null}
           cwd={cwd}
+          visible={visible}
           readOnly={() => Boolean(props.readOnly)}
           turnActive={turnActive}
           dead={dead}

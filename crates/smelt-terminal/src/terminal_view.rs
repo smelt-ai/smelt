@@ -170,6 +170,8 @@ pub(crate) struct TerminalView {
     drag_scroll_running: bool,
     /// 上次测得的等宽字符像素宽（鼠标坐标换算用）。
     cell_w: f32,
+    /// 已测得的字符宽缓存 `(font_px_u32, font_family, cell_w)`，避免每帧重跑 `layout_line("M")`。
+    cached_cell_w: Option<(u32, String, f32)>,
     /// 网格原点（含内边距）的窗口像素坐标，由 canvas 在 paint 时写入。
     grid_origin: Rc<StdCell<(f32, f32)>>,
     /// 终端自身像素尺寸 (宽, 高)，由 canvas 写入；按卡片大小算行列（网格 Hub 用）。
@@ -264,6 +266,7 @@ impl TerminalView {
             drag_scroll_col: 0,
             drag_scroll_running: false,
             cell_w: 8.0,
+            cached_cell_w: None,
             grid_origin: Rc::new(StdCell::new((0.0, 0.0))),
             grid_size: Rc::new(StdCell::new((0.0, 0.0))),
             hover_url: None,
@@ -295,19 +298,32 @@ impl TerminalView {
     }
 
     /// 驱动重绘的常驻任务：await 读线程的唤醒 → `cx.notify()`。内容一到就画，
-    /// 不靠轮询。读线程退出（发送端 drop）时若当前连接仍是这一代且已标记 dead，
-    /// 则触发自动重连；换上新连接后旧通道的关闭不会误触发。
+    /// 不靠轮询；高频刷屏时将 8ms 内的多批输出合并为一次通知，保持首帧零延迟且避免
+    /// 远超刷新率的主线程唤醒。读线程退出（发送端 drop）时若当前连接仍是这一代且已标记
+    /// dead，则触发自动重连；换上新连接后旧通道的关闭不会误触发。
     fn drive_redraws(terminal: &mut Terminal, generation: u64, cx: &mut Context<Self>) {
+        /// 120Hz 单帧预算内的最小合并间隔：交互输入首批立即触发，高频刷屏合并。
+        const PTY_REDRAW_MIN_INTERVAL: Duration = Duration::from_millis(8);
         let Some(mut redraws) = terminal.take_redraw_channel() else {
             return;
         };
         cx.spawn(async move |this, cx| {
+            let mut last_emit: Option<std::time::Instant> = None;
             while redraws.recv().await.is_some() {
-                if this
-                    .update(cx, |this, cx| this.handle_terminal_event(cx))
-                    .is_err()
-                {
+                if let Some(prev) = last_emit {
+                    let elapsed = prev.elapsed();
+                    if elapsed < PTY_REDRAW_MIN_INTERVAL {
+                        cx.background_executor()
+                            .timer(PTY_REDRAW_MIN_INTERVAL - elapsed)
+                            .await;
+                        redraws.clear_pending();
+                    }
+                }
+                let Ok(redrew) = this.update(cx, |this, cx| this.handle_terminal_event(cx)) else {
                     return; // 视图已销毁
+                };
+                if redrew {
+                    last_emit = Some(std::time::Instant::now());
                 }
             }
             // 读线程退出：连接断了。dead 判断放在 update 里，读的是「当前」Terminal。
@@ -321,8 +337,8 @@ impl TerminalView {
     }
 
     /// PTY 读线程每批输出只唤醒一次，终端内容在这里消费。响铃、OSC 通知由运行时扫输出
-    /// 判定成提醒，不经过这里。
-    fn handle_terminal_event(&mut self, cx: &mut Context<Self>) {
+    /// 判定成提醒，不经过这里。返回是否实际触发了重绘。
+    fn handle_terminal_event(&mut self, cx: &mut Context<Self>) -> bool {
         // kitty 图形换下来的纹理在前台释放（见 terminal_images）。
         for image in self.terminal.take_released_images() {
             cx.drop_image(image, None);
@@ -333,9 +349,11 @@ impl TerminalView {
             // 滚动/输出/网格尺寸变了：搜索高亮要按新的可视区重算命中。
             self.refresh_search_highlights();
             cx.notify();
+            return true;
         }
         // 纯 OSC 标题 / BEL 没有终端网格 damage，不重画画布。
         // 会话名来自 daemon 的 provider 标题或 prompt 兜底，不来自这里的 OSC。
+        false
     }
 
     /// 断线自动重连（后台）。会话还活在守护里时 reattach 恢复画面；守护崩溃过、
@@ -979,27 +997,38 @@ impl Render for TerminalView {
         // 依据「本终端自身尺寸」重算行列（网格 Hub 里每个终端只占一格）。
         {
             let (w, h) = self.grid_size.get();
-            // 精确测量等宽字符宽度（量一个 'M'）；异常时回退到 0.6 估算。
-            // 必须用 terminal_font()（带 fallback 链）而非裸字体族：主字体没装时，
-            // 裸字体和渲染各自 fallback 到不同字体，cell_w 就跟实际画出来的字宽脱节。
-            let run = TextRun {
-                len: 1,
-                font: terminal_font(),
-                color: hsla(0.0, 0.0, 1.0, 1.0),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            let measured = f32::from(
-                window
-                    .text_system()
-                    .layout_line("M", px(font_px()), &[run], None)
-                    .width,
-            );
-            let cell_w = if measured > 1.0 {
-                measured
-            } else {
-                font_px() * CELL_W_RATIO
+            let cur_font_px_u32 = FONT_PX_ATOM.load(std::sync::atomic::Ordering::Relaxed);
+            let cur_family = font_family();
+            let cell_w = match &self.cached_cell_w {
+                Some((px_u32, fam, width)) if *px_u32 == cur_font_px_u32 && fam == &cur_family => {
+                    *width
+                }
+                _ => {
+                    // 精确测量等宽字符宽度（量一个 'M'）；异常时回退到 0.6 估算。
+                    // 必须用 terminal_font()（带 fallback 链）而非裸字体族：主字体没装时，
+                    // 裸字体和渲染各自 fallback 到不同字体，cell_w 就跟实际画出来的字宽脱节。
+                    let run = TextRun {
+                        len: 1,
+                        font: terminal_font(),
+                        color: hsla(0.0, 0.0, 1.0, 1.0),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let measured = f32::from(
+                        window
+                            .text_system()
+                            .layout_line("M", px(cur_font_px_u32 as f32), &[run], None)
+                            .width,
+                    );
+                    let width = if measured > 1.0 {
+                        measured
+                    } else {
+                        cur_font_px_u32 as f32 * CELL_W_RATIO
+                    };
+                    self.cached_cell_w = Some((cur_font_px_u32, cur_family, width));
+                    width
+                }
             };
             self.cell_w = cell_w; // 供鼠标坐标换算
             // grid_size 未就绪（首帧为 0）时跳过 resize：保持 spawn 的默认 80 列，
@@ -2114,12 +2143,13 @@ fn text_batches(
         }
         let style = style_of(i);
         let zw = cell.zw.as_deref().unwrap_or_default();
-        let mut text = String::from(ch);
-        text.extend(zw); // 零宽字符：进文本，不占格
 
         // 宽字符（后面跟着 '\0' 占位格）：独占一批，绘制时按真实字形宽度居中到两格里。
         if row.get(i + 1).is_some_and(|c| c.ch == '\0') {
             flush(&mut cur, &mut out);
+            let mut text = String::with_capacity(ch.len_utf8() + zw.len() * 4);
+            text.push(ch);
+            text.extend(zw); // 零宽字符：进文本，不占格
             out.push(Batch {
                 col: i,
                 text,
@@ -2131,12 +2161,16 @@ fn text_batches(
 
         match cur.as_mut() {
             Some((start, count, buf, st)) if *st == style && *start + *count == i => {
-                buf.push_str(&text);
+                buf.push(ch);
+                buf.extend(zw);
                 *count += 1;
             }
             _ => {
                 flush(&mut cur, &mut out);
-                cur = Some((i, 1, text, style));
+                let mut buf = String::with_capacity(16);
+                buf.push(ch);
+                buf.extend(zw);
+                cur = Some((i, 1, buf, style));
             }
         }
     }

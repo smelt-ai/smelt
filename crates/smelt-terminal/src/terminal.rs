@@ -249,15 +249,41 @@ pub struct ImagePaint {
     pub clip: (i32, i32, u32, u32),
 }
 
+/// 一次 `snapshot()` 调用期间固定的配色表，避免每格重读全局状态。
+#[derive(Clone, Copy)]
+struct SnapshotPalette {
+    default_fg: u32,
+    default_bg: u32,
+    ansi: &'static [u32; 16],
+}
+
+impl SnapshotPalette {
+    fn current() -> Self {
+        Self {
+            default_fg: default_fg(),
+            default_bg: default_bg(),
+            ansi: palette(),
+        }
+    }
+
+    #[inline]
+    fn resolve(self, color: Color, is_fg: bool, overrides: &Colors) -> u32 {
+        match color {
+            Color::Spec(rgb) => rgb_u32(rgb),
+            Color::Indexed(i) => {
+                overrides[i as usize].map_or_else(|| indexed_rgb_with(i, self.ansi), rgb_u32)
+            }
+            Color::Named(n) => overrides[n].map_or_else(|| named_rgb_with(n, is_fg, self), rgb_u32),
+        }
+    }
+}
+
 /// 把 alacritty 的 Color 解析成 0xRRGGBB。is_fg 决定「默认色」取前景还是背景。
 /// 程序用 OSC 4 / 10 / 11 改过的颜色（alacritty 记在 `overrides` 里）优先于主题色，
 /// 跟主流终端一致：base16-shell 这类主题脚本、TUI 自己换底色都靠它。
+#[cfg(test)]
 fn resolve(color: Color, is_fg: bool, overrides: &Colors) -> u32 {
-    match color {
-        Color::Spec(rgb) => rgb_u32(rgb),
-        Color::Indexed(i) => overrides[i as usize].map_or_else(|| indexed_rgb(i), rgb_u32),
-        Color::Named(n) => overrides[n].map_or_else(|| named_rgb(n, is_fg), rgb_u32),
-    }
+    SnapshotPalette::current().resolve(color, is_fg, overrides)
 }
 
 /// kitty 占位符把图片 id 记在前景色、放置 id 记在下划线颜色里：真彩是 24 位整数，256 色是下标。
@@ -346,9 +372,10 @@ fn rgb_u32(rgb: Rgb) -> u32 {
     ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32
 }
 
-fn named_rgb(n: NamedColor, is_fg: bool) -> u32 {
+#[inline]
+fn named_rgb_with(n: NamedColor, is_fg: bool, pal: SnapshotPalette) -> u32 {
     use NamedColor::*;
-    let p = palette();
+    let p = pal.ansi;
     match n {
         Black => p[0],
         Red => p[1],
@@ -366,22 +393,23 @@ fn named_rgb(n: NamedColor, is_fg: bool) -> u32 {
         BrightMagenta => p[13],
         BrightCyan => p[14],
         BrightWhite => p[15],
-        Background => default_bg(),
+        Background => pal.default_bg,
         // Foreground / Cursor / Dim* / 未来新增变体统一回落到默认色
         _ => {
             if is_fg {
-                default_fg()
+                pal.default_fg
             } else {
-                default_bg()
+                pal.default_bg
             }
         }
     }
 }
 
 /// xterm 256 色索引 → rgb：0-15 用调色板，16-231 为 6×6×6 色立方，232-255 为灰阶。
-fn indexed_rgb(i: u8) -> u32 {
+#[inline]
+fn indexed_rgb_with(i: u8, ansi: &[u32; 16]) -> u32 {
     match i {
-        0..=15 => palette()[i as usize],
+        0..=15 => ansi[i as usize],
         16..=231 => {
             let i = i - 16;
             let step = |v: u8| -> u32 { if v == 0 { 0 } else { 55 + v as u32 * 40 } };
@@ -1747,6 +1775,7 @@ impl Terminal {
         let sel_range = content.selection;
 
         let cols = self.size.cols;
+        let pal = SnapshotPalette::current();
         let mut rows: Vec<Vec<Cell>> = Vec::with_capacity(self.size.rows);
         let mut wrapped: Vec<bool> = Vec::with_capacity(self.size.rows);
         let mut row: Vec<Cell> = Vec::with_capacity(cols);
@@ -1792,16 +1821,18 @@ impl Terminal {
             let flags = cell.flags;
             row_wraps = flags.contains(Flags::WRAPLINE);
             let inverse = flags.contains(Flags::INVERSE);
-            let mut fg = resolve(cell.fg, true, overrides);
-            let mut bg = resolve(cell.bg, false, overrides);
             // 反色（SGR 7）后真正当底色用的是**前景那个颜色**，默认底色的判定也得跟着换。
             // 程序用 OSC 11 改过底色时，默认底色的格子也要画成它改的颜色，不再留空。
+            let fg_color = if inverse { cell.bg } else { cell.fg };
             let bg_color = if inverse { cell.fg } else { cell.bg };
             let bg_default = matches!(bg_color, Color::Named(NamedColor::Background))
                 && overrides[NamedColor::Background].is_none();
-            if inverse {
-                std::mem::swap(&mut fg, &mut bg);
-            }
+            let fg = pal.resolve(fg_color, !inverse, overrides);
+            let bg = if bg_default {
+                pal.default_bg
+            } else {
+                pal.resolve(bg_color, inverse, overrides)
+            };
             // 宽字符占两格，第二格是 WIDE_CHAR_SPACER 占位：一律记成 '\0'。
             // 渲染侧（render_row）据此跳过该格但让列号照常前进，于是宽字符后面的内容
             // 列号不再连续 → 自动断成新的一批、按 grid 列重新定位。字形本身宽窄不影响
@@ -1839,7 +1870,12 @@ impl Terminal {
             });
             count += 1;
             if count.is_multiple_of(cols) {
-                rows.push(std::mem::take(&mut row));
+                let next_cap = if rows.len() + 1 < self.size.rows {
+                    cols
+                } else {
+                    0
+                };
+                rows.push(std::mem::replace(&mut row, Vec::with_capacity(next_cap)));
                 wrapped.push(row_wraps);
             }
         }

@@ -23,7 +23,8 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::{
-    AnyElement, App, AppContext as _, AsyncApp, Entity, FocusHandle, IntoElement as _, Window,
+    AnyElement, App, AppContext as _, AsyncApp, Entity, FocusHandle, IntoElement as _, Styled as _,
+    Window,
 };
 use nsh_platform_gpui::{ComponentContext, NativeComponent};
 use serde_json::{Value, json};
@@ -226,7 +227,12 @@ impl NativeComponent for SmeltTerminal {
     fn render(&mut self, _: &mut Window, cx: &mut App) -> Option<AnyElement> {
         let canvas = self.canvas.as_ref()?;
         self.focus = Some(canvas.read(cx).focus_target(cx));
-        Some(canvas.clone().into_any_element())
+        Some(
+            canvas
+                .clone()
+                .cached(gpui::StyleRefinement::default().size_full())
+                .into_any_element(),
+        )
     }
 
     fn focus_handle(&self) -> Option<FocusHandle> {

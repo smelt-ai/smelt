@@ -1269,6 +1269,7 @@ bootTask(async () => {
 function SplitLeafPane(props: {
   live: LiveSession;
   paneId: string;
+  visible: () => boolean;
   many: () => boolean;
   touches: () => { top: boolean; right: boolean; bottom: boolean; left: boolean };
   parentArea: () => any;
@@ -1376,6 +1377,7 @@ function SplitLeafPane(props: {
           else={
             <ConversationPane
               args={(spec()?.args as any) ?? null}
+              visible={props.visible()}
               many={props.many()}
               safeArea={contentArea()}
               reuseKey={reuseKey()}
@@ -1447,6 +1449,7 @@ function SplitTreeView(props: {
   live: LiveSession;
   node: any;
   path: number[];
+  visible: () => boolean;
   many: () => boolean;
   touchesMap: () => Map<string, { top: boolean; right: boolean; bottom: boolean; left: boolean }>;
   parentArea: () => any;
@@ -1460,6 +1463,7 @@ function SplitTreeView(props: {
       <SplitLeafPane
         live={props.live}
         paneId={paneId}
+        visible={props.visible}
         many={props.many}
         touches={() =>
           props.touchesMap().get(paneId) ?? {
@@ -1494,6 +1498,7 @@ function SplitTreeView(props: {
           live={props.live}
           node={props.node.first}
           path={[...props.path, 0]}
+          visible={props.visible}
           many={props.many}
           touchesMap={props.touchesMap}
           parentArea={props.parentArea}
@@ -1509,6 +1514,7 @@ function SplitTreeView(props: {
           live={props.live}
           node={props.node.second}
           path={[...props.path, 1]}
+          visible={props.visible}
           many={props.many}
           touchesMap={props.touchesMap}
           parentArea={props.parentArea}
@@ -1530,6 +1536,7 @@ function LiveSessionView(props: { keyStr: string }) {
       sel.kind === "conversation" && convKeyStr(sel.machine, sel.conversation_id) === props.keyStr
     );
   });
+  const isVisible = computed(() => isSelected() && viewShown(SESSION_VIEW));
   const conv = computed(() => {
     const dir = workspaceDirectory(live.key.machine);
     return (dir?.conversations ?? []).find((c: any) => c.id === live.key.id) ?? null;
@@ -1604,6 +1611,7 @@ function LiveSessionView(props: { keyStr: string }) {
               live={live}
               node={tree}
               path={[]}
+              visible={isVisible}
               many={many}
               touchesMap={touchesMap}
               parentArea={innerArea}

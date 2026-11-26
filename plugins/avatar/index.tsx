@@ -106,6 +106,8 @@ export interface AvatarProps {
   size: number;
   /** 眼睛用的图标路径；不给就是圆点眼。 */
   eye?: string;
+  /** 是否可见（折叠分组、隐藏侧栏或非活动页时传 false，彻底暂停关键帧与定时器）。 */
+  active?: boolean;
 }
 
 export function Avatar(props: AvatarProps) {
@@ -120,8 +122,18 @@ export function Avatar(props: AvatarProps) {
   const offset = dice(seed, 2) * 1200;
   // 换一出就加一，旧的那一串拍子看到对不上就停。
   let run = 0;
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearIdleTimer = () => {
+    if (idleTimer != null) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  };
   cleanup(() => {
     run = -1;
+    clearIdleTimer();
+    body.reset();
+    eyes.reset();
   });
 
   const play = (move: Move, delay: number) => {
@@ -134,9 +146,13 @@ export function Avatar(props: AvatarProps) {
     if (e) waits.push(eyes.play({ keyframes: e, ...timing }));
     // 发呆的那拍没有动画，也不要帧：只等一拍再挑下一个。
     if (waits.length === 0) {
-      return new Promise<{ finished: boolean }>((done) =>
-        setTimeout(() => done({ finished: true }), delay + timing.duration),
-      );
+      return new Promise<{ finished: boolean }>((done) => {
+        clearIdleTimer();
+        idleTimer = setTimeout(() => {
+          idleTimer = null;
+          done({ finished: true });
+        }, delay + timing.duration);
+      });
     }
     return Promise.all(waits).then((results) => ({ finished: results.every((r) => r.finished) }));
   };
@@ -151,8 +167,9 @@ export function Avatar(props: AvatarProps) {
   effect(() => {
     const act = props.act;
     const since = props.since;
-    const still = lifecycle() !== "active" || reduceMotion();
+    const still = props.active === false || lifecycle() !== "active" || reduceMotion();
     const mine = ++run;
+    clearIdleTimer();
     body.reset();
     eyes.reset();
     if (still) return;

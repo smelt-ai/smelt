@@ -735,6 +735,9 @@ fn select_theme(name: String, cx: &mut App) {
 }
 
 fn set_bg_image(path: Option<String>, cx: &mut App) {
+    if let Some(p) = path.as_deref() {
+        smelt_ui::image::invalidate_file_preview(std::path::Path::new(p));
+    }
     apply_appearance(|a| a.bg_image = path, cx);
     cx.refresh_windows();
 }
