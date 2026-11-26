@@ -1,10 +1,11 @@
 //! 别的 Pi 对话发来的消息：这个会话这一头。
 //!
 //! - 守护把消息交给这里（`deliver`），排队后和后台任务、子智能体的结果走同一条
-//!   监听交回会话：扩展写成 `smelt.peer_message` 自定义消息，`message_start` 时回 ack 才算送到；
-//!   `clear_queue` 清掉的、换了监听的，再写一次。
-//! - 扩展的 `session_list` / `session_read` / `session_send` / `session_spawn` 和通知用户的
-//!   `notify` 不在这里回答。
+//!   监听交回会话：扩展把 `peer.prompt`（写给模型的 `<peer-message>`，见
+//!   [`crate::acp_chat::format_peer_message_text`]）写成 `smelt.peer_message` 自定义消息，
+//!   `message_start` 时回 ack 才算送到；`clear_queue` 清掉的、换了监听的，再写一次。
+//! - 扩展要工具定义的 `session_tools`、`session_list` / `session_read` / `session_send` /
+//!   `session_spawn` 和通知用户的 `notify` 不在这里回答。
 //!   起会话时守护把应答函数装进这个会话；来源是那时候绑上的会话 id，请求体里的字段不算。
 //!
 //! 只认会话本身（空归属）：子智能体不收也不发。
@@ -111,6 +112,11 @@ fn notice_of(peer: &LivePeer) -> ModelNotice {
             "kind": delivery.kind.as_str(),
             "hops": delivery.hops,
             "replyTo": delivery.reply_to,
+            "prompt": crate::acp_chat::format_peer_message_text(
+                delivery,
+                None,
+                crate::acp_chat::PeerReplyChannel::Tool,
+            ),
         })),
         wake: !peer.quiet,
     }

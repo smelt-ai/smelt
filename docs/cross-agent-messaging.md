@@ -71,11 +71,10 @@ Pi 扩展 session-peers.ts ──┐                                            
     - `initialize` 回应协商的 `protocolVersion` 与 `capabilities: { tools: {} }`，并在此时向 `PeerSocket` 发送一次轻量 `mcp_hello` 将该会话标记为 `mcp_connected = true`；
     - 对无 `id` 的通知（如 `notifications/initialized`、`notifications/cancelled`）不回包；
     - 工具调用 `tools/call` 把 MCP 这次调用生成的唯一 ID（或请求 `id` + 参数摘要）映射为幂等 `toolCallId` 交给 `peer_handler`。
-  - 暴露四个工具，schema 与 Pi 扩展保持一致：
-    - `session_list`
-    - `session_read`
-    - `session_send`
-    - `session_spawn`
+  - 暴露四个工具 `session_list` / `session_read` / `session_send` / `session_spawn`。
+- **工具定义和回给模型的文字只有一份**：`crates/smeltd/src/peer_tools.rs`。
+  - `definitions()` 给名字、说明、用法提示（`promptGuidelines`）、参数 JSON Schema。Pi 扩展 `agent/src/session-peers.ts` 加载时经会话宿主发 `session_tools` 要这份定义原样注册（子智能体、没有会话宿主时要不到，不注册）；`--peer-mcp` 的 `tools/list` 用同一份，用法提示接在说明后面。
+  - 应答函数答完由 `present()` 补上 `text`（回给模型的话）和 `details`（界面画事件行用，见 `peer_send_from_tool`）。Pi 扩展把两者原样交给 Pi；MCP 回 `text`，`session_send` / `session_spawn` 另附一段 `details` JSON 文本，不用 `structuredContent`（各家 ACP 转发不一）。CLI 的 JSON 回答里也带着。
 - 在 `crates/smelt-core/src/acp_conn.rs` 发 `NewSessionRequest` 和 `LoadSessionRequest` 时，如果 `launch.peer_handler.is_some()`：
   - 附加 `McpServer::Stdio(McpServerStdio { name: "smelt-peers", command: <当前 smeltd 路径>, args: ["--peer-mcp"], env: [SMELT_PEER_SOCK=<socket>] })`。
   - **不**把 `SMELT_PEER_SOCK` 塞进 agent 主进程环境，仅传给这个 MCP 子进程。
@@ -127,7 +126,7 @@ smelt peer spawn --title <标题> --task <任务> [--agent <agent_option_id>] [-
 
 ### 4.2 `<peer-message>` 封装与自适应引导语
 
-封装逻辑抽成共享纯函数（`smelt-model` 或 `smelt-core` 供 Rust 侧用，`agent/src/peer-message.ts` 保持同一格式）：
+封装只有一份：`smelt_model::acp_chat::format_peer_message_text`。非 Pi ACP 由 `acp_host` 写进 prompt；Pi 由会话宿主把它放进通知的 `peer.prompt`，`agent/src/peer-message.ts` 原样写成 `smelt.peer_message`：
 
 ```xml
 <peer-message from="架构师（acp-1234）" id="pm-1a2b3c4d5e6f" kind="task">

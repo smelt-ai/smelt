@@ -82,6 +82,8 @@ export type PeerNoticeFields = {
 	kind: PeerMessageKind;
 	hops: number;
 	replyTo: string | null;
+	/** 写给模型的 `<peer-message>`，主 daemon 写好的。 */
+	prompt: string;
 };
 
 export type TaskCompletionNotice = {
@@ -152,12 +154,14 @@ function parseCompletion(value: unknown): TaskCompletionNotice | undefined {
 function parsePeer(value: unknown): PeerNoticeFields | undefined {
 	const row = value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
 	if (!row || typeof row.sourceSessionId !== "string" || !row.sourceSessionId) return undefined;
+	if (typeof row.prompt !== "string" || !row.prompt) return undefined;
 	return {
 		sourceSessionId: row.sourceSessionId,
 		sourceTitle: typeof row.sourceTitle === "string" ? row.sourceTitle : "",
 		kind: peerMessageKind(row.kind),
 		hops: typeof row.hops === "number" ? row.hops : 0,
 		replyTo: typeof row.replyTo === "string" && row.replyTo ? row.replyTo : null,
+		prompt: row.prompt,
 	};
 }
 

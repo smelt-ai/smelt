@@ -698,18 +698,32 @@ pub(crate) fn dispatch_local_peer_op(
             "This conversation can't message other conversations",
         ));
     }
+    if !crate::peer_tools::is_tool(op) {
+        return Ok(rejected("invalid", format!("Unknown operation {op}")));
+    }
     let courier = Courier {
         acp_sessions: Arc::clone(acp_sessions),
         subscribers: subscribers.clone(),
     };
+    Ok(answer_tool(op, &slot, session_id, &courier, body))
+}
+
+/// 四个跨对话工具的回答，补上回给模型的文字和界面要的 `details`。扩展、MCP、CLI 都走这里。
+fn answer_tool(
+    op: &str,
+    slot: &Arc<AcpSlot<AcpSession>>,
+    session_id: &str,
+    courier: &Courier,
+    body: &serde_json::Value,
+) -> serde_json::Value {
+    let acp_sessions = &courier.acp_sessions;
     let reply = match op {
         "session_list" => list(session_id, acp_sessions, body),
         "session_read" => read(session_id, acp_sessions, body).unwrap_or_else(|error| error),
-        "session_send" => send(&slot, session_id, &courier, body).unwrap_or_else(|error| error),
-        "session_spawn" => spawn(&slot, session_id, &courier, body).unwrap_or_else(|error| error),
-        _ => rejected("invalid", format!("Unknown operation {op}")),
+        "session_send" => send(slot, session_id, courier, body).unwrap_or_else(|error| error),
+        _ => spawn(slot, session_id, courier, body).unwrap_or_else(|error| error),
     };
-    Ok(reply)
+    crate::peer_tools::present(op, body, reply)
 }
 
 /// 起这个 ACP 会话时绑上的应答。来源是 `session_id`，请求体里的字段不算。
@@ -723,6 +737,10 @@ pub(crate) fn bind_peer_handler(
     subscribers: EventHubHandle,
 ) -> smelt_core::background_tasks::PeerRequestHandler {
     Arc::new(move |op, body| {
+        // 工具定义不认来源，会话还没登记好时扩展就来要了。
+        if op == crate::peer_tools::SESSION_TOOLS_OP {
+            return serde_json::json!({"ok": true, "tools": crate::peer_tools::definitions()});
+        }
         let courier = Courier {
             acp_sessions: Arc::clone(&acp_sessions),
             subscribers: subscribers.clone(),
@@ -740,13 +758,8 @@ pub(crate) fn bind_peer_handler(
             );
         }
         match op {
-            "session_list" => list(&session_id, &acp_sessions, body),
-            "session_read" => read(&session_id, &acp_sessions, body).unwrap_or_else(|error| error),
-            "session_send" => {
-                send(&slot, &session_id, &courier, body).unwrap_or_else(|error| error)
-            }
-            "session_spawn" => {
-                spawn(&slot, &session_id, &courier, body).unwrap_or_else(|error| error)
+            op if crate::peer_tools::is_tool(op) => {
+                answer_tool(op, &slot, &session_id, &courier, body)
             }
             "notify" => crate::agent_notify::from_session(
                 &session_id,
