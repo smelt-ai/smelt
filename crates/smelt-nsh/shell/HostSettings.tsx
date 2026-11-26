@@ -1294,26 +1294,26 @@ function PanelPluginsSettingsView(props: { data: () => any }) {
 
 function ThemeDots(props: { swatch: [string, string, string] | null }) {
   const theme = currentTheme;
-  if (!props.swatch) return null;
-  const [bg, fg, accent] = props.swatch;
-  const dot = (color: string) => (
+  const dot = (idx: 0 | 1 | 2) => (
     <View
       style={{
         width: 10,
         height: 10,
         borderRadius: 999,
-        backgroundColor: color,
+        backgroundColor: props.swatch?.[idx] ?? "transparent",
         borderWidth: 1,
         borderColor: theme().palette.hair_strong,
       }}
     />
   );
   return (
-    <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 0 }}>
-      {dot(bg)}
-      {dot(fg)}
-      {dot(accent)}
-    </View>
+    <If when={props.swatch != null}>
+      <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 0 }}>
+        {dot(0)}
+        {dot(1)}
+        {dot(2)}
+      </View>
+    </If>
   );
 }
 
@@ -1629,33 +1629,35 @@ function KeycapRow(props: { caps: string[] }) {
   const theme = currentTheme;
   return (
     <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 2 }}>
-      {props.caps.map((cap) => (
-        <View
-          style={{
-            minWidth: 18,
-            height: 20,
-            paddingLeft: 5,
-            paddingRight: 5,
-            borderRadius: theme().radius.xs,
-            backgroundColor: theme().palette.soft,
-            borderWidth: 1,
-            borderColor: theme().palette.hair,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <Text
+      <Each of={props.caps}>
+        {(cap: () => string) => (
+          <View
             style={{
-              fontSize: theme().type.text_xsmall.size,
-              fontWeight: theme().type.text_xsmall_medium.weight,
-              color: theme().palette.muted,
+              minWidth: 18,
+              height: 20,
+              paddingLeft: 5,
+              paddingRight: 5,
+              borderRadius: theme().radius.xs,
+              backgroundColor: theme().palette.soft,
+              borderWidth: 1,
+              borderColor: theme().palette.hair,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
             }}
           >
-            {cap}
-          </Text>
-        </View>
-      ))}
+            <Text
+              style={{
+                fontSize: theme().type.text_xsmall.size,
+                fontWeight: theme().type.text_xsmall_medium.weight,
+                color: theme().palette.muted,
+              }}
+            >
+              {cap()}
+            </Text>
+          </View>
+        )}
+      </Each>
     </View>
   );
 }
@@ -1706,134 +1708,144 @@ function ShortcutsSettingsView(props: { data: () => any }) {
       <Each of={props.data().groups ?? []} key={(g: any) => g.title}>
         {(group: () => any) => (
           <SettingsSectionCard title={group().title}>
-            {(group().rows ?? []).map((row: any, ix: number) => (
-              <SectionCell dividerAbove={ix > 0}>
-                <View
-                  style={{
-                    display: "flex",
-                    flexDirection: "row",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: 16,
-                    minHeight: 28,
-                    width: "100%",
-                  }}
-                >
-                  <View style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-                    <Text
-                      style={{
-                        fontSize: theme().type.ui.size,
-                        lineHeight: theme().type.ui.line_height,
-                        color: theme().palette.text,
-                      }}
-                    >
-                      {row.title}
-                    </Text>
-                    <If when={row.note != null}>
-                      <Text
-                        style={{
-                          fontSize: theme().type.text_xsmall.size,
-                          lineHeight: theme().type.text_xsmall.line_height,
-                          color:
-                            row.note?.tone === "bad"
-                              ? theme().palette.bad
-                              : theme().palette.muted,
-                        }}
-                      >
-                        {row.note?.text ?? ""}
-                      </Text>
-                    </If>
-                  </View>
-
+            <Each of={group().rows ?? []} key={(r: any) => r.id}>
+              {(row: () => any, ix: () => number) => (
+                <SectionCell dividerAbove={ix() > 0}>
                   <View
                     style={{
                       display: "flex",
                       flexDirection: "row",
-                      flexShrink: 0,
                       alignItems: "center",
-                      gap: 8,
+                      justifyContent: "space-between",
+                      gap: 16,
+                      minHeight: 28,
+                      width: "100%",
                     }}
                   >
-                    <If when={Boolean(row.reassigning)}>
-                      <SmeltButton
-                        quiet={true}
-                        small={true}
-                        label={labels().never_mind ?? ""}
-                        onPress={() =>
-                          sendSettingsAction({ page: "shortcuts", kind: "cancel_reassign" })
-                        }
-                      />
-                      <SmeltButton
-                        small={true}
-                        label={labels().reassign ?? ""}
-                        onPress={() =>
-                          sendSettingsAction({ page: "shortcuts", kind: "confirm_reassign" })
-                        }
-                      />
-                    </If>
-                    <If when={Boolean(row.overridden && !row.recording && !row.reassigning)}>
-                      <SmeltButton
-                        quiet={true}
-                        small={true}
-                        label={labels().reset ?? ""}
-                        onPress={() =>
-                          sendSettingsAction({ page: "shortcuts", kind: "reset", id: row.id })
-                        }
-                      />
-                    </If>
-                    <BaseButton
-                      accessibilityLabel={row.aria_label}
-                      onPress={() =>
-                        sendSettingsAction({ page: "shortcuts", kind: "toggle_record", id: row.id })
-                      }
+                    <View style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+                      <Text
+                        style={{
+                          fontSize: theme().type.ui.size,
+                          lineHeight: theme().type.ui.line_height,
+                          color: theme().palette.text,
+                        }}
+                      >
+                        {row().title}
+                      </Text>
+                      <If when={row().note != null}>
+                        <Text
+                          style={{
+                            fontSize: theme().type.text_xsmall.size,
+                            lineHeight: theme().type.text_xsmall.line_height,
+                            color:
+                              row().note?.tone === "bad"
+                                ? theme().palette.bad
+                                : theme().palette.muted,
+                          }}
+                        >
+                          {row().note?.text ?? ""}
+                        </Text>
+                      </If>
+                    </View>
+
+                    <View
                       style={{
-                        borderRadius: theme().radius.md,
-                        backgroundColor: "transparent",
-                        cursor: "default",
+                        display: "flex",
+                        flexDirection: "row",
+                        flexShrink: 0,
+                        alignItems: "center",
+                        gap: 8,
                       }}
-                      hoverStyle={{ opacity: 0.8 }}
                     >
-                      {row.recording ? (
-                        <KeycapTextBadge text={labels().press ?? ""} focused={true} />
-                      ) : Array.isArray(row.caps) && row.caps.length > 0 ? (
-                        <KeycapRow caps={row.caps} />
-                      ) : (
-                        <KeycapTextBadge text={labels().unset ?? ""} />
-                      )}
-                    </BaseButton>
+                      <If when={Boolean(row().reassigning)}>
+                        <SmeltButton
+                          quiet={true}
+                          small={true}
+                          label={labels().never_mind ?? ""}
+                          onPress={() =>
+                            sendSettingsAction({ page: "shortcuts", kind: "cancel_reassign" })
+                          }
+                        />
+                        <SmeltButton
+                          small={true}
+                          label={labels().reassign ?? ""}
+                          onPress={() =>
+                            sendSettingsAction({ page: "shortcuts", kind: "confirm_reassign" })
+                          }
+                        />
+                      </If>
+                      <If when={Boolean(row().overridden && !row().recording && !row().reassigning)}>
+                        <SmeltButton
+                          quiet={true}
+                          small={true}
+                          label={labels().reset ?? ""}
+                          onPress={() =>
+                            sendSettingsAction({ page: "shortcuts", kind: "reset", id: row().id })
+                          }
+                        />
+                      </If>
+                      <BaseButton
+                        accessibilityLabel={row().aria_label}
+                        onPress={() =>
+                          sendSettingsAction({ page: "shortcuts", kind: "toggle_record", id: row().id })
+                        }
+                        style={{
+                          borderRadius: theme().radius.md,
+                          backgroundColor: "transparent",
+                          cursor: "default",
+                        }}
+                        hoverStyle={{ opacity: 0.8 }}
+                      >
+                        <If
+                          when={Boolean(row().recording)}
+                          else={
+                            <If
+                              when={Array.isArray(row().caps) && row().caps.length > 0}
+                              else={<KeycapTextBadge text={labels().unset ?? ""} />}
+                            >
+                              <KeycapRow caps={row().caps ?? []} />
+                            </If>
+                          }
+                        >
+                          <KeycapTextBadge text={labels().press ?? ""} focused={true} />
+                        </If>
+                      </BaseButton>
+                    </View>
                   </View>
-                </View>
-              </SectionCell>
-            ))}
+                </SectionCell>
+              )}
+            </Each>
           </SettingsSectionCard>
         )}
       </Each>
 
       <SettingsSectionCard title={props.data().view_keys_title}>
-        {(props.data().view_keys ?? []).map((item: any, ix: number) => (
-          <SectionCell dividerAbove={ix > 0}>
-            <View
-              style={{
-                display: "flex",
-                flexDirection: "row",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 16,
-                minHeight: 28,
-                width: "100%",
-              }}
-            >
-              <Text style={{ fontSize: theme().type.ui.size, color: theme().palette.text }}>
-                {item.label}
-              </Text>
-              <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 6 }}>
-                {(item.steps ?? []).map((caps: string[]) => (
-                  <KeycapRow caps={caps} />
-                ))}
+        <Each of={props.data().view_keys ?? []}>
+          {(item: () => any, ix: () => number) => (
+            <SectionCell dividerAbove={ix() > 0}>
+              <View
+                style={{
+                  display: "flex",
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 16,
+                  minHeight: 28,
+                  width: "100%",
+                }}
+              >
+                <Text style={{ fontSize: theme().type.ui.size, color: theme().palette.text }}>
+                  {item().label}
+                </Text>
+                <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 6 }}>
+                  <Each of={item().steps ?? []}>
+                    {(caps: () => string[]) => <KeycapRow caps={caps()} />}
+                  </Each>
+                </View>
               </View>
-            </View>
-          </SectionCell>
-        ))}
+            </SectionCell>
+          )}
+        </Each>
       </SettingsSectionCard>
     </SettingsPageLayout>
   );

@@ -69,7 +69,7 @@ pub(crate) fn register(cx: &mut App) {
     let handle = LanguageChoice {
         entity: entity.clone(),
     };
-    cx.set_global(handle.clone());
+    cx.set_global(handle);
     cx.observe(&entity, move |entity, cx| {
         let next = *entity.read(cx);
         let code = next.unwrap_or_else(|| api::system_locale());

@@ -103,33 +103,6 @@ const DEFAULT_FONT: &str = "Droid Sans Mono";
 )))]
 const DEFAULT_FONT: &str = "monospace";
 
-/// A realtime performance HUD: frames per second, a rolling frame time chart,
-/// and this process' GPU, CPU and memory usage.
-///
-/// This is a view rather than a stateless component on purpose: driving
-/// redraws goes through [`Window::request_animation_frame`], which notifies the
-/// *current* view, and from inside a stateless component that would be whoever
-/// rendered the HUD — dirtying the host's own state to move a frame counter.
-///
-/// The HUD never asks for a frame of its own. A dirty view schedules a *window*
-/// draw and GPUI re-renders every view outside an [`Entity::cached`] boundary,
-/// so a HUD that drove the frame loop to keep its counter moving would be
-/// paying a full layout and paint per frame — and reporting that cost in the
-/// resource row as if it were the application's. The headline is derived from
-/// what a frame costs instead, which answers the same question for free and
-/// leaves the readings measuring the application alone.
-///
-/// The one frame the HUD does cause — the readout clock dirtying the window to
-/// move the digits — announces itself to the sampler and is left out of the
-/// readings, unless the application asked for that frame as well.
-///
-/// ```no_run
-/// # use gpui::*;
-/// # use gpui_fps::FpsMonitor;
-/// # fn example(window: &mut Window, cx: &mut App) {
-/// let monitor = cx.new(|cx| FpsMonitor::new(window, cx).capacity(240));
-/// # }
-/// ```
 /// The numbers as last published to the screen.
 #[derive(Clone, Copy, Default)]
 struct Readout {
@@ -199,6 +172,33 @@ enum Headline {
     Observed,
 }
 
+/// A realtime performance HUD: frames per second, a rolling frame time chart,
+/// and this process' GPU, CPU and memory usage.
+///
+/// This is a view rather than a stateless component on purpose: driving
+/// redraws goes through [`Window::request_animation_frame`], which notifies the
+/// *current* view, and from inside a stateless component that would be whoever
+/// rendered the HUD — dirtying the host's own state to move a frame counter.
+///
+/// The HUD never asks for a frame of its own. A dirty view schedules a *window*
+/// draw and GPUI re-renders every view outside an [`gpui::Entity::cached`] boundary,
+/// so a HUD that drove the frame loop to keep its counter moving would be
+/// paying a full layout and paint per frame — and reporting that cost in the
+/// resource row as if it were the application's. The headline is derived from
+/// what a frame costs instead, which answers the same question for free and
+/// leaves the readings measuring the application alone.
+///
+/// The one frame the HUD does cause — the readout clock dirtying the window to
+/// move the digits — announces itself to the sampler and is left out of the
+/// readings, unless the application asked for that frame as well.
+///
+/// ```no_run
+/// # use gpui::*;
+/// # use smelt_fps::FpsMonitor;
+/// # fn example(window: &mut Window, cx: &mut App) {
+/// let monitor = cx.new(|cx| FpsMonitor::new(window, cx).capacity(240));
+/// # }
+/// ```
 pub struct FpsMonitor {
     sampler: FrameSampler,
     readout: Readout,
@@ -683,7 +683,7 @@ impl Render for FpsMonitor {
         };
 
         div()
-            .id("gpui-fps-hud")
+            .id("smelt-fps-hud")
             .flex()
             .bg(style.background)
             .font_family(DEFAULT_FONT)

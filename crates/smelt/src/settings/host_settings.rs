@@ -450,7 +450,7 @@ impl Workspace {
         let image_name = appearance
             .bg_image
             .as_deref()
-            .and_then(|path| path.rsplit('/').next())
+            .and_then(|path| path.rsplit(['/', '\\']).next())
             .map(str::to_string);
         let has_image = image_name.is_some();
 
@@ -606,7 +606,8 @@ impl Workspace {
             }
             Some("set_ui_font_px") => {
                 if let Some(px) = action["px"].as_u64() {
-                    let size = (px as u32).clamp(MIN_UI_FONT_PX, MAX_UI_FONT_PX);
+                    let size =
+                        px.clamp(u64::from(MIN_UI_FONT_PX), u64::from(MAX_UI_FONT_PX)) as u32;
                     apply_appearance(move |a| a.ui_font_px = size, cx);
                     cx.refresh_windows();
                 }

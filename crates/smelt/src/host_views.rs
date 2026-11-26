@@ -19,10 +19,11 @@ use crate::Workspace;
 /// 宿主自己登记视图、页和布局用的来源。
 pub(crate) const HOST_OWNER: &str = "smelt";
 
+pub(crate) type ViewBuilder = Rc<dyn Fn(&mut Window, &mut gpui::App) -> Rc<dyn ViewHandle>>;
+
 /// 由 NSH 主壳（`MainShell.tsx` / `HostSettings.tsx`）直接渲染的宿主视图占位构造器：
 /// 视图仍登记在全局视图注册表里以参与导航、角标、路由与搜索，渲染由 NSH 主壳接管。
-pub(crate) fn nsh_managed_view_builder()
--> Rc<dyn Fn(&mut Window, &mut gpui::App) -> Rc<dyn ViewHandle>> {
+pub(crate) fn nsh_managed_view_builder() -> ViewBuilder {
     Rc::new(|_, cx| Rc::new(cx.new(|_| NshManagedView)) as Rc<dyn ViewHandle>)
 }
 

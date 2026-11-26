@@ -17,7 +17,7 @@ use smelt_plugin_api::{
     RuntimeKey,
     client::{Connector, RuntimeStream, protocol::daemon::DaemonOperation},
 };
-use smelt_terminal::{TerminalCanvas, TerminalLabels, TerminalSpec};
+use smelt_terminal::{TerminalCanvas, TerminalSpec};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BenchTerminalMode {
@@ -237,8 +237,7 @@ pub fn spawn_real_terminal(
     cx: &mut App,
 ) -> Entity<TerminalCanvas> {
     smelt_terminal::bind_keys(cx);
-    let canvas =
-        cx.new(|cx| TerminalCanvas::new(TerminalLabels::default(), None, None, window, cx));
+    let canvas = cx.new(|cx| TerminalCanvas::new(None, window, cx));
     let spec = TerminalSpec {
         machine: RuntimeKey::Local,
         session_id: session_id.to_owned(),
