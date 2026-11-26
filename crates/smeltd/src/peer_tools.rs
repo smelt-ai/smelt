@@ -18,14 +18,148 @@ const READ: &str = "session_read";
 const SEND: &str = "session_send";
 const SPAWN: &str = "session_spawn";
 
-/// 应答函数答的工具，按定义的先后。
-pub(crate) fn is_tool(op: &str) -> bool {
-    matches!(op, LIST | READ | SEND | SPAWN)
+const GROUP_POST: &str = "group_post";
+const GROUP_YIELD: &str = "group_yield";
+const GROUP_READ: &str = "group_read";
+const GROUP_MEMBERS: &str = "group_members";
+const GROUP_TASK_UPDATE: &str = "group_task_update";
+
+/// 群组工具清单（PR 1 本地智能体群组）。
+pub(crate) fn is_group_tool(op: &str) -> bool {
+    matches!(
+        op,
+        GROUP_POST | GROUP_YIELD | GROUP_READ | GROUP_MEMBERS | GROUP_TASK_UPDATE
+    )
 }
 
-/// 只读工具：不修改任何会话状态，也不唤醒对方（与 Pi 侧 `smelt-permission.ts` 的免审批边界一致）。
+/// 应答函数答的工具，按定义的先后（含跨对话工具与群组工具）。
+pub(crate) fn is_tool(op: &str) -> bool {
+    matches!(op, LIST | READ | SEND | SPAWN) || is_group_tool(op)
+}
+
+/// 只读工具：不修改任何会话或群组状态，也不唤醒对方（与 Pi 侧 `smelt-permission.ts` 的免审批边界一致）。
 pub(crate) fn is_read_only(op: &str) -> bool {
-    matches!(op, LIST | READ)
+    matches!(op, LIST | READ | GROUP_READ | GROUP_MEMBERS)
+}
+
+/// 根据当前会话是否属于某个活跃群组，返回对应工具定义集合。
+pub(crate) fn definitions_for(include_group_tools: bool) -> Value {
+    let mut list = definitions().as_array().cloned().unwrap_or_default();
+    if include_group_tools {
+        list.extend(group_definitions());
+    }
+    Value::Array(list)
+}
+
+fn group_definitions() -> Vec<Value> {
+    vec![
+        json!({
+            "name": GROUP_POST,
+            "label": "群内发言",
+            "description": "在所属的 Smelt 智能体群组里发布一条消息。仅当需要其他成员行动时在正文中使用 @alias 或 @all；避免无意义回复。",
+            "promptSnippet": "Post a message, task, or decision to a Smelt agent group you belong to",
+            "promptGuidelines": [
+                "Use group_post to reply inside a group you belong to instead of session_send.",
+                "Mention @alias only when that member needs to take action."
+            ],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_id": { "type": "string", "description": "群组 ID（如 grp-…）" },
+                    "content": { "type": "string", "description": "消息正文（支持 Markdown 与 @alias）" },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["chat", "task", "decision"],
+                        "description": "消息类型：chat（默认）、task（任务）、decision（结论）"
+                    },
+                    "reply_to_seq": { "type": "integer", "minimum": 1, "description": "可选：回复的消息序号" },
+                    "task_status": {
+                        "type": "string",
+                        "enum": ["open", "in_progress", "done", "blocked"],
+                        "description": "可选：当 kind=task 时的初始状态，默认 open"
+                    },
+                    "idempotency_key": { "type": "string", "description": "可选：幂等键，防止重复发言" }
+                },
+                "required": ["group_id", "content"]
+            }
+        }),
+        json!({
+            "name": GROUP_YIELD,
+            "label": "跳过发言",
+            "description": "显式表明本次群组消息无需你回复，并推进你在该群的已读游标。",
+            "promptSnippet": "Acknowledge group messages without posting a reply",
+            "promptGuidelines": [
+                "Use group_yield when you read a group wake and have nothing to add."
+            ],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_id": { "type": "string", "description": "群组 ID" },
+                    "up_to_seq": { "type": "integer", "minimum": 1, "description": "可选：已读到的消息序号" },
+                    "reason": { "type": "string", "description": "可选：简短说明为何无需发言" }
+                },
+                "required": ["group_id"]
+            }
+        }),
+        json!({
+            "name": GROUP_READ,
+            "label": "读取群消息",
+            "description": "读取所属群组的最近消息（只读，不唤醒任何成员）。",
+            "promptSnippet": "Read recent messages from a Smelt agent group you belong to",
+            "promptGuidelines": [
+                "Use group_read to inspect earlier group context without posting."
+            ],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_id": { "type": "string", "description": "群组 ID" },
+                    "since_seq": { "type": "integer", "minimum": 0, "description": "可选：只看大于该序号的消息" },
+                    "before_seq": { "type": "integer", "minimum": 1, "description": "可选：只看小于该序号的消息" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "最多条数，默认 30" },
+                    "pinned_only": { "type": "boolean", "description": "是否仅看置顶消息" }
+                },
+                "required": ["group_id"]
+            }
+        }),
+        json!({
+            "name": GROUP_MEMBERS,
+            "label": "查看群成员",
+            "description": "列出所属群组里的活跃成员、别名与角色（只读）。",
+            "promptSnippet": "List active members and roles in a Smelt agent group",
+            "promptGuidelines": [
+                "Use group_members to check valid @alias names and roles before mentioning teammates."
+            ],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_id": { "type": "string", "description": "群组 ID" }
+                },
+                "required": ["group_id"]
+            }
+        }),
+        json!({
+            "name": GROUP_TASK_UPDATE,
+            "label": "更新群任务状态",
+            "description": "更新群组里一条任务消息的状态（open / in_progress / done / blocked）。",
+            "promptSnippet": "Update the status of a task message in a Smelt agent group",
+            "promptGuidelines": [
+                "Use group_task_update when starting, blocking, or finishing a group task."
+            ],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_id": { "type": "string", "description": "群组 ID" },
+                    "seq": { "type": "integer", "minimum": 1, "description": "任务消息序号" },
+                    "task_status": {
+                        "type": "string",
+                        "enum": ["open", "in_progress", "done", "blocked"],
+                        "description": "目标状态"
+                    }
+                },
+                "required": ["group_id", "seq", "task_status"]
+            }
+        }),
+    ]
 }
 
 /// 四个工具的定义：`name`、`label`、`description`、`promptSnippet`、`promptGuidelines`、
@@ -190,7 +324,7 @@ fn answered(op: &str, body: &Value, reply: &Value) -> (String, Value) {
                 "status": field("status"),
             }),
         ),
-        _ => (
+        SPAWN => (
             spawn_text(reply),
             json!({
                 "to": field("to"),
@@ -200,7 +334,128 @@ fn answered(op: &str, body: &Value, reply: &Value) -> (String, Value) {
                 "spawned": true,
             }),
         ),
+        GROUP_POST => (
+            group_post_text(reply),
+            json!({
+                "groupId": field("group_id"),
+                "messageId": field("message_id"),
+                "seq": field("seq"),
+                "mentions": field("mentions"),
+            }),
+        ),
+        GROUP_YIELD => (
+            group_yield_text(reply),
+            json!({
+                "groupId": field("group_id"),
+                "lastReadSeq": field("last_read_seq"),
+            }),
+        ),
+        GROUP_READ => (
+            group_read_text(reply),
+            json!({
+                "groupId": field("group_id"),
+                "count": array(reply, "messages").len(),
+            }),
+        ),
+        GROUP_MEMBERS => (
+            group_members_text(reply),
+            json!({
+                "groupId": field("group_id"),
+                "count": array(reply, "members").len(),
+            }),
+        ),
+        _ => (
+            group_task_update_text(reply),
+            json!({
+                "groupId": field("group_id"),
+                "seq": field("seq"),
+                "taskStatus": field("task_status"),
+            }),
+        ),
     }
+}
+
+fn group_post_text(reply: &Value) -> String {
+    let seq = reply.get("seq").and_then(Value::as_i64).unwrap_or(0);
+    let mentions = array(reply, "mentions");
+    if mentions.is_empty() {
+        return format!("已在群内发布消息 #{seq}（未唤醒其他成员）。");
+    }
+    let summary: Vec<String> = mentions
+        .iter()
+        .map(|m| {
+            let alias = str_of(m, "target_alias").unwrap_or("?");
+            let status = str_of(m, "delivery_status").unwrap_or("queued");
+            format!("@{alias}:{status}")
+        })
+        .collect();
+    format!("已在群内发布消息 #{seq}（{}）。", summary.join(", "))
+}
+
+fn group_yield_text(reply: &Value) -> String {
+    let seq = reply
+        .get("last_read_seq")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    format!("已确认本次无需发言（已读游标 #{seq}）。")
+}
+
+fn group_read_text(reply: &Value) -> String {
+    let messages = array(reply, "messages");
+    if messages.is_empty() {
+        return "群内暂时没有更多消息。".to_string();
+    }
+    let mut lines = Vec::with_capacity(messages.len());
+    for msg in messages {
+        let seq = msg.get("seq").and_then(Value::as_i64).unwrap_or(0);
+        let sender = str_of(msg, "sender_alias")
+            .map(|a| format!("@{a}"))
+            .or_else(|| str_of(msg, "sender_display_name").map(str::to_string))
+            .unwrap_or_else(|| "user".to_string());
+        let kind = str_of(msg, "kind").unwrap_or("chat");
+        let tag = if kind == "task" {
+            format!(" [task:{}]", str_of(msg, "task_status").unwrap_or("open"))
+        } else if kind != "chat" {
+            format!(" [{kind}]")
+        } else {
+            String::new()
+        };
+        let content = str_of(msg, "content").unwrap_or("");
+        lines.push(format!("#{seq}{tag} {sender}: {content}"));
+    }
+    lines.join("\n\n")
+}
+
+fn group_members_text(reply: &Value) -> String {
+    let members = array(reply, "members");
+    if members.is_empty() {
+        return "群内没有活跃成员。".to_string();
+    }
+    members
+        .iter()
+        .map(|m| {
+            let alias = str_of(m, "alias").unwrap_or("?");
+            let role = str_of(m, "role_kind").unwrap_or("worker");
+            let title = str_of(m, "role_title").unwrap_or("");
+            let muted = m.get("muted").and_then(Value::as_bool) == Some(true);
+            let mut line = format!("- @{alias} [{role}]");
+            if !title.is_empty() {
+                line.push_str(" · ");
+                line.push_str(title);
+            }
+            if muted {
+                line.push_str(" (muted)");
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn group_task_update_text(reply: &Value) -> String {
+    let seq = reply.get("seq").and_then(Value::as_i64).unwrap_or(0);
+    let status = str_of(reply, "task_status").unwrap_or("open");
+    format!("已将任务 #{seq} 状态更新为 {status}。")
 }
 
 /// 没办成：原因回给模型。发消息、起对话照样带上发给谁，界面画成没送到的那一行。

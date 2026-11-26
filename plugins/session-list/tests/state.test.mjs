@@ -226,3 +226,28 @@ test("启动时对端命令尚未登记不弹错，commands_changed 到来后再
     "smelt.agents/agent-settings",
   ]);
 });
+
+test("group.changed 里的 group_owned_session_ids 会从侧栏隐藏，linked 会话照常保留", () => {
+  const host = fake_host();
+  const sessions = list(host);
+  sessions.rebuild();
+  expect(sessions.sidebar.has_session({ machine: null, id: "p" })).toBe(true);
+  expect(sessions.sidebar.has_session({ machine: null, id: "w" })).toBe(true);
+
+  sessions.on_event({
+    type: "runtime_topic",
+    machine: null,
+    topic: "group.changed",
+    message: { kind: "snapshot", payload: { group_owned_session_ids: ["p-t"] } },
+  });
+  expect(sessions.sidebar.has_session({ machine: null, id: "p" })).toBe(false);
+  expect(sessions.sidebar.has_session({ machine: null, id: "w" })).toBe(true);
+
+  sessions.on_event({
+    type: "runtime_topic",
+    machine: null,
+    topic: "group.changed",
+    message: { kind: "event", payload: { group_owned_session_ids: [] } },
+  });
+  expect(sessions.sidebar.has_session({ machine: null, id: "p" })).toBe(true);
+});

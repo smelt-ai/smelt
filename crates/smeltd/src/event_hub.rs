@@ -14,13 +14,15 @@ use smelt_event_bus::{
 };
 use smelt_event_protocol::{
     AggregateRef, AttentionKind, CORE_SNAPSHOT_AGENT_HOST, CORE_SNAPSHOT_ATTENTION,
-    CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_NEW_SESSION_CATALOG, CORE_SNAPSHOT_SESSIONS,
-    CORE_SNAPSHOT_WORKSPACE, CORE_TOPIC_AGENT_HOST_CHANGED, CORE_TOPIC_AUTOMATIONS_CHANGED,
-    CORE_TOPIC_CONVERSATION_WAKE_REQUESTED, CORE_TOPIC_NEW_SESSION_CATALOG_CHANGED,
-    CORE_TOPIC_SESSION_REMOVED, CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_WORKSPACE_CHANGED,
-    Capability, ConversationWakeRequested, CoreProjectionEvent, CoreSessionPhase, CorrelationId,
-    EventEnvelope, EventId, EventSource, PluginId, PublisherIdentity, SessionStateChanged,
-    SessionStateRemoved, SessionStatesSnapshot, SnapshotKind, SubscriptionId, Topic,
+    CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_GROUPS, CORE_SNAPSHOT_NEW_SESSION_CATALOG,
+    CORE_SNAPSHOT_SESSIONS, CORE_SNAPSHOT_WORKSPACE, CORE_TOPIC_AGENT_HOST_CHANGED,
+    CORE_TOPIC_AUTOMATIONS_CHANGED, CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
+    CORE_TOPIC_GROUP_MESSAGE_APPENDED, CORE_TOPIC_GROUPS_CHANGED,
+    CORE_TOPIC_NEW_SESSION_CATALOG_CHANGED, CORE_TOPIC_SESSION_REMOVED,
+    CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_WORKSPACE_CHANGED, Capability,
+    ConversationWakeRequested, CoreProjectionEvent, CoreSessionPhase, CorrelationId, EventEnvelope,
+    EventId, EventSource, PluginId, PublisherIdentity, SessionStateChanged, SessionStateRemoved,
+    SessionStatesSnapshot, SnapshotKind, SubscriptionId, Topic,
 };
 
 use super::{
@@ -148,6 +150,22 @@ impl SnapshotProvider for AgentHostSnapshotProvider {
             watermark,
             revision: 0,
             payload: serde_json::to_value(settings)
+                .map_err(|error| EventBusError::new(error.to_string()))?,
+        })
+    }
+}
+
+/// 群组快照现读运行时 SQLite 库，零冗余缓存。
+struct GroupsSnapshotProvider;
+
+impl SnapshotProvider for GroupsSnapshotProvider {
+    fn snapshot(&self, kind: &SnapshotKind, watermark: u64) -> Result<Snapshot, EventBusError> {
+        let snapshot = crate::group_runtime::groups_snapshot_or_empty();
+        Ok(Snapshot {
+            kind: kind.clone(),
+            watermark,
+            revision: snapshot.revision,
+            payload: serde_json::to_value(snapshot)
                 .map_err(|error| EventBusError::new(error.to_string()))?,
         })
     }
@@ -980,6 +998,41 @@ impl DaemonEventHub {
         Ok(true)
     }
 
+    pub(crate) fn publish_groups_changed(&self) -> Result<(), EventBusError> {
+        let topic = Topic::new(CORE_TOPIC_GROUPS_CHANGED).expect("registered core topic is valid");
+        if !self.hub.has_subscriber(&topic)? {
+            return Ok(());
+        }
+        let snapshot = crate::group_runtime::groups_snapshot_or_empty();
+        self.publish_core(
+            CORE_TOPIC_GROUPS_CHANGED,
+            serde_json::to_value(snapshot).map_err(|error| {
+                EventBusError::new(format!("serialize groups snapshot: {error}"))
+            })?,
+            None,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn publish_group_message_appended(
+        &self,
+        event: &smelt_core::agent_group::GroupMessageAppendedEvent,
+    ) -> Result<(), EventBusError> {
+        let topic =
+            Topic::new(CORE_TOPIC_GROUP_MESSAGE_APPENDED).expect("registered core topic is valid");
+        if !self.hub.has_subscriber(&topic)? {
+            return Ok(());
+        }
+        self.publish_core(
+            CORE_TOPIC_GROUP_MESSAGE_APPENDED,
+            serde_json::to_value(event).map_err(|error| {
+                EventBusError::new(format!("serialize group message appended: {error}"))
+            })?,
+            None,
+        )?;
+        Ok(())
+    }
+
     fn publish_core(
         &self,
         topic: &str,
@@ -1092,6 +1145,10 @@ fn register_snapshot_providers(
     hub.register_snapshot_provider(
         SnapshotKind(CORE_SNAPSHOT_AGENT_HOST.to_string()),
         Arc::new(AgentHostSnapshotProvider),
+    )?;
+    hub.register_snapshot_provider(
+        SnapshotKind(CORE_SNAPSHOT_GROUPS.to_string()),
+        Arc::new(GroupsSnapshotProvider),
     )?;
     hub.register_snapshot_provider(
         SnapshotKind(CORE_SNAPSHOT_NEW_SESSION_CATALOG.to_string()),

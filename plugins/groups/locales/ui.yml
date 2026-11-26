@@ -1,0 +1,329 @@
+_version: 2
+view:
+  title:
+    en: "Groups"
+    zh-CN: "群组"
+menu:
+  create_for_project:
+    en: "New agent group"
+    zh-CN: "新建智能体群组"
+  add_conversation:
+    en: "Add to agent group"
+    zh-CN: "加入智能体群组"
+list:
+  title:
+    en: "Groups"
+    zh-CN: "群组"
+  new:
+    en: "New group"
+    zh-CN: "新建群组"
+  empty:
+    en: "No groups yet"
+    zh-CN: "还没有群组"
+  empty_hint:
+    en: "Create a group to coordinate multiple agents in one shared timeline."
+    zh-CN: "新建一个群组，在同一条时间线里协同多个智能体。"
+  members_count:
+    en: "%{count} members"
+    zh-CN: "%{count} 位成员"
+  paused:
+    en: "Paused"
+    zh-CN: "已暂停"
+  archived:
+    en: "Archived"
+    zh-CN: "已归档"
+  pending_approvals:
+    en: "%{count} pending"
+    zh-CN: "%{count} 待审批"
+header:
+  add_member:
+    en: "Add member"
+    zh-CN: "添加成员"
+  pause:
+    en: "Pause"
+    zh-CN: "暂停"
+  resume:
+    en: "Resume"
+    zh-CN: "继续"
+  archive:
+    en: "Archive"
+    zh-CN: "归档"
+  delete:
+    en: "Delete"
+    zh-CN: "删除"
+  drawer_show:
+    en: "Inspector"
+    zh-CN: "成员与任务"
+  drawer_hide:
+    en: "Hide inspector"
+    zh-CN: "收起侧栏"
+  mode_mention:
+    en: "Mention"
+    zh-CN: "自由 @"
+  mode_coordinator:
+    en: "Coordinator"
+    zh-CN: "协调者模式"
+timeline:
+  empty:
+    en: "No messages yet"
+    zh-CN: "还没有消息"
+  load_earlier:
+    en: "Load earlier"
+    zh-CN: "加载更早消息"
+  reply_to:
+    en: "Replying to #%{seq}"
+    zh-CN: "回复 #%{seq}"
+  cancel_reply:
+    en: "Cancel"
+    zh-CN: "取消"
+  pinned:
+    en: "Pinned"
+    zh-CN: "已置顶"
+  pin:
+    en: "Pin"
+    zh-CN: "置顶"
+  unpin:
+    en: "Unpin"
+    zh-CN: "取消置顶"
+  reply:
+    en: "Reply"
+    zh-CN: "回复"
+  auto_bridged:
+    en: "Auto-bridged"
+    zh-CN: "自动桥接"
+  user_sender:
+    en: "You"
+    zh-CN: "你"
+  system_sender:
+    en: "System"
+    zh-CN: "系统"
+  kind_chat:
+    en: "Chat"
+    zh-CN: "消息"
+  kind_task:
+    en: "Task"
+    zh-CN: "任务"
+  kind_decision:
+    en: "Decision"
+    zh-CN: "结论"
+composer:
+  placeholder:
+    en: "Message or @mention"
+    zh-CN: "发消息或 @成员"
+  send:
+    en: "Send"
+    zh-CN: "发送"
+  kind_chat:
+    en: "Message"
+    zh-CN: "普通消息"
+  kind_task:
+    en: "Task"
+    zh-CN: "任务"
+  kind_decision:
+    en: "Decision"
+    zh-CN: "结论"
+approval:
+  title:
+    en: "Approval needed to wake @%{alias}"
+    zh-CN: "需要你的批准才能唤醒 @%{alias}"
+  detail:
+    en: "A read-only or lower-privilege member requested waking a higher-privilege member."
+    zh-CN: "只读或较低权限成员请求唤醒更高权限成员。"
+  approve:
+    en: "Approve"
+    zh-CN: "批准"
+  reject:
+    en: "Reject"
+    zh-CN: "拒绝"
+mention_status:
+  queued:
+    en: "Queued"
+    zh-CN: "排队中"
+  pending_approval:
+    en: "Needs approval"
+    zh-CN: "待审批"
+  delivered:
+    en: "Delivered"
+    zh-CN: "已送达"
+  coalesced:
+    en: "Coalesced"
+    zh-CN: "已合并"
+  skipped:
+    en: "Skipped"
+    zh-CN: "已跳过"
+  rejected:
+    en: "Rejected"
+    zh-CN: "已拒绝"
+  failed:
+    en: "Failed"
+    zh-CN: "投递失败"
+drawer:
+  tab_conversation:
+    en: "Member"
+    zh-CN: "成员对话"
+  tab_tasks:
+    en: "Tasks"
+    zh-CN: "任务"
+  tab_settings:
+    en: "Settings"
+    zh-CN: "设置"
+  select_member:
+    en: "Select a member to inspect their conversation."
+    zh-CN: "点击成员可查看其实时对话。"
+  no_tasks:
+    en: "No open tasks"
+    zh-CN: "没有进行中的任务"
+  wake:
+    en: "Wake"
+    zh-CN: "唤醒"
+  mute:
+    en: "Mute"
+    zh-CN: "静音"
+  unmute:
+    en: "Unmute"
+    zh-CN: "取消静音"
+  remove:
+    en: "Remove"
+    zh-CN: "移出"
+  ownership_owned:
+    en: "Group session"
+    zh-CN: "群专属"
+  ownership_linked:
+    en: "Linked"
+    zh-CN: "已有会话"
+  auto_bridge_label:
+    en: "Auto-bridge mentions"
+    zh-CN: "自动桥接 @ 提及"
+  auto_bridge_hint:
+    en: "Bridge a member's final reply into the group when it mentions @alias without calling group_post."
+    zh-CN: "成员回合结束未调 group_post 但回复里包含有效 @alias 时自动桥接进群。"
+  cross_talk_label:
+    en: "Allow worker cross-talk"
+    zh-CN: "允许成员互 @"
+  cross_talk_hint:
+    en: "When off, non-coordinator members can only wake the coordinator."
+    zh-CN: "关闭后，非协调者成员只能唤醒协调者。"
+task_status:
+  open:
+    en: "Open"
+    zh-CN: "待处理"
+  in_progress:
+    en: "In progress"
+    zh-CN: "进行中"
+  done:
+    en: "Done"
+    zh-CN: "已完成"
+  blocked:
+    en: "Blocked"
+    zh-CN: "阻塞"
+role:
+  coordinator:
+    en: "Coordinator"
+    zh-CN: "协调者"
+  worker:
+    en: "Worker"
+    zh-CN: "执行者"
+  reviewer:
+    en: "Reviewer"
+    zh-CN: "审阅者"
+  observer:
+    en: "Observer"
+    zh-CN: "观察者"
+dialog:
+  cancel:
+    en: "Cancel"
+    zh-CN: "取消"
+  create_title:
+    en: "New group"
+    zh-CN: "新建群组"
+  create_confirm:
+    en: "Create"
+    zh-CN: "创建"
+  group_title_label:
+    en: "Name"
+    zh-CN: "名称"
+  group_title_placeholder:
+    en: "API review"
+    zh-CN: "例如：API 方案评审"
+  group_desc_label:
+    en: "Goal"
+    zh-CN: "目标说明"
+  group_desc_placeholder:
+    en: "Optional context shared in the first briefing"
+    zh-CN: "可选：首条简报中共享给所有成员的背景"
+  group_mode_label:
+    en: "Routing"
+    zh-CN: "路由模式"
+  add_member_title:
+    en: "Add member"
+    zh-CN: "添加成员"
+  add_member_confirm:
+    en: "Add"
+    zh-CN: "添加"
+  ownership_label:
+    en: "Source"
+    zh-CN: "来源"
+  ownership_new:
+    en: "New conversation"
+    zh-CN: "新建群专属对话"
+  ownership_link:
+    en: "Link existing conversation"
+    zh-CN: "挂接已有对话"
+  alias_label:
+    en: "Alias"
+    zh-CN: "别名（@alias）"
+  alias_placeholder:
+    en: "coder"
+    zh-CN: "例如：coder"
+  agent_label:
+    en: "Agent"
+    zh-CN: "智能体"
+  session_label:
+    en: "Conversation"
+    zh-CN: "已有对话"
+  no_linkable_sessions:
+    en: "No available conversations to link"
+    zh-CN: "没有可挂接的活跃对话"
+  role_label:
+    en: "Role"
+    zh-CN: "角色"
+  role_prompt_label:
+    en: "Role instructions"
+    zh-CN: "角色指令"
+  role_prompt_placeholder:
+    en: "Optional instructions included in the member briefing"
+    zh-CN: "可选：附带在成员简报中的职责说明"
+  delete_title:
+    en: "Delete group?"
+    zh-CN: "删除该群组？"
+  delete_body:
+    en: "This removes the group timeline and its group-owned sessions. Linked conversations stay untouched."
+    zh-CN: "将删除群组记录与群专属会话；挂接的已有对话不受影响。"
+  delete_confirm:
+    en: "Delete"
+    zh-CN: "删除"
+error:
+  load_failed:
+    en: "Couldn't load groups: %{error}"
+    zh-CN: "加载群组失败：%{error}"
+  action_failed:
+    en: "Action failed: %{error}"
+    zh-CN: "操作失败：%{error}"
+  alias_length:
+    en: "Alias must be 1 to 32 characters."
+    zh-CN: "别名需为 1 到 32 个字符。"
+  alias_format:
+    en: "Use lowercase letters, digits, '-' or '_', starting with a letter or digit."
+    zh-CN: "仅支持小写字母、数字、- 和 _，且需以字母或数字开头。"
+  alias_reserved:
+    en: "Alias '@%{alias}' is reserved."
+    zh-CN: "别名 @%{alias} 为保留字。"
+  title_required:
+    en: "Enter a group name."
+    zh-CN: "请填写群组名称。"
+  session_required:
+    en: "Choose a conversation to link."
+    zh-CN: "请选择要挂接的对话。"
+  no_groups_to_add:
+    en: "Create a group first before adding a conversation."
+    zh-CN: "请先创建一个群组，再将对话加入其中。"

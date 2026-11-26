@@ -1,0 +1,9 @@
+{
+  "id": "smelt.groups",
+  "name": "Groups",
+  "version": "1.0.0",
+  "entry": "nsh/main.tsx",
+  "requires": [
+    "smelt/conversation"
+  ]
+}

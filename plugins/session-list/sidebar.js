@@ -325,6 +325,7 @@ export function build_sidebar(input) {
         directory: data.directory,
         states: data.states,
         facts: data.facts,
+        hidden_sessions: data.hidden_sessions ?? null,
         agents: input.agent_names.get(machine_key(machine.machine)) ?? new Map(),
         unread: unread_ids(data.attention),
         link,
@@ -446,6 +447,12 @@ function fill_machine(input, ui, projects, agent_rows) {
   input.directory.conversations.forEach((conversation, ix) => {
     const fact = input.facts[ix];
     if (!fact || fact.id !== conversation.id) return;
+    if (
+      input.hidden_sessions?.size > 0 &&
+      session_ids(conversation).some((id) => input.hidden_sessions.has(id))
+    ) {
+      return;
+    }
     const placement = fact.placement;
     if (placement.kind === "conversations") {
       agent_rows.push(session_row(conversation, fact, input, ui, { kind: "conversations" }, input.remote_name));

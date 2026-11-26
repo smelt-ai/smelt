@@ -132,6 +132,13 @@ pub const CORE_TOPIC_FS_USAGE_PROGRESS: &str = "fs.usage.progress";
 /// 加在事件协议 v7 之后、没有升版本，同 [`CORE_TOPIC_AGENT_HOST_CHANGED`] 只放在单独的一条
 /// 订阅里；不认识该话题的旧运行时只会拒掉那一条。
 pub const CORE_TOPIC_NEW_SESSION_CATALOG_CHANGED: &str = "new_session.catalog_changed";
+/// 本地智能体群组摘要、成员列表或群组持有会话清单变了，带快照 [`CORE_SNAPSHOT_GROUPS`]。
+///
+/// 加在事件协议 v7 之后、没有升版本，单独占一条订阅；不认识该话题的旧运行时只会拒掉那一条。
+pub const CORE_TOPIC_GROUPS_CHANGED: &str = "group.changed";
+/// 某群组追加了一条消息，载荷为 `smelt_model::agent_group::GroupMessageAppendedEvent`。
+/// 与 [`CORE_TOPIC_GROUPS_CHANGED`] 一样单独订阅、不进核心订阅。
+pub const CORE_TOPIC_GROUP_MESSAGE_APPENDED: &str = "group.message_appended";
 
 pub const CORE_CAPABILITY_SESSION_READ: &str = "session.read";
 pub const CORE_CAPABILITY_WORKSPACE_READ: &str = "workspace.read";
@@ -150,6 +157,7 @@ pub const CORE_SNAPSHOT_AUTOMATIONS: &str = "core.automations.v1";
 pub const CORE_SNAPSHOT_ATTENTION: &str = "core.attention.v1";
 pub const CORE_SNAPSHOT_AGENT_HOST: &str = "core.agent_host.v1";
 pub const CORE_SNAPSHOT_NEW_SESSION_CATALOG: &str = "core.new_session_catalog.v1";
+pub const CORE_SNAPSHOT_GROUPS: &str = "core.groups.v1";
 
 pub const FIRST_PARTY_DESKTOP_PLUGIN_ID: &str = "core.desktop";
 
@@ -954,6 +962,20 @@ pub fn core_topic_descriptors() -> Result<Vec<TopicDescriptor>, ValidationError>
             Some(CORE_SNAPSHOT_NEW_SESSION_CATALOG),
             512 * 1024,
         )?,
+        // 智能体群组摘要与群组持有会话清单。
+        descriptor(
+            CORE_TOPIC_GROUPS_CHANGED,
+            CORE_CAPABILITY_WORKSPACE_READ,
+            Some(CORE_SNAPSHOT_GROUPS),
+            1024 * 1024,
+        )?,
+        // 群组单条消息追加推送。
+        descriptor(
+            CORE_TOPIC_GROUP_MESSAGE_APPENDED,
+            CORE_CAPABILITY_WORKSPACE_READ,
+            None,
+            256 * 1024,
+        )?,
     ])
 }
 
@@ -1268,6 +1290,8 @@ mod tests {
                 Some(CORE_SNAPSHOT_NEW_SESSION_CATALOG),
                 1,
             ),
+            (CORE_TOPIC_GROUPS_CHANGED, Some(CORE_SNAPSHOT_GROUPS), 1),
+            (CORE_TOPIC_GROUP_MESSAGE_APPENDED, None, 1),
         ];
         assert_eq!(descriptors.len(), expected.len());
         for (topic, snapshot, schema_version) in expected {

@@ -122,6 +122,7 @@ mod event_hub;
 mod files_control;
 mod fs_control;
 mod git_control;
+mod group_runtime;
 mod history_control;
 mod memory_peer_auth;
 mod memory_watch;
@@ -2589,6 +2590,9 @@ fn main() {
     );
     webhook::spawn(Arc::clone(&automations), Arc::clone(&event_hub));
     push::spawn();
+
+    // 恢复未暂停群组中上次停机前尚在排队的 @ 投递。
+    group_runtime::resume_on_startup(&acp_sessions, &event_hub);
 
     // 后台预热本机 Agent CLI 探测与新建会话目录，避免首帧打开「+」弹窗撞上几十次 PATH stat。
     {

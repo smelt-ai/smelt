@@ -1357,3 +1357,454 @@ pub struct SubagentTranscriptResult {
     /// 整段子会话一共多少条。
     pub total: u64,
 }
+
+// ── Local Agent Groups (PR 1) ────────────────────────────────────────────────
+
+pub enum GroupCreate {}
+impl ControlCall for GroupCreate {
+    type Params = GroupCreateParams;
+    type Result = crate::agent_group::GroupDetail;
+    const METHOD: ControlMethod = ControlMethod::GroupCreate;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupCreateParams {
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workset_id: Option<String>,
+    #[serde(default)]
+    pub mode: crate::agent_group::GroupMode,
+    #[serde(default = "default_true")]
+    pub allow_worker_cross_talk: bool,
+    #[serde(default = "default_max_chain_hops")]
+    pub max_chain_hops: u32,
+    #[serde(default = "default_max_chain_depth")]
+    pub max_chain_depth: u32,
+    #[serde(default = "default_max_pair_ping_pong")]
+    pub max_pair_ping_pong: u32,
+    #[serde(default)]
+    pub auto_bridge_mentions: bool,
+}
+
+impl Default for GroupCreateParams {
+    fn default() -> Self {
+        Self {
+            title: String::new(),
+            description: String::new(),
+            project_root: None,
+            workset_id: None,
+            mode: crate::agent_group::GroupMode::default(),
+            allow_worker_cross_talk: default_true(),
+            max_chain_hops: default_max_chain_hops(),
+            max_chain_depth: default_max_chain_depth(),
+            max_pair_ping_pong: default_max_pair_ping_pong(),
+            auto_bridge_mentions: false,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_max_chain_hops() -> u32 {
+    10
+}
+
+fn default_max_chain_depth() -> u32 {
+    6
+}
+
+fn default_max_pair_ping_pong() -> u32 {
+    3
+}
+
+pub enum GroupList {}
+impl ControlCall for GroupList {
+    type Params = GroupListParams;
+    type Result = GroupListResult;
+    const METHOD: ControlMethod = ControlMethod::GroupList;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupListParams {
+    #[serde(default)]
+    pub include_archived: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupListResult {
+    pub groups: Vec<crate::agent_group::GroupSummary>,
+    #[serde(default)]
+    pub group_owned_session_ids: Vec<String>,
+}
+
+pub enum GroupGet {}
+impl ControlCall for GroupGet {
+    type Params = GroupGetParams;
+    type Result = crate::agent_group::GroupDetail;
+    const METHOD: ControlMethod = ControlMethod::GroupGet;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupGetParams {
+    pub group_id: String,
+    #[serde(default)]
+    pub include_removed_members: bool,
+}
+
+pub enum GroupUpdate {}
+impl ControlCall for GroupUpdate {
+    type Params = GroupUpdateParams;
+    type Result = crate::agent_group::GroupDetail;
+    const METHOD: ControlMethod = ControlMethod::GroupUpdate;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupUpdateParams {
+    pub group_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<crate::agent_group::GroupMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_member_id: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_worker_cross_talk: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_chain_hops: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_chain_depth: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pair_ping_pong: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_bridge_mentions: Option<bool>,
+}
+
+pub enum GroupArchive {}
+impl ControlCall for GroupArchive {
+    type Params = GroupArchiveParams;
+    type Result = crate::agent_group::GroupDetail;
+    const METHOD: ControlMethod = ControlMethod::GroupArchive;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupArchiveParams {
+    pub group_id: String,
+    #[serde(default = "default_true")]
+    pub archived: bool,
+}
+
+impl Default for GroupArchiveParams {
+    fn default() -> Self {
+        Self {
+            group_id: String::new(),
+            archived: default_true(),
+        }
+    }
+}
+
+pub enum GroupDelete {}
+impl ControlCall for GroupDelete {
+    type Params = GroupDeleteParams;
+    type Result = GroupDeleteResult;
+    const METHOD: ControlMethod = ControlMethod::GroupDelete;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupDeleteParams {
+    pub group_id: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupDeleteResult {
+    pub deleted: bool,
+}
+
+pub enum GroupMemberAdd {}
+impl ControlCall for GroupMemberAdd {
+    type Params = GroupMemberAddParams;
+    type Result = crate::agent_group::GroupMemberView;
+    const METHOD: ControlMethod = ControlMethod::GroupMemberAdd;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMemberAddParams {
+    pub group_id: String,
+    pub alias: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub ownership: crate::agent_group::MemberOwnership,
+    /// `ownership = linked` 时必填；`group_owned` 时省略，由运行时按 `agent` 新建会话。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// `ownership = group_owned` 时用于创建会话的智能体 id（如 `pi`、`claude`、`codex`、`agent:<id>`、`profile:<id>`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// `ownership = group_owned` 时的工作目录，省略则回退到群组 `project_root`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub role_kind: crate::agent_group::MemberRoleKind,
+    #[serde(default)]
+    pub role_title: String,
+    #[serde(default)]
+    pub role_prompt: String,
+    #[serde(default = "default_tool_profile")]
+    pub tool_restriction_profile: String,
+}
+
+impl Default for GroupMemberAddParams {
+    fn default() -> Self {
+        Self {
+            group_id: String::new(),
+            alias: String::new(),
+            display_name: String::new(),
+            ownership: crate::agent_group::MemberOwnership::default(),
+            session_id: None,
+            agent: None,
+            cwd: None,
+            role_kind: crate::agent_group::MemberRoleKind::default(),
+            role_title: String::new(),
+            role_prompt: String::new(),
+            tool_restriction_profile: default_tool_profile(),
+        }
+    }
+}
+
+fn default_tool_profile() -> String {
+    "default".to_string()
+}
+
+pub enum GroupMemberUpdate {}
+impl ControlCall for GroupMemberUpdate {
+    type Params = GroupMemberUpdateParams;
+    type Result = crate::agent_group::GroupMemberView;
+    const METHOD: ControlMethod = ControlMethod::GroupMemberUpdate;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMemberUpdateParams {
+    pub group_id: String,
+    pub member_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_kind: Option<crate::agent_group::MemberRoleKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_restriction_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muted: Option<bool>,
+}
+
+pub enum GroupMemberRemove {}
+impl ControlCall for GroupMemberRemove {
+    type Params = GroupMemberRemoveParams;
+    type Result = GroupMemberRemoveResult;
+    const METHOD: ControlMethod = ControlMethod::GroupMemberRemove;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMemberRemoveParams {
+    pub group_id: String,
+    pub member_id: String,
+    /// 仅当成员为 `group_owned` 且为 `true` 时顺带删除底层会话；`linked` 会话绝不删除。
+    #[serde(default)]
+    pub delete_owned_session: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMemberRemoveResult {
+    pub removed: bool,
+}
+
+pub enum GroupMemberWake {}
+impl ControlCall for GroupMemberWake {
+    type Params = GroupMemberWakeParams;
+    type Result = GroupMemberWakeResult;
+    const METHOD: ControlMethod = ControlMethod::GroupMemberWake;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMemberWakeParams {
+    pub group_id: String,
+    pub member_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMemberWakeResult {
+    pub message_id: String,
+    pub seq: i64,
+    pub delivery_id: String,
+}
+
+pub enum GroupMessageList {}
+impl ControlCall for GroupMessageList {
+    type Params = GroupMessageListParams;
+    type Result = GroupMessageListResult;
+    const METHOD: ControlMethod = ControlMethod::GroupMessageList;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMessageListParams {
+    pub group_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_seq: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_seq: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub pinned_only: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMessageListResult {
+    pub messages: Vec<crate::agent_group::GroupMessageView>,
+    pub has_more: bool,
+}
+
+pub enum GroupMessagePost {}
+impl ControlCall for GroupMessagePost {
+    type Params = GroupMessagePostParams;
+    type Result = crate::agent_group::GroupMessageView;
+    const METHOD: ControlMethod = ControlMethod::GroupMessagePost;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMessagePostParams {
+    pub group_id: String,
+    pub content: String,
+    #[serde(default)]
+    pub kind: crate::agent_group::GroupMessageKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_seq: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_status: Option<crate::agent_group::GroupTaskStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+pub enum GroupMessagePin {}
+impl ControlCall for GroupMessagePin {
+    type Params = GroupMessagePinParams;
+    type Result = GroupMessagePinResult;
+    const METHOD: ControlMethod = ControlMethod::GroupMessagePin;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMessagePinParams {
+    pub group_id: String,
+    pub seq: i64,
+    pub pinned: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMessagePinResult {
+    pub updated: bool,
+}
+
+pub enum GroupMentionApprove {}
+impl ControlCall for GroupMentionApprove {
+    type Params = GroupMentionActionParams;
+    type Result = GroupMentionActionResult;
+    const METHOD: ControlMethod = ControlMethod::GroupMentionApprove;
+}
+
+pub enum GroupMentionReject {}
+impl ControlCall for GroupMentionReject {
+    type Params = GroupMentionActionParams;
+    type Result = GroupMentionActionResult;
+    const METHOD: ControlMethod = ControlMethod::GroupMentionReject;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMentionActionParams {
+    pub group_id: String,
+    pub message_id: String,
+    pub target_member_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupMentionActionResult {
+    pub updated: bool,
+    pub delivery_status: crate::agent_group::GroupDeliveryStatus,
+}
+
+pub enum GroupPause {}
+impl ControlCall for GroupPause {
+    type Params = GroupPauseParams;
+    type Result = crate::agent_group::GroupDetail;
+    const METHOD: ControlMethod = ControlMethod::GroupPause;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupPauseParams {
+    pub group_id: String,
+    /// 为 `true` 时中止当前正在运行的 `group_owned` 成员回合；绝不中止 `linked` 会话。
+    #[serde(default)]
+    pub abort_running: bool,
+}
+
+pub enum GroupResume {}
+impl ControlCall for GroupResume {
+    type Params = GroupResumeParams;
+    type Result = crate::agent_group::GroupDetail;
+    const METHOD: ControlMethod = ControlMethod::GroupResume;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupResumeParams {
+    pub group_id: String,
+}
+
+pub enum GroupTaskUpdate {}
+impl ControlCall for GroupTaskUpdate {
+    type Params = GroupTaskUpdateParams;
+    type Result = GroupTaskUpdateResult;
+    const METHOD: ControlMethod = ControlMethod::GroupTaskUpdate;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupTaskUpdateParams {
+    pub group_id: String,
+    pub seq: i64,
+    pub task_status: crate::agent_group::GroupTaskStatus,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupTaskUpdateResult {
+    pub updated: bool,
+}
+
+/// 供智能体会话在终端 / CLI 回退路径调用群组工具（身份由守护根据对端 PID 反查会话，不信任入参）。
+pub enum GroupAgentTool {}
+impl ControlCall for GroupAgentTool {
+    type Params = GroupAgentToolParams;
+    type Result = serde_json::Value;
+    const METHOD: ControlMethod = ControlMethod::GroupAgentTool;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupAgentToolParams {
+    pub op: String,
+    #[serde(default)]
+    pub args: serde_json::Value,
+}

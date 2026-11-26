@@ -1730,7 +1730,7 @@ fn adopt_unknown_conversation_binding(
     }
 }
 
-fn session_uses_pi_admission(sess: &AcpSession) -> bool {
+pub(crate) fn session_uses_pi_admission(sess: &AcpSession) -> bool {
     sess.launch_spec
         .lock()
         .as_ref()
@@ -2036,7 +2036,7 @@ pub(crate) fn start_acp_event_drain(
                         }
                         // 非 Pi 对话执行跨对话 `Task` 结束时先取出本轮任务上下文，再放闸派发下一条排队消息，
                         // 避免 `flush_pending_acp_prompt_locked` 把下一条任务写进来覆盖掉刚刚结束的那一条。
-                        let auto_complete = if turn_ended && !session_uses_pi_admission(sess) {
+                        let (auto_complete, group_turn_reply) = if turn_ended {
                             let reduced = sess.reduced.lock();
                             let done = matches!(
                                 reduced.phase,
@@ -2044,19 +2044,17 @@ pub(crate) fn start_acp_event_drain(
                                     | smelt_core::daemon_state::DaemonPhase::Succeeded
                                     | smelt_core::daemon_state::DaemonPhase::Failed
                             ) && !reduced.background_work_running();
-                            if done {
+                            let reply = done.then(|| last_turn_reply(reduced.entries()));
+                            let peer_task = if done && !session_uses_pi_admission(sess) {
                                 sess.active_peer_task.lock().take().map(|task| {
-                                    (
-                                        task,
-                                        last_turn_reply(reduced.entries()),
-                                        reduced.turn_outcome,
-                                    )
+                                    (task, reply.clone().unwrap_or_default(), reduced.turn_outcome)
                                 })
                             } else {
                                 None
-                            }
+                            };
+                            (peer_task, reply)
                         } else {
-                            None
+                            (None, None)
                         };
                         // 其它 agent 在回合结束时放闸。Pi 还要等它自己声明空闲。
                         settle_acp_turn_locked(
@@ -2076,6 +2074,14 @@ pub(crate) fn start_acp_event_drain(
                                 task,
                                 reply_text,
                                 outcome,
+                                &acp_sessions,
+                                &subscribers,
+                            );
+                        }
+                        if let Some(reply_text) = group_turn_reply {
+                            crate::group_runtime::on_member_turn_ended(
+                                &session_id,
+                                &reply_text,
                                 &acp_sessions,
                                 &subscribers,
                             );
@@ -3189,6 +3195,17 @@ fn send_acp_stop_subagent(sess: &AcpSession, id: String) -> Result<(), &'static 
         sess,
         smelt_core::acp_conn::ConversationCommand::StopSubagent { id },
     )
+}
+
+/// 群组暂停并勾选中止运行中回合时调用：仅对活跃的 `group_owned` 成员会话发取消。
+pub(crate) fn cancel_acp_session_if_running(
+    session_id: &str,
+    acp_sessions: &AcpSessions,
+    subscribers: &EventHubHandle,
+) {
+    if let Some(slot) = acp_sessions.get(session_id) {
+        let _ = request_acp_cancel(&slot.value, subscribers);
+    }
 }
 
 /// 把门卫放行的消息交给这个对话：Pi 走会话宿主的 `smelt.peer_message`，非 Pi ACP 走

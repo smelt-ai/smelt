@@ -77,6 +77,58 @@ fn directory_response(
     }
 }
 
+fn to_json_value<T: Serialize>(value: T) -> Result<serde_json::Value, ControlError> {
+    serde_json::to_value(value)
+        .map_err(|error| ControlError::new(ControlErrorCode::Internal, error.to_string()))
+}
+
+/// 群组控制接口（含全部读与写）统一 fail-closed 鉴权：
+/// - 拒绝未配对设备及远端节点；
+/// - 本机缺失对端 PID 且未通过桌面签名认证时一律拒绝（禁止静默放行）；
+/// - 处于任意活跃智能体会话进程树内的对端一律拒绝；
+/// - 审批权限水位线放行/拒绝（`group.mention.approve|reject`）额外要求桌面签名认证或已配对设备。
+fn authorize_group_control(
+    principal: &crate::devices::Principal,
+    acp_sessions: &AcpSessions,
+    peer_pid: Option<u32>,
+    desktop_authenticated: bool,
+    require_desktop: bool,
+) -> Result<(), ControlError> {
+    use crate::devices::Principal;
+    match principal {
+        Principal::Device(_) => Ok(()),
+        Principal::Peer { .. } | Principal::Unpaired(_) => Err(ControlError::new(
+            ControlErrorCode::PermissionDenied,
+            "group control methods are not available to remote peers or unpaired devices",
+        )),
+        Principal::Local => {
+            if require_desktop && !desktop_authenticated {
+                return Err(ControlError::new(
+                    ControlErrorCode::PermissionDenied,
+                    "approving or rejecting group mention escalations requires the signed desktop app",
+                ));
+            }
+            match peer_pid {
+                Some(pid) => {
+                    crate::memory_peer_auth::deny_agent_session_peer(acp_sessions, pid).map_err(
+                        |_| {
+                            ControlError::new(
+                                ControlErrorCode::PermissionDenied,
+                                "agent sessions must use group tools instead of direct group control RPCs",
+                            )
+                        },
+                    )
+                }
+                None if desktop_authenticated => Ok(()),
+                None => Err(ControlError::new(
+                    ControlErrorCode::PermissionDenied,
+                    "cannot verify caller identity for group control request",
+                )),
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn dispatch_control(
     envelope: ControlRequestEnvelope,
@@ -445,6 +497,201 @@ fn dispatch_control(
             };
             match reply {
                 Ok(result) => success_value(control_version, &request_id, result),
+                Err(error) => error_value(control_version, request_id, error),
+            }
+        }
+        ControlMethod::GroupAgentTool => {
+            let params: smelt_core::control_api::GroupAgentToolParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            if !matches!(principal, crate::Principal::Local) {
+                return error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(
+                        ControlErrorCode::PermissionDenied,
+                        "group.agent.tool is only available to local agent session processes",
+                    ),
+                );
+            }
+            let Some(session_id) = peer_pid
+                .and_then(|pid| crate::memory_peer_auth::caller_session_id(acp_sessions, pid))
+            else {
+                return error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(
+                        ControlErrorCode::PermissionDenied,
+                        "smelt group agent tools must be invoked from inside an active Smelt agent conversation",
+                    ),
+                );
+            };
+            let reply = crate::group_runtime::dispatch_agent_group_tool(
+                &params.op,
+                &session_id,
+                &params.args,
+                acp_sessions,
+                workspace_directory,
+                event_hub,
+            );
+            success_value(control_version, &request_id, reply)
+        }
+        group_method @ (ControlMethod::GroupCreate
+        | ControlMethod::GroupList
+        | ControlMethod::GroupGet
+        | ControlMethod::GroupUpdate
+        | ControlMethod::GroupArchive
+        | ControlMethod::GroupDelete
+        | ControlMethod::GroupMemberAdd
+        | ControlMethod::GroupMemberUpdate
+        | ControlMethod::GroupMemberRemove
+        | ControlMethod::GroupMemberWake
+        | ControlMethod::GroupMessageList
+        | ControlMethod::GroupMessagePost
+        | ControlMethod::GroupMessagePin
+        | ControlMethod::GroupMentionApprove
+        | ControlMethod::GroupMentionReject
+        | ControlMethod::GroupPause
+        | ControlMethod::GroupResume
+        | ControlMethod::GroupTaskUpdate) => {
+            let require_desktop = matches!(
+                group_method,
+                ControlMethod::GroupMentionApprove | ControlMethod::GroupMentionReject
+            );
+            if let Err(error) = authorize_group_control(
+                principal,
+                acp_sessions,
+                peer_pid,
+                desktop_authenticated,
+                require_desktop,
+            ) {
+                return error_value(control_version, request_id, error);
+            }
+            let result: Result<serde_json::Value, ControlError> = match group_method {
+                ControlMethod::GroupCreate => decode_params(params).and_then(|p| {
+                    crate::group_runtime::create_group(
+                        p,
+                        workspace_directory,
+                        acp_sessions,
+                        event_hub,
+                    )
+                    .and_then(to_json_value)
+                }),
+                ControlMethod::GroupList => decode_params(params)
+                    .and_then(crate::group_runtime::list_groups)
+                    .and_then(to_json_value),
+                ControlMethod::GroupGet => decode_params(params).and_then(|p| {
+                    crate::group_runtime::get_group(p, workspace_directory, acp_sessions)
+                        .and_then(to_json_value)
+                }),
+                ControlMethod::GroupUpdate => decode_params(params).and_then(|p| {
+                    crate::group_runtime::update_group(
+                        p,
+                        workspace_directory,
+                        acp_sessions,
+                        event_hub,
+                    )
+                    .and_then(to_json_value)
+                }),
+                ControlMethod::GroupArchive => decode_params(params).and_then(|p| {
+                    crate::group_runtime::archive_group(
+                        p,
+                        workspace_directory,
+                        acp_sessions,
+                        event_hub,
+                    )
+                    .and_then(to_json_value)
+                }),
+                ControlMethod::GroupDelete => decode_params(params).and_then(|p| {
+                    crate::group_runtime::delete_group(
+                        p,
+                        sessions,
+                        acp_sessions,
+                        workspace_directory,
+                        automations,
+                        event_hub,
+                    )
+                    .and_then(to_json_value)
+                }),
+                ControlMethod::GroupMemberAdd => decode_params(params).and_then(|p| {
+                    crate::group_runtime::add_member(
+                        p,
+                        sessions,
+                        acp_sessions,
+                        workspace_directory,
+                        automations,
+                        event_hub,
+                    )
+                    .and_then(to_json_value)
+                }),
+                ControlMethod::GroupMemberUpdate => decode_params(params).and_then(|p| {
+                    crate::group_runtime::update_member(
+                        p,
+                        workspace_directory,
+                        acp_sessions,
+                        event_hub,
+                    )
+                    .and_then(to_json_value)
+                }),
+                ControlMethod::GroupMemberRemove => decode_params(params).and_then(|p| {
+                    crate::group_runtime::remove_member(
+                        p,
+                        sessions,
+                        acp_sessions,
+                        workspace_directory,
+                        automations,
+                        event_hub,
+                    )
+                    .and_then(to_json_value)
+                }),
+                ControlMethod::GroupMemberWake => decode_params(params).and_then(|p| {
+                    crate::group_runtime::wake_member(p, acp_sessions, event_hub)
+                        .and_then(to_json_value)
+                }),
+                ControlMethod::GroupMessageList => decode_params(params)
+                    .and_then(crate::group_runtime::list_messages)
+                    .and_then(to_json_value),
+                ControlMethod::GroupMessagePost => decode_params(params).and_then(|p| {
+                    crate::group_runtime::post_user_message(p, acp_sessions, event_hub)
+                        .and_then(to_json_value)
+                }),
+                ControlMethod::GroupMessagePin => decode_params(params).and_then(|p| {
+                    crate::group_runtime::pin_message(p, event_hub).and_then(to_json_value)
+                }),
+                ControlMethod::GroupMentionApprove => decode_params(params).and_then(|p| {
+                    crate::group_runtime::approve_mention(p, acp_sessions, event_hub)
+                        .and_then(to_json_value)
+                }),
+                ControlMethod::GroupMentionReject => decode_params(params).and_then(|p| {
+                    crate::group_runtime::reject_mention(p, event_hub).and_then(to_json_value)
+                }),
+                ControlMethod::GroupPause => decode_params(params).and_then(|p| {
+                    crate::group_runtime::pause_group(
+                        p,
+                        workspace_directory,
+                        acp_sessions,
+                        event_hub,
+                    )
+                    .and_then(to_json_value)
+                }),
+                ControlMethod::GroupResume => decode_params(params).and_then(|p| {
+                    crate::group_runtime::resume_group(
+                        p,
+                        workspace_directory,
+                        acp_sessions,
+                        event_hub,
+                    )
+                    .and_then(to_json_value)
+                }),
+                ControlMethod::GroupTaskUpdate => decode_params(params).and_then(|p| {
+                    crate::group_runtime::update_task_status(p, event_hub).and_then(to_json_value)
+                }),
+                _ => unreachable!(),
+            };
+            match result {
+                Ok(value) => success_value(control_version, &request_id, value),
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
@@ -2243,5 +2490,120 @@ mod tests {
             panic!("unknown method should fail");
         };
         assert_eq!(error.code, ControlErrorCode::MethodNotFound);
+    }
+
+    #[test]
+    fn group_control_is_fail_closed_for_unidentified_callers_and_agents() {
+        let sessions = super::super::new_sessions();
+        let acp_sessions = super::super::new_test_acp_sessions();
+        let event_hub = super::super::new_event_hub();
+        let automations = smelt_core::automation_store::new_automation_store();
+        let workspace_directory = super::super::new_test_workspace_directory();
+
+        // Register a fake live ACP session with a synthetic agent pid.
+        let agent_pid: i32 = 2_147_000_777;
+        let (slot, _) = acp_sessions.reserve_with("acp-agent-1", || {
+            super::super::make_acp_session(
+                "acp-agent-1",
+                None,
+                Some(smelt_core::conversation::ConversationBinding::Direct),
+                None,
+            )
+        });
+        slot.value.state.lock().phase = super::super::Phase::Idle;
+        let (cmd_tx, _cmd_rx) = smol::channel::unbounded();
+        let (_event_tx, event_rx) = smol::channel::unbounded();
+        *slot.value.handle.lock() = Some(smelt_core::acp_conn::ConversationHandle {
+            cmd_tx,
+            event_rx,
+            stdio: std::sync::Arc::new(std::sync::Mutex::new(Some(
+                smelt_core::acp_conn::AcpStdio { pid: agent_pid },
+            ))),
+            in_flight_rpc: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shutdown_requested: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            supports_mid_turn_input: false,
+            supports_compaction: false,
+            supports_native_queue: false,
+            supports_rewind: false,
+        });
+
+        for method in [
+            "group.list",
+            "group.get",
+            "group.message.list",
+            "group.message.post",
+            "group.mention.approve",
+        ] {
+            // Unidentified caller (peer_pid=None, desktop_authenticated=false) must fail closed on BOTH reads and writes.
+            let resp = dispatch_control(
+                ControlRequestEnvelope {
+                    control_version: CONTROL_API_VERSION,
+                    request_id: "unid".into(),
+                    method: method.into(),
+                    params: serde_json::json!({}),
+                },
+                &crate::devices::Principal::Local,
+                &sessions,
+                &acp_sessions,
+                &workspace_directory,
+                &automations,
+                &event_hub,
+                0,
+                None,
+                false,
+            );
+            let parsed: ControlResponse<serde_json::Value> = serde_json::from_value(resp).unwrap();
+            let ControlOutcome::Error { error } = parsed.outcome else {
+                panic!("{method} must fail closed when peer_pid=None");
+            };
+            assert_eq!(error.code, ControlErrorCode::PermissionDenied, "{method}");
+
+            // Agent session PID must be rejected even if desktop_authenticated=true.
+            let agent_resp = dispatch_control(
+                ControlRequestEnvelope {
+                    control_version: CONTROL_API_VERSION,
+                    request_id: "agent".into(),
+                    method: method.into(),
+                    params: serde_json::json!({}),
+                },
+                &crate::devices::Principal::Local,
+                &sessions,
+                &acp_sessions,
+                &workspace_directory,
+                &automations,
+                &event_hub,
+                0,
+                Some(agent_pid as u32),
+                true,
+            );
+            let parsed_agent: ControlResponse<serde_json::Value> =
+                serde_json::from_value(agent_resp).unwrap();
+            let ControlOutcome::Error { error } = parsed_agent.outcome else {
+                panic!("{method} must reject agent PID");
+            };
+            assert_eq!(error.code, ControlErrorCode::PermissionDenied, "{method}");
+        }
+
+        // Non-desktop CLI PID cannot call group.mention.approve.
+        let approve_from_cli = authorize_group_control(
+            &crate::devices::Principal::Local,
+            &acp_sessions,
+            Some(999_999),
+            false,
+            true,
+        );
+        assert!(approve_from_cli.is_err());
+
+        // Non-agent CLI PID CAN call normal group methods like group.list / group.create.
+        assert!(
+            authorize_group_control(
+                &crate::devices::Principal::Local,
+                &acp_sessions,
+                Some(999_999),
+                false,
+                false,
+            )
+            .is_ok()
+        );
     }
 }

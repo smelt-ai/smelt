@@ -234,9 +234,15 @@ impl Outbox {
         }
     }
 
-    /// 见 [`observe_inbox`]。有信退回排队就返回 true。
-    fn reconcile(&mut self, target: &str, generation: u64, inbox: &[PeerMessageView]) -> bool {
+    /// 见 [`observe_inbox`]。返回 `(是否有信退回排队, 已结算送达的群组投递 ID 列表)`。
+    fn reconcile(
+        &mut self,
+        target: &str,
+        generation: u64,
+        inbox: &[PeerMessageView],
+    ) -> (bool, Vec<String>) {
         let mut delivered = Vec::new();
+        let mut settled_groups = Vec::new();
         let mut requeued = false;
         for letter in &mut self.letters {
             let LetterState::HandedOff {
@@ -259,17 +265,23 @@ impl Outbox {
             }
         }
         for id in delivered {
+            if smelt_core::agent_group::is_group_delivery_id(&id) {
+                settled_groups.push(id.clone());
+            }
             self.settle(&id, LetterState::Delivered);
         }
-        requeued
+        (requeued, settled_groups)
     }
 }
 
-/// 失败的信退给发送方。退信自己失败了不再退。
+/// 失败的信退给发送方。退信或群组投递失败不再生成退信（群组投递通过结算回调更新群消息状态）。
 fn bounce_of(letter: &Letter) -> Option<Letter> {
     let LetterState::Failed(reason) = &letter.state else {
         return None;
     };
+    if smelt_core::agent_group::is_group_delivery_id(&letter.delivery.id) {
+        return None;
+    }
     if letter.delivery.kind == PeerMessageKind::Bounce {
         eprintln!(
             "[peer] 退信 {} 也没送到 {}：{reason}",
@@ -360,7 +372,14 @@ impl Courier {
                         source_posture,
                         source_agent_label.as_deref(),
                     ) {
-                        let bounce = lock_outbox().settle(&id, LetterState::Failed(reason));
+                        let bounce = lock_outbox().settle(&id, LetterState::Failed(reason.clone()));
+                        if smelt_core::agent_group::is_group_delivery_id(&id) {
+                            crate::group_runtime::on_delivery_settled(
+                                &id,
+                                Err(reason),
+                                &courier.subscribers,
+                            );
+                        }
                         courier.post_bounce(bounce);
                     }
                 }
@@ -648,15 +667,75 @@ pub(crate) fn observe_inbox(
     acp_sessions: &AcpSessions,
     subscribers: &EventHubHandle,
 ) {
-    let mut outbox = lock_outbox();
-    if outbox.reconcile(target, generation, inbox) && outbox.claim_drain(target) {
-        drop(outbox);
+    let (requeued, settled_groups, should_drain) = {
+        let mut outbox = lock_outbox();
+        let (requeued, settled_groups) = outbox.reconcile(target, generation, inbox);
+        let should_drain = requeued && outbox.claim_drain(target);
+        (requeued, settled_groups, should_drain)
+    };
+    let _ = requeued;
+    for delivery_id in settled_groups {
+        crate::group_runtime::on_delivery_settled(&delivery_id, Ok(()), subscribers);
+    }
+    if should_drain {
         Courier {
             acp_sessions: Arc::clone(acp_sessions),
             subscribers: subscribers.clone(),
         }
         .drain(target.to_string());
     }
+}
+
+/// 群组投递入口：复用 `peer_messages` 发件队列与 `acp_host::deliver_peer_message`，
+/// 使用确定性 `pm-grp-...` 投递 ID。若同 ID 曾因目标暂时不可达失败，先清掉失败记录再重排；
+/// 已在排队、已交出或已送达的同 ID 自动幂等去重。
+pub(crate) fn deliver_group_message(
+    target_session_id: &str,
+    target_title: &str,
+    delivery: PeerDelivery,
+    source_posture: ApprovalPosture,
+    acp_sessions: &AcpSessions,
+    subscribers: &EventHubHandle,
+) {
+    let target = target_session_id.to_string();
+    let should_drain = {
+        let mut outbox = lock_outbox();
+        outbox.letters.retain(|existing| {
+            !(existing.delivery.id == delivery.id
+                && matches!(existing.state, LetterState::Failed(_)))
+        });
+        let accepted = outbox.accept(
+            Letter {
+                delivery,
+                to: target.clone(),
+                to_title: target_title.to_string(),
+                state: LetterState::Queued,
+                source_posture,
+                source_agent_label: None,
+                spawned: false,
+            },
+            None,
+        );
+        matches!(accepted, Accepted::New) && outbox.claim_drain(&target)
+    };
+    if should_drain {
+        Courier {
+            acp_sessions: Arc::clone(acp_sessions),
+            subscribers: subscribers.clone(),
+        }
+        .drain(target);
+    }
+}
+
+/// 查询某会话当前的审批姿态（供群组权限水位线与 `peer_messages` 保持同一事实源）。
+pub(crate) fn session_approval_posture(
+    session_id: &str,
+    acp_sessions: &AcpSessions,
+) -> ApprovalPosture {
+    acp_sessions
+        .get(session_id)
+        .map(|slot| approval_posture(session_id, &slot.value))
+        .unwrap_or(ApprovalPosture::Unknown)
 }
 
 /// 有交给这个对话、还没结算的信。归约时先问一句，没有就不必拷 `peer_inbox`。
@@ -737,9 +816,13 @@ pub(crate) fn bind_peer_handler(
     subscribers: EventHubHandle,
 ) -> smelt_core::background_tasks::PeerRequestHandler {
     Arc::new(move |op, body| {
-        // 工具定义不认来源，会话还没登记好时扩展就来要了。
+        // 工具定义不认来源，会话还没登记好时扩展就来要了；若会话已在活跃群组中，顺带暴露群组工具。
         if op == crate::peer_tools::SESSION_TOOLS_OP {
-            return serde_json::json!({"ok": true, "tools": crate::peer_tools::definitions()});
+            let in_group = crate::group_runtime::session_in_any_group(&session_id);
+            return serde_json::json!({
+                "ok": true,
+                "tools": crate::peer_tools::definitions_for(in_group),
+            });
         }
         let courier = Courier {
             acp_sessions: Arc::clone(&acp_sessions),
@@ -758,6 +841,17 @@ pub(crate) fn bind_peer_handler(
             );
         }
         match op {
+            op if crate::peer_tools::is_group_tool(op) => {
+                let reply = crate::group_runtime::dispatch_agent_group_tool(
+                    op,
+                    &session_id,
+                    body,
+                    &acp_sessions,
+                    &workspace_directory(),
+                    &subscribers,
+                );
+                crate::peer_tools::present(op, body, reply)
+            }
             op if crate::peer_tools::is_tool(op) => {
                 answer_tool(op, &slot, &session_id, &courier, body)
             }
@@ -2229,7 +2323,7 @@ mod tests {
             inbox_view("pm-waiting", PeerMessageStatus::Pending),
         ];
         assert!(
-            !outbox.reconcile("acp-b", 2, &inbox),
+            !outbox.reconcile("acp-b", 2, &inbox).0,
             "同一代宿主还在，不重投"
         );
         assert_eq!(
@@ -2243,7 +2337,7 @@ mod tests {
         );
 
         // 宿主换了一代（重启、挂起后唤醒）：没送到的都要重投，包括旧镜像里还写着待送的。
-        assert!(outbox.reconcile("acp-b", 3, &inbox));
+        assert!(outbox.reconcile("acp-b", 3, &inbox).0);
         assert_eq!(
             outbox.find("pm-waiting").unwrap().state,
             LetterState::Queued
@@ -2253,6 +2347,27 @@ mod tests {
             outbox.find("pm-done").unwrap().state,
             LetterState::Delivered
         );
+    }
+
+    #[test]
+    fn group_deliveries_suppress_bounce_and_report_settled_ids() {
+        let mut outbox = Outbox::default();
+        let grp_id = smelt_core::agent_group::deterministic_group_delivery_id("gmsg-1", "mem-1");
+        let grp_fail = smelt_core::agent_group::deterministic_group_delivery_id("gmsg-2", "mem-1");
+        outbox.accept(letter(&grp_id, "group:grp-1", "acp-b"), None);
+        outbox.mark_handed_off(&grp_id, 1);
+        outbox.accept(letter(&grp_fail, "group:grp-1", "acp-b"), None);
+
+        let bounce = outbox.settle(&grp_fail, LetterState::Failed("offline".into()));
+        assert!(
+            bounce.is_none(),
+            "group deliveries must not generate peer bounces"
+        );
+
+        let inbox = [inbox_view(&grp_id, PeerMessageStatus::Delivered)];
+        let (requeued, settled) = outbox.reconcile("acp-b", 1, &inbox);
+        assert!(!requeued);
+        assert_eq!(settled, vec![grp_id]);
     }
 
     /// 已结束的信每个来源只留最近一批，没送到的都留着。

@@ -47,6 +47,12 @@ describe("Smelt Pi permission extension", () => {
 		expect(toolNeedsSmeltApproval(extension("session_send", peers))).toBe(true);
 		expect(toolNeedsSmeltApproval(extension("session_spawn", peers))).toBe(true);
 		expect(toolNeedsSmeltApproval(extension("session_read", "/tmp/spoof.ts"))).toBe(true);
+		expect(toolNeedsSmeltApproval(extension("group_read", peers))).toBe(false);
+		expect(toolNeedsSmeltApproval(extension("group_members", peers))).toBe(false);
+		expect(toolNeedsSmeltApproval(extension("group_post", peers))).toBe(true);
+		expect(toolNeedsSmeltApproval(extension("group_yield", peers))).toBe(true);
+		expect(toolNeedsSmeltApproval(extension("group_task_update", peers))).toBe(true);
+		expect(toolNeedsSmeltApproval(extension("group_read", "/tmp/spoof.ts"))).toBe(true);
 	});
 
 	test("notifying the user skips approval only for the Smelt-owned tool", () => {
