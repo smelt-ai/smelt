@@ -23,6 +23,11 @@ pub(crate) fn is_tool(op: &str) -> bool {
     matches!(op, LIST | READ | SEND | SPAWN)
 }
 
+/// 只读工具：不修改任何会话状态，也不唤醒对方（与 Pi 侧 `smelt-permission.ts` 的免审批边界一致）。
+pub(crate) fn is_read_only(op: &str) -> bool {
+    matches!(op, LIST | READ)
+}
+
 /// 四个工具的定义：`name`、`label`、`description`、`promptSnippet`、`promptGuidelines`、
 /// `parameters`（JSON Schema）。Pi 原样注册；MCP 把 `promptGuidelines` 接在说明后面。
 pub(crate) fn definitions() -> Value {
@@ -396,7 +401,9 @@ mod tests {
             .collect();
         assert_eq!(names, [LIST, READ, SEND, SPAWN]);
         for tool in definitions.as_array().unwrap() {
-            assert!(is_tool(tool["name"].as_str().unwrap()));
+            let name = tool["name"].as_str().unwrap();
+            assert!(is_tool(name));
+            assert_eq!(is_read_only(name), matches!(name, LIST | READ));
             assert_eq!(tool["parameters"]["type"], "object", "{tool}");
             assert!(!tool["description"].as_str().unwrap().is_empty());
             assert!(!tool["promptGuidelines"].as_array().unwrap().is_empty());

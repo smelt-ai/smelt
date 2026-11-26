@@ -184,6 +184,19 @@ fn handle_tool_call(
     ok_response(id, json!({ "content": content, "isError": is_error }))
 }
 
+/// 按 MCP `ToolAnnotations` 显式标出四个布尔提示，避免客户端按规范默认值
+/// （`destructiveHint: true`、`openWorldHint: true`）把只读工具当成高风险操作弹窗审批。
+fn tool_annotations(name: &str, title: &str) -> Value {
+    let read_only = peer_tools::is_read_only(name);
+    json!({
+        "title": title,
+        "readOnlyHint": read_only,
+        "destructiveHint": false,
+        "idempotentHint": read_only,
+        "openWorldHint": false,
+    })
+}
+
 /// MCP 没有 Pi 那样的「用法提示」位置：接在每个工具的说明后面。
 fn tool_definitions() -> Value {
     let tools = peer_tools::definitions()
@@ -191,6 +204,8 @@ fn tool_definitions() -> Value {
         .into_iter()
         .flatten()
         .map(|tool| {
+            let name = tool["name"].as_str().unwrap_or_default();
+            let title = tool["label"].as_str().unwrap_or(name);
             let mut description = tool["description"].as_str().unwrap_or_default().to_string();
             for line in tool["promptGuidelines"].as_array().into_iter().flatten() {
                 if let Some(line) = line.as_str() {
@@ -199,9 +214,10 @@ fn tool_definitions() -> Value {
                 }
             }
             json!({
-                "name": tool["name"],
+                "name": name,
                 "description": description,
                 "inputSchema": tool["parameters"],
+                "annotations": tool_annotations(name, title),
             })
         })
         .collect();
@@ -326,6 +342,50 @@ mod tests {
             description.contains("\n- When you finish a task"),
             "{description}"
         );
+    }
+
+    #[test]
+    fn tools_list_marks_read_only_and_mutating_annotations() {
+        let resp = handle_jsonrpc_line(
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/list","params":{}}"#,
+            |_| Ok(json!({"ok": true})),
+        )
+        .expect("tools/list response");
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        let by_name = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("missing tool {name}"))
+        };
+
+        for (name, title) in [("session_list", "列出对话"), ("session_read", "查看对话")] {
+            assert_eq!(
+                by_name(name)["annotations"],
+                json!({
+                    "title": title,
+                    "readOnlyHint": true,
+                    "destructiveHint": false,
+                    "idempotentHint": true,
+                    "openWorldHint": false,
+                }),
+                "{name} should advertise read-only annotations"
+            );
+        }
+
+        for (name, title) in [("session_send", "发给对话"), ("session_spawn", "新建对话")] {
+            assert_eq!(
+                by_name(name)["annotations"],
+                json!({
+                    "title": title,
+                    "readOnlyHint": false,
+                    "destructiveHint": false,
+                    "idempotentHint": false,
+                    "openWorldHint": false,
+                }),
+                "{name} should advertise non-read-only annotations"
+            );
+        }
     }
 
     #[test]
