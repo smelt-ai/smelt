@@ -1,5 +1,4 @@
-//! gpui-base 自己的主题。它直接画的几样东西读这份：输入框的光标和选区、富文本的选区和
-//! 代码字体、滚动条、分栏手柄；JS 插件的 `cx.theme().colors` 也是从这份来的。颜色在装
+//! gpui-base 自己的主题。它直接画的几样东西读这份：输入框的光标和选区、滚动条。颜色在装
 //! smelt 主题时（[`crate::theme_catalog::apply`]）从 smelt 的语义色写进去，代码字体在换字体
 //! 时（[`set_code_font`]）写进去，别处不改它。
 
@@ -94,9 +93,6 @@ pub(crate) fn install(colors: &ThemeColors, dark: bool, cx: &mut App) {
                 .thumb_hover(|style| style.bg(thumb_hover).radius(thumb_radius))
                 .thumb_active(|style| style.bg(thumb_hover).radius(thumb_radius)),
         );
-
-    theme.resizable.handle = Some(hsla(c.border_base));
-    theme.resizable.active_handle = Some(hsla(c.border_focus));
 }
 
 #[cfg(test)]

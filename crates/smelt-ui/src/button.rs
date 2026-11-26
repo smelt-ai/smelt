@@ -210,7 +210,6 @@ pub struct Button {
     dismiss: bool,
     floating: bool,
     icon: Option<SharedString>,
-    icon_opacity: Option<f32>,
     label: Option<SharedString>,
     children: Vec<AnyElement>,
     accessibility_label: Option<SharedString>,
@@ -239,7 +238,6 @@ impl Button {
             dismiss: false,
             floating: false,
             icon: None,
-            icon_opacity: None,
             label: None,
             children: Vec::new(),
             accessibility_label: None,
@@ -332,12 +330,6 @@ impl Button {
     /// 使用应用自己的 SVG 图标资源。
     pub fn icon_path(mut self, path: impl Into<SharedString>) -> Self {
         self.icon = Some(path.into());
-        self
-    }
-
-    /// 只调整主图标的透明度，不影响按钮底色、焦点环或禁用样式。
-    pub(crate) fn icon_opacity(mut self, opacity: f32) -> Self {
-        self.icon_opacity = Some(opacity);
         self
     }
 
@@ -486,12 +478,11 @@ impl RenderOnce for ButtonIcon {
 }
 
 /// 图标格子：边长就是图标大小（px，界面字号 16 时），随 rem 缩放。
-fn icon_slot(icon: SharedString, size: f32, opacity: Option<f32>) -> gpui::Div {
+fn icon_slot(icon: SharedString, size: f32) -> gpui::Div {
     div()
         .size(rems(size / 16.))
         .text_size(rems(size / 16.))
         .flex_shrink_0()
-        .when_some(opacity, |slot, opacity| slot.opacity(opacity))
         .child(ButtonIcon(icon))
 }
 
@@ -662,7 +653,6 @@ impl Button {
             dismiss,
             floating,
             icon,
-            icon_opacity,
             label,
             children,
             accessibility_label,
@@ -734,18 +724,14 @@ impl Button {
                 } else {
                     metrics.icon
                 };
-                this.child(icon_slot(icon, size, icon_opacity))
+                this.child(icon_slot(icon, size))
             })
             .when_some(label.clone(), |this, label| {
                 this.child(div().min_w_0().text_ellipsis().child(label))
             })
             .children(children)
             .when(dropdown_caret, |this| {
-                this.child(icon_slot(
-                    crate::IconName::ChevronDown.path(),
-                    metrics.icon,
-                    None,
-                ))
+                this.child(icon_slot(crate::IconName::ChevronDown.path(), metrics.icon))
             });
 
         base.disabled(!interactive)
@@ -1841,24 +1827,6 @@ mod tests {
         let custom = Button::new("custom").icon_path("smelt-icons/agent-claude.svg");
         assert_eq!(asset.icon, Some(crate::IconName::Plus.path()));
         assert_eq!(custom.icon.as_deref(), Some("smelt-icons/agent-claude.svg"));
-    }
-
-    #[test]
-    fn icon_opacity_is_scoped_to_icon_slot() {
-        for disabled in [false, true] {
-            let mut button = Button::new("b")
-                .quiet()
-                .icon(crate::IconName::Check)
-                .icon_opacity(0.25)
-                .disabled(disabled);
-            assert_eq!(button.style().opacity, None);
-            assert_eq!(button.disabled, disabled);
-            assert_eq!(button.role.disabled_opacity(), 0.5);
-            let mut slot = icon_slot(button.icon.take().unwrap(), 16., button.icon_opacity);
-            assert_eq!(slot.style().opacity, Some(0.25));
-        }
-        let mut slot = icon_slot("icon.svg".into(), 16., None);
-        assert_eq!(slot.style().opacity, None);
     }
 
     #[test]

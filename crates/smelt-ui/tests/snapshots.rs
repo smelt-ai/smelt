@@ -30,8 +30,8 @@ use smelt_ui::IconName;
 use smelt_ui::field::{InputState, TextareaState};
 use smelt_ui::kit::{ControlSize, TYPE, TypeStyled as _};
 use smelt_ui::{
-    Button, Checkbox, Clipboard, IconAction as _, ListRow, Radio, Segmented, Switch, TextArea,
-    TextInput, theme_catalog, tooltip::Tooltip, ui_theme,
+    Button, IconAction as _, ListRow, Segmented, Switch, TextArea, TextInput, theme_catalog,
+    tooltip::Tooltip, ui_theme,
 };
 
 gpui::actions!(tooltip_snapshot, [Save, Sequence]);
@@ -54,14 +54,9 @@ const SNAPSHOTS: &[Snapshot] = &[
         setup: buttons,
     },
     Snapshot {
-        name: "choice",
-        size: (400., 180.),
-        setup: choices,
-    },
-    Snapshot {
-        name: "clipboard",
+        name: "switch",
         size: (400., 100.),
-        setup: clipboards,
+        setup: switches,
     },
     Snapshot {
         name: "tooltip",
@@ -149,16 +144,6 @@ const SNAPSHOTS: &[Snapshot] = &[
         setup: command_palette,
     },
     Snapshot {
-        name: "hover-card",
-        size: (520., 260.),
-        setup: hover_card,
-    },
-    Snapshot {
-        name: "badge",
-        size: (520., 120.),
-        setup: badges,
-    },
-    Snapshot {
         name: "keybind",
         size: (420., 120.),
         setup: keybinds,
@@ -169,39 +154,14 @@ const SNAPSHOTS: &[Snapshot] = &[
         setup: links,
     },
     Snapshot {
-        name: "alert",
-        size: (520., 200.),
-        setup: alerts,
-    },
-    Snapshot {
         name: "progress",
         size: (420., 140.),
         setup: progresses,
     },
     Snapshot {
-        name: "divider",
-        size: (420., 120.),
-        setup: dividers,
-    },
-    Snapshot {
-        name: "resizable",
-        size: (420., 220.),
-        setup: resizables,
-    },
-    Snapshot {
-        name: "chart",
-        size: (420., 160.),
-        setup: charts,
-    },
-    Snapshot {
         name: "slider",
         size: (420., 140.),
         setup: sliders,
-    },
-    Snapshot {
-        name: "tabs",
-        size: (520., 100.),
-        setup: tab_bars,
     },
     Snapshot {
         name: "icon",
@@ -217,21 +177,6 @@ const SNAPSHOTS: &[Snapshot] = &[
         name: "window-bar",
         size: (560., 320.),
         setup: window_bars,
-    },
-    Snapshot {
-        name: "sticky",
-        size: (620., 260.),
-        setup: sticky_sections,
-    },
-    Snapshot {
-        name: "sticky-reveal",
-        size: (620., 260.),
-        setup: sticky_reveal,
-    },
-    Snapshot {
-        name: "dock",
-        size: (560., 240.),
-        setup: docks,
     },
 ];
 
@@ -412,25 +357,6 @@ fn icon_set(_: &mut Window, _: &mut App) -> Draw {
                 })
                 .into(),
         )
-    })
-}
-
-fn clipboards(_: &mut Window, _: &mut App) -> Draw {
-    Box::new(|_, _| {
-        page(vec![row(
-            "复制",
-            vec![
-                Clipboard::new("copy")
-                    .value("内容")
-                    .icon_action("复制")
-                    .into_any_element(),
-                Clipboard::new("copy-disabled")
-                    .value("内容")
-                    .icon_action("复制")
-                    .disabled(true)
-                    .into_any_element(),
-            ],
-        )])
     })
 }
 
@@ -692,53 +618,22 @@ fn buttons(_: &mut Window, _: &mut App) -> Draw {
     })
 }
 
-fn choices(_: &mut Window, _: &mut App) -> Draw {
+fn switches(_: &mut Window, _: &mut App) -> Draw {
     Box::new(|_, _| {
-        page(vec![
-            row(
-                "开关",
-                vec![
-                    Switch::new("switch-off").into_any_element(),
-                    Switch::new("switch-on").checked(true).into_any_element(),
-                    Switch::new("switch-off-disabled")
-                        .disabled(true)
-                        .into_any_element(),
-                    Switch::new("switch-on-disabled")
-                        .checked(true)
-                        .disabled(true)
-                        .into_any_element(),
-                ],
-            ),
-            row(
-                "复选框",
-                vec![
-                    Checkbox::new("check-off").label("没勾").into_any_element(),
-                    Checkbox::new("check-on")
-                        .checked(true)
-                        .label("勾上")
-                        .into_any_element(),
-                    Checkbox::new("check-disabled")
-                        .checked(true)
-                        .disabled(true)
-                        .label("禁用")
-                        .into_any_element(),
-                ],
-            ),
-            row(
-                "单选",
-                vec![
-                    Radio::new("radio-off").label("没选").into_any_element(),
-                    Radio::new("radio-on")
-                        .checked(true)
-                        .label("选中")
-                        .into_any_element(),
-                    Radio::new("radio-disabled")
-                        .disabled(true)
-                        .label("禁用")
-                        .into_any_element(),
-                ],
-            ),
-        ])
+        page(vec![row(
+            "开关",
+            vec![
+                Switch::new("switch-off").into_any_element(),
+                Switch::new("switch-on").checked(true).into_any_element(),
+                Switch::new("switch-off-disabled")
+                    .disabled(true)
+                    .into_any_element(),
+                Switch::new("switch-on-disabled")
+                    .checked(true)
+                    .disabled(true)
+                    .into_any_element(),
+            ],
+        )])
     })
 }
 
@@ -860,161 +755,6 @@ fn list_rows(_: &mut Window, _: &mut App) -> Draw {
             .gap_4()
             .child(column("bg", ui_theme::bg()))
             .child(column("backdrop", ui_theme::chart(0)))
-            .into_any_element()
-    })
-}
-
-/// 吸顶区段：三栏同一份列表滚到不同位置。左边没滚，中间「对话」的标题停在顶上、滚上去
-/// 的行在标题下沿被裁掉，右边「对话」快滚完了、标题被「项目」顶走一截。
-fn sticky_sections(_: &mut Window, _: &mut App) -> Draw {
-    use gpui::{ScrollHandle, point};
-    use smelt_ui::StickySection;
-    use smelt_ui::scrollbar::{Scrollable, ScrollbarAxis};
-
-    let handles: Vec<ScrollHandle> = [0., 60., 180.]
-        .into_iter()
-        .map(|offset| {
-            let handle = ScrollHandle::new();
-            handle.set_offset(point(px(0.), px(-offset)));
-            handle
-        })
-        .collect();
-    Box::new(move |_, _| {
-        let header = |label: &'static str| {
-            div()
-                .h(px(24.))
-                .px_2()
-                .flex()
-                .items_center()
-                .type_style(TYPE.text_xsmall_medium)
-                .text_color(rgb(ui_theme::muted()))
-                .child(label)
-        };
-        let body = |name: &'static str, count: usize| {
-            div().flex().flex_col().children((1..=count).map(move |n| {
-                div()
-                    .h(px(28.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .type_style(TYPE.ui)
-                    .child(format!("{name} {n}"))
-            }))
-        };
-        let column = |index: usize, handle: &ScrollHandle| {
-            let content = div()
-                .flex()
-                .flex_col()
-                .child(StickySection::new(header("对话"), body("对话", 6)))
-                .child(StickySection::new(header("项目"), body("会话", 10)));
-            div()
-                .w(px(180.))
-                .h(px(200.))
-                .flex()
-                .flex_col()
-                .border_1()
-                .border_color(ui_theme::hair())
-                .child(Scrollable::new(
-                    ElementId::Name(format!("sticky-{index}").into()),
-                    content,
-                    handle,
-                    ScrollbarAxis::Vertical,
-                ))
-        };
-        div()
-            .flex()
-            .gap_4()
-            .children(
-                handles
-                    .iter()
-                    .enumerate()
-                    .map(|(index, handle)| column(index, handle)),
-            )
-            .into_any_element()
-    })
-}
-
-/// 吸顶区段里滚到某一项（`ScrollAnchors::reveal`），要滚到的那行涂了底色。左边从顶上跳到
-/// 远处的「会话 8」：滚到标题以下那段的中间。中间原本滚到 60，「对话 2」压在停住的「对话」
-/// 标题底下：上沿滚到标题下沿。右边「对话 4」本来就看得见：不动。
-fn sticky_reveal(_: &mut Window, _: &mut App) -> Draw {
-    use gpui::{ScrollHandle, point};
-    use smelt_ui::StickySection;
-    use smelt_ui::scroll_anchors::ScrollAnchors;
-    use smelt_ui::scrollbar::{Scrollable, ScrollbarAxis};
-
-    let panels: Vec<(ScrollHandle, ScrollAnchors, &'static str)> =
-        [(0., "会话 8"), (60., "对话 2"), (0., "对话 4")]
-            .into_iter()
-            .map(|(offset, target)| {
-                let handle = ScrollHandle::new();
-                handle.set_offset(point(px(0.), px(-offset)));
-                let anchors = ScrollAnchors::new(&handle);
-                anchors.reveal(Some(target.into()));
-                (handle, anchors, target)
-            })
-            .collect();
-    Box::new(move |_, _| {
-        let header = |label: &'static str| {
-            div()
-                .h(px(24.))
-                .px_2()
-                .flex()
-                .items_center()
-                .type_style(TYPE.text_xsmall_medium)
-                .text_color(rgb(ui_theme::muted()))
-                .child(label)
-        };
-        let body = |anchors: &ScrollAnchors, target: &str, name: &str, count: usize| {
-            div().flex().flex_col().children((1..=count).map(|n| {
-                let label = format!("{name} {n}");
-                let row = div()
-                    .h(px(28.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .type_style(TYPE.ui)
-                    .when(label == target, |row| row.bg(ui_theme::selection()))
-                    .child(label.clone());
-                anchors.anchor(label, row)
-            }))
-        };
-        let column =
-            |index: usize, (handle, anchors, target): &(ScrollHandle, ScrollAnchors, &str)| {
-                let sections = div()
-                    .flex()
-                    .flex_col()
-                    .child(StickySection::new(
-                        header("对话"),
-                        body(anchors, target, "对话", 6),
-                    ))
-                    .child(StickySection::new(
-                        header("项目"),
-                        body(anchors, target, "会话", 10),
-                    ));
-                div()
-                    .w(px(180.))
-                    .h(px(200.))
-                    .flex()
-                    .flex_col()
-                    .border_1()
-                    .border_color(ui_theme::hair())
-                    .child(Scrollable::new(
-                        ElementId::Name(format!("sticky-reveal-{index}").into()),
-                        div().flex().flex_col().child(anchors.root(sections)),
-                        handle,
-                        ScrollbarAxis::Vertical,
-                    ))
-            };
-        div()
-            .flex()
-            .gap_4()
-            .children(
-                panels
-                    .iter()
-                    .enumerate()
-                    .map(|(index, panel)| column(index, panel)),
-            )
             .into_any_element()
     })
 }
@@ -1576,73 +1316,6 @@ fn command_palette(window: &mut Window, cx: &mut App) -> Draw {
     })
 }
 
-/// 悬停卡片开着：画好第一帧后把指针移到触发的那行字上。延时设成 0，一移上去就浮出。
-fn hover_card(window: &mut Window, cx: &mut App) -> Draw {
-    window.defer(cx, |window, cx| {
-        let _ = window.draw(cx);
-        window.dispatch_event(
-            gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
-                position: gpui::point(px(60.), px(32.)),
-                pressed_button: None,
-                modifiers: gpui::Modifiers::default(),
-            }),
-            cx,
-        );
-    });
-    Box::new(|_, _| {
-        div()
-            .flex()
-            .child(
-                smelt_ui::hover_card::HoverCard::new("hover-card")
-                    .open_delay(std::time::Duration::ZERO)
-                    .anchor(gpui::Anchor::TopLeft)
-                    .trigger(
-                        div()
-                            .type_style(TYPE.ui)
-                            .text_color(rgb(ui_theme::muted()))
-                            .child("收到：先把对话框层并到一处…"),
-                    )
-                    .child(
-                        div()
-                            .w(px(360.))
-                            .p_2()
-                            .type_style(TYPE.text_xsmall)
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child("先把对话框层并到一处，宿主和插件的对话框叠在同一摞里。")
-                            .child("弹出卡片和悬停卡片的外观在 smelt-ui，行为用 gpui-base。"),
-                    ),
-            )
-            .into_any_element()
-    })
-}
-
-fn badges(_: &mut Window, _: &mut App) -> Draw {
-    use smelt_ui::Badge;
-    Box::new(|_, _| {
-        page(vec![
-            row(
-                "灰 / 实底",
-                vec![
-                    Badge::new().child("已添加").into_any_element(),
-                    Badge::new().child("main").into_any_element(),
-                    Badge::new().accent().child("默认").into_any_element(),
-                    Badge::new().accent().child("12").into_any_element(),
-                ],
-            ),
-            row(
-                "状态",
-                vec![
-                    Badge::new().ok().child("已登录").into_any_element(),
-                    Badge::new().need().child("快用完").into_any_element(),
-                    Badge::new().bad().child("已过期").into_any_element(),
-                ],
-            ),
-        ])
-    })
-}
-
 fn keybinds(_: &mut Window, _: &mut App) -> Draw {
     use smelt_ui::Keybind;
     fn key(spec: &'static str) -> gpui::Keystroke {
@@ -1693,24 +1366,6 @@ fn links(_: &mut Window, _: &mut App) -> Draw {
     })
 }
 
-fn alerts(_: &mut Window, _: &mut App) -> Draw {
-    use smelt_ui::Alert;
-    Box::new(|_, _| {
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .w(px(440.))
-            .child(Alert::error("short", "读不到智能体配置"))
-            .child(Alert::error(
-                "long",
-                "保存失败：配置文件被别的程序占用，关掉占用它的程序后再试一次；还不行就打开日志看看具体原因",
-            ))
-            .child(Alert::need("need", "已有同名技能，导入会替换它，旧版本移进回收目录。"))
-            .into_any_element()
-    })
-}
-
 fn progresses(_: &mut Window, _: &mut App) -> Draw {
     use smelt_ui::Progress;
     Box::new(|_, _| {
@@ -1724,87 +1379,6 @@ fn progresses(_: &mut Window, _: &mut App) -> Draw {
             .child(Progress::new("full").value(100.))
             .child(Progress::new("thin").value(60.).w(px(120.)).h(px(5.)))
             .child(Progress::new("unknown").indeterminate(true))
-            .into_any_element()
-    })
-}
-
-/// 横、竖两种分栏，把手都是平时那根 1px 细线。
-fn resizables(_: &mut Window, cx: &mut App) -> Draw {
-    use smelt_ui::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
-    let across = cx.new(|_| ResizableState::default());
-    let down = cx.new(|_| ResizableState::default());
-    Box::new(move |_, _| {
-        let pane = |label: &'static str| {
-            div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .type_style(TYPE.ui)
-                .text_color(rgb(ui_theme::muted()))
-                .child(label)
-        };
-        div()
-            .flex()
-            .gap_4()
-            .h(px(160.))
-            .child(
-                div().w(px(180.)).h_full().child(
-                    h_resizable("across")
-                        .with_state(&across)
-                        .child(resizable_panel().size(px(70.)).child(pane("左")))
-                        .child(resizable_panel().child(pane("右"))),
-                ),
-            )
-            .child(
-                div().w(px(180.)).h_full().child(
-                    v_resizable("down")
-                        .with_state(&down)
-                        .child(resizable_panel().size(px(60.)).child(pane("上")))
-                        .child(resizable_panel().child(pane("下"))),
-                ),
-            )
-            .into_any_element()
-    })
-}
-
-/// 资源页的内存曲线：默认最高点贴上沿；给了上限就留出余量；平的一条贴底也画得出来。
-fn charts(_: &mut Window, _: &mut App) -> Draw {
-    use smelt_ui::chart::AreaChart;
-    const MEMORY: [f64; 12] = [
-        310., 318., 342., 336., 360., 402., 398., 421., 415., 446., 438., 452.,
-    ];
-    Box::new(|_, _| {
-        let chart = |chart: AreaChart| div().h(px(96.)).w(px(110.)).child(chart);
-        div()
-            .flex()
-            .gap_4()
-            .child(chart(AreaChart::new(MEMORY)))
-            .child(chart(AreaChart::new(MEMORY).max(452. * 1.2)))
-            .child(chart(AreaChart::new([0., 0., 0.]).max(1.)))
-            .into_any_element()
-    })
-}
-
-fn dividers(_: &mut Window, _: &mut App) -> Draw {
-    use smelt_ui::Divider;
-    Box::new(|_, _| {
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .w(px(240.))
-            .child("上面")
-            .child(Divider::horizontal())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child("左")
-                    .child(Divider::vertical().h(px(14.)))
-                    .child("右"),
-            )
             .into_any_element()
     })
 }
@@ -1828,22 +1402,6 @@ fn sliders(_: &mut Window, cx: &mut App) -> Draw {
             .child(Slider::new(&low))
             .child(Slider::new(&high))
             .child(Slider::new(&high).disabled(true))
-            .into_any_element()
-    })
-}
-
-fn tab_bars(_: &mut Window, _: &mut App) -> Draw {
-    use smelt_ui::Badge;
-    use smelt_ui::tabs::{Tab, TabBar};
-    Box::new(|_, _| {
-        TabBar::new("tabs")
-            .child(Tab::new("a").selected(true).child("对话"))
-            .child(
-                Tab::new("b")
-                    .child("改动")
-                    .child(Badge::new().accent().child("3")),
-            )
-            .child(Tab::new("c").child("终端"))
             .into_any_element()
     })
 }
@@ -2002,141 +1560,5 @@ fn window_bars(_: &mut Window, _: &mut App) -> Draw {
             bottom_row(bottom, "贴左右下角"),
             bottom_row(SafeArea::default(), "不贴角"),
         ])
-    })
-}
-
-/// smelt 画的 Dock：左边一组两块叠成页签，右边一组一块，中间是分隔条。
-fn docks(window: &mut Window, cx: &mut App) -> Draw {
-    use std::rc::Rc;
-
-    use gpui::{AnyView, EventEmitter, FocusHandle, Focusable};
-    use gpui_base::dock::{
-        DockArea, DockAreaRenderer, DockLayout, DropIndicator, Panel, PanelEvent, TabGroupContext,
-        TabGroupRenderer,
-    };
-    use smelt_ui::dock::{TabLabel, active_panel, drop_indicator, split_handle, tab_strip};
-
-    struct Pane {
-        name: &'static str,
-        focus: FocusHandle,
-    }
-    impl EventEmitter<PanelEvent> for Pane {}
-    impl Focusable for Pane {
-        fn focus_handle(&self, _: &App) -> FocusHandle {
-            self.focus.clone()
-        }
-    }
-    impl Panel for Pane {
-        fn panel_name(&self) -> &'static str {
-            self.name
-        }
-    }
-    impl Render for Pane {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .type_style(TYPE.ui)
-                .text_color(rgb(ui_theme::muted()))
-                .child(self.name)
-        }
-    }
-
-    struct Skin;
-    impl DockAreaRenderer for Skin {
-        fn render_split_handle(
-            &self,
-            handle: &gpui_base::ResizeHandleContext,
-            _: &mut Window,
-            _: &mut App,
-        ) -> Option<AnyElement> {
-            Some(split_handle(handle))
-        }
-        fn tab_group_renderer(&self) -> Rc<dyn TabGroupRenderer> {
-            Rc::new(Skin)
-        }
-    }
-    impl TabGroupRenderer for Skin {
-        fn render_tab_bar(
-            &self,
-            group: &TabGroupContext,
-            _: &mut Window,
-            cx: &mut App,
-        ) -> AnyElement {
-            let tabs = group
-                .panels()
-                .iter()
-                .enumerate()
-                .map(|(ix, panel)| {
-                    let text: gpui::SharedString = panel.panel_name(cx).into();
-                    let badge = (ix == 1).then(|| {
-                        smelt_ui::Badge::new()
-                            .accent()
-                            .child("3")
-                            .into_any_element()
-                    });
-                    let label = TabLabel {
-                        text: text.clone(),
-                        label: text.into_any_element(),
-                        badge,
-                    };
-                    (ix, label)
-                })
-                .collect();
-            div()
-                .flex()
-                .items_center()
-                .h(smelt_ui::window_bar::TOP_BAR_HEIGHT)
-                .px_2()
-                .child(tab_strip(group, tabs, false, cx))
-                .into_any_element()
-        }
-        fn render_active_panel(
-            &self,
-            panel: AnyView,
-            group: &TabGroupContext,
-            _: &mut Window,
-            _: &mut App,
-        ) -> AnyElement {
-            active_panel(panel, group)
-        }
-        fn render_drop_indicator(
-            &self,
-            indicator: DropIndicator,
-            window: &mut Window,
-            cx: &mut App,
-        ) -> Option<AnyElement> {
-            Some(drop_indicator(indicator, window, cx))
-        }
-    }
-
-    let pane = |name: &'static str, cx: &mut App| {
-        cx.new(|cx| Pane {
-            name,
-            focus: cx.focus_handle(),
-        })
-    };
-    let (chat, changes, terminal) = (pane("对话", cx), pane("改动", cx), pane("终端", cx));
-    let area =
-        cx.new(|cx| DockArea::new("snapshot-dock", None, window, cx).with_renderer(Rc::new(Skin)));
-    area.update(cx, |area, cx| {
-        let layout = DockLayout::h_split()
-            .child(
-                DockLayout::tabs().panel(chat).panel(changes),
-                Some(px(300.)),
-            )
-            .child(DockLayout::tabs().panel(terminal), None);
-        area.set_center(layout, window, cx);
-    });
-    Box::new(move |_, _| {
-        div()
-            .w(px(500.))
-            .h(px(180.))
-            .border_1()
-            .border_color(ui_theme::hair())
-            .child(area.clone())
-            .into_any_element()
     })
 }

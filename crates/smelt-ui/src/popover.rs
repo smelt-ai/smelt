@@ -6,7 +6,7 @@
 //! （[`crate::motion::overlay_enter`]）；gpui-base 关掉就卸下内容，出场淡出做不了。
 //!
 //! `Styled` 改的是浮层卡片（宽、内边距）；触发点外框（参与外面排版、浮层对齐它）用
-//! [`Popover::trigger_style`]。悬停出现的详情用 [`crate::hover_card::HoverCard`]。
+//! [`Popover::trigger_style`]。
 
 use gpui::{
     Anchor, AnyElement, App, Context, Div, ElementId, FocusHandle, IntoElement, ParentElement as _,
@@ -21,16 +21,16 @@ use crate::motion::{EnterFrom, overlay_enter};
 use crate::ui_theme;
 
 /// 浮层离触发点的距离。
-pub(crate) const GAP: f32 = 4.;
+const GAP: f32 = 4.;
 /// 卡片内边距。
 const PADDING: f32 = 12.;
-/// 弹出卡片、悬停卡片的宽度范围。
+/// 弹出卡片的宽度范围。
 const MIN_WIDTH: f32 = 200.;
 const MAX_WIDTH: f32 = 320.;
 
 /// 浮层卡片的底：实色面、1px 半透明边、`md` 投影，竖排，
-/// 宽 200~320（调用方的宽高样式在后面，盖得过）。弹出卡片和悬停卡片共用，圆角、内边距各自定。
-pub(crate) fn surface() -> Div {
+/// 宽 200~320（调用方的宽高样式在后面，盖得过）。
+fn surface() -> Div {
     div()
         .flex()
         .flex_col()
