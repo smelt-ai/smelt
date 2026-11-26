@@ -1,5 +1,5 @@
-//! 宿主自带的命令：设置、退出、调试面板、命令面板，和插件调的宿主动作。快捷键、应用菜单、
-//! 命令面板执行的都是登记过的命令（见 `smelt_plugin_api::register_commands`），功能的命令
+//! 宿主自带的命令：设置、退出、调试面板，和插件调的宿主动作。快捷键与应用菜单
+//! 执行的都是登记过的命令（见 `smelt_plugin_api::register_commands`），功能的命令
 //! 归各自的插件登记。
 //!
 //! id 定了就别改，改了用户的覆盖就认不出。
@@ -11,7 +11,7 @@ use smelt_plugin_api::{self as api, CommandHandler, CommandSpec, Handled};
 use super::*;
 use crate::plugin_host::WorkspaceRef;
 
-/// 处理函数：工作台、执行时带的参数（快捷键、菜单、命令面板执行时是 `null`）。
+/// 处理函数：工作台、执行时带的参数（快捷键、菜单执行时是 `null`）。
 type Run = fn(&mut Workspace, &serde_json::Value, &mut Window, &mut Context<Workspace>) -> Handled;
 
 /// 一条自带命令。键位规则见 [`CommandSpec`]。
@@ -22,15 +22,12 @@ pub(crate) struct Def {
     pub(crate) title: fn() -> api::Text,
     pub(crate) key: Option<&'static str>,
     pub(crate) context: &'static str,
-    pub(crate) palette: bool,
     run: Run,
 }
 
 /// 来源 → 快捷键设置里的分组名，顺序就是登记顺序。
-pub(crate) const OWNERS: &[(&str, fn() -> api::Text)] = &[
-    ("smelt.app", || api::text!("command.group.app")),
-    ("smelt.palette", || api::text!("command.group.app")),
-];
+pub(crate) const OWNERS: &[(&str, fn() -> api::Text)] =
+    &[("smelt.app", || api::text!("command.group.app"))];
 
 const fn def(
     owner: &'static str,
@@ -45,15 +42,7 @@ const fn def(
         title,
         key,
         context: "Workspace",
-        palette: true,
         run,
-    }
-}
-
-const fn hidden(def: Def) -> Def {
-    Def {
-        palette: false,
-        ..def
     }
 }
 
@@ -79,7 +68,7 @@ pub(crate) const COMMANDS: &[Def] = &[
         },
     ),
     // 帧耗时、GPU/CPU/内存。编辑器把同一组合键绑成 Replace，更深的 Input 优先。
-    hidden(def(
+    def(
         "smelt.app",
         "debug-hud",
         || api::text!("command.debug_hud"),
@@ -89,21 +78,7 @@ pub(crate) const COMMANDS: &[Def] = &[
             cx.notify();
             Handled::ok()
         },
-    )),
-    hidden(def(
-        "smelt.palette",
-        "toggle",
-        || api::text!("command.palette"),
-        Some("cmd-k"),
-        |this, _, window, cx| {
-            if this.palette.is_some() {
-                this.close_palette(window, cx);
-            } else {
-                this.open_palette(window, cx);
-            }
-            Handled::ok()
-        },
-    )),
+    ),
 ];
 
 /// 登记全部自带命令，处理函数由 `handler` 按 [`Def`] 做出来；带类型的宿主动作（插件用
@@ -126,7 +101,6 @@ fn register_with(
                 title: (def.title)(),
                 key: def.key.map(str::to_string),
                 context: def.context.to_string(),
-                palette: def.palette,
                 requires_args: false,
                 args: Some(Vec::new()),
                 cli: false,

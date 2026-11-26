@@ -130,9 +130,6 @@ command:
   open_view:
     en: "Open View"
     zh-CN: "打开视图"
-  palette:
-    en: "Open Command Palette"
-    zh-CN: "打开命令面板"
   pick_paths:
     en: "Choose Paths"
     zh-CN: "选择路径"

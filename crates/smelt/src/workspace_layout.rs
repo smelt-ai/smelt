@@ -34,9 +34,8 @@ use gpui::{
     App, AppContext as _, Context, Div, InteractiveElement as _, ParentElement as _, SharedString,
     Styled as _, Subscription, Window, WindowControlArea, div, px, rgb,
 };
-use gpui_base::dock::DockAreaState;
 use smelt_client_store::WorkspaceLayoutStateRecord;
-use smelt_plugin_api as api;
+use smelt_plugin_api::{self as api, DockAreaState};
 use smelt_ui::{
     Button, Icon, IconName,
     kit::{RADIUS, TYPE, TypeStyled as _},
@@ -1003,9 +1002,9 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{layout_views, resolve, to_text, usable_saved_state};
-    use gpui_base::dock::DockAreaState;
     use smelt_client_store::WorkspaceLayoutStateRecord;
     use smelt_plugin_api as api;
+    use smelt_plugin_api::DockAreaState;
 
     fn info(id: &str) -> api::LayoutInfo {
         api::LayoutInfo {

@@ -139,11 +139,6 @@ const SNAPSHOTS: &[Snapshot] = &[
         setup: combobox,
     },
     Snapshot {
-        name: "command-palette",
-        size: (720., 520.),
-        setup: command_palette,
-    },
-    Snapshot {
         name: "keybind",
         size: (420., 120.),
         setup: keybinds,
@@ -1271,48 +1266,6 @@ fn combobox(window: &mut Window, cx: &mut App) -> Draw {
                     .anchor(gpui::Anchor::TopLeft),
             )
             .into_any_element()
-    })
-}
-
-/// 命令面板开着：分组、行尾快捷键（含两步的）、禁用项，第一项高亮。
-fn command_palette(window: &mut Window, cx: &mut App) -> Draw {
-    use smelt_ui::{ComboboxGroup, ComboboxOption, CommandPalette};
-
-    // 面板画在窗口根的对话框层上，根这时还没建好：等这一轮建完再开。
-    window.defer(cx, |window, cx| {
-        let key = |spec: &'static str| gpui::Keystroke::parse(spec).unwrap();
-        let groups = std::rc::Rc::new(vec![
-            ComboboxGroup::new(
-                Some("工作区".into()),
-                vec![
-                    ComboboxOption::new("sidebar", "显示或隐藏侧栏").keybind([key("cmd-b")]),
-                    ComboboxOption::new("zoom", "放大当前面板").keybind([key("cmd-shift-enter")]),
-                    ComboboxOption::new("settings", "打开设置").keybind([key("cmd-,")]),
-                ],
-            ),
-            ComboboxGroup::new(
-                Some("对话".into()),
-                vec![
-                    ComboboxOption::new("new", "新对话").keybind([key("cmd-n")]),
-                    ComboboxOption::new("fork", "从这里分叉"),
-                    ComboboxOption::new("compact", "压缩上下文").disabled(true),
-                ],
-            ),
-            ComboboxGroup::new(
-                Some("终端".into()),
-                vec![
-                    ComboboxOption::new("terminal", "新终端").keybind([key("ctrl-`")]),
-                    ComboboxOption::new("clear", "清屏").keybind([key("cmd-k"), key("cmd-l")]),
-                ],
-            ),
-        ]);
-        CommandPalette::new(groups, |_, _, _| {}).open(window, cx);
-    });
-    Box::new(|_, _| {
-        page(vec![row(
-            "背后",
-            vec![div().child("面板背后的工作区").into_any_element()],
-        )])
     })
 }
 

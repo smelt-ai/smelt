@@ -1,7 +1,9 @@
-//! 远程桌面画布能力：本地 noVNC 转发口（[`DesktopProxy`]）与原生子窗口 [`gpui_webview::WebView`] 封装。
+//! 远程桌面画布能力：本地 noVNC 转发口（[`DesktopProxy`]）与原生子窗口 [`wry::WebView`] 封装。
 //!
 //! 只负责画布、输入法/剪贴板 IPC 桥接与遮罩层显隐，不含工具栏、重连策略、机器探测或插件登记——
 //! 这些全部由 JS 插件（`plugins/desktop/`）实现。
+
+mod webview;
 
 use std::rc::Rc;
 
@@ -13,6 +15,7 @@ use smelt_plugin_api as api;
 use smelt_plugin_api::HostEvent;
 use smelt_plugin_api::client::RuntimeClient;
 use smelt_plugin_api::client::desktop::DesktopProxy;
+use webview::NativeWebView;
 
 /// 画布发往 JS 层的原生事件。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,10 +47,10 @@ fn parse_page_event(body: &str) -> Option<DesktopCanvasEvent> {
     }
 }
 
-/// 单台机器的远程桌面原生画布：持有本地转发口与 `gpui_webview::WebView`，释放时自动断连。
+/// 单台机器的远程桌面原生画布：持有本地转发口与原生 `wry::WebView`，释放时自动断连。
 pub struct DesktopCanvas {
     proxy: Option<DesktopProxy>,
-    webview: Option<Entity<gpui_webview::WebView>>,
+    webview: Option<Entity<NativeWebView>>,
     overlay_open: bool,
     _page_events: Option<Task<()>>,
     _overlay_sub: Subscription,
@@ -120,7 +123,7 @@ impl DesktopCanvas {
         };
         let overlay_open = self.overlay_open;
         self.webview = Some(cx.new(|cx| {
-            let mut webview = gpui_webview::WebView::new(native, window, cx);
+            let mut webview = NativeWebView::new(native, window, cx);
             if overlay_open {
                 webview.hide();
             }

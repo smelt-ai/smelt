@@ -32,10 +32,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use gpui::{
-    BoxShadow, FontStyle, FontWeight, HighlightStyle, Rgba, SharedString, UnderlineStyle, px,
-};
-use gpui_base::input::HighlightStyleResolver;
+use gpui::{BoxShadow, Rgba, SharedString, px};
 use serde_json::{Map, Value};
 
 /// 主题文件格式的版本。格式改了就加一；读到别的版本整份不收。
@@ -347,50 +344,6 @@ impl ThemeConfig {
 /// 代码编辑器按 tree-sitter 高亮名查样式用的表，从主题的 `syntax` 段建。带点的名字查不到时
 /// 退到第一段（`keyword.modifier` 用 `keyword` 的）。
 #[derive(Debug, Default)]
-pub struct SyntaxPalette {
-    styles: HashMap<&'static str, HighlightStyle>,
-}
-
-impl SyntaxPalette {
-    pub fn new(styles: &[(&'static str, SyntaxStyle)]) -> Self {
-        let styles = styles
-            .iter()
-            .map(|(key, style)| {
-                let highlight = HighlightStyle {
-                    color: style.color.map(Into::into),
-                    font_weight: style.font_weight.map(|weight| FontWeight(weight.into())),
-                    font_style: match style.font_style {
-                        Some(SyntaxFontStyle::Italic) => Some(FontStyle::Italic),
-                        Some(SyntaxFontStyle::Normal | SyntaxFontStyle::Underline) => {
-                            Some(FontStyle::Normal)
-                        }
-                        None => None,
-                    },
-                    underline: (style.font_style == Some(SyntaxFontStyle::Underline)).then(|| {
-                        UnderlineStyle {
-                            thickness: px(1.),
-                            ..UnderlineStyle::default()
-                        }
-                    }),
-                    ..HighlightStyle::default()
-                };
-                (*key, highlight)
-            })
-            .collect();
-        Self { styles }
-    }
-}
-
-impl HighlightStyleResolver for SyntaxPalette {
-    fn style(&self, name: &str) -> Option<HighlightStyle> {
-        if let Some(style) = self.styles.get(name) {
-            return Some(*style);
-        }
-        let (head, _) = name.split_once('.')?;
-        self.styles.get(head).copied()
-    }
-}
-
 /// 一份主题集文件。
 pub(crate) struct ThemeSet {
     pub name: SharedString,

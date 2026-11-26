@@ -17,9 +17,8 @@ use std::fmt;
 use std::sync::{Arc, LazyLock};
 
 use gpui::{App, Global, Hsla, SharedString};
-use gpui_base::input::SharedHighlightStyleResolver;
 
-use crate::theme_config::{self, SyntaxPalette, SyntaxStyle, ThemeColors};
+use crate::theme_config::{self, SyntaxStyle, ThemeColors};
 pub use crate::theme_config::{ThemeConfig, ThemeMode};
 use crate::ui_theme;
 
@@ -253,7 +252,6 @@ pub fn syntax_styles(config: &ThemeConfig) -> &[(&'static str, SyntaxStyle)] {
 pub struct ActiveTheme {
     config: Arc<ThemeConfig>,
     colors: ThemeColors,
-    syntax: SharedHighlightStyleResolver,
 }
 
 impl Global for ActiveTheme {}
@@ -271,11 +269,6 @@ impl ActiveTheme {
     /// 装上的语义色。窗口底下垫了材质时字色已按材质配够对比，可能和主题文件求出的不同。
     pub fn colors(&self) -> &ThemeColors {
         &self.colors
-    }
-
-    /// 代码编辑器的高亮样式（[`syntax_styles`] 建成的查表），换主题时建一次。
-    pub fn syntax(&self) -> &SharedHighlightStyleResolver {
-        &self.syntax
     }
 }
 
@@ -364,12 +357,7 @@ pub fn apply(name: &str, cx: &mut App) -> bool {
     ui_theme::fit_text_to_backdrop(&mut colors, dark);
     ui_theme::install_theme(&colors, config.elevation().clone(), dark);
     crate::base_theme::install(&colors, dark, cx);
-    let syntax: SharedHighlightStyleResolver = Arc::new(SyntaxPalette::new(syntax_styles(&config)));
-    cx.set_global(ActiveTheme {
-        config,
-        colors,
-        syntax,
-    });
+    cx.set_global(ActiveTheme { config, colors });
     true
 }
 
@@ -532,11 +520,9 @@ mod tests {
         });
     }
 
-    /// 没写 `syntax` 的主题整套用同明暗的 smelt 高亮；写了的只用自己的。带点的名字退到第一段。
+    /// 没写 `syntax` 的主题整套用同明暗的 smelt 高亮；写了的只用自己的。
     #[test]
     fn syntax_falls_back_to_the_builtin_set_as_a_whole() {
-        use gpui_base::input::HighlightStyleResolver as _;
-
         let mut catalog = ThemeCatalog::default();
         let bare = set(&[("Bare", "#101010")]);
         catalog.register("bare", &[&bare], no_reserved).unwrap();
@@ -562,10 +548,11 @@ mod tests {
             .unwrap();
         let styles = syntax_styles(catalog.get("Own").unwrap());
         assert_eq!(styles.len(), 1);
-        let palette = SyntaxPalette::new(styles);
-        let keyword = palette.style("keyword.modifier").unwrap();
-        assert_eq!(keyword.color, Some(gpui::rgb(0xff0000).into()));
-        assert!(keyword.underline.is_some());
-        assert!(palette.style("string").is_none());
+        assert_eq!(styles[0].0, "keyword");
+        assert_eq!(styles[0].1.color, Some(gpui::rgb(0xff0000)));
+        assert_eq!(
+            styles[0].1.font_style,
+            Some(theme_config::SyntaxFontStyle::Underline)
+        );
     }
 }

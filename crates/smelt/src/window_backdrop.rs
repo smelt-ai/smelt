@@ -33,7 +33,7 @@
 //! `NSGlassEffectView`：液态玻璃是给浮在内容上的控件用的，不是侧栏的底。
 
 use gpui::{Bounds, Pixels, Window, WindowBackgroundAppearance, fill, point, px, size};
-use gpui_base::dock::DockPlacement;
+use smelt_plugin_api::DockPlacement;
 use smelt_plugin_api::{LayoutMaterials, Material};
 use smelt_ui::ui_theme::{self, MaterialTone};
 

@@ -1,6 +1,6 @@
 //! 布局注册表：一页（见 [`crate::page`]）怎么摆。
 //!
-//! 布局是 gpui-base 的 `DockAreaState` 原文，面板名就是视图 id（见 [`crate::view`]）。每份
+//! 布局是 [`DockAreaState`] 原文，面板名就是视图 id（见 [`crate::view`]）。每份
 //! 布局说明自己给哪一页，一页可以有好几份，别的插件也能给不是自己的页带布局。插件按来源
 //! 整组登记，id 是 `<来源>/<名字>`，所以一个插件替换不了别人的布局。首页用哪份由用户在
 //! 设置里选，别的页用给它登记的第一份；选的那份没登记（插件还没加载、被卸了）时宿主先用
@@ -11,13 +11,179 @@
 //! 布局还说各块地方（左、右、下停靠区和中间）垫什么材质（[`LayoutMaterials`]），没说的铺实色。
 //! 材质跟着地方走，不跟视图：把视图拖到别处，透不透看它落在哪。
 
-use gpui::{App, Global, SharedString};
-use gpui_base::dock::DockPlacement;
+use gpui::{App, Axis, Global, Pixels, SharedString};
 use serde::{Deserialize, Serialize};
 
 use crate::{HostEvent, Text};
 
-pub use gpui_base::dock::{DockAreaState, PanelInfo, PanelState};
+/// 布局与存档的序列化结构。与 NSH `<DockArea>` 及既有落盘 JSON 格式完全同构，字段名和
+/// serde tag 为持久化契约，不可擅改。
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DockAreaState {
+    #[serde(default)]
+    pub version: Option<usize>,
+    pub center: PanelState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left_dock: Option<DockState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right_dock: Option<DockState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bottom_dock: Option<DockState>,
+}
+
+/// 单个停靠区的持久化状态。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DockState {
+    panel: PanelState,
+    placement: DockPlacement,
+    size: Pixels,
+    open: bool,
+}
+
+impl DockState {
+    pub fn new(panel: PanelState, placement: DockPlacement, size: Pixels, open: bool) -> Self {
+        Self {
+            panel,
+            placement,
+            size,
+            open,
+        }
+    }
+
+    pub fn panel(&self) -> &PanelState {
+        &self.panel
+    }
+
+    pub fn placement(&self) -> DockPlacement {
+        self.placement
+    }
+
+    pub fn size(&self) -> Pixels {
+        self.size
+    }
+
+    pub fn open(&self) -> bool {
+        self.open
+    }
+}
+
+/// 布局树节点（框架或叶子面板）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PanelState {
+    pub panel_name: String,
+    pub children: Vec<PanelState>,
+    pub info: PanelInfo,
+}
+
+impl Default for PanelState {
+    fn default() -> Self {
+        Self {
+            panel_name: String::new(),
+            children: Vec::new(),
+            info: PanelInfo::Panel(serde_json::Value::Null),
+        }
+    }
+}
+
+impl PanelState {
+    pub fn new(panel_name: impl Into<String>) -> Self {
+        Self {
+            panel_name: panel_name.into(),
+            ..Default::default()
+        }
+    }
+
+    pub fn add_child(&mut self, panel: PanelState) {
+        self.children.push(panel);
+    }
+}
+
+/// 节点附加信息：`stack`（分栏）、`tabs`（标签页组）或 `panel`（叶子数据）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PanelInfo {
+    #[serde(rename = "stack")]
+    Stack { sizes: Vec<Pixels>, axis: usize },
+    #[serde(rename = "tabs")]
+    Tabs { active_index: usize },
+    #[serde(rename = "panel")]
+    Panel(serde_json::Value),
+}
+
+impl PanelInfo {
+    pub fn stack(sizes: Vec<Pixels>, axis: Axis) -> Self {
+        Self::Stack {
+            sizes,
+            axis: if axis == Axis::Horizontal { 0 } else { 1 },
+        }
+    }
+
+    pub fn tabs(active_index: usize) -> Self {
+        Self::Tabs { active_index }
+    }
+
+    pub fn panel(info: serde_json::Value) -> Self {
+        Self::Panel(info)
+    }
+
+    pub fn axis(&self) -> Option<Axis> {
+        match self {
+            Self::Stack { axis, .. } => Some(if *axis == 0 {
+                Axis::Horizontal
+            } else {
+                Axis::Vertical
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn sizes(&self) -> Option<&Vec<Pixels>> {
+        match self {
+            Self::Stack { sizes, .. } => Some(sizes),
+            _ => None,
+        }
+    }
+
+    pub fn active_index(&self) -> Option<usize> {
+        match self {
+            Self::Tabs { active_index } => Some(*active_index),
+            _ => None,
+        }
+    }
+}
+
+/// 停靠区相对主区域的位置。serde tag 为持久化契约，不可擅改。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum DockPlacement {
+    #[serde(rename = "center")]
+    Center,
+    #[serde(rename = "left")]
+    Left,
+    #[serde(rename = "bottom")]
+    Bottom,
+    #[serde(rename = "right")]
+    Right,
+}
+
+impl DockPlacement {
+    pub fn axis(&self) -> Axis {
+        match self {
+            Self::Left | Self::Right | Self::Center => Axis::Horizontal,
+            Self::Bottom => Axis::Vertical,
+        }
+    }
+
+    pub fn is_left(&self) -> bool {
+        matches!(self, Self::Left)
+    }
+
+    pub fn is_bottom(&self) -> bool {
+        matches!(self, Self::Bottom)
+    }
+
+    pub fn is_right(&self) -> bool {
+        matches!(self, Self::Right)
+    }
+}
 
 /// 一摞：Dock 里的一块面板，`info.panel` 是一份 [`Stack`]，把几个视图按顺序排在一格里。
 /// 各项之间没有分隔条、拖不动，按内容定高（`fit`）的那几项之外平分剩下的地方；不分标签，
@@ -470,5 +636,43 @@ mod tests {
             ));
             assert!(parse_layout(&text).is_err(), "{info}");
         }
+    }
+
+    #[test]
+    fn dock_state_serde_contract_is_preserved() {
+        use gpui::px;
+
+        let stack = serde_json::to_value(PanelInfo::stack(vec![px(1.)], Axis::Vertical)).unwrap();
+        assert_eq!(
+            stack,
+            serde_json::json!({ "stack": { "sizes": [1.0], "axis": 1 } })
+        );
+        let tabs = serde_json::to_value(PanelInfo::tabs(2)).unwrap();
+        assert_eq!(tabs, serde_json::json!({ "tabs": { "active_index": 2 } }));
+        assert_eq!(
+            serde_json::to_value(DockPlacement::Bottom).unwrap(),
+            serde_json::json!("bottom")
+        );
+
+        let empty = serde_json::to_value(DockAreaState::default()).unwrap();
+        assert!(empty.get("left_dock").is_none());
+        assert!(empty.get("right_dock").is_none());
+        assert!(empty.get("bottom_dock").is_none());
+
+        let mut dock_area = parse_layout(ONE).unwrap();
+        dock_area.left_dock = Some(DockState::new(
+            PanelState::new("nav"),
+            DockPlacement::Left,
+            px(240.),
+            true,
+        ));
+        let json = serde_json::to_string(&dock_area).unwrap();
+        let again = parse_layout(&json).unwrap();
+        assert_eq!(again, dock_area);
+        let left = again.left_dock.unwrap();
+        assert_eq!(left.placement(), DockPlacement::Left);
+        assert_eq!(left.size(), px(240.));
+        assert!(left.open());
+        assert_eq!(left.panel().panel_name, "nav");
     }
 }

@@ -119,7 +119,6 @@ mod tests {
             title: name.to_string().into(),
             key: None,
             context: "Workspace".to_string(),
-            palette: false,
             requires_args: true,
             args: Some(FileLocation::arg_fields()),
             cli: false,

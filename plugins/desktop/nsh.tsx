@@ -116,7 +116,6 @@ bootTask(async () => {
       {
         name: OPEN_COMMAND_NAME,
         title: text("command.open"),
-        palette: false,
         requires_args: true,
       },
     ],

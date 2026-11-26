@@ -493,7 +493,6 @@ export function NewSessionPopover(props: {
     if (activeMenu) activeMenu.dispose();
     availableHeight.set(null);
     const owner = {
-      palette: false,
       redraw: () => localTick.set(localTick() + 1),
       close: () => closeMenu(),
     };

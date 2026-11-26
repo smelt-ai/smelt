@@ -12,9 +12,13 @@ workspace = true
 [dependencies]
 smelt-plugin-api = { path = "../smelt-plugin-api" }
 gpui = { package = "gpui-fast", version = "=0.1.19" }
-gpui-webview = { git = "https://github.com/longbridge/gpui-kit", rev = "82f1c1dc1f2970d93f1adfe10cbd772516c21ce7", features = ["gpui-fast"] }
 wry = "0.57.3"
-# 与 gpui-webview 共用同一套 gpui-fast 特性，单独编译本 crate 时不掉回 gpui-pre。
-gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "82f1c1dc1f2970d93f1adfe10cbd772516c21ce7", default-features = false, features = ["gpui-fast"] }
+anyhow = "1"
+log = "0.4"
 serde_json = "1"
 smol = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSView"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry"] }

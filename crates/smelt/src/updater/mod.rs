@@ -51,7 +51,6 @@ fn command(name: &str, title: api::Text, run: impl Fn(&mut App) + 'static) -> Co
         title,
         key: None,
         context: "Workspace".into(),
-        palette: true,
         requires_args: false,
         args: Some(Vec::new()),
         cli: false,

@@ -53,7 +53,6 @@ fn info(id: &str, key: Option<&str>) -> CommandInfo {
         title: id.to_string().into(),
         key: key.map(|key| key.to_string().into()),
         context: "Workspace".into(),
-        palette: true,
         requires_args: false,
         args: Some(Vec::new()),
         cli: false,
@@ -71,12 +70,12 @@ fn workspace() -> Vec<KeyContext> {
     vec![KeyContext::parse("Workspace").expect("context")]
 }
 
-const PALETTE: &str = "smelt.palette/toggle";
+const SETTINGS: &str = "smelt.app/settings";
 
-fn palette_keys(overrides: &Overrides) -> Vec<Keystroke> {
+fn settings_keys(overrides: &Overrides) -> Vec<Keystroke> {
     let keymap = Keymap::new(app_bindings(overrides));
     keymap
-        .bindings_for_action(&RunCommand::new(PALETTE))
+        .bindings_for_action(&RunCommand::new(SETTINGS))
         .map(|binding| binding.keystrokes()[0].inner().clone())
         .collect()
 }
@@ -130,15 +129,15 @@ fn every_app_binding_carries_the_app_marker() {
 
 #[test]
 fn an_override_replaces_the_default_and_none_unbinds() {
-    assert_eq!(palette_keys(&Overrides::new()), vec![stroke("cmd-k")]);
+    assert_eq!(settings_keys(&Overrides::new()), vec![stroke("cmd-,")]);
     assert_eq!(
-        palette_keys(&overrides(&[(PALETTE, Some("cmd-shift-p"))])),
+        settings_keys(&overrides(&[(SETTINGS, Some("cmd-shift-p"))])),
         vec![stroke("cmd-shift-p")]
     );
-    assert!(palette_keys(&overrides(&[(PALETTE, None)])).is_empty());
+    assert!(settings_keys(&overrides(&[(SETTINGS, None)])).is_empty());
 
-    let keymap = Keymap::new(app_bindings(&overrides(&[(PALETTE, Some("cmd-shift-p"))])));
-    let (old, _) = keymap.bindings_for_input(&[stroke("cmd-k")], &workspace());
+    let keymap = Keymap::new(app_bindings(&overrides(&[(SETTINGS, Some("cmd-shift-p"))])));
+    let (old, _) = keymap.bindings_for_input(&[stroke("cmd-,")], &workspace());
     assert!(old.is_empty(), "改走了以后旧键不能还在");
 }
 
@@ -188,7 +187,6 @@ fn commands_that_require_args_are_never_bound() {
         info("a/plain", None),
         CommandInfo {
             requires_args: true,
-            palette: false,
             ..info("a/resume", None)
         },
     ];
@@ -196,7 +194,7 @@ fn commands_that_require_args_are_never_bound() {
     assert_eq!(keys(&bound), vec![("a/plain".to_string(), None)]);
 }
 
-/// 带类型的宿主动作登记成「要参数」：id 和插件接口里的常量对得上，不进面板、不绑键。
+/// 带类型的宿主动作登记成「要参数」：id 和插件接口里的常量对得上，不绑键。
 #[test]
 fn typed_host_commands_require_args() {
     TestAppContext::single().update(|cx| {
@@ -210,10 +208,7 @@ fn typed_host_commands_require_args() {
         ] {
             let command = api::command(id, cx).unwrap_or_else(|| panic!("{id} 没登记上"));
             assert!(command.requires_args, "{id} 要参数");
-            assert!(
-                !command.palette && command.key.is_none(),
-                "{id} 不进面板、不绑键"
-            );
+            assert!(command.key.is_none(), "{id} 不绑键");
         }
     });
 }
@@ -224,7 +219,7 @@ fn unknown_commands_are_kept_and_broken_keystrokes_dropped() {
     let loaded = overrides_from_records(
         vec![
             KeyBindingRecord {
-                command: PALETTE.to_string(),
+                command: SETTINGS.to_string(),
                 keystroke: Some("cmd-j".to_string()),
             },
             KeyBindingRecord {
@@ -246,7 +241,7 @@ fn unknown_commands_are_kept_and_broken_keystrokes_dropped() {
     assert_eq!(
         loaded,
         overrides(&[
-            (PALETTE, Some("cmd-j")),
+            (SETTINGS, Some("cmd-j")),
             ("example.a/list", None),
             ("trader/buy", Some("cmd-l")),
         ])
@@ -296,16 +291,16 @@ fn rebuilding_swaps_only_the_app_segment_in_place() {
 #[test]
 fn escape_cancels_and_backspace_clears() {
     let none = Overrides::new();
-    assert_eq!(judge(PALETTE, "escape", &none), Recorded::Cancel);
-    assert_eq!(judge(PALETTE, "backspace", &none), Recorded::Set(None));
-    assert_set(judge(PALETTE, "cmd-shift-p", &none), "cmd-shift-p");
+    assert_eq!(judge(SETTINGS, "escape", &none), Recorded::Cancel);
+    assert_eq!(judge(SETTINGS, "backspace", &none), Recorded::Set(None));
+    assert_set(judge(SETTINGS, "cmd-shift-p", &none), "cmd-shift-p");
     assert_set(judge("smelt.app/quit", "f8", &none), "f8");
 }
 
 #[test]
 fn recording_the_default_again_is_a_reset() {
-    let moved = overrides(&[(PALETTE, Some("cmd-j"))]);
-    assert_eq!(judge(PALETTE, "cmd-k", &moved), Recorded::Reset);
+    let moved = overrides(&[(SETTINGS, Some("cmd-j"))]);
+    assert_eq!(judge(SETTINGS, "cmd-,", &moved), Recorded::Reset);
 }
 
 #[test]
@@ -313,7 +308,7 @@ fn keys_without_command_are_left_to_the_terminal_and_inputs() {
     let none = Overrides::new();
     for spec in ["ctrl-r", "alt-p", "shift-a", "a"] {
         assert!(
-            matches!(judge(PALETTE, spec, &none), Recorded::Rejected(_)),
+            matches!(judge(SETTINGS, spec, &none), Recorded::Rejected(_)),
             "{spec} 不该收"
         );
     }
@@ -324,11 +319,10 @@ fn keys_without_command_are_left_to_the_terminal_and_inputs() {
 fn a_key_used_by_another_command_asks_to_reassign() {
     let none = Overrides::new();
     for (spec, other) in [
-        ("cmd-,", "smelt.app/settings"),
         ("cmd-q", "smelt.app/quit"),
         ("cmd-shift-f", "smelt.app/debug-hud"),
     ] {
-        match judge(PALETTE, spec, &none) {
+        match judge(SETTINGS, spec, &none) {
             Recorded::Taken {
                 other: taken,
                 keystroke,
@@ -340,13 +334,13 @@ fn a_key_used_by_another_command_asks_to_reassign() {
         }
     }
     // 改走以后，原来的键就空出来了。
-    let moved = overrides(&[("smelt.app/settings", Some("cmd-shift-m"))]);
-    assert_set(judge(PALETTE, "cmd-,", &moved), "cmd-,");
+    let moved = overrides(&[("smelt.app/debug-hud", Some("cmd-shift-m"))]);
+    assert_set(judge(SETTINGS, "cmd-shift-f", &moved), "cmd-shift-f");
     // 清掉键的命令也让出原来的键。
     let cleared = overrides(&[("smelt.app/quit", None)]);
-    assert_set(judge(PALETTE, "cmd-q", &cleared), "cmd-q");
+    assert_set(judge(SETTINGS, "cmd-q", &cleared), "cmd-q");
     // 自己现在的键不算冲突。
-    assert_eq!(judge(PALETTE, "cmd-k", &none), Recorded::Reset);
+    assert_eq!(judge(SETTINGS, "cmd-,", &none), Recorded::Reset);
 }
 
 /// 编辑键、终端自己处理的键和系统用的键直接拒；键表里改不了的键也拒。
@@ -355,18 +349,18 @@ fn reserved_and_fixed_keys_are_refused() {
     let none = Overrides::new();
     for spec in ["cmd-c", "cmd-z", "cmd-f", "cmd-h", "cmd-m"] {
         assert!(
-            matches!(judge(PALETTE, spec, &none), Recorded::Rejected(_)),
+            matches!(judge(SETTINGS, spec, &none), Recorded::Rejected(_)),
             "{spec} 不该收"
         );
     }
     assert!(matches!(
-        judge(PALETTE, "cmd-c", &none),
+        judge(SETTINGS, "cmd-c", &none),
         Recorded::Rejected(reason) if reason.contains("Copy")
     ));
 
     let component = KeyBinding::new("cmd-shift-x", DismissWorkspace, Some("Input"));
     assert!(matches!(
-        judge_with(PALETTE, "cmd-shift-x", &none, &[component]),
+        judge_with(SETTINGS, "cmd-shift-x", &none, &[component]),
         Recorded::Rejected(_)
     ));
 }

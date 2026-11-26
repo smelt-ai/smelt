@@ -2422,10 +2422,6 @@ fn register_js_commands(
             .get("requires_args")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let palette = item
-            .get("palette")
-            .and_then(Value::as_bool)
-            .unwrap_or(!requires_args);
         let cli = item.get("cli").and_then(Value::as_bool).unwrap_or(false);
         let args = item.get("args").and_then(Value::as_array).map(|arr| {
             arr.iter()
@@ -2470,7 +2466,6 @@ fn register_js_commands(
             title,
             key,
             context,
-            palette,
             requires_args,
             args,
             cli,

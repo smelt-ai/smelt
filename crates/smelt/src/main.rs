@@ -36,7 +36,6 @@ mod window_backdrop;
 mod workspace_commands;
 mod workspace_frame;
 mod workspace_layout;
-mod workspace_palette;
 mod workspace_persist;
 mod workspace_prepare;
 mod workspace_shell;
@@ -230,8 +229,6 @@ struct Workspace {
     window_corners: workspace_frame::WindowCorners,
     _window_bounds_sub: Option<Subscription>,
     _layout_choice_sub: Option<Subscription>,
-    /// 开着的命令面板（⌘K），见 `workspace_palette`。
-    palette: Option<smelt_ui::dialog::DialogId>,
     /// 已经交给系统的窗口材质，没变就不再发（见 `window_backdrop::paint`）。窗口根的铺底在
     /// paint 里读写它。
     backdrop: Rc<RefCell<window_backdrop::Backdrop>>,
@@ -332,10 +329,10 @@ impl Workspace {
             })),
             record: Some(Rc::new(move |placement, bounds, _| {
                 let placement = match placement {
-                    smelt_nsh::BackdropPlacement::Center => gpui_base::dock::DockPlacement::Center,
-                    smelt_nsh::BackdropPlacement::Left => gpui_base::dock::DockPlacement::Left,
-                    smelt_nsh::BackdropPlacement::Right => gpui_base::dock::DockPlacement::Right,
-                    smelt_nsh::BackdropPlacement::Bottom => gpui_base::dock::DockPlacement::Bottom,
+                    smelt_nsh::BackdropPlacement::Center => smelt_plugin_api::DockPlacement::Center,
+                    smelt_nsh::BackdropPlacement::Left => smelt_plugin_api::DockPlacement::Left,
+                    smelt_nsh::BackdropPlacement::Right => smelt_plugin_api::DockPlacement::Right,
+                    smelt_nsh::BackdropPlacement::Bottom => smelt_plugin_api::DockPlacement::Bottom,
                 };
                 record_regions.borrow_mut().set(placement, bounds);
             })),
@@ -417,7 +414,6 @@ impl Workspace {
             window_corners,
             _window_bounds_sub: None,
             _layout_choice_sub: None,
-            palette: None,
             backdrop: Rc::default(),
             regions,
             applied_ui_font_px: None,

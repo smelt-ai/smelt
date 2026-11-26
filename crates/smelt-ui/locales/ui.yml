@@ -35,10 +35,6 @@ mermaid:
   panicked:
     en: "Rendering was interrupted"
     zh-CN: "渲染中断"
-palette:
-  placeholder:
-    en: "Type a command"
-    zh-CN: "输入命令"
 scrollbar:
   horizontal:
     en: "Horizontal scroll bar"

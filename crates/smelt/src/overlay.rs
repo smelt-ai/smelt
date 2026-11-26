@@ -1,14 +1,14 @@
-//! 宿主自己画在主窗口里的层：调试 HUD。对话框和命令面板在窗口根的对话框层上，不在这里。
+//! 宿主自己画在主窗口里的层：调试 HUD。对话框在窗口根的对话框层上，不在这里。
 
 use gpui::{AnyElement, App, Context, IntoElement, ParentElement, Styled, Window, div};
 
 use super::*;
 
 impl Workspace {
-    /// 主窗口里开着宿主的遮罩层（宿主对话框、命令面板）。原生网页视图会盖住这些层，开着时
+    /// 主窗口里开着宿主的遮罩层（宿主对话框）。原生网页视图会盖住这些层，开着时
     /// 插件里的网页让开。
     pub(crate) fn main_overlay_open(&self) -> bool {
-        self.main_host_dialog_open() || self.palette.is_some()
+        self.main_host_dialog_open()
     }
 
     /// 宿主自己的层，叠在主窗口内容上面。

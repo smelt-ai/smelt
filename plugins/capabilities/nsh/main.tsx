@@ -173,7 +173,6 @@ bootTask(async () => {
       {
         name: OPEN_ON_MACHINE_NAME,
         title: text("command.open_on_machine"),
-        palette: false,
         requires_args: true,
         args: ["machine"],
       },

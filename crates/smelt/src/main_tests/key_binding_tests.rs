@@ -64,8 +64,8 @@ fn first_command(spec: &'static str, stack: &[&str]) -> Option<String> {
 #[test]
 fn workspace_chords_stay_shallower_than_terminal_and_input() {
     assert_eq!(
-        first_command("cmd-k", &["Workspace", "Terminal"]).as_deref(),
-        Some("smelt.palette/toggle")
+        first_command("cmd-,", &["Workspace", "Terminal"]).as_deref(),
+        Some("smelt.app/settings")
     );
     assert!(
         matched("cmd-s", &["Workspace", "Terminal"]).is_empty(),

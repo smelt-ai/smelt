@@ -26,7 +26,6 @@ export interface CommandSpec {
   title: LocalizedText;
   key?: string | null;
   context?: string;
-  palette?: boolean;
   requires_args?: boolean;
   args?: string[] | null;
   cli?: boolean;

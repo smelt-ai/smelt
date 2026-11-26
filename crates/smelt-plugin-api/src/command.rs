@@ -176,7 +176,6 @@ impl<A: DeserializeOwned + 'static, R: Serialize + 'static> Command<A, R> {
             title: title.into(),
             key: None,
             context: "Workspace".to_string(),
-            palette: false,
             requires_args: true,
             args: arg_fields::<A>(),
             cli: false,
@@ -282,7 +281,7 @@ fn check_args(info: &CommandInfo, args: &serde_json::Value) -> Result<(), String
 pub struct CommandSpec {
     /// 来源内的名字，不含 `/`，如 `save`。
     pub name: String,
-    /// 给人看的名字，命令面板和快捷键设置里显示，跟着界面语言变（见 [`crate::Text`]）。
+    /// 给人看的名字，在快捷键设置里显示，跟着界面语言变（见 [`crate::Text`]）。
     pub title: Text,
     /// 出厂快捷键，gpui 写法的单个按键（如 `cmd-shift-p`）。要带 ⌘ 或者是 F 键，保留键
     /// 不能用；不合规的宿主装键表时不装，记日志。
@@ -290,10 +289,8 @@ pub struct CommandSpec {
     /// 快捷键在哪个 key context 里生效，gpui 谓词写法。主窗口任何地方是 `Workspace`；
     /// 视图自己挂的 context 只在焦点在它里面时生效。
     pub context: String,
-    /// 出现在命令面板里。
-    pub palette: bool,
-    /// 要带参数才能执行：只给代码用 [`crate::run`] 调，不进命令面板、不绑键，也不在快捷键
-    /// 设置里出现。这种命令 `key` 要空、`palette` 要关。
+    /// 要带参数才能执行：只给代码用 [`crate::run`] 调，不绑键，也不在快捷键设置里出现。
+    /// 这种命令 `key` 要空。
     pub requires_args: bool,
     /// 认的参数字段（对象顶层的键）。执行时参数里有表外的字段，宿主不调处理函数，交回
     /// 「不认识参数 …；它认的参数：…」。空表是不带参数。`None` 是没声明，不查；带类型的
@@ -326,7 +323,6 @@ pub struct CommandInfo {
     pub title: Text,
     pub key: Option<SharedString>,
     pub context: SharedString,
-    pub palette: bool,
     pub requires_args: bool,
     /// 认的参数字段，见 [`CommandSpec::args`]。
     pub args: Option<Vec<String>>,
@@ -387,10 +383,8 @@ pub fn register_commands(
                 return Err(format!("命令「{id}」的快捷键 {key} 解析不了：{error}"));
             }
         }
-        if spec.requires_args && (spec.key.is_some() || spec.palette) {
-            return Err(format!(
-                "命令「{id}」要带参数才能执行，不能有快捷键，也不能进命令面板"
-            ));
+        if spec.requires_args && spec.key.is_some() {
+            return Err(format!("命令「{id}」要带参数才能执行，不能有快捷键"));
         }
         if spec.cli && spec.args.is_none() {
             return Err(format!(
@@ -411,7 +405,6 @@ pub fn register_commands(
                 title: spec.title,
                 key: spec.key.map(Into::into),
                 context: spec.context.into(),
-                palette: spec.palette,
                 requires_args: spec.requires_args,
                 args: spec.args,
                 cli: spec.cli,
@@ -547,7 +540,6 @@ mod tests {
             title: name.to_string().into(),
             key: key.map(str::to_string),
             context: "Workspace".to_string(),
-            palette: true,
             requires_args: false,
             args: None,
             cli: false,
@@ -600,14 +592,10 @@ mod tests {
                     title: " ".into(),
                     ..spec("b", None)
                 }],
-                // 要参数的命令没法从键、面板执行。
+                // 要参数的命令没法从快捷键执行。
                 vec![CommandSpec {
                     requires_args: true,
                     ..spec("b", Some("cmd-k"))
-                }],
-                vec![CommandSpec {
-                    requires_args: true,
-                    ..spec("b", None)
                 }],
                 // 开给命令行的要说清认哪些参数。
                 vec![spec("b", None).callable_from_cli()],
@@ -787,7 +775,7 @@ mod tests {
             )
             .unwrap();
             let info = command(BUY.id(), cx).unwrap();
-            assert!(info.requires_args && !info.palette && info.key.is_none());
+            assert!(info.requires_args && info.key.is_none());
         });
         assert_eq!(BUY.name(), "buy");
         assert_eq!(

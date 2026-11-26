@@ -120,7 +120,6 @@ bootTask(async () => {
       {
         name: OPEN_WITH_NAME,
         title: text("open_with"),
-        palette: false,
         requires_args: true,
         args: ["app", "path"],
       },

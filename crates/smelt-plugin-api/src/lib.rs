@@ -100,9 +100,9 @@ pub use facts::{
 pub use file::{FileLocation, open_file, register_file_opener, unregister_file_opener};
 pub use image_asset::{image_asset, load_image_asset};
 pub use layout::{
-    DockAreaState, LAYOUT_VERSION, LayoutInfo, LayoutMaterials, LayoutSource, Material, PanelInfo,
-    PanelState, STACK_PANEL, Stack, StackAxis, StackContent, StackItem, layout, layout_stacks,
-    layouts, parse_layout, register_layouts, unregister_layouts,
+    DockAreaState, DockPlacement, DockState, LAYOUT_VERSION, LayoutInfo, LayoutMaterials,
+    LayoutSource, Material, PanelInfo, PanelState, STACK_PANEL, Stack, StackAxis, StackContent,
+    StackItem, layout, layout_stacks, layouts, parse_layout, register_layouts, unregister_layouts,
 };
 pub use locale::{
     FALLBACK_LOCALE, LOCALES, Text, locale, set_locale, supported_locale, system_locale,
