@@ -4,6 +4,7 @@ import { cleanup, computed, Image, List, Scroll, signal, Text, View } from "nsh"
 import { MenuItem, MenuSeparator } from "nsh/base";
 import {
   clipboardWrite,
+  clipboardWriteImage,
   contextMenuItems,
   diffLineStats,
   isInterruptMarker,
@@ -36,6 +37,54 @@ function imageThumbSrc(img: any): string | null {
     return `data:${img.mime || "image/png"};base64,${img.data_b64}`;
   }
   return null;
+}
+
+function clipboardImagePayload(img: any): {
+  ref_id?: string | null;
+  data_b64?: string | null;
+  mime?: string | null;
+  data_uri?: string | null;
+} | null {
+  if (!img || typeof img !== "object") return null;
+  const ref_id = typeof img.ref_id === "string" && img.ref_id.length > 0 ? img.ref_id : null;
+  const data_b64 = typeof img.data_b64 === "string" && img.data_b64.length > 0 ? img.data_b64 : null;
+  const mime = typeof img.mime === "string" && img.mime.length > 0 ? img.mime : null;
+  const data_uri = typeof img.preview_uri === "string" && img.preview_uri.length > 0 ? img.preview_uri : null;
+  if (!ref_id && !data_b64 && !data_uri) return null;
+  return { ref_id, data_b64, mime, data_uri };
+}
+
+function ImageThumbContextMenu(props: {
+  img: () => any;
+  onPreview: (img: any) => void;
+  children: any;
+}) {
+  const look = theme;
+  return (
+    <SmeltContextMenu popupStyle={{ minWidth: 156 }} trigger={props.children}>
+      <MenuItem
+        onSelect={() => {
+          const payload = clipboardImagePayload(props.img());
+          if (payload) void clipboardWriteImage(payload).catch(() => {});
+        }}
+        style={{ height: 28, paddingHorizontal: 10, borderRadius: 5, flexDirection: "row", alignItems: "center", gap: 8 }}
+      >
+        <SmeltIcon path="icons/copy.svg" size={13} color={look().palette.muted} />
+        <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
+          {ct("action.copy_image")}
+        </Text>
+      </MenuItem>
+      <MenuItem
+        onSelect={() => props.onPreview(props.img())}
+        style={{ height: 28, paddingHorizontal: 10, borderRadius: 5, flexDirection: "row", alignItems: "center", gap: 8 }}
+      >
+        <SmeltIcon path="icons/eye.svg" size={13} color={look().palette.muted} />
+        <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
+          {ct("image.preview")}
+        </Text>
+      </MenuItem>
+    </SmeltContextMenu>
+  );
 }
 
 function toolIconFor(kind: string): string {
@@ -175,6 +224,7 @@ function MessageContextWrapper(props: {
   role: "user" | "assistant";
   globalIndex: () => number;
   copyText: () => string;
+  copyImage?: () => any | null;
   canFork: () => boolean;
   canEditResend: () => boolean;
   onFork: () => void;
@@ -204,18 +254,34 @@ function MessageContextWrapper(props: {
       }}
       trigger={props.children}
     >
-      <MenuItem
-        onSelect={() => {
-          const text = props.copyText();
-          if (text) void clipboardWrite(text).catch(() => {});
-        }}
-        style={{ height: 28, paddingHorizontal: 10, borderRadius: 5, flexDirection: "row", alignItems: "center", gap: 8 }}
-      >
-        <SmeltIcon path="icons/copy.svg" size={13} color={look().palette.muted} />
-        <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
-          {ct("action.copy")}
-        </Text>
-      </MenuItem>
+      <If when={props.copyText().trim().length > 0}>
+        <MenuItem
+          onSelect={() => {
+            const text = props.copyText();
+            if (text) void clipboardWrite(text).catch(() => {});
+          }}
+          style={{ height: 28, paddingHorizontal: 10, borderRadius: 5, flexDirection: "row", alignItems: "center", gap: 8 }}
+        >
+          <SmeltIcon path="icons/copy.svg" size={13} color={look().palette.muted} />
+          <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
+            {ct("action.copy")}
+          </Text>
+        </MenuItem>
+      </If>
+      <If when={props.copyText().trim().length === 0 && props.copyImage?.() != null}>
+        <MenuItem
+          onSelect={() => {
+            const payload = clipboardImagePayload(props.copyImage?.());
+            if (payload) void clipboardWriteImage(payload).catch(() => {});
+          }}
+          style={{ height: 28, paddingHorizontal: 10, borderRadius: 5, flexDirection: "row", alignItems: "center", gap: 8 }}
+        >
+          <SmeltIcon path="icons/copy.svg" size={13} color={look().palette.muted} />
+          <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
+            {ct("action.copy_image")}
+          </Text>
+        </MenuItem>
+      </If>
       <If when={props.canFork()}>
         <MenuItem
           onSelect={props.onFork}
@@ -457,21 +523,23 @@ function ToolCallRow(props: {
                     const src = computed(() => imageThumbSrc(img()));
                     return (
                       <If when={src() != null}>
-                        <View
-                          onPress={() => props.onPreviewImage(img())}
-                          style={{
-                            borderRadius: 6,
-                            borderWidth: 1,
-                            borderColor: look().palette.hair,
-                            overflow: "hidden",
-                            backgroundColor: look().palette.surface,
-                          }}
-                        >
-                          <Image
-                            src={src()!}
-                            style={{ width: 120, height: 84, objectFit: "contain" }}
-                          />
-                        </View>
+                        <ImageThumbContextMenu img={img} onPreview={props.onPreviewImage}>
+                          <View
+                            onPress={() => props.onPreviewImage(img())}
+                            style={{
+                              borderRadius: 6,
+                              borderWidth: 1,
+                              borderColor: look().palette.hair,
+                              overflow: "hidden",
+                              backgroundColor: look().palette.surface,
+                            }}
+                          >
+                            <Image
+                              src={src()!}
+                              style={{ width: 120, height: 84, objectFit: "contain" }}
+                            />
+                          </View>
+                        </ImageThumbContextMenu>
                       </If>
                     );
                   }}
@@ -705,15 +773,27 @@ export function MessageList(props: {
   let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
   let internalListApi: any = null;
 
-  const copyAnswer = (key: string, text: string) => {
-    if (!text) return;
-    void clipboardWrite(text).catch(() => {});
+  const markCopied = (key: string) => {
     copiedKey.set(key);
     if (copyResetTimer != null) clearTimeout(copyResetTimer);
     copyResetTimer = setTimeout(() => {
       if (copiedKey() === key) copiedKey.set(null);
       copyResetTimer = null;
     }, 1500);
+  };
+
+  const copyMessage = (key: string, text: string) => {
+    if (!text) return;
+    void clipboardWrite(text).catch(() => {});
+    markCopied(key);
+  };
+
+  const copyImage = (key: string, img: any) => {
+    const payload = clipboardImagePayload(img);
+    if (!payload) return;
+    void clipboardWriteImage(payload)
+      .then(() => markCopied(key))
+      .catch(() => {});
   };
 
   cleanup(() => {
@@ -895,13 +975,14 @@ export function MessageList(props: {
                             </View>
                           }
                         >
-                          <View style={{ width: "100%", alignItems: "flex-end", paddingTop: 6 }}>
+                          <View class="group/user" style={{ width: "100%", alignItems: "flex-end", paddingTop: 6, gap: 2 }}>
                             <MessageContextWrapper
                               machine={props.machine}
                               sessionId={props.sessionId}
                               role="user"
                               globalIndex={() => r().globalIndex}
                               copyText={userText}
+                              copyImage={() => (userImages().length === 1 ? userImages()[0] : null)}
                               canFork={() =>
                                 props.canFork() &&
                                 props.settled() &&
@@ -923,15 +1004,17 @@ export function MessageList(props: {
                                         const src = computed(() => imageThumbSrc(img()));
                                         return (
                                           <If when={src() != null}>
-                                            <View
-                                              onPress={() => props.onPreviewImage(img())}
-                                              class="rounded-[10px] overflow-hidden border border-border"
-                                            >
-                                              <Image
-                                                src={src()!}
-                                                style={{ width: 104, height: 78, objectFit: "cover" }}
-                                              />
-                                            </View>
+                                            <ImageThumbContextMenu img={img} onPreview={props.onPreviewImage}>
+                                              <View
+                                                onPress={() => props.onPreviewImage(img())}
+                                                class="rounded-[10px] overflow-hidden border border-border"
+                                              >
+                                                <Image
+                                                  src={src()!}
+                                                  style={{ width: 104, height: 78, objectFit: "cover" }}
+                                                />
+                                              </View>
+                                            </ImageThumbContextMenu>
                                           </If>
                                         );
                                       }}
@@ -951,6 +1034,36 @@ export function MessageList(props: {
                                 </If>
                               </View>
                             </MessageContextWrapper>
+                            <If when={userText().trim().length > 0 || userImages().length === 1}>
+                              <View
+                                class={
+                                  copiedKey() === r().key
+                                    ? "opacity-100"
+                                    : "opacity-0 group-hover/user:opacity-100"
+                                }
+                                style={{ height: 24, flexDirection: "row", alignItems: "center" }}
+                              >
+                                <SmeltButton
+                                  quiet
+                                  small
+                                  icon={copiedKey() === r().key ? "icons/check.svg" : "icons/copy.svg"}
+                                  tooltip={
+                                    copiedKey() === r().key
+                                      ? ct("action.copied")
+                                      : userText().trim().length > 0
+                                        ? ct("action.copy")
+                                        : ct("action.copy_image")
+                                  }
+                                  onPress={() => {
+                                    if (userText().trim().length > 0) {
+                                      copyMessage(r().key, userText());
+                                    } else if (userImages().length === 1) {
+                                      copyImage(r().key, userImages()[0]);
+                                    }
+                                  }}
+                                />
+                              </View>
+                            </If>
                           </View>
                         </If>
                       );
@@ -1061,7 +1174,7 @@ export function MessageList(props: {
                                       small
                                       icon={copiedKey() === r().key ? "icons/check.svg" : "icons/copy.svg"}
                                       tooltip={copiedKey() === r().key ? ct("action.copied") : ct("action.copy")}
-                                      onPress={() => copyAnswer(r().key, bodyText())}
+                                      onPress={() => copyMessage(r().key, bodyText())}
                                     />
                                     <If when={props.canFork() && props.settled()}>
                                       <SmeltButton

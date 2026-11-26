@@ -1262,6 +1262,17 @@ export function clipboardWrite(value: string): Promise<void> {
   return host.call("clipboard.write", { text: value });
 }
 
+export interface ClipboardImageInput {
+  ref_id?: string | null;
+  data_b64?: string | null;
+  mime?: string | null;
+  data_uri?: string | null;
+}
+
+export function clipboardWriteImage(image: ClipboardImageInput): Promise<void> {
+  return host.call("clipboard.write_image", image);
+}
+
 export function clipboardRead(): Promise<string | null> {
   return host.call("clipboard.read", {});
 }

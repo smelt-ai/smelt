@@ -567,6 +567,13 @@ export declare function contextMenuItems(
   context: unknown,
 ): Promise<any[]>;
 export declare function clipboardWrite(value: string): Promise<void>;
+export interface ClipboardImageInput {
+  ref_id?: string | null;
+  data_b64?: string | null;
+  mime?: string | null;
+  data_uri?: string | null;
+}
+export declare function clipboardWriteImage(image: ClipboardImageInput): Promise<void>;
 export declare function clipboardRead(): Promise<string | null>;
 export declare function revealPath(path: string): Promise<void>;
 

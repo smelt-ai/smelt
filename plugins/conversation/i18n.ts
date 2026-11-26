@@ -22,6 +22,7 @@ const TABLE: Record<string, { en: string; zh: string }> = {
   "attach.title": { en: "Attach files or images", zh: "选择要附加的文件或图片" },
   "attach.confirm": { en: "Attach", zh: "附加" },
   "action.copy": { en: "Copy", zh: "复制" },
+  "action.copy_image": { en: "Copy image", zh: "复制图片" },
   "action.copied": { en: "Copied", zh: "已复制" },
   "action.fork": { en: "Fork from here", zh: "从此处分叉" },
   "action.edit_resend": { en: "Edit & Resend", zh: "编辑并重发" },

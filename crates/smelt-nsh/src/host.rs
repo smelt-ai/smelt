@@ -19,7 +19,8 @@ use std::{
 };
 
 use gpui::{
-    App, AppContext as _, ClipboardItem, Context, IntoElement, Render, SharedString, Window, div,
+    App, AppContext as _, ClipboardItem, Context, Image, ImageFormat, IntoElement, Render,
+    SharedString, Window, div,
 };
 use nsh_engine::HostCall;
 use serde_json::{Value, json};
@@ -73,6 +74,10 @@ pub(crate) enum Action {
     },
     ClipboardWrite {
         text: String,
+        call: HostCall,
+    },
+    ClipboardWriteImage {
+        image: Image,
         call: HostCall,
     },
     ClipboardRead {
@@ -830,6 +835,75 @@ impl Bridge {
                     return call.reject("clipboard.write：缺 text 字符串");
                 };
                 send_action(&actions, Action::ClipboardWrite { text, call });
+            });
+        }
+
+        {
+            let actions = actions.clone();
+            let images = acp_hub.images().clone();
+            plugins.handle("clipboard.write_image", move |_plugin, call| {
+                let data = call.data();
+                let ref_id = data
+                    .get("ref_id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let data_b64 = data
+                    .get("data_b64")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let mime = data
+                    .get("mime")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let data_uri = data
+                    .get("data_uri")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                if ref_id.is_none() && data_b64.is_none() && data_uri.is_none() {
+                    return call.reject("clipboard.write_image：缺 ref_id / data_b64 / data_uri");
+                }
+                let actions = actions.clone();
+                let images = images.clone();
+                api::blocking::spawn_detached(move || {
+                    let resolved = ref_id
+                        .as_deref()
+                        .and_then(|id| images.get_bytes(id))
+                        .map(Ok)
+                        .or_else(|| {
+                            data_b64.as_deref().map(|b64| {
+                                smelt_acp::images::decode_image_base64(mime.as_deref(), b64)
+                            })
+                        })
+                        .or_else(|| {
+                            data_uri
+                                .as_deref()
+                                .map(smelt_acp::images::decode_image_data_uri)
+                        });
+                    let (resolved_mime, bytes) = match resolved {
+                        Some(Ok(pair)) => pair,
+                        Some(Err(err)) => {
+                            return call.reject(format!("clipboard.write_image：{err}"));
+                        }
+                        None => {
+                            return call.reject("clipboard.write_image：找不到对应图片");
+                        }
+                    };
+                    let Some(format) = gpui_image_format(&resolved_mime) else {
+                        return call.reject(format!(
+                            "clipboard.write_image：不支持的图片格式 {resolved_mime}"
+                        ));
+                    };
+                    let image = Image::from_bytes(format, bytes);
+                    send_action(&actions, Action::ClipboardWriteImage { image, call });
+                });
             });
         }
 
@@ -2070,6 +2144,10 @@ pub(crate) fn handle_action(action: Action, bridge: &Bridge, plugins: &PluginHos
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             call.resolve(Value::Null);
         }
+        Action::ClipboardWriteImage { image, call } => {
+            cx.write_to_clipboard(ClipboardItem::new_image(&image));
+            call.resolve(Value::Null);
+        }
         Action::ClipboardRead { call } => {
             let text = cx
                 .read_from_clipboard()
@@ -2663,6 +2741,7 @@ fn send_action(sender: &mpsc::UnboundedSender<Action>, action: Action) {
             | Action::Request { call, .. }
             | Action::ContextMenuItems { call, .. }
             | Action::ClipboardWrite { call, .. }
+            | Action::ClipboardWriteImage { call, .. }
             | Action::ClipboardRead { call }
             | Action::SetActiveContext { call, .. }
             | Action::OpenFile { call, .. }
@@ -2683,6 +2762,20 @@ fn send_action(sender: &mpsc::UnboundedSender<Action>, action: Action) {
             | Action::AcpClipboardImages { call, .. } => call,
         };
         call.reject("面板已经关了");
+    }
+}
+
+fn gpui_image_format(mime: &str) -> Option<ImageFormat> {
+    match mime.trim().to_ascii_lowercase().as_str() {
+        "image/png" => Some(ImageFormat::Png),
+        "image/jpeg" | "image/jpg" => Some(ImageFormat::Jpeg),
+        "image/webp" => Some(ImageFormat::Webp),
+        "image/gif" => Some(ImageFormat::Gif),
+        "image/bmp" => Some(ImageFormat::Bmp),
+        "image/tiff" => Some(ImageFormat::Tiff),
+        "image/svg+xml" => Some(ImageFormat::Svg),
+        "image/x-icon" | "image/vnd.microsoft.icon" | "image/ico" => Some(ImageFormat::Ico),
+        _ => None,
     }
 }
 

@@ -10,6 +10,7 @@ import {
   acpUnsubscribe,
   agentCatalog,
   call,
+  clipboardWriteImage,
   DIALOG_SURFACE_CLASS,
   type EntryWindow,
   isInterruptMarker,
@@ -190,7 +191,9 @@ export function SmeltConversation(props: SmeltConversationProps) {
   const loadedMcpServers = computed<string[]>(() => snapshot()?.mcp_servers ?? []);
   const diffDialog = signal<EditDiffDialogState | null>(null);
   const inspectedSubagent = signal<{ id: string; title: string } | null>(null);
-  const imagePreview = signal<{ uri: string; loading: boolean } | null>(null);
+  const imagePreview = signal<{ uri: string; loading: boolean; img: any } | null>(null);
+  const imagePreviewCopied = signal(false);
+  let imagePreviewCopyTimer: ReturnType<typeof setTimeout> | null = null;
   const restoreDraft = signal<{ seq: number; text: string; images: AttachedImage[] } | null>(null);
   const quickInsert = signal<{ seq: number; text: string } | null>(null);
   const reconnectSeq = signal(0);
@@ -477,6 +480,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
       inspectedSubagent.set(null);
       diffDialog.set(null);
       imagePreview.set(null);
+      imagePreviewCopied.set(false);
       pinnedPrompt.set(null);
       readingGlobalIndex.set(null);
       atLatest.set(true);
@@ -628,6 +632,44 @@ export function SmeltConversation(props: SmeltConversationProps) {
     }
   };
 
+  const clearImagePreviewCopyTimer = () => {
+    if (imagePreviewCopyTimer != null) {
+      clearTimeout(imagePreviewCopyTimer);
+      imagePreviewCopyTimer = null;
+    }
+    imagePreviewCopied.set(false);
+  };
+
+  cleanup(clearImagePreviewCopyTimer);
+
+  const closeImagePreview = () => {
+    clearImagePreviewCopyTimer();
+    imagePreview.set(null);
+  };
+
+  const handleCopyPreviewImage = () => {
+    const preview = imagePreview();
+    if (!preview) return;
+    const img = preview.img;
+    const payload = {
+      ref_id: typeof img?.ref_id === "string" && img.ref_id.length > 0 ? img.ref_id : null,
+      data_b64: typeof img?.data_b64 === "string" && img.data_b64.length > 0 ? img.data_b64 : null,
+      mime: typeof img?.mime === "string" && img.mime.length > 0 ? img.mime : null,
+      data_uri: typeof preview.uri === "string" && preview.uri.length > 0 ? preview.uri : null,
+    };
+    if (!payload.ref_id && !payload.data_b64 && !payload.data_uri) return;
+    void clipboardWriteImage(payload)
+      .then(() => {
+        imagePreviewCopied.set(true);
+        if (imagePreviewCopyTimer != null) clearTimeout(imagePreviewCopyTimer);
+        imagePreviewCopyTimer = setTimeout(() => {
+          imagePreviewCopied.set(false);
+          imagePreviewCopyTimer = null;
+        }, 1500);
+      })
+      .catch(() => {});
+  };
+
   const handlePreviewImage = (img: any) => {
     const quick =
       typeof img?.preview_uri === "string" && img.preview_uri.length > 0
@@ -636,18 +678,22 @@ export function SmeltConversation(props: SmeltConversationProps) {
           ? `data:${img.mime || "image/png"};base64,${img.data_b64}`
           : "";
     if (!quick && !img?.ref_id) return;
-    imagePreview.set({ uri: quick, loading: Boolean(img?.ref_id) });
+    clearImagePreviewCopyTimer();
+    imagePreview.set({ uri: quick, loading: Boolean(img?.ref_id), img });
     if (img?.ref_id) {
       acpImageUri(img.ref_id)
         .then((fullUri) => {
-          if (fullUri && imagePreview() != null) {
-            imagePreview.set({ uri: fullUri, loading: false });
-          } else if (imagePreview() != null) {
-            imagePreview.set({ uri: quick, loading: false });
+          const cur = imagePreview();
+          if (cur == null || cur.img !== img) return;
+          if (fullUri) {
+            imagePreview.set({ uri: fullUri, loading: false, img });
+          } else {
+            imagePreview.set({ uri: quick, loading: false, img });
           }
         })
         .catch(() => {
-          if (imagePreview() != null) imagePreview.set({ uri: quick, loading: false });
+          const cur = imagePreview();
+          if (cur != null && cur.img === img) imagePreview.set({ uri: quick, loading: false, img });
         });
     }
   };
@@ -1206,7 +1252,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
       <SmeltDialog
         open={imagePreview() != null}
         onOpenChange={({ open }: any) => {
-          if (!open) imagePreview.set(null);
+          if (!open) closeImagePreview();
         }}
         class="m-auto"
       >
@@ -1224,7 +1270,16 @@ export function SmeltConversation(props: SmeltConversationProps) {
               <Text style={{ fontSize: look().type.small.size, color: look().palette.muted }}>
                 {ct("image.preview")}
               </Text>
-              <SmeltButton quiet small icon="icons/close.svg" onPress={() => imagePreview.set(null)} />
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                <SmeltButton
+                  quiet
+                  small
+                  icon={imagePreviewCopied() ? "icons/check.svg" : "icons/copy.svg"}
+                  label={imagePreviewCopied() ? ct("action.copied") : ct("action.copy_image")}
+                  onPress={handleCopyPreviewImage}
+                />
+                <SmeltButton quiet small icon="icons/close.svg" onPress={closeImagePreview} />
+              </View>
             </View>
             <View style={{ flex: 1, minHeight: 0, alignItems: "center", justifyContent: "center" }}>
               <If when={Boolean(imagePreview()?.uri)}>
