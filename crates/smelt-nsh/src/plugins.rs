@@ -1662,6 +1662,7 @@ const ALLOWED_GLOBALS: &[&str] = &[
     // QuickJS / Web / NSH 运行时全局
     "AbortController",
     "AbortSignal",
+    "Blob",
     "CustomEvent",
     "Event",
     "EventTarget",

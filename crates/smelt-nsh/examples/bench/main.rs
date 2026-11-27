@@ -699,12 +699,12 @@ impl Bench {
                     let wait_rpc = Instant::now();
                     while !host_state
                         .rpc_counters
-                        .git_diff_all_served
+                        .git_diff_files_served
                         .load(Ordering::Acquire)
                     {
                         assert!(
                             wait_rpc.elapsed() < Duration::from_secs(15),
-                            "等待 git.diff.all 返回超时"
+                            "等待 git.diff.files 返回超时"
                         );
                         cx.background_executor()
                             .timer(Duration::from_millis(10))

@@ -739,7 +739,8 @@ git_calls! {
     GitPullCall => GitPull(GitRootParams) -> EmptyParams;
     GitStashPushCall => GitStashPush(GitRootParams) -> EmptyParams;
     GitStashPopCall => GitStashPop(GitRootParams) -> EmptyParams;
-    /// 一个仓库在某个范围里的全部改动：每项的路径、状态、大小、行数，不带正文。
+    /// 一个仓库在某个范围里的全部改动：每项的路径、状态、大小、行数，以及放得下的那些文件
+    /// 接在一起的 diff（有总额度，放不下的按文件另取）。
     GitDiffFilesCall => GitDiffFiles(GitDiffFilesParams) -> GitDiffFilesResult;
     /// 单个文件的 diff 原文（超过查看上限时不给），以及展示它要用到的几项事实。
     GitFileDiffCall => GitFileDiff(GitFileDiffParams) -> GitFileDiffResult;

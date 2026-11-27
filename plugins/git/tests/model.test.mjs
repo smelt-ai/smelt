@@ -4,9 +4,10 @@ import {
   clearConfirmedGitIndexOps,
   commitButtonBusyKey,
   commitGraphRowSvg,
+  diffEntryFor,
   diffFeedbackText,
-  diffParseFailure,
-  diffScrollTarget,
+  diffLeftOutReason,
+  formatSize,
   fullFilePath,
   GIT_AUTOFETCH_INTERVAL_MS,
   GIT_DISCOVERY_MIN_INTERVAL_MS,
@@ -17,11 +18,8 @@ import {
   gitStatusResponseAction,
   gitStatusRetryDelay,
   graphWidth,
-  hunkPatch,
   layoutGraph,
-  mapJoinedLineToFile,
   needsFetch,
-  parseUnifiedPatch,
   pullRequestLink,
   pullRequestUrl,
   releaseGitWrite,
@@ -250,66 +248,30 @@ describe("status state machine, write locks, and multi-repo target resolution", 
   });
 });
 
-describe("unified patch parsing, line mapping, and feedback formatting", () => {
-  test("parses file headers, hunks, renames, and builds valid hunk patch", () => {
-    const patch =
-      "diff --git a/old name.rs b/new name.rs\n" +
-      "similarity index 90%\n" +
-      "rename from old name.rs\n" +
-      "rename to new name.rs\n" +
-      "--- a/old name.rs\n" +
-      "+++ b/new name.rs\n" +
-      "@@ -10,2 +10,2 @@ fn foo()\n" +
-      "-old\n" +
-      "+new\n" +
-      " ctx\n";
-    const parsed = parseUnifiedPatch(patch);
-    expect(parsed.files).toHaveLength(1);
-    expect(parsed.files[0].path).toBe("new name.rs");
-    expect(parsed.files[0].oldPath).toBe("old name.rs");
-    expect(diffScrollTarget(parsed.files, "old name.rs")).toBe("new name.rs");
-    expect(diffScrollTarget(parsed.files, "new name.rs")).toBe("new name.rs");
-    expect(diffScrollTarget(parsed.files, "missing.rs")).toBeNull();
+describe("diff entries and feedback formatting", () => {
+  test("a clicked path finds its entry by either side of a rename, a directory without its slash", () => {
+    const entries = [
+      { path: "new name.rs", old_path: "old name.rs", body: { kind: "text" }, in_patch: true },
+      { path: "nested", body: { kind: "directory" }, in_patch: false },
+      { path: "big.log", body: { kind: "too_large" }, in_patch: false },
+      { path: "wide.json", body: { kind: "text" }, in_patch: false },
+    ];
+    expect(diffEntryFor(entries, "old name.rs")).toBe(entries[0]);
+    expect(diffEntryFor(entries, "new name.rs")).toBe(entries[0]);
+    expect(diffEntryFor(entries, "nested/")).toBe(entries[1]);
+    expect(diffEntryFor(entries, "missing.rs")).toBeNull();
 
-    const single = hunkPatch(parsed.header, parsed.hunks[0]);
-    expect(single).toContain("diff --git a/old name.rs b/new name.rs");
-    expect(single).toContain("@@ -10,2 +10,2 @@ fn foo()");
-    expect(single).toContain("+new\n");
-
-    expect(mapJoinedLineToFile(parsed, "new", 0)).toEqual({ path: "new name.rs", line: 10 });
-    expect(mapJoinedLineToFile(parsed, "new", 1)).toEqual({ path: "new name.rs", line: 11 });
+    expect(entries.slice(1).map(diffLeftOutReason)).toEqual(["directory", "too_large", "separate"]);
+    expect([0, 1, 3 * 2 ** 19, 414 * 2 ** 20, 5 * 2 ** 30].map(formatSize)).toEqual([
+      "0 KB",
+      "1 KB",
+      "1.5 MB",
+      "414.0 MB",
+      "5.0 GB",
+    ]);
   });
 
-  test("parseUnifiedPatch normalizes CRLF, handles EOF without newline, and supports includeRaw=false", () => {
-    const crlf =
-      "diff --git a/a.txt b/a.txt\r\n" +
-      "--- a/a.txt\r\n" +
-      "+++ b/a.txt\r\n" +
-      "@@ -1,2 +1,2 @@\r\n" +
-      "-old\r\n" +
-      "+new\r\n" +
-      " end";
-    const full = parseUnifiedPatch(crlf);
-    expect(full.files).toHaveLength(1);
-    expect(full.hunks[0].raw).toBe("@@ -1,2 +1,2 @@\n-old\n+new\n end\n");
-    expect(full.files[0].oldLineCount).toBe(2);
-    expect(full.files[0].newLineCount).toBe(2);
-
-    const light = parseUnifiedPatch(crlf, { includeRaw: false });
-    expect(light.files[0].path).toBe("a.txt");
-    expect(light.files[0].oldLineCount).toBe(2);
-    expect(light.files[0].newLineCount).toBe(2);
-    expect(light.hunks[0].raw).toBe("");
-    expect(mapJoinedLineToFile(light, "new", 1)).toEqual({ path: "a.txt", line: 2 });
-  });
-
-  test("diffParseFailure & diffFeedbackText", () => {
-    expect(diffParseFailure("  \n", "(No differences)")).toBe("(No differences)");
-    expect(diffParseFailure("fatal: not a git repository", "(No differences)")).toBe(
-      "fatal: not a git repository",
-    );
-    expect(diffParseFailure("diff --git a/f b/f\n@@ -1 +1 @@\n-a\n+b\n", "(No differences)")).toBeNull();
-
+  test("diffFeedbackText", () => {
     expect(diffFeedbackText("Feedback on src/a.rs:", 8, 3, "hello", "look here")).toBe(
       "Feedback on src/a.rs:\nL3-L8\nhello\n\nlook here\n",
     );

@@ -1206,6 +1206,23 @@ export function call(
   return host.call("call", payload);
 }
 
+/**
+ * 同 `call`，回复里 `blobs` 这些位置（JSON 指针，如 `/patch`、`/diff/text`）上的长文本以
+ * `Blob` 交来，不进插件的 JS 堆：用 `URL.createObjectURL` 交给原生组件（`SmeltDiffView` 的
+ * `patchUrl`），换内容时 `URL.revokeObjectURL`。那里没有文本时照原样。
+ */
+export function callWithBlobs(
+  machine: string | null,
+  method: string,
+  params: unknown,
+  blobs: string[],
+  timeoutMs?: number,
+): Promise<any> {
+  const payload: Record<string, unknown> = { machine, method, params, blobs };
+  if (timeoutMs != null) payload.timeout_ms = timeoutMs;
+  return host.call("call", payload);
+}
+
 export type CallDetailResult<T = any> =
   | { ok: true; value: T }
   | { ok: false; code: string | null; message: string };
@@ -2456,6 +2473,8 @@ export function SmeltVector(props: {
 export function SmeltDiffView(props: {
   diffRef?: (api: any) => void;
   patch?: string;
+  /** `blob:` 地址的补丁（`callWithBlobs` 拿到的 Blob），组件自己读原生字节。 */
+  patchUrl?: string;
   oldValue?: string;
   newValue?: string;
   language?: string;
@@ -2505,6 +2524,7 @@ export function SmeltDiffView(props: {
     <BaseDiffView
       ref={props.diffRef}
       patch={props.patch}
+      patchUrl={props.patchUrl}
       oldValue={props.oldValue}
       newValue={props.newValue}
       language={props.language}

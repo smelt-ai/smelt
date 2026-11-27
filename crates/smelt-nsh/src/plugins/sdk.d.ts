@@ -529,6 +529,19 @@ export declare function call<T = any>(
   timeoutMs?: number,
 ): Promise<T>;
 
+/**
+ * 同 `call`，回复里 `blobs` 这些位置（JSON 指针，如 `/patch`、`/diff/text`）上的长文本以
+ * `Blob` 交来，不进插件的 JS 堆：用 `URL.createObjectURL` 交给原生组件（`SmeltDiffView` 的
+ * `patchUrl`），换内容时 `URL.revokeObjectURL`。那里没有文本时照原样。
+ */
+export declare function callWithBlobs<T = any>(
+  machine: string | null,
+  method: ControlMethodName | (string & {}),
+  params: unknown,
+  blobs: string[],
+  timeoutMs?: number,
+): Promise<T>;
+
 export type CallDetailResult<T = any> =
   | { ok: true; value: T }
   | { ok: false; code: string | null; message: string };
@@ -821,6 +834,12 @@ export declare function SmeltVector(props: {
 export declare function SmeltDiffView(props: {
   diffRef?: (api: any) => void;
   patch?: string;
+  /**
+   * `blob:` 地址的补丁（`callWithBlobs` 拿到的 Blob），组件自己读原生字节，正文不进插件的堆。
+   * ref 的 `hunkPatch(gap)` 给出一块单独的补丁（可直接 `git apply`），`fileLine(side, line)`
+   * 给出一行所在的文件和行号。
+   */
+  patchUrl?: string;
   oldValue?: string;
   newValue?: string;
   language?: string;

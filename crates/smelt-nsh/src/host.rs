@@ -22,6 +22,7 @@ use gpui::{
     App, AppContext as _, ClipboardItem, Context, Image, ImageFormat, IntoElement, Render,
     SharedString, Window, div,
 };
+use nsh_core::host_channel::{HostAnswer, HostBlob};
 use nsh_engine::HostCall;
 use serde_json::{Value, json};
 use smelt_plugin_api::{
@@ -56,8 +57,7 @@ pub(crate) enum Action {
         machine: RuntimeKey,
         method: ControlMethod,
         params: Value,
-        timeout: Duration,
-        detailed: bool,
+        options: CallOptions,
         call: HostCall,
     },
     Request {
@@ -836,9 +836,33 @@ impl Bridge {
                     .get("detailed")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                let blobs = match data.get_mut("blobs").map(Value::take) {
+                    None | Some(Value::Null) => Vec::new(),
+                    Some(Value::Array(list)) => {
+                        let pointers: Option<Vec<String>> = list
+                            .into_iter()
+                            .map(|v| match v {
+                                Value::String(s) if s.starts_with('/') => Some(s),
+                                _ => None,
+                            })
+                            .collect();
+                        match pointers {
+                            Some(pointers) => pointers,
+                            None => {
+                                return call.reject("call：blobs 要是以 / 开头的 JSON 指针数组");
+                            }
+                        }
+                    }
+                    Some(_) => return call.reject("call：blobs 要是以 / 开头的 JSON 指针数组"),
+                };
+                let options = CallOptions {
+                    timeout,
+                    detailed,
+                    blobs,
+                };
                 if let Some(client) = bridge.cached_client(&machine) {
                     api::blocking::spawn_detached(move || {
-                        execute_call_rpc(Some(client), method, params, timeout, detailed, call);
+                        execute_call_rpc(Some(client), method, params, options, call);
                     });
                 } else {
                     send_action(
@@ -847,8 +871,7 @@ impl Bridge {
                             machine,
                             method,
                             params,
-                            timeout,
-                            detailed,
+                            options,
                             call,
                         },
                     );
@@ -2137,14 +2160,49 @@ impl Bridge {
     }
 }
 
+/// 插件 `call` 的选项。
+pub(crate) struct CallOptions {
+    timeout: Duration,
+    /// 失败也 resolve，带上错误码：`{ ok, value }` / `{ ok: false, code, message }`。
+    detailed: bool,
+    /// 回复里这些位置（JSON 指针，相对方法的返回值）上的字符串换成 Blob 交给插件。
+    blobs: Vec<String>,
+}
+
+/// 把 `value` 里 `pointers`（加上 `prefix`）处的字符串取出来做成 Blob：几 MB 的 diff 正文
+/// 插件只是转交给原生组件（`URL.createObjectURL` 给 `DiffView`），不该先进它的 JS 堆。
+/// 那里不是字符串（这次回复没有正文）就照原样。
+fn blob_answer(mut value: Value, pointers: &[String], prefix: &str) -> HostAnswer {
+    let blobs = pointers
+        .iter()
+        .filter_map(|pointer| {
+            let at = format!("{prefix}{pointer}");
+            let slot = value.pointer_mut(&at).filter(|slot| slot.is_string())?;
+            let Value::String(text) = slot.take() else {
+                return None;
+            };
+            Some(HostBlob {
+                at,
+                bytes: nsh_core::ImageData::from(text.into_bytes()),
+                mime: "text/plain;charset=utf-8".to_string(),
+            })
+        })
+        .collect();
+    HostAnswer { value, blobs }
+}
+
 fn execute_call_rpc(
     client: Option<api::client::RuntimeClient>,
     method: ControlMethod,
     params: Value,
-    timeout: Duration,
-    detailed: bool,
+    options: CallOptions,
     call: HostCall,
 ) {
+    let CallOptions {
+        timeout,
+        detailed,
+        blobs,
+    } = options;
     if detailed {
         let response = match client {
             Some(client) => match client.call_method(method, params, timeout) {
@@ -2171,7 +2229,7 @@ fn execute_call_rpc(
                 "message": api::machine_removed(),
             }),
         };
-        call.resolve(response);
+        call.answer(blob_answer(response, &blobs, "/value"));
     } else {
         let result = match client {
             Some(client) => client
@@ -2179,7 +2237,10 @@ fn execute_call_rpc(
                 .map_err(api::call_error_text),
             None => Err(api::machine_removed()),
         };
-        call.reply(result);
+        match result {
+            Ok(value) => call.answer(blob_answer(value, &blobs, "")),
+            Err(error) => call.reject(error),
+        }
     }
 }
 
@@ -2252,13 +2313,12 @@ pub(crate) fn handle_action(action: Action, bridge: &Bridge, plugins: &PluginHos
             machine,
             method,
             params,
-            timeout,
-            detailed,
+            options,
             call,
         } => {
             let client = api::host(cx).client(&machine, cx);
             api::blocking::spawn_detached(move || {
-                execute_call_rpc(client, method, params, timeout, detailed, call);
+                execute_call_rpc(client, method, params, options, call);
             });
         }
         Action::Request {
