@@ -1666,7 +1666,6 @@ async function publishCommands(defaultName: string | null, force = false): Promi
       {
         name: "new-conversation",
         title: buildNewConversationTitle(defaultName),
-        key: "cmd-n",
         context: "Workspace",
         requires_args: false,
         args: [],

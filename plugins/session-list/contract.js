@@ -34,7 +34,7 @@ export const SESSION_MENU = `${OWNER}/conversation`;
  */
 export const REVEAL_IN_LIST = `${OWNER}/reveal-in-list`;
 
-// ---- 不带参数的命令（快捷键、命令面板） ----
+// ---- 不带参数的命令（能绑快捷键） ----
 
 /** 新建会话（打开新建会话的菜单）。 */
 export const NEW_SESSION = `${OWNER}/new-session`;

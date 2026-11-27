@@ -1,4 +1,4 @@
-// 新建会话菜单（NSH A2 版）：复用纯逻辑 `../new_session.js`，支持项目/工作树行「+」弹层与 ⌘N 命令面板对话框。
+// 新建会话菜单的界面，逻辑在 `../new_session.js`：项目/工作树行「+」的弹层，和命令打开的、钉在窗口上方的面板。
 
 import { computed, Scroll, signal, Text, View } from "nsh";
 import { DIALOG_SURFACE_CLASS, newSessionIcon, SmeltButton, SmeltDialog, SmeltIcon, SmeltMenu, SmeltPopover } from "smelt/sdk";
@@ -216,7 +216,7 @@ function MenuBody(props: { menu: () => any; localTick?: () => number; maxHeight?
   return (
     <View
       ref={(el: any) => {
-        // 打开弹层 / ⌘N 面板时同步拿取键盘焦点，保证 ↑/↓/Enter/1-9 立即生效。
+        // 弹层、面板一打开就拿键盘焦点，↑/↓/Enter/1-9 不用先点。
         el?.focus?.();
       }}
       focusable={true}
@@ -563,7 +563,7 @@ export function NewSessionPopover(props: {
   );
 }
 
-/** ⌘N 打开的新建会话面板（挂在插件无头根上）。 */
+/** 命令打开的新建会话面板，挂在插件无头根上。 */
 export function PaletteDialog() {
   const paletteOpen = computed(() => {
     tick();

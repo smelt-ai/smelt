@@ -103,7 +103,7 @@ export class SessionList {
     this.agent_settings_failure = null;
     /** 开着的新建会话菜单（new_session.js），宿主事件转给它们。 */
     this.launchers = new Set();
-    /** ⌘N 打开的、钉在窗口上方的那份新建会话菜单（插件的根画它）。 */
+    /** 命令打开的那份新建会话菜单，钉在窗口上方（插件的根画它）。 */
     this.palette = null;
     /** 开着的仓库对话框（repositories.js，插件的根画它）。 */
     this.repositories = null;
@@ -683,7 +683,7 @@ export class SessionList {
 
   // ---- 插件的根画的对话框 ----
 
-  /** ⌘N：钉在窗口上方的新建会话菜单，预选眼下活动项目。已经开着就换一份新的（重读目录）。 */
+  /** 打开钉在窗口上方的新建会话菜单，预选眼下活动项目；已经开着就换一份新的（重读目录）。 */
   open_palette() {
     this.palette?.dispose();
     const owner = { palette: true, redraw: () => this.host.redraw(), close: () => this.close_palette(menu) };

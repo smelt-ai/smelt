@@ -1158,7 +1158,7 @@ export function Shell() {
         <HostDialogs />
       </If>
 
-      {/* 插件无头根：不占空间，承载命令弹出的对话框（⌘N、仓库管理）及后台事件循环 */}
+      {/* 插件无头根：不占空间，承载命令弹出的对话框（新建会话、仓库管理）及后台事件循环 */}
       <View
         style={{
           position: "absolute",

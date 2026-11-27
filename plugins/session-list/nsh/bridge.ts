@@ -1,4 +1,4 @@
-// 会话列表插件（NSH A2 独立 VM 版）宿主桥与生命周期：
+// 会话列表插件的宿主桥与生命周期：
 // 零重复复用 `plugins/session-list/` 全部纯 JS 业务逻辑模块，经 `smelt/sdk` 对接宿主状态、
 // 事件、双向命令、SQLite 存储（含 smelt.sessions 旧库迁移）与视图登记。
 

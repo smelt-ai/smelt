@@ -16,7 +16,7 @@ export const SETTINGS_VIEW = "smelt.agents/settings";
 
 /**
  * 跟默认智能体开一段新对话；没有默认就打开智能体页选，一个都没有就去建。
- * 不带参数，标题随默认智能体名称动态更新（⌘N）。
+ * 不带参数，标题随默认智能体名称动态更新。
  */
 export const NEW_CONVERSATION = "smelt.agents/new-conversation";
 

@@ -1,4 +1,4 @@
-// 项目的仓库对话框（NSH A2 版）：复用纯逻辑 `../repositories.js`。
+// 项目的仓库对话框的界面，逻辑在 `../repositories.js`。
 
 import { computed, Scroll, Text, View } from "nsh";
 import { Input } from "nsh/base";
