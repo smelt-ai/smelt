@@ -222,6 +222,17 @@ export function SmeltConversation(props: SmeltConversationProps) {
   let backfilledAt: number | null = null;
   let lastRejectedNoticeId: number | null = null;
   let lastInitialPromptText: string | null = null;
+  let pendingSendScrollRowCount: number | null = null;
+  let pendingSendScrollTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearPendingSendScroll = () => {
+    pendingSendScrollRowCount = null;
+    if (pendingSendScrollTimer != null) {
+      clearTimeout(pendingSendScrollTimer);
+      pendingSendScrollTimer = null;
+    }
+  };
+  cleanup(clearPendingSendScroll);
 
   const agentId = computed(() => {
     const dir = props.directoryAcp;
@@ -766,6 +777,26 @@ export function SmeltConversation(props: SmeltConversationProps) {
     }
   };
 
+  /** 用户主动发消息后立刻滚到底部，并在新气泡落地时再贴一次底，确保重新吸附流式输出。 */
+  const scrollToBottomAfterSend = () => {
+    clearPendingSendScroll();
+    pendingSendScrollRowCount = displayRows().length;
+    listApi?.scrollToEnd?.({ animated: true });
+    updateAtLatest(true);
+    pendingSendScrollTimer = setTimeout(clearPendingSendScroll, 2000);
+  };
+
+  effect(() => {
+    const count = displayRows().length;
+    if (pendingSendScrollRowCount != null && count > pendingSendScrollRowCount) {
+      clearPendingSendScroll();
+      queueMicrotask(() => {
+        listApi?.scrollToEnd?.({ animated: false });
+        updateAtLatest(true);
+      });
+    }
+  });
+
   const handleViewableRange = (firstRowIdx: number, _lastRowIdx: number) => {
     const rows = displayRows();
     const firstRow = rows[firstRowIdx];
@@ -1098,7 +1129,10 @@ export function SmeltConversation(props: SmeltConversationProps) {
                 onEditResendAt={(globalIndex, _text) => {
                   sendAction({ RewindToMessage: { entry_index: globalIndex } });
                 }}
-                onRetryTurn={() => sendAction("RetryLastTurn")}
+                onRetryTurn={() => {
+                  sendAction("RetryLastTurn");
+                  scrollToBottomAfterSend();
+                }}
                 onInspectSubagent={(sub) => inspectedSubagent.set(sub)}
                 onOpenConversation={props.onOpenConversation}
               />
@@ -1242,6 +1276,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
               ? { FollowUp: { text, images: [], delivery_id: null } }
               : { Prompt: { text, images: [], delivery_id: null } };
             sendAction(payload, imageRefs);
+            scrollToBottomAfterSend();
           }}
           onCancel={() => sendAction("Cancel")}
           onForceRestart={() => {
@@ -1264,7 +1299,10 @@ export function SmeltConversation(props: SmeltConversationProps) {
           }
           onElicitSubmit={() => sendAction("ElicitationSubmit")}
           onElicitDismiss={() => sendAction("ElicitationDismiss")}
-          onDeliverQueuedNow={(text) => sendAction({ DeliverQueuedNow: { text } })}
+          onDeliverQueuedNow={(text) => {
+            sendAction({ DeliverQueuedNow: { text } });
+            scrollToBottomAfterSend();
+          }}
           onWithdrawPendingPrompt={(id) => sendAction({ WithdrawPendingPrompt: { id } })}
           onClearQueue={() => sendAction("ClearQueue")}
           onStopSubagent={(id) => sendAction({ StopSubagent: { id } })}
