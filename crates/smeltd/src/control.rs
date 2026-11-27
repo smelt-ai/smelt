@@ -171,8 +171,8 @@ fn dispatch_control(
         | ControlMethod::GitPull
         | ControlMethod::GitStashPush
         | ControlMethod::GitStashPop
+        | ControlMethod::GitDiffFiles
         | ControlMethod::GitFileDiff
-        | ControlMethod::GitAllDiff
         | ControlMethod::GitLog
         | ControlMethod::GitCommitFiles
         | ControlMethod::GitCommitFileDiff) => match super::git_control::dispatch(git, params) {

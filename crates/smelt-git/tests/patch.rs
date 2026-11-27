@@ -2,7 +2,7 @@
 //! worktree 目录当普通仓库用。这些都跑真 git，原先在 GUI 的 git 面板测试里。
 
 use smelt_git::{DiffScope, file_diff, load_repo_info, parse_diff, run_git, run_git_stdin};
-use smelt_runtime_client::protocol::git::hunk_patch;
+use smelt_runtime_client::protocol::git::{GitDiffText, hunk_patch};
 
 /// 在临时目录里造一个仓库：写 `content`、提交，再覆写成 `modified`（不提交）。
 /// 返回仓库根路径。用 pid + 标签避免并行测试互相踩。
@@ -27,15 +27,15 @@ fn repo_with_change(tag: &str, content: &str, modified: &str) -> std::path::Path
 fn file_diff_offers_the_worktree_file_only_while_it_is_a_regular_file() {
     let root = repo_with_change("full-file-availability", "before\n", "after\n");
     let r = root.to_str().unwrap();
-    let diff = file_diff(r, "f.txt", false, DiffScope::All);
+    let diff = file_diff(r, "f.txt", None, false, DiffScope::All).unwrap();
     assert_eq!(
         diff.worktree_file.as_deref(),
         Some(root.join("f.txt").to_str().unwrap())
     );
-    assert!(diff.text.contains("+after"));
+    assert!(matches!(&diff.diff, GitDiffText::Text { text } if text.contains("+after")));
 
     std::fs::remove_file(root.join("f.txt")).unwrap();
-    let diff = file_diff(r, "f.txt", false, DiffScope::All);
+    let diff = file_diff(r, "f.txt", None, false, DiffScope::All).unwrap();
     assert_eq!(
         diff.worktree_file, None,
         "已删除的文件不能再提供「打开完整文件」"

@@ -145,15 +145,104 @@ pub enum DiffScope {
 }
 
 impl DiffScope {
-    pub fn args(self) -> &'static [&'static str] {
+    /// `git diff` 在子命令和 `--` 之间要带的比较对象。
+    pub fn revs(self) -> &'static [&'static str] {
         match self {
             // 同 `load_git_status`：不强制 `--ignore-submodules`，跟随仓库配置。
             // diff 与 status 必须用同一套口径，否则列表里有的条目点开是空的。
-            Self::All => &["diff", "HEAD", "--"],
-            Self::Staged => &["diff", "--staged", "--"],
-            Self::Unstaged => &["diff", "--"],
+            Self::All => &["HEAD"],
+            Self::Staged => &["--staged"],
+            Self::Unstaged => &[],
         }
     }
+}
+
+/// 一项改动怎么变的，git 的说法（`--name-status` 的首字母）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GitChangeStatus {
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Copied,
+    /// 类型变了（普通文件 ↔ 符号链接 ↔ 子模块）。
+    TypeChanged,
+    /// 合并冲突还没解决。
+    Unmerged,
+    Untracked,
+}
+
+impl GitChangeStatus {
+    /// `--raw` / `--name-status` 的状态字母（`R100` 这种带相似度的只看首字母）。
+    pub fn from_letter(letter: u8) -> Self {
+        match letter {
+            b'A' => Self::Added,
+            b'D' => Self::Deleted,
+            b'R' => Self::Renamed,
+            b'C' => Self::Copied,
+            b'T' => Self::TypeChanged,
+            b'U' => Self::Unmerged,
+            _ => Self::Modified,
+        }
+    }
+}
+
+/// 一项改动的增删行数（`--numstat`）。
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+pub struct GitLineCounts {
+    pub added: u32,
+    pub deleted: u32,
+}
+
+/// 一项改动的正文是什么样的。列表据此决定展开、折叠还是只给文件头，不用先把正文拉过来。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GitDiffBody {
+    /// 文本。`lines` 是增删行数；未跟踪文件不去数（要整个读一遍），为 `None`。
+    Text { lines: Option<GitLineCounts> },
+    /// 二进制：没有行。
+    Binary,
+    /// 超过查看上限：运行时不算也不给它的 diff。
+    TooLarge,
+    /// 子模块指针的变化。
+    Submodule,
+    /// 未跟踪的目录（多半是嵌套仓库）：没有正文。
+    Directory,
+}
+
+/// 改动列表的一项：只有事实。汇总视图的补丁里有没有它看 `in_patch`，没有的按文件另取
+/// （`git.diff.file`）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GitDiffEntry {
+    /// 新路径；删除的文件是它原来的路径。
+    pub path: String,
+    /// 重命名、复制前的路径。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+    pub status: GitChangeStatus,
+    /// 两侧里较大那份的字节数。目录、子模块为 0。
+    pub size: u64,
+    pub body: GitDiffBody,
+    /// 它的 diff 在 `GitDiffFilesResult::patch` 里。超过查看上限的、目录、单个较大的，以及
+    /// 汇总放不下的不在。
+    #[serde(default)]
+    pub in_patch: bool,
+}
+
+/// 一个文件的 diff 原文，或者它太大不给。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GitDiffText {
+    Text {
+        text: String,
+    },
+    /// 文件或它的 diff 超过查看上限。`size` 是两侧里较大那份文件的字节数。
+    TooLarge {
+        size: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -650,15 +739,15 @@ git_calls! {
     GitPullCall => GitPull(GitRootParams) -> EmptyParams;
     GitStashPushCall => GitStashPush(GitRootParams) -> EmptyParams;
     GitStashPopCall => GitStashPop(GitRootParams) -> EmptyParams;
-    /// 单个文件的 diff 原文，以及展示它要用到的几项事实。
+    /// 一个仓库在某个范围里的全部改动：每项的路径、状态、大小、行数，不带正文。
+    GitDiffFilesCall => GitDiffFiles(GitDiffFilesParams) -> GitDiffFilesResult;
+    /// 单个文件的 diff 原文（超过查看上限时不给），以及展示它要用到的几项事实。
     GitFileDiffCall => GitFileDiff(GitFileDiffParams) -> GitFileDiffResult;
-    /// 一个仓库在某个范围里的全部改动，未跟踪文件也拼进去。
-    GitAllDiffCall => GitAllDiff(GitAllDiffParams) -> GitTextResult;
     GitLogCall => GitLog(GitLogParams) -> GitLogResult;
     /// 一个提交改了哪些文件：`(状态首字母, 路径)`。
     GitCommitFilesCall => GitCommitFiles(GitCommitRefParams) -> GitCommitFilesResult;
-    /// 一个文件在某个提交里的 diff 原文。
-    GitCommitFileDiffCall => GitCommitFileDiff(GitCommitFileParams) -> GitTextResult;
+    /// 一个文件在某个提交里的 diff 原文（超过查看上限时不给）。
+    GitCommitFileDiffCall => GitCommitFileDiff(GitCommitFileParams) -> GitDiffText;
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -741,14 +830,16 @@ pub struct GitCommitParams {
 pub struct GitFileDiffParams {
     pub root: String,
     pub path: String,
+    /// 重命名前的路径：两头都在路径里，git 才认得出这是重命名，而不是一删一加。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
     pub untracked: bool,
     pub scope: DiffScope,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitFileDiffResult {
-    /// diff 原文。git 跑不起来时是一句说明，界面照样显示它。
-    pub text: String,
+    pub diff: GitDiffText,
     /// 这个文件是否有已暂存的部分。
     pub has_staged: bool,
     /// 这是子模块指针的变化，不能按块操作。
@@ -758,16 +849,19 @@ pub struct GitFileDiffResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct GitAllDiffParams {
+pub struct GitDiffFilesParams {
     pub root: String,
     pub scope: DiffScope,
-    /// 要拼进去的未跟踪路径。客户端从它手上的 status 里取，免得两次 status 对不上。
+    /// 要列进去的未跟踪路径，排在已跟踪的后面。客户端从它手上的 status 里取，免得两次
+    /// status 对不上。
     pub untracked_paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct GitTextResult {
-    pub text: String,
+pub struct GitDiffFilesResult {
+    pub files: Vec<GitDiffEntry>,
+    /// `in_patch` 那些文件的 diff，接在一起，不超过查看上限。
+    pub patch: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
