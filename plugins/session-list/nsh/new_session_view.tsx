@@ -350,12 +350,13 @@ function MenuBody(props: { menu: () => any; localTick?: () => number; maxHeight?
                   return (
                     <View
                       role="button"
+                      class="group/row"
                       onMouseEnter={() => props.menu()?.hover(index)}
                       onPress={() => props.menu()?.launch(index)}
                       style={{
                         height: ROW_HEIGHT,
                         paddingLeft: 12,
-                        paddingRight: 4,
+                        paddingRight: 8,
                         borderRadius: look().radius.sm,
                         backgroundColor: selected() ? look().palette.row_hover : "transparent",
                         display: "flex",
@@ -392,51 +393,69 @@ function MenuBody(props: { menu: () => any; localTick?: () => number; maxHeight?
                           {t(action()?.kind === "terminal" ? "kind.terminal" : "kind.conversation")}
                         </Text>
                       ) : null}
-                      {digit() != null ? (
-                        <View
-                          style={{
-                            paddingHorizontal: 5,
-                            height: 18,
-                            borderRadius: 4,
-                            borderWidth: 1,
-                            borderColor: look().palette.hair_strong,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            flexShrink: 0,
-                          }}
-                        >
-                          <Text
-                            style={{
-                              fontSize: look().type.small.size,
-                              color: look().palette.muted,
-                            }}
-                          >
-                            {digit()}
-                          </Text>
-                        </View>
-                      ) : null}
-                      <View style={{ width: 22, height: 22, flexShrink: 0, alignItems: "center", justifyContent: "center" }}>
-                        {selected() && action() ? (
+                      {/* 行尾槽位：常用项平时画数字键，悬停时与星标原位叠换，不留空白占位也不挪动前面文字。 */}
+                      <View
+                        style={{
+                          position: "relative",
+                          width: 22,
+                          height: 22,
+                          flexShrink: 0,
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                      >
+                        {digit() != null ? (
                           <View
-                            role="button"
-                            accessibilityLabel={action()?.pinned ? t("new.unfavorite") : t("new.favorite")}
-                            tooltip={
-                              <Tip text={action()?.pinned ? t("new.unfavorite") : t("new.favorite")} />
-                            }
-                            class="items-center justify-center rounded-(--radius) hover:bg-accent"
-                            style={{ width: 22, height: 22, cursor: "default" }}
-                            onPress={(e: any) => {
-                              e?.stopPropagation?.();
-                              const key = action()?.key;
-                              if (key != null) props.menu()?.toggle_pin(key);
-                            }}
+                            class="absolute inset-0 items-center justify-center opacity-100 visible group-hover/row:opacity-0 group-hover/row:invisible"
+                            style={{ pointerEvents: "none" }}
                           >
-                            <SmeltIcon
-                              path={icon(action()?.pinned ? "star-fill" : "star")}
-                              size={13}
-                              color={action()?.pinned ? look().palette.text : look().palette.muted}
-                            />
+                            <View
+                              style={{
+                                minWidth: 18,
+                                paddingHorizontal: 5,
+                                height: 18,
+                                borderRadius: 4,
+                                borderWidth: 1,
+                                borderColor: look().palette.hair_strong,
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                flexShrink: 0,
+                              }}
+                            >
+                              <Text
+                                style={{
+                                  fontSize: look().type.small.size,
+                                  color: look().palette.muted,
+                                }}
+                              >
+                                {digit()}
+                              </Text>
+                            </View>
+                          </View>
+                        ) : null}
+                        {action() ? (
+                          <View class="absolute inset-0 items-center justify-center opacity-0 invisible pointer-events-none group-hover/row:opacity-100 group-hover/row:visible group-hover/row:pointer-events-auto">
+                            <View
+                              role="button"
+                              accessibilityLabel={action()?.pinned ? t("new.unfavorite") : t("new.favorite")}
+                              tooltip={
+                                <Tip text={action()?.pinned ? t("new.unfavorite") : t("new.favorite")} />
+                              }
+                              class="items-center justify-center rounded-(--radius) hover:bg-accent"
+                              style={{ width: 22, height: 22, cursor: "default" }}
+                              onPress={(e: any) => {
+                                e?.stopPropagation?.();
+                                const key = action()?.key;
+                                if (key != null) props.menu()?.toggle_pin(key);
+                              }}
+                            >
+                              <SmeltIcon
+                                path={icon(action()?.pinned ? "star-fill" : "star")}
+                                size={13}
+                                color={action()?.pinned ? look().palette.text : look().palette.muted}
+                              />
+                            </View>
                           </View>
                         ) : null}
                       </View>

@@ -94,7 +94,15 @@ impl Host for RenameHost {
                     "fs.list" => json!({ "entries": [] }),
                     "new_session.catalog" => json!({
                         "sections": {
-                            "common": [],
+                            "common": [
+                                {
+                                    "key": "shell",
+                                    "label": "Shell",
+                                    "kind": "terminal",
+                                    "pinned": true,
+                                    "target": "blankTerminal"
+                                }
+                            ],
                             "terminal": [
                                 {
                                     "key": "blank",
@@ -758,14 +766,18 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
         *open_view_calls.lock().unwrap()
     );
 
-    // 9. ⌘N 新建会话面板打开后无需先点击，直接按 Enter 即可通过 MenuBody 键盘导航启动。
+    // 9. ⌘N 新建会话面板：未悬停时常用项行尾直接画数字键（不给隐藏星标留空洞），悬停才原位换成星标；
+    // 打开后无需先点击，直接按 Enter 即可通过 MenuBody 键盘导航启动。
     create_calls.lock().unwrap().clear();
+    cx.simulate_mouse_move(point(px(2.), px(2.)), None, Modifiers::default());
     cx.update(|_, cx| {
         api::run("smelt.session-list/new-session", Value::Null, cx).detach();
     });
     assert!(
         wait_until(cx, Duration::from_secs(2), |cx| {
-            has_a11y_label(cx, "New Session") && has_a11y_label(cx, "Terminal")
+            has_a11y_label(cx, "New Session")
+                && has_a11y_label(cx, "Shell Terminal 1")
+                && has_a11y_label(cx, "Terminal")
         }),
         "调用 new-session 应打开新建会话面板并加载目录，当前 labels：{:?}",
         a11y_nodes(cx)
@@ -775,6 +787,78 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
                 .and_then(Value::as_str)
                 .map(str::to_owned))
             .collect::<Vec<_>>()
+    );
+    assert!(
+        !has_a11y_label(cx, "Remove from Favorites"),
+        "未悬停常用行时不应露出星标按钮（即使默认选中第一行）"
+    );
+    // 核对第一行选中底块与数字键帽的实际像素位置：数字键紧贴行右缘，不留星标占位空洞。
+    let (row_center, right_gap) = cx.update(|window, _| {
+        let scale = window.scale_factor();
+        let quads: Vec<(f32, f32, f32, f32)> = window
+            .painted_quads()
+            .iter()
+            .map(|q| {
+                let b = q.bounds;
+                (
+                    b.origin.x.0 / scale,
+                    b.origin.y.0 / scale,
+                    b.size.width.0 / scale,
+                    b.size.height.0 / scale,
+                )
+            })
+            .collect();
+        let row = quads
+            .iter()
+            .copied()
+            .find(|&(_, _, w, h)| (w - 352.).abs() <= 4. && (h - 28.).abs() <= 2.)
+            .unwrap_or_else(|| panic!("应画有 ⌘N 第一行高亮底块（352×28），quads={quads:?}"));
+        let keycap = quads
+            .iter()
+            .copied()
+            .find(|&(x, y, w, h)| {
+                x >= row.0
+                    && x + w <= row.0 + row.2
+                    && y >= row.1
+                    && y + h <= row.1 + row.3
+                    && (16. ..=24.).contains(&w)
+                    && (h - 18.).abs() <= 2.
+            })
+            .unwrap_or_else(|| panic!("第一行内应画有数字键帽（~18×18），row={row:?}"));
+        let row_right = row.0 + row.2;
+        let keycap_right = keycap.0 + keycap.2;
+        (
+            point(px(row.0 + row.2 * 0.5), px(row.1 + row.3 * 0.5)),
+            row_right - keycap_right,
+        )
+    });
+    assert!(
+        (6. ..=14.).contains(&right_gap),
+        "未悬停时数字键右缘应贴近行右缘（~9-10pt），不应留出星标空洞，实际 right_gap={right_gap}"
+    );
+    // 悬停第一行：数字键原位隐藏、星标露出；移开指针后恢复。
+    cx.simulate_mouse_move(row_center, None, Modifiers::default());
+    assert!(
+        wait_until(cx, Duration::from_secs(2), |cx| {
+            has_a11y_label(cx, "Remove from Favorites")
+                && has_a11y_label(cx, "Shell Terminal")
+                && !has_a11y_label(cx, "Shell Terminal 1")
+        }),
+        "悬停常用行后应隐藏数字键并原位露出取消常用星标，当前 labels：{:?}",
+        a11y_nodes(cx)
+            .into_iter()
+            .filter_map(|n| n
+                .pointer("/aria/label")
+                .and_then(Value::as_str)
+                .map(str::to_owned))
+            .collect::<Vec<_>>()
+    );
+    cx.simulate_mouse_move(point(px(2.), px(2.)), None, Modifiers::default());
+    assert!(
+        wait_until(cx, Duration::from_secs(2), |cx| {
+            !has_a11y_label(cx, "Remove from Favorites") && has_a11y_label(cx, "Shell Terminal 1")
+        }),
+        "鼠标移开常用行后应隐藏星标并恢复数字键"
     );
     cx.simulate_keystrokes("enter");
     assert!(
