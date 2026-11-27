@@ -16,8 +16,8 @@ import {
 } from "../model.js";
 
 const TEXTS = {
-  open_with: { en: "Open With", "zh-CN": "用其他应用打开" },
-  file_manager: { en: "File Manager", "zh-CN": "文件管理器" },
+  open_with: { en: "Open with", "zh-CN": "用其他应用打开" },
+  file_manager: { en: "File manager", "zh-CN": "文件管理器" },
 };
 
 describe("smelt.ide model", () => {

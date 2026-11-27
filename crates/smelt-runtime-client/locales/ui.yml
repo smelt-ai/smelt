@@ -154,22 +154,22 @@ reason.worktree_base_not_found:
   zh-CN: "仓库 %{repository} 的远端和本地都没有分支 %{base}"
 automation.no_agent:
   en: Choose a configured agent
-  zh-CN: 请选择已配置的智能体
+  zh-CN: 先选一个已配置的智能体
 automation.no_shell_command:
   en: Enter the shell command to run
-  zh-CN: 请填写要执行的 Shell 命令
+  zh-CN: 填写要执行的 Shell 命令
 automation.no_webhook_token:
   en: The external trigger has no receiving token
   zh-CN: 外部触发缺少接收令牌
 automation.no_trigger:
   en: Add at least one trigger
-  zh-CN: 请至少添加一条触发条件
+  zh-CN: 至少添加一条触发条件
 automation.no_id:
   en: The automation has no id
   zh-CN: 自动化缺少 id
 automation.no_name:
   en: Enter a name for the automation
-  zh-CN: 请填写自动化名称
+  zh-CN: 填写自动化名称
 automation.workspace_not_ready:
   en: The automation's Smelt workspace isn't ready yet
   zh-CN: 自动化的 Smelt 工作区尚未就绪
@@ -178,13 +178,13 @@ automation.workspace_missing:
   zh-CN: 自动化的 Smelt 工作区不存在或不是目录：%{path}
 automation.no_instruction:
   en: Scheduled triggers bring no outside content, so enter an instruction
-  zh-CN: 定时触发不会带入外部内容，请填写指令
+  zh-CN: 定时触发不会带入外部内容，需要填写指令
 automation.no_days:
   en: Choose at least one day
-  zh-CN: 请至少选择一天
+  zh-CN: 至少选一天
 automation.time_out_of_range:
   en: Enter a time between 00:00 and 23:59
-  zh-CN: 请输入 00:00 到 23:59 之间的时间
+  zh-CN: 输入 00:00 到 23:59 之间的时间
 automation.minutes_out_of_range:
   en: The interval must be 1 to 1440 minutes
   zh-CN: 执行间隔需为 1 到 1440 分钟
@@ -214,7 +214,7 @@ automation.delete_while_cleaning_up:
   zh-CN: 自动化运行现场正在清理，请稍后再删除
 automation.event_topic_missing:
   en: Enter an event topic
-  zh-CN: 请填写事件主题
+  zh-CN: 填写事件主题
 automation.event_topic_too_long:
   en: The event topic is too long
   zh-CN: 事件主题过长
@@ -223,7 +223,7 @@ automation.event_topic_malformed:
   zh-CN: 事件主题须为小写点分名，例如 lark.message.received
 automation.event_id_missing:
   en: Enter an event_id
-  zh-CN: 请填写 event_id
+  zh-CN: 填写 event_id
 automation.event_id_too_long:
   en: The event_id is too long
   zh-CN: event_id 过长
@@ -304,16 +304,16 @@ automation_run.command_failed:
   zh-CN: 命令执行失败
 reason.repository_not_git:
   en: "Choose the root folder of an existing Git repository, not a plain folder"
-  zh-CN: "请选择已有 Git 仓库的根目录，而不是普通文件夹"
+  zh-CN: "选择已有 Git 仓库的根目录，而不是普通文件夹"
 reason.repository_not_root:
   en: "Choose the repository's root folder: %{root}"
-  zh-CN: "请选择 Git 仓库根目录：%{root}"
+  zh-CN: "选择 Git 仓库根目录：%{root}"
 reason.repository_name_taken:
   en: "That folder name is already taken; choose another name: %{path}"
-  zh-CN: "目录名已被占用，请修改名称：%{path}"
+  zh-CN: "目录名已被占用，换个名称：%{path}"
 reason.repository_url_invalid:
   en: "Enter a valid Git URL"
-  zh-CN: "请填写有效的 Git URL"
+  zh-CN: "填写有效的 Git URL"
 reason.repository_clone_failed:
   en: "Git clone failed. Check the URL, your network and your SSH or credential setup."
   zh-CN: "Git 克隆失败，请检查 URL、网络和 SSH/凭据配置"
@@ -322,7 +322,7 @@ reason.repository_clone_failed_kept:
   zh-CN: "Git 克隆失败，请检查 URL、网络和 SSH/凭据配置；已保留克隆目录 %{path}，重试请换名称或先检查该目录"
 reason.repository_already_added:
   en: "This repository or folder name is already in the project"
-  zh-CN: "该仓库或目录名已添加，请勿重复绑定"
+  zh-CN: "该仓库或目录名已添加，不能重复绑定"
 reason.app_not_open:
   en: "This needs the Smelt app open on this computer, and it isn't"
   zh-CN: "要本机开着 Smelt App，现在没开"

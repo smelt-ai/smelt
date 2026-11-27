@@ -72,9 +72,9 @@ describe("desktop model", () => {
 
     probes.set("a-box", { kind: "known", desktop: true });
     probes.set("b-box", { kind: "known", desktop: false });
-    expect(buildMachineMenuItems(probes, { en: "Remote Desktop" }, "smelt.desktop/open")).toEqual([
+    expect(buildMachineMenuItems(probes, { en: "Remote desktop" }, "smelt.desktop/open")).toEqual([
       {
-        label: { en: "Remote Desktop" },
+        label: { en: "Remote desktop" },
         icon: "icons/monitor.svg",
         machine: "a-box",
         command: "smelt.desktop/open",

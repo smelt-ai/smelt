@@ -802,8 +802,8 @@ bootTask(async () => {
         ("smelt.capabilities/memory", "Memory"),
         ("smelt.machines/remote", "Remote"),
         ("smelt.quota/settings", "Quota"),
-        ("smelt.resources/main", "Resource Usage"),
-        ("smelt.session-list/settings", "Session List"),
+        ("smelt.resources/main", "Resource usage"),
+        ("smelt.session-list/settings", "Session list"),
     ] {
         shell.update(cx, |shell, cx| {
             shell.set_settings_page(Some((id.into(), title.into())), cx);

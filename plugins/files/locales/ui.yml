@@ -19,14 +19,14 @@ readonly:
     en: Outside this project (read-only). Click to edit.
     zh-CN: 项目外文件默认只读，点击解锁编辑。
 copy_path:
-  en: Copy File Path
+  en: Copy file path
   zh-CN: 复制文件路径
 command:
   save:
-    en: Save Current File
+    en: Save current file
     zh-CN: 保存当前文件
   open:
-    en: Open File
+    en: Open file
     zh-CN: 打开文件
 error:
   bad_open_args:
@@ -57,17 +57,17 @@ tree:
     en: No project folder
     zh-CN: 无项目目录
   collapse:
-    en: Hide File Tree
+    en: Hide file tree
     zh-CN: 收起文件树
   expand:
-    en: Show File Tree
+    en: Show file tree
     zh-CN: 展开文件树
 pin:
   add:
-    en: Add Folder to File Tree
+    en: Add folder to file tree
     zh-CN: 把目录加到文件树
   remove:
-    en: Remove from File Tree
+    en: Remove from file tree
     zh-CN: 从文件树移除
   pick_title:
     en: Choose folders to add to the file tree
@@ -83,10 +83,10 @@ switch:
     en: You're switching to “%{name}”, but these changes aren't saved. What do you want to do?
     zh-CN: 要切换到「%{name}」了，这些改动还没保存，要怎么处理？
   save:
-    en: Save and Switch
+    en: Save and switch
     zh-CN: 保存并切换
   discard:
-    en: Switch Without Saving
+    en: Switch without saving
     zh-CN: 不保存，直接切换
 unreadable:
   image:
@@ -119,17 +119,17 @@ save:
     zh-CN: 保存失败：%{error}
 browser:
   open:
-    en: Open in Browser
+    en: Open in browser
     zh-CN: 浏览器打开
   bad_path:
     en: This path can't be turned into a file URL, so the browser can't open it
     zh-CN: 这个路径转不成文件地址，打不开浏览器
 preview:
   show_source:
-    en: View Source
+    en: View source
     zh-CN: 查看原始码
   show_preview:
-    en: View Preview
+    en: View preview
     zh-CN: 查看预览
 edit:
   cut:
@@ -142,14 +142,14 @@ edit:
     en: Paste
     zh-CN: 粘贴
   select_all:
-    en: Select All
+    en: Select all
     zh-CN: 全选
 send:
   selection_menu:
-    en: Send Selection to Session
+    en: Send selection to session
     zh-CN: 发送选中内容到会话
   path_menu:
-    en: Send to Session
+    en: Send to session
     zh-CN: 发送到会话
   selection:
     en: "This selection from %{path}:\n```\n%{selected}\n```\n"
@@ -162,24 +162,24 @@ reveal:
     en: Show in Finder
     zh-CN: 在 Finder 中显示
   file_manager:
-    en: Show in File Manager
+    en: Show in file manager
     zh-CN: 在文件管理器中显示
 delete:
   action:
     en: Delete
     zh-CN: 删除
   folder_menu:
-    en: Delete Folder
+    en: Delete folder
     zh-CN: 删除文件夹
   file_menu:
-    en: Delete File
+    en: Delete file
     zh-CN: 删除文件
   folder_confirm:
     en: Delete this folder?
-    zh-CN: 确定删除这个文件夹吗？
+    zh-CN: 删除这个文件夹？
   file_confirm:
     en: Delete this file?
-    zh-CN: 确定删除这个文件吗？
+    zh-CN: 删除这个文件？
   folder_description:
     en: “%{name}” and everything in it will be moved to the Trash.
     zh-CN: 「%{name}」及其全部内容会移到废纸篓。

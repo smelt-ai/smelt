@@ -527,8 +527,8 @@ describe("schedules, validation, copy & formatting", () => {
     );
     expect(triggerPresetLabel("daily", tEn)).toBe("Daily");
     expect(triggerPresetLabel("webhook", tEn)).toBe("Webhook");
-    expect(notifyLabel("always", tEn)).toBe("Every Run");
-    expect(notifyLabel("never", tEn)).toBe("No Notification");
+    expect(notifyLabel("always", tEn)).toBe("Every run");
+    expect(notifyLabel("never", tEn)).toBe("No notification");
   });
 
   test("scheduleSummary & triggerSummary read naturally without leaking tokens", () => {
@@ -572,7 +572,7 @@ describe("schedules, validation, copy & formatting", () => {
         { webhooks: [{ endpoint: "tok_should_not_leak", secret: "tok_should_not_leak" }] },
         tEn,
       ),
-    ).toBe("External Trigger");
+    ).toBe("External trigger");
     expect(
       triggerSummary(
         {
@@ -581,7 +581,7 @@ describe("schedules, validation, copy & formatting", () => {
         },
         tEn,
       ),
-    ).toBe("Daily 09:00; External Trigger");
+    ).toBe("Daily 09:00; External trigger");
     expect(
       triggerSummary(
         {
@@ -592,7 +592,7 @@ describe("schedules, validation, copy & formatting", () => {
         },
         tEn,
       ),
-    ).toBe("External Trigger; External Trigger");
+    ).toBe("External trigger; External trigger");
     expect(triggerSummary({}, tEn)).toBe("No trigger set up");
   });
 
@@ -789,7 +789,7 @@ describe("schedules, validation, copy & formatting", () => {
       expect(notifyLabel(n, tEn).length).toBeGreaterThan(0);
       expect(notifyHint(n, tEn).length).toBeGreaterThan(0);
     }
-    expect(notifyLabel("failures_only", tEn)).toBe("Failures Only");
+    expect(notifyLabel("failures_only", tEn)).toBe("Failures only");
     expect(notifyShouldFire("never", true)).toBe(false);
     expect(notifyShouldFire("failures_only", false)).toBe(false);
     expect(notifyShouldFire("failures_only", true)).toBe(true);

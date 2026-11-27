@@ -7,13 +7,13 @@ cancel:
   zh-CN: 取消
 command:
   prev_hunk:
-    en: Previous Change
+    en: Previous change
     zh-CN: 上一个差异
   next_hunk:
-    en: Next Change
+    en: Next change
     zh-CN: 下一个差异
   open_pull_request:
-    en: Create PR in Browser
+    en: Create PR in browser
     zh-CN: 在浏览器中创建 PR
 error:
   pull_request_args:
@@ -64,7 +64,7 @@ changes:
     en: Nothing to commit
     zh-CN: 没有要提交的更改
   staged:
-    en: Staged Changes · %{count}
+    en: Staged changes · %{count}
     zh-CN: 暂存的更改 · %{count}
   unstaged:
     en: Changes · %{count}
@@ -135,10 +135,10 @@ busy:
     zh-CN: 丢弃块中…
 commit:
   commit_and_push:
-    en: Commit & Push
+    en: Commit & push
     zh-CN: 提交并推送
   commit_only:
-    en: Commit Only
+    en: Commit only
     zh-CN: 仅提交
   stage_first:
     en: Stage the changes to commit first
@@ -164,28 +164,31 @@ stage:
     zh-CN: 取消暂存失败：%{error}
 repo:
   expand:
-    en: Expand Repository
+    en: Expand repository
     zh-CN: 展开仓库
   collapse:
-    en: Collapse Repository
+    en: Collapse repository
     zh-CN: 收起仓库
 file:
   submodule:
     en: Submodule pointer
     zh-CN: 子模块指针
   open_diff:
-    en: Open File Diff
+    en: Open file diff
     zh-CN: 打开单文件 Diff
   copy_path:
-    en: Copy File Path
+    en: Copy file path
     zh-CN: 复制文件路径
   reveal:
     en: Show in Finder
     zh-CN: 在 Finder 中显示
   reveal_file_manager:
-    en: Show in File Manager
+    en: Show in file manager
     zh-CN: 在文件管理器中显示
 ops:
+  more:
+    en: More actions
+    zh-CN: 更多操作
   push:
     en: Push ↑%{ahead}
     zh-CN: 推送 ↑%{ahead}
@@ -199,14 +202,14 @@ ops:
     en: Pull ↓%{behind}
     zh-CN: 拉取 ↓%{behind}
   stash:
-    en: Stash Changes
+    en: Stash changes
     zh-CN: 储藏更改
   stash_pop:
-    en: Restore Stash (%{count})
+    en: Restore stash (%{count})
     zh-CN: 恢复储藏 (%{count})
 discard:
   all_menu:
-    en: Discard All Changes
+    en: Discard all changes
     zh-CN: 丢弃全部更改
   all_title:
     en: Discard all working tree changes?
@@ -215,32 +218,32 @@ discard:
     en: Tracked files go back to HEAD; unstaged and untracked new files are deleted.
     zh-CN: 已跟踪文件还原成 HEAD，未暂存 / 未跟踪的新文件会被删除。
   all_ok:
-    en: Discard All
+    en: Discard all
     zh-CN: 全部丢弃
   no_reflog:
     en: This doesn't go into the reflog and can't be recovered.
     zh-CN: 不进 reflog，找不回来。
   file_untracked_title:
     en: Delete this new file?
-    zh-CN: 确定删除这个新文件吗？
+    zh-CN: 删除这个新文件？
   file_untracked_body:
     en: "%{path} was never tracked by git, so deleting it removes it for good."
     zh-CN: "%{path} 从未被 git 跟踪过，删了就是彻底删除。"
   file_untracked_ok:
-    en: Delete File
+    en: Delete file
     zh-CN: 删除文件
   file_title:
     en: Discard this file's changes?
-    zh-CN: 确定丢弃这个文件的更改吗？
+    zh-CN: 丢弃这个文件的更改？
   file_body:
     en: "%{path} goes back to how it is in HEAD, including its staged part."
     zh-CN: "%{path} 会被还原成 HEAD 的样子，已暂存的部分一并还原。"
   file_ok:
-    en: Discard Changes
+    en: Discard changes
     zh-CN: 丢弃更改
   hunk_title:
     en: Discard this change?
-    zh-CN: 确定丢弃这一块更改吗？
+    zh-CN: 丢弃这一块更改？
   hunk_body:
     en: "Change %{index} in %{path} goes back to how it was before."
     zh-CN: "%{path} 的第 %{index} 块更改会被还原成更改前的样子。"
@@ -248,7 +251,7 @@ discard:
     en: This edits the working tree file directly, bypassing both the index and the reflog. Once discarded it can't be recovered.
     zh-CN: 直接改工作区文件，不进暂存区也不进 reflog——丢了就找不回来。
   hunk_ok:
-    en: Discard Change
+    en: Discard change
     zh-CN: 丢弃这一块
   gone:
     en: "%{path} is no longer in the change list. Refresh and discard again."
@@ -258,23 +261,23 @@ discard:
     zh-CN: 改动列表还没加载出来，请刷新后再丢弃。
 hunk:
   stage:
-    en: Stage Hunk
+    en: Stage hunk
     zh-CN: 暂存块
   unstage:
-    en: Unstage Hunk
+    en: Unstage hunk
     zh-CN: 取消暂存块
   discard:
-    en: Discard Hunk
+    en: Discard hunk
     zh-CN: 丢弃块
   apply_failed:
     en: "Couldn't apply the hunk: %{error}\n(If this file is partly staged, the view mixes staged and unstaged changes and hunks won't line up; unstage the whole file with its checkbox and try again)"
     zh-CN: "按块操作失败：%{error}\n（这个文件若已部分暂存，当前视图混着暂存与未暂存的改动，按块操作会对不上号；先用勾选框整文件取消暂存再试）"
   unsupported:
     en: This diff can't be changed hunk by hunk (submodule / untracked file); use the whole-file checkbox
-    zh-CN: 这个 diff 不支持按块操作（子模块 / 未跟踪文件），请用整文件的勾选框
+    zh-CN: 这个 diff 不支持按块操作（子模块 / 未跟踪文件），改用整文件的勾选框
 diff:
   all_changes:
-    en: All Changes
+    en: All changes
     zh-CN: 全部更改
   empty:
     en: (No differences)
@@ -289,7 +292,7 @@ diff:
     en: Too large to show (%{size})
     zh-CN: 文件太大，不显示（%{size}）
   left_out:
-    en: Not included in All Changes (%{count})
+    en: Not included in all changes (%{count})
     zh-CN: 没放进全部更改（%{count}）
   left_out_too_large:
     en: Too large to show · %{size}
@@ -301,19 +304,19 @@ diff:
     en: "%{size} · open to view"
     zh-CN: "%{size} · 点开单独查看"
   open_in_file:
-    en: Open in File
+    en: Open in file
     zh-CN: 在文件里打开
   open:
     en: Open
     zh-CN: 打开
   expand_all:
-    en: Expand All
+    en: Expand all
     zh-CN: 全部展开
   collapse_all:
-    en: Collapse All
+    en: Collapse all
     zh-CN: 全部收起
   split:
-    en: Side by Side
+    en: Side by side
     zh-CN: 并排
   split_tooltip:
     en: Compare old and new side by side; turn off for the unified view
@@ -335,7 +338,7 @@ comment:
     en: Cancel
     zh-CN: 取消
   send:
-    en: Send Comment
+    en: Send comment
     zh-CN: 发送评论
   feedback_header:
     en: "Feedback on these lines of %{path}:"
@@ -367,23 +370,23 @@ branch:
     en: Remote
     zh-CN: 远程
   checkout:
-    en: Check Out
+    en: Check out
     zh-CN: 签出
   merge:
-    en: Merge into Current Branch
+    en: Merge into current branch
     zh-CN: 合并到当前分支
   delete:
-    en: Delete Branch…
+    en: Delete branch…
     zh-CN: 删除分支…
   delete_remote:
-    en: Delete Remote Branch…
+    en: Delete remote branch…
     zh-CN: 删除远端分支…
   delete_ok:
     en: Delete
     zh-CN: 删除
   delete_title:
     en: Delete this branch?
-    zh-CN: 确定删除这个分支吗？
+    zh-CN: 删除这个分支？
   delete_body:
     en: "%{branch} only deletes the local ref; working tree files aren't affected."
     zh-CN: "%{branch} 只删本地引用，工作区文件不受影响。"
@@ -392,7 +395,7 @@ branch:
     zh-CN: 有未合并的提交时 git 会拒绝删除，不会强删。
   delete_remote_title:
     en: Delete this remote branch?
-    zh-CN: 确定删除这个远端分支吗？
+    zh-CN: 删除这个远端分支？
   delete_remote_body:
     en: "%{branch} is deleted from the remote; others lose it locally after they pull."
     zh-CN: "%{branch} 会从远端仓库删除，其他人拉取后本地也会跟着消失。"

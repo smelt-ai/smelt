@@ -1,6 +1,6 @@
 _version: 2
 commands:
-  en: Remote Machines
+  en: Remote machines
   zh-CN: 远程机器
 online:
   en: Online
@@ -15,35 +15,35 @@ page:
     zh-CN: 远程
 command:
   add:
-    en: Add Remote Machine
+    en: Add remote machine
     zh-CN: 添加远程机器
   reconnect:
-    en: Reconnect Machine
+    en: Reconnect machine
     zh-CN: 重新连接机器
   upgrade:
-    en: Upgrade Machine Runtime
+    en: Upgrade machine runtime
     zh-CN: 升级机器的运行时
   rename:
-    en: Rename Machine
+    en: Rename machine
     zh-CN: 重命名机器
   edit_relay:
-    en: Change Machine Relay
+    en: Change machine relay
     zh-CN: 改机器的中继
   remove:
-    en: Remove Machine
+    en: Remove machine
     zh-CN: 移除机器
   agent_access:
-    en: Toggle Agent Access to Machine
+    en: Toggle agent access to machine
     zh-CN: 切换智能体能否使用机器
   inbound:
-    en: Toggle Whether Machine Can Connect In
+    en: Toggle whether machine can connect in
     zh-CN: 切换机器能否连入本机
 menu:
   reconnect:
     en: Reconnect
     zh-CN: 重新连接
   upgrade:
-    en: Upgrade Runtime
+    en: Upgrade runtime
     zh-CN: 升级运行时
   rename:
     en: Rename…
@@ -55,16 +55,16 @@ menu:
     en: Remove…
     zh-CN: 移除…
   allow_agents:
-    en: Allow Agents Here to Use It
+    en: Allow agents here to use it
     zh-CN: 允许本机智能体使用
   disallow_agents:
-    en: Stop Agents Here from Using It
+    en: Stop agents here from using it
     zh-CN: 不再允许本机智能体使用
   allow_inbound:
-    en: Allow It to Connect to This Computer
+    en: Allow it to connect to this computer
     zh-CN: 允许它连入本机
   disallow_inbound:
-    en: Stop It from Connecting to This Computer
+    en: Stop it from connecting to this computer
     zh-CN: 不再允许它连入本机
 access_change:
   failed:
@@ -201,10 +201,10 @@ devices:
     zh-CN: 撤销
 pairing:
   title:
-    en: Pair New Device
+    en: Pair new device
     zh-CN: 配对新设备
   begin:
-    en: Pair New Device…
+    en: Pair new device…
     zh-CN: 配对新设备…
   needs_access:
     en: Turn on remote access first
@@ -231,7 +231,7 @@ pairing:
     en: Single use, valid for 10 minutes.
     zh-CN: 只能用一次，10 分钟内有效。
   regenerate:
-    en: New Pairing Code
+    en: New pairing code
     zh-CN: 换一个配对串
   done:
     en: Done
@@ -270,14 +270,14 @@ upgrade:
     zh-CN: 升级
   tooltip:
     en: Upgrade this machine to v%{version}
-    zh-CN: 请这台机器升到 v%{version}
+    zh-CN: 把这台机器升到 v%{version}
   failed:
     en: Couldn't upgrade the runtime
     zh-CN: 升级运行时失败
 remove:
   title:
     en: Remove this machine?
-    zh-CN: 确定移除这台机器吗？
+    zh-CN: 移除这台机器？
   action:
     en: Remove
     zh-CN: 移除
@@ -289,7 +289,7 @@ remove:
     zh-CN: 移除机器失败
 rename:
   title:
-    en: Rename Machine
+    en: Rename machine
     zh-CN: 重命名机器
   action:
     en: Rename

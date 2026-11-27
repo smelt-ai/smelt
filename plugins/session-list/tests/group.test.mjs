@@ -17,7 +17,7 @@ test("按状态的组按画出来的顺序", () => {
     ["idle", 0],
   ];
   const groups = buckets("status", rows, now());
-  expect(labels(groups)).toStrictEqual(["Needs You", "Running", "Idle"]);
+  expect(labels(groups)).toStrictEqual(["Needs you", "Running", "Idle"]);
   expect(flatten(groups)).toStrictEqual([2, 1, 0, 3]);
 });
 
@@ -50,7 +50,7 @@ test("按项目不分组", () => {
 test("按时间按日历分组、组里从新到旧", () => {
   const rows = [0, 2, 1, 8].map((days) => ["idle", noon_days_ago(days)]);
   const groups = buckets("last_updated", rows, now());
-  expect(labels(groups)).toStrictEqual(["Today", "Yesterday", "Last 7 Days", "Earlier"]);
+  expect(labels(groups)).toStrictEqual(["Today", "Yesterday", "Last 7 days", "Earlier"]);
   expect(flatten(groups)).toStrictEqual([0, 2, 1, 3]);
 });
 

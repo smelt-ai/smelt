@@ -1,16 +1,16 @@
 _version: 2
 agent:
   default_name:
-    en: "%{kind} Agent"
+    en: "%{kind} agent"
     zh-CN: "%{kind} 智能体"
   default_name_numbered:
-    en: "%{kind} Agent %{number}"
+    en: "%{kind} agent %{number}"
     zh-CN: "%{kind} 智能体 %{number}"
   name_label:
-    en: "Agent Name"
+    en: "Agent name"
     zh-CN: "智能体名称"
   new:
-    en: "New Agent"
+    en: "New agent"
     zh-CN: "新建智能体"
   unnamed:
     en: "Untitled"
@@ -23,7 +23,7 @@ automations:
     en: "Enabled"
     zh-CN: "启用"
   new:
-    en: "New Automation"
+    en: "New automation"
     zh-CN: "新建自动化"
   next:
     en: "Next %{when}"
@@ -32,14 +32,14 @@ automations:
     en: "Paused"
     zh-CN: "已暂停"
   recent:
-    en: "Recent Runs"
+    en: "Recent runs"
     zh-CN: "最近运行"
   run_failed:
     en: "The run failed"
     zh-CN: "运行失败"
   run_status:
     awaiting_approval:
-      en: "Awaiting Approval"
+      en: "Awaiting approval"
       zh-CN: "等待审批"
     cancelled:
       en: "Cancelled"
@@ -54,7 +54,7 @@ automations:
       en: "Failed"
       zh-CN: "失败"
     queued:
-      en: "Waiting to Deliver"
+      en: "Waiting to deliver"
       zh-CN: "等待投递"
     running:
       en: "Running"
@@ -66,7 +66,7 @@ automations:
       en: "Starting"
       zh-CN: "启动中"
     waiting_for_user:
-      en: "Waiting for Input"
+      en: "Waiting for input"
       zh-CN: "等待输入"
   schedule:
     daily:
@@ -107,7 +107,7 @@ automations:
       en: "in %{count} min"
       zh-CN: "%{count} 分钟后"
   title:
-    en: "What %{name} Does"
+    en: "What %{name} does"
     zh-CN: "让%{name}做的事"
   trigger:
     event:
@@ -120,13 +120,13 @@ automations:
       en: "; "
       zh-CN: "；"
     webhook:
-      en: "External Trigger"
+      en: "External trigger"
       zh-CN: "外部触发"
     webhook_unset:
       en: "External trigger not set up"
       zh-CN: "未配置外部触发"
   unnamed:
-    en: "Untitled Automation"
+    en: "Untitled automation"
     zh-CN: "未命名自动化"
   weekday:
     fri:
@@ -164,7 +164,7 @@ capabilities:
     en: "No matching capabilities"
     zh-CN: "没有匹配的能力"
   rescan:
-    en: "Rescan Skills, Extensions and mcp.json"
+    en: "Rescan skills, extensions and mcp.json"
     zh-CN: "重新扫描技能、扩展和 mcp.json"
   selected:
     en: "%{count} checked; it can't see anything unchecked. Changes apply to new conversations."
@@ -193,7 +193,7 @@ cli:
     zh-CN: "安装 %{agent}"
   installed:
     en: "%{agent} installed via %{installer}. Sign in the first time you launch it."
-    zh-CN: "%{agent} 已通过 %{installer} 安装；请在首次启动时完成登录。"
+    zh-CN: "%{agent} 已通过 %{installer} 安装；首次启动时完成登录。"
   installed_no_version:
     en: "Installed (no version reported)"
     zh-CN: "已安装（未返回版本）"
@@ -216,14 +216,14 @@ cli:
     en: "Not found on Smelt's agent search path"
     zh-CN: "未在 Smelt 的 Agent 搜索路径中找到"
   refresh:
-    en: "Refresh Environment Detection"
+    en: "Refresh environment detection"
     zh-CN: "刷新运行环境检测"
 command:
   agent_settings:
-    en: "Agent Settings on Each Machine"
+    en: "Agent settings on each machine"
     zh-CN: "各台机器的智能体配置"
   edit_agent_settings:
-    en: "Edit Agent Settings"
+    en: "Edit agent settings"
     zh-CN: "改智能体配置"
 common:
   add:
@@ -258,7 +258,7 @@ context:
     en: "Link"
     zh-CN: "链接"
   link_label:
-    en: "Context Link"
+    en: "Context link"
     zh-CN: "上下文链接"
   link_placeholder:
     en: "Paste a reference link and press Return to add"
@@ -267,16 +267,16 @@ context:
     en: "Bind"
     zh-CN: "绑定"
   pick_title:
-    en: "Choose Folders to Bind"
+    en: "Choose folders to bind"
     zh-CN: "选择要绑定的目录"
   remove_link:
-    en: "Remove This Link"
+    en: "Remove this link"
     zh-CN: "移除这个链接"
   title:
-    en: "Bound Context"
+    en: "Bound context"
     zh-CN: "绑定的上下文"
   unbind_folder:
-    en: "Unbind This Folder"
+    en: "Unbind this folder"
     zh-CN: "解除这个目录的绑定"
   workspace:
     en: "Workspace"
@@ -295,8 +295,8 @@ custom_agent:
     en: "Custom agent \"%{name}\" needs a launch command"
     zh-CN: "自定义 Agent「%{name}」还没填启动命令"
   data_dir_in_env:
-    en: "Data directory goes in the \"Data Folder\" field, not as `%{var}` in the environment variables"
-    zh-CN: "`%{var}` 请填在「数据目录」里，不要写在环境变量中"
+    en: "Data directory goes in the \"Data folder\" field, not as `%{var}` in the environment variables"
+    zh-CN: "`%{var}` 填在「数据目录」里，不要写在环境变量中"
   data_dir_unsupported:
     en: "%{agent} doesn't support a custom data directory"
     zh-CN: "%{agent} 不支持自定义数据目录"
@@ -317,16 +317,16 @@ default:
     en: "Default: %{name}"
     zh-CN: "默认：%{name}"
   pick:
-    en: "Choose Default Agent"
+    en: "Choose default agent"
     zh-CN: "选默认智能体"
   pick_banner:
     en: "Choose an agent to set as default and start a new conversation."
     zh-CN: "点选一个智能体设为默认，并立刻开始新对话。"
   set:
-    en: "Set as Default"
+    en: "Set as default"
     zh-CN: "设为默认"
   tooltip:
-    en: "“New Conversation” starts with this agent"
+    en: "“New conversation” starts with this agent"
     zh-CN: "「新对话」用这个智能体开"
 delete:
   automation_name:
@@ -337,7 +337,7 @@ delete:
     zh-CN: "还有 %{count} 条自动化在用它：%{names}。先改掉或删掉它们。"
   confirm_title:
     en: "Delete this agent?"
-    zh-CN: "确定删除这个智能体吗？"
+    zh-CN: "删除这个智能体？"
   message:
     en: "This deletes the agent “%{name}” and its instructions, skills and extensions. This can't be undone."
     zh-CN: "将删除智能体「%{name}」和它的指令、技能和扩展设置。此操作不可撤销。"
@@ -352,7 +352,7 @@ delete:
     en: ", "
     zh-CN: "、"
   title:
-    en: "Delete Agent"
+    en: "Delete agent"
     zh-CN: "删除智能体"
   tooltip:
     en: "Delete the agent and its memories; existing conversations are kept"
@@ -377,7 +377,7 @@ editor:
     en: "Give it a name"
     zh-CN: "给它起个名字"
   start:
-    en: "Start Conversation"
+    en: "Start conversation"
     zh-CN: "开始对话"
 empty:
   description:
@@ -387,7 +387,7 @@ empty:
     en: "Create a reusable agent. Starting a conversation opens with it and makes it the default. Going back discards it."
     zh-CN: "创建一个可复用的智能体。开始对话后会用它开场，并设为默认。返回则不保留。"
   title:
-    en: "No Agents Yet"
+    en: "No agents yet"
     zh-CN: "还没有智能体"
 engine:
   tooltip:
@@ -424,7 +424,7 @@ error:
     zh-CN: "智能体配置没有改完"
   no_engine:
     en: "Choose an available engine"
-    zh-CN: "请选择一个可用的执行引擎"
+    zh-CN: "选择一个可用的执行引擎"
   not_ready:
     en: "This agent can't start a conversation yet"
     zh-CN: "这个智能体还不能开始对话"
@@ -448,7 +448,7 @@ hooks:
     en: "Connects Smelt notifications to each agent's user-level config, adding and removing only Smelt's own entries. It doesn't take part in tool permission decisions and takes effect after reopening a session."
     zh-CN: "把 Smelt 的通知接进各家 Agent 的用户级配置，只增删 Smelt 自己的条目；不介入工具权限决策，重开会话后生效。"
   install:
-    en: "Install Hooks"
+    en: "Install hooks"
     zh-CN: "安装 hooks"
   install_failed:
     en: "Install failed"
@@ -485,11 +485,11 @@ instructions:
     en: "%{count} characters · sent as the system prompt with every conversation and automation"
     zh-CN: "%{count} 字 · 会作为系统提示词带进每次对话和自动化"
   title:
-    en: "Way of Working"
+    en: "Way of working"
     zh-CN: "工作方式"
 launch:
   add:
-    en: "Add Launch Item"
+    en: "Add launch item"
     zh-CN: "添加启动项"
   command_column:
     en: "Command"
@@ -498,7 +498,7 @@ launch:
     en: "Launch command, e.g. claude"
     zh-CN: "启动命令，如 claude"
   delete:
-    en: "Delete Launch Item"
+    en: "Delete launch item"
     zh-CN: "删除启动项"
   label_placeholder:
     en: "Display name"
@@ -513,7 +513,7 @@ launch:
     en: "Name"
     zh-CN: "名称"
   new_entry:
-    en: "New Launch Item"
+    en: "New launch item"
     zh-CN: "新启动项"
   not_loaded:
     en: "Still reading launch items from the runtime; try again shortly"
@@ -549,7 +549,7 @@ memory:
     en: "No memories yet. When the user corrects it or asks it to remember something, it writes it down itself."
     zh-CN: "还没有记忆。用户纠正它或让它记住什么时，它会自己写下来。"
   agent_title:
-    en: "This Agent"
+    en: "This agent"
     zh-CN: "这个智能体"
   count:
     en: "%{total}"
@@ -568,9 +568,9 @@ memory:
     zh-CN: "将删除记忆「%{name}」和它的使用记录。这是全局记忆，所有智能体之后都不会再用到它。此操作不可撤销。"
   delete_title:
     en: "Delete this memory?"
-    zh-CN: "确定删除这条记忆吗？"
+    zh-CN: "删除这条记忆？"
   delete_tooltip:
-    en: "Delete This Memory"
+    en: "Delete this memory"
     zh-CN: "删除这条记忆"
   description:
     en: "Long-term information the agent writes down in conversations and automations. Changes take effect from the next turn."
@@ -635,14 +635,14 @@ memory:
     en: "Off: nothing injected or written; existing memories are kept"
     zh-CN: "已关闭：不注入、不写入，已有记忆保留"
   open_folder:
-    en: "Open Memory Folder"
+    en: "Open memory folder"
     zh-CN: "打开记忆文件夹"
   open_in_editor:
-    en: "Open in Text Editor"
+    en: "Open in text editor"
     zh-CN: "用文本编辑器打开"
   over_budget:
     en: "Rule memories exceed the %{kb}KB always-loaded limit, so only part is injected at startup. Merge or delete outdated rules."
-    zh-CN: "规则类记忆正文超过 %{kb}KB 常驻上限，启动时只会注入一部分。请合并或删掉过时的规则。"
+    zh-CN: "规则类记忆正文超过 %{kb}KB 常驻上限，启动时只会注入一部分。合并或删掉过时的规则。"
   pending:
     edits_pending:
       en: "Edited a memory that was still pending"
@@ -675,7 +675,7 @@ memory:
     en: "%{reason}: %{description}"
     zh-CN: "%{reason}：%{description}"
   reload:
-    en: "Reload Memories"
+    en: "Reload memories"
     zh-CN: "重新读取记忆"
   search_placeholder:
     en: "Search names, descriptions or content"
@@ -716,7 +716,7 @@ memory:
     zh-CN: "全局（所有智能体共享）"
 model:
   inherit:
-    en: "Follow Pi Default"
+    en: "Follow Pi default"
     zh-CN: "跟随 Pi 默认"
   tooltip:
     en: "New conversations and automations for this agent use this model. You can still change it within a conversation."
@@ -727,10 +727,10 @@ monogram:
     zh-CN: "智"
 new_conversation:
   named:
-    en: "New Conversation · %{name}"
+    en: "New conversation · %{name}"
     zh-CN: "新对话 · %{name}"
   title:
-    en: "New Conversation"
+    en: "New conversation"
     zh-CN: "新对话"
   tooltip:
     en: "Start a new conversation"
@@ -774,10 +774,10 @@ plugins:
     zh-CN: "磁盘上已经找不到了"
 profile:
   add:
-    en: "Add Custom Agent"
+    en: "Add custom agent"
     zh-CN: "添加自定义 Agent"
   command:
-    en: "Launch Command"
+    en: "Launch command"
     zh-CN: "启动命令"
   command_inherit_placeholder:
     en: "Leave empty to use %{agent}'s command"
@@ -786,10 +786,10 @@ profile:
     en: "ACP launch command, e.g. my-agent --acp"
     zh-CN: "ACP 启动命令，如 my-agent --acp"
   delete:
-    en: "Delete This Custom Agent"
+    en: "Delete this custom agent"
     zh-CN: "删除这个自定义 Agent"
   dir:
-    en: "Data Folder"
+    en: "Data folder"
     zh-CN: "数据目录"
   dir_placeholder:
     en: "Leave empty to use the default folder"
@@ -816,20 +816,20 @@ profile:
     en: "Reading local agent settings…"
     zh-CN: "正在读取本机的智能体配置…"
   new:
-    en: "New Agent"
+    en: "New agent"
     zh-CN: "新 Agent"
   section_description:
-    en: "Connect any ACP agent, or change the command, add environment variables or change the data folder of a built-in agent. It adds an item to the “New Conversation” menu; ones based on a built-in agent also appear on the history page."
+    en: "Connect any ACP agent, or change the command, add environment variables or change the data folder of a built-in agent. It adds an item to the “New conversation” menu; ones based on a built-in agent also appear on the history page."
     zh-CN: "接入任意 ACP Agent，或在内置 Agent 上换命令、加环境变量、换数据目录。「新建对话」菜单会多一项；基于内置 Agent 的还会出现在历史会话页。"
 settings:
   custom_agents:
-    en: "Custom Agents"
+    en: "Custom agents"
     zh-CN: "自定义 Agent"
   local_agents:
-    en: "Local Agents"
+    en: "Local agents"
     zh-CN: "本机 Agent"
   new_menu:
-    en: "New Menu"
+    en: "New menu"
     zh-CN: "新建菜单"
   title:
     en: "Agents"

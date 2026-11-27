@@ -49,7 +49,7 @@ row:
     zh-CN: "%{time} · 跑了 %{minutes} 分钟"
 menu:
   continue_agent:
-    en: Continue Conversation
+    en: Continue conversation
     zh-CN: 继续对话
   continue_acp:
     en: Continue via ACP
@@ -58,13 +58,13 @@ menu:
     en: Continue in CLI/TUI
     zh-CN: CLI/TUI 继续
   hand_off:
-    en: Hand Off To
+    en: Hand off to
     zh-CN: 迁移到
   reset_title:
-    en: Restore Default Name
+    en: Restore default name
     zh-CN: 恢复默认名称
   copy_path:
-    en: Copy File Path
+    en: Copy file path
     zh-CN: 复制文件路径
 handoff:
   unreadable:
@@ -79,7 +79,7 @@ delete:
     zh-CN: 删除
   confirm:
     en: Delete this history session?
-    zh-CN: 确定删除这条历史会话吗？
+    zh-CN: 删除这条历史会话？
   description:
     en: "%{agent}'s “%{title}” and its local conversation record will be permanently deleted. This can't be undone."
     zh-CN: 将永久删除 %{agent} 的「%{title}」及其本地对话记录，此操作不可撤销。

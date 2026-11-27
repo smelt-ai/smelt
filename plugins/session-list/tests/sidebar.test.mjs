@@ -311,7 +311,7 @@ test("智能体对话标引擎，悬停写智能体名", () => {
 
 test("项目名取最后一段", () => {
   expect(project_name("posix", "/a/smelt", path, t)).toBe("smelt");
-  expect(project_name("posix", "", path, t)).toBe("No Folder");
+  expect(project_name("posix", "", path, t)).toBe("No folder");
 });
 
 // ---- 从宿主的数据整份算 ----

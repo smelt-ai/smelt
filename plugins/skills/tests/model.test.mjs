@@ -19,7 +19,7 @@ const t = (key, params = {}) => {
     "time.unknown": "Unknown time",
     "list.separator": ", ",
     "place.universal": "Universal",
-    "place.legacy": "Old Location",
+    "place.legacy": "Old location",
     "place.conflict": `Conflict ×${params.count}`,
     "status.choose": "Choose one",
     "status.unread": "No agent reads it",

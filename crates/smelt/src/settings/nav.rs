@@ -262,7 +262,7 @@ mod tests {
         assert_eq!(titles(&nav), ["General"]);
         assert_eq!(
             child_titles(&nav, "General"),
-            ["Appearance", "Shortcuts", "Panel Plugins"]
+            ["Appearance", "Shortcuts", "Panel plugins"]
         );
         assert!(settings_nav(&[]).is_empty(), "没有设置页就没有分组");
     }
@@ -278,8 +278,8 @@ mod tests {
         ));
         let nav = settings_nav(&views);
         let filtered = filter_settings_nav(&nav, "relay");
-        assert_eq!(titles(&filtered), ["Agents & Remote"]);
-        assert_eq!(child_titles(&filtered, "Agents & Remote"), ["远程"]);
+        assert_eq!(titles(&filtered), ["Agents & remote"]);
+        assert_eq!(child_titles(&filtered, "Agents & remote"), ["远程"]);
 
         // 组名用哪种语言搜都行。
         for query in ["通用", "General"] {
@@ -317,7 +317,7 @@ mod tests {
         assert_eq!(titles(&nav), ["General", "System", "Plugins"]);
         assert_eq!(
             child_titles(&nav, "General"),
-            ["Appearance", "Shortcuts", "Panel Plugins", "提醒"]
+            ["Appearance", "Shortcuts", "Panel plugins", "提醒"]
         );
         assert_eq!(child_titles(&nav, "System"), ["磁盘"]);
         assert_eq!(child_titles(&nav, "Plugins"), ["行情"]);

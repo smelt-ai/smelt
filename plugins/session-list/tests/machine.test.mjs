@@ -30,7 +30,7 @@ test("用不了的机器灭灯、写短字", () => {
   );
   expect(incompatible.light).toBe("down");
   expect(incompatible.detail).toBe("Incompatible version · 0.9 · Direct · 8ms\nupgrade the remote runtime");
-  expect(incompatible.unavailable).toBe("Incompatible Version");
+  expect(incompatible.unavailable).toBe("Incompatible version");
   const upgrading = remote_link({ state: "upgrading", progress: "downloading" }, null, t);
   expect(upgrading.light).toBe("degraded");
   expect(upgrading.unavailable).toBe("Upgrading");

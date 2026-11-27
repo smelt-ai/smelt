@@ -144,13 +144,13 @@ entry.turn_failed_with_detail:
   en: "⚠️ Turn failed: %{detail}"
   zh-CN: "⚠️ 回合失败：%{detail}"
 turn_hint.no_api_key:
-  en: "No API key yet. In Settings → Agents → Custom Agents, create an agent based on this one, put your keys in Environment as KEY=value, one per line (e.g. OPENAI_API_KEY=sk-...), then start a new conversation with it."
+  en: "No API key yet. In Settings → Agents → Custom agents, create an agent based on this one, put your keys in Environment as KEY=value, one per line (e.g. OPENAI_API_KEY=sk-...), then start a new conversation with it."
   zh-CN: "还没配 API key：在「设置 → Agent → 自定义 Agent」新建一个基于这个 agent 的 Agent，在「环境变量」里按 KEY=值 每行一条填好（比如 OPENAI_API_KEY=sk-...），再用它新建对话。"
 turn_hint.api_key_rejected:
-  en: "The server rejected the API key. Check this agent's Environment in Settings → Agents → Custom Agents, and make sure no spaces or quotes were pasted along with it."
+  en: "The server rejected the API key. Check this agent's Environment in Settings → Agents → Custom agents, and make sure no spaces or quotes were pasted along with it."
   zh-CN: "API key 被服务端拒绝了：到「设置 → Agent → 自定义 Agent」里这个 Agent 的「环境变量」核对一遍，注意别把前后空格或引号一起粘进去。"
 turn_hint.connection_refused:
-  en: "Couldn't reach the model service. If you set a custom base URL (such as OPENAI_BASE_URL), check the address and port in this agent's Environment under Settings → Agents → Custom Agents, and that this machine can reach it."
+  en: "Couldn't reach the model service. If you set a custom base URL (such as OPENAI_BASE_URL), check the address and port in this agent's Environment under Settings → Agents → Custom agents, and that this machine can reach it."
   zh-CN: "连不上模型服务：如果配了自定义 base URL（如 OPENAI_BASE_URL），到「设置 → Agent → 自定义 Agent」里这个 Agent 的「环境变量」确认地址和端口，以及本机能否访问。"
 turn_hint.rate_limited:
   en: "The server is rate limiting requests. Wait a moment before sending again; if it keeps happening, check your account's quota."
@@ -216,7 +216,7 @@ mcp_preset.browser_mcp.name:
   en: Agent360 Browser
   zh-CN: Agent360 浏览器
 mcp_preset.browser_mcp.summary:
-  en: "Drives the Chrome you're signed in to: open pages, click and fill forms, take screenshots, and stop to ask you at captchas or two-factor prompts. Install the Agent360 Browser MCP extension first (click \"Install Extension\")."
+  en: "Drives the Chrome you're signed in to: open pages, click and fill forms, take screenshots, and stop to ask you at captchas or two-factor prompts. Install the Agent360 Browser MCP extension first (click \"Install extension\")."
   zh-CN: 操作你已登录的 Chrome：打开网页、点击填表、截图，遇到验证码或二次验证会停下来问你。需先安装 Agent360 Browser MCP 扩展（点「安装扩展」）。
 mcp_preset.chrome_devtools.name:
   en: Chrome DevTools
@@ -237,7 +237,7 @@ mcp_preset.playwright.name:
   en: Playwright Browser
   zh-CN: Playwright 浏览器
 mcp_preset.playwright.summary:
-  en: "Drives the Chrome you're using through the Playwright extension, keeping your sign-ins: open pages, click and fill forms, read page structure, take screenshots. Install the Playwright extension first (click \"Install Extension\") and confirm the connection in the browser."
+  en: "Drives the Chrome you're using through the Playwright extension, keeping your sign-ins: open pages, click and fill forms, read page structure, take screenshots. Install the Playwright extension first (click \"Install extension\") and confirm the connection in the browser."
   zh-CN: 通过 Playwright 扩展操作你正在用的 Chrome，沿用已登录的状态：打开网页、点击填表、读页面结构、截图。需先安装 Playwright 扩展（点「安装扩展」），连接时在浏览器里确认。
 mcp_preset.playwright.summary_remote_desktop:
   en: "Drives the always-on Chrome in this machine's remote desktop, keeping its sign-ins: open pages, click and fill forms, read page structure, take screenshots. A person takes over in the remote desktop for captchas and payments."
@@ -256,7 +256,7 @@ custom_agent.command_required:
   zh-CN: "自定义 Agent「%{name}」还没填启动命令"
 custom_agent.data_dir_in_env:
   en: "Data directory goes in the \"Data directory\" field, not as `%{var}` in the environment variables"
-  zh-CN: "`%{var}` 请填在「数据目录」里，不要写在环境变量中"
+  zh-CN: "`%{var}` 填在「数据目录」里，不要写在环境变量中"
 custom_agent.data_dir_unsupported:
   en: "%{agent} doesn't support a custom data directory"
   zh-CN: "%{agent} 不支持自定义数据目录"
@@ -286,7 +286,7 @@ pi_model.base_url_invalid:
   zh-CN: API 地址必须是完整的 HTTP(S) URL
 pi_model.base_url_required:
   en: Enter the API URL first
-  zh-CN: 请先填写 API 地址
+  zh-CN: 先填写 API 地址
 pi_model.base_url_scheme:
   en: "The API URL must start with http:// or https://: %{url}"
   zh-CN: "API 地址需要以 http:// 或 https:// 开头：%{url}"
@@ -294,8 +294,8 @@ pi_model.provider_id_invalid:
   en: "Provider ID \"%{id}\" is invalid: it must start with a letter and contain only letters, digits and hyphens"
   zh-CN: "Provider ID「%{id}」无效：须以字母开头，只能含字母、数字和短连字符"
 pi_model.provider_id_required:
-  en: Enter a Provider ID
-  zh-CN: 请填写 Provider ID
+  en: Enter a provider ID
+  zh-CN: 填写 Provider ID
 project.unnamed:
   en: Project
   zh-CN: 项目
@@ -343,13 +343,13 @@ pi_login.no_redirect:
   zh-CN: 授权链接里没有回调地址，没法转交，请在这台机器的浏览器里授权
 pi_login.not_full_address:
   en: "That isn't a full address. Copy the whole thing from the browser's address bar (it starts with http://)."
-  zh-CN: 这不是完整的地址，请从浏览器地址栏整段复制（以 http:// 开头）
+  zh-CN: 这不是完整的地址，从浏览器地址栏整段复制（以 http:// 开头）
 pi_login.wrong_callback:
   en: "That isn't this sign-in's callback address; it should start with %{expected}"
   zh-CN: 这不是这次登录的回调地址，应以 %{expected} 开头
 pi_login.no_authorization_result:
   en: "The address has no authorization result (code). Approve on the authorization page first, then copy it."
-  zh-CN: 地址里没有授权结果（code），请在授权页点完同意后再复制
+  zh-CN: 地址里没有授权结果（code），在授权页点完同意后再复制
 pi_login.login_failed:
   en: "Sign-in failed (exit code %{code})"
   zh-CN: 登录失败（退出码 %{code}）

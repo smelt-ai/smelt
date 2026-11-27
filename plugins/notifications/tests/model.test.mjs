@@ -22,7 +22,7 @@ const EN = {
   "status.needs_you": "Needs you",
   "status.running": "Running",
   "status.unread": "Unread",
-  "menu.show_main_window": "Open smelt Main Window",
+  "menu.show_main_window": "Open smelt main window",
   "tooltip.both": "%{attention}, %{running}",
   "tooltip.attention.one": "1 session needs attention",
   "tooltip.attention.other": "%{count} sessions need attention",
@@ -176,7 +176,7 @@ describe("菜单栏的菜单", () => {
       "等批准 — Needs you",
       "在跑 — Running",
       "没看 — Unread",
-      "Open smelt Main Window",
+      "Open smelt main window",
     ]);
     expect(actions[0].icon.color).toBe(PALETTE.need);
     expect(menu.title).toBe("3@·2");
@@ -194,7 +194,7 @@ describe("菜单栏的菜单", () => {
     const empty = buildMenu([], new Map(), PALETTE, t);
     expect(empty.title).toBe("");
     expect(empty.items).toStrictEqual([
-      { type: "action", label: "Open smelt Main Window", icon: null, command: SHOW_MAIN_WINDOW, args: null },
+      { type: "action", label: "Open smelt main window", icon: null, command: SHOW_MAIN_WINDOW, args: null },
     ]);
 
     const listed = buildMenu([row(["run"], ["running"], "在跑", "running", "box")], new Map(), PALETTE, t);

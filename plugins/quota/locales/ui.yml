@@ -1,6 +1,6 @@
 _version: 2
 title:
-  en: "Account Quota"
+  en: "Account quota"
   zh-CN: "账户额度"
 click_to_check:
   en: "Not checked yet · click to check"
@@ -18,7 +18,7 @@ copilot_used:
   en: "%{label} this period %{used} / %{limit} %{unit} (%{percent}%)"
   zh-CN: "%{label} 本周期 %{used} / %{limit} %{unit}（%{percent}%）"
 empty_trigger:
-  en: "Account Quota · click to check"
+  en: "Account quota · click to check"
   zh-CN: "账户额度 · 点击查询"
 enable_label:
   en: "Check quota for %{name}"
@@ -33,7 +33,7 @@ period:
   en: "This period"
   zh-CN: "本周期"
 read_failed:
-  en: "Read Failed"
+  en: "Read failed"
   zh-CN: "读取失败"
 refresh_one:
   en: "Check %{name} quota"
