@@ -1227,3 +1227,86 @@ export function colorWithAlpha(color, alpha) {
   }
   return color;
 }
+
+/**
+ * 发送消息或点击「回到最新」后的贴底控制器。
+ *
+ * `nsh-core` 的 `<List>` 在 `splice`（回显用户气泡 / 流式追加行）时会取消飞行中的
+ * 平滑滚动 `pin`，且单次 `queueMicrotask` 跑在布局测量之前。因此：
+ * - 触发时默认立刻 `animated: false` 落到底部（同帧 `jump` 激活原生底部吸附）；
+ * - 在随后的短窗口内，每次新行落地 / 流式增长 / 视口回退都经 `requestAnimationFrame`
+ *   合并到布局测量完成后再贴一次底；
+ * - 用户一旦滚轮滚动、使用左侧刻度条、切会话或超时，立即退出贴底不抢控制权。
+ */
+export function createBottomStickController({
+  scrollToEnd,
+  setAtLatest,
+  requestFrame = (fn) => requestAnimationFrame(fn),
+  cancelFrame = (id) => cancelAnimationFrame(id),
+  setTimer = (fn, ms) => setTimeout(fn, ms),
+  clearTimer = (id) => clearTimeout(id),
+  windowMs = 3000,
+}) {
+  let active = false;
+  let rafId = null;
+  let timerId = null;
+
+  const cancelScheduled = () => {
+    if (rafId != null) {
+      cancelFrame(rafId);
+      rafId = null;
+    }
+    if (timerId != null) {
+      clearTimer(timerId);
+      timerId = null;
+    }
+  };
+
+  const scheduleFollowUp = () => {
+    if (!active || rafId != null) return;
+    rafId = requestFrame(() => {
+      rafId = null;
+      if (!active) return;
+      scrollToEnd({ animated: false });
+      setAtLatest(true);
+    });
+  };
+
+  const cancel = () => {
+    active = false;
+    cancelScheduled();
+  };
+
+  const trigger = ({ animated = false } = {}) => {
+    cancelScheduled();
+    active = true;
+    scrollToEnd({ animated });
+    setAtLatest(true);
+    scheduleFollowUp();
+    timerId = setTimer(() => {
+      timerId = null;
+      active = false;
+    }, windowMs);
+  };
+
+  const onContentGrew = () => {
+    if (!active) return;
+    scheduleFollowUp();
+  };
+
+  const onViewableAtLatest = (nearEnd) => {
+    if (active && !nearEnd) {
+      scheduleFollowUp();
+      return;
+    }
+    setAtLatest(nearEnd);
+  };
+
+  return {
+    trigger,
+    onContentGrew,
+    onViewableAtLatest,
+    cancel,
+    isActive: () => active,
+  };
+}
