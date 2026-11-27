@@ -131,6 +131,7 @@ define_control_methods! {
     FsUsageScan => (FS_USAGE_SCAN_METHOD, "fs.usage.scan"),
     FsUsageChildren => (FS_USAGE_CHILDREN_METHOD, "fs.usage.children"),
     FsUsageRelease => (FS_USAGE_RELEASE_METHOD, "fs.usage.release"),
+    ProcessRun => (PROCESS_RUN_METHOD, "process.run"),
     FileOpen => (FILE_OPEN_METHOD, "file.open"),
     FileSave => (FILE_SAVE_METHOD, "file.save"),
     SessionCompleteFiles => (SESSION_COMPLETE_FILES_METHOD, "session.complete_files"),

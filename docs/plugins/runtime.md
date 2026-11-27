@@ -160,6 +160,14 @@ onEvent((event) => {
 | `fs.usage.children` | `{ scan, path }` → `{ done, progress, entry, children }`。扫完后 `entry` 是 `path` 自己，`children` 是下一层，按占用从大到小；没扫完 `done` 是 `false`。子目录的大小是扫描那一刻的，文件当场列，删掉的不再出现 |
 | `fs.usage.release` | `{ scan }`。不看了就放掉；在扫的会停下。同时留着的统计最多 4 个，满了 `fs.usage.scan` 报 `busy` |
 
+要在那台机器上跑一个命令行程序（比如插件配套的 CLI），用 `process.run`：
+
+| 方法 | 做什么 |
+| --- | --- |
+| `process.run` | `{ program, args?, cwd?, env?, timeout_ms? }` → `{ code, stdout, stderr, timed_out, truncated }`。按那台机器登录 shell 的环境（`PATH` 等）找程序并跑到退出，`env` 叠在上面。默认最多等 60 秒，`timeout_ms` 最多 30 分钟，超时整棵进程树被杀掉、`code` 为 `null`。stdout、stderr 各最多 8 MB，多的丢掉、`truncated` 为真。程序或 `cwd` 不存在报 `not_found`。没有 stdin、不推中间输出 |
+
+`call` 的超时（第 4 个参数）要比 `timeout_ms` 长一点，不然宿主先放弃等待，程序还在跑。
+
 路径都是那台机器上的绝对路径。统计按实际占的块算，硬链接只算一次，不跟符号链接，不跨卷。进度经话题 `fs.usage.progress` 推，见上面。
 
 ## 对话
