@@ -978,65 +978,17 @@ export function MessageList(props: {
                             </View>
                           }
                         >
-                          <View class="group/user" style={{ width: "100%", alignItems: "flex-end", paddingTop: 6, gap: 2 }}>
-                            <MessageContextWrapper
-                              machine={props.machine}
-                              sessionId={props.sessionId}
-                              role="user"
-                              globalIndex={() => r().globalIndex}
-                              copyText={userText}
-                              copyImage={() => (userImages().length === 1 ? userImages()[0] : null)}
-                              canFork={() =>
-                                props.canFork() &&
-                                props.settled() &&
-                                Boolean(props.supportsRewind()) &&
-                                !isLatestUser()
-                              }
-                              canEditResend={() => Boolean(props.supportsRewind() && isLatestUser())}
-                              onFork={() => props.onForkAt(r().globalIndex, "user")}
-                              onEditResend={() => props.onEditResendAt(r().globalIndex, userText())}
-                            >
-                              <View
-                                class="rounded-[20px] bg-foreground/[0.08] px-4 py-2.5 gap-2"
-                                style={{ maxWidth: "72%" }}
-                              >
-                                <If when={userImages().length > 0}>
-                                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-                                    <Each of={userImages()}>
-                                      {(img) => {
-                                        const src = computed(() => imageThumbSrc(img()));
-                                        return (
-                                          <If when={src() != null}>
-                                            <ImageThumbContextMenu img={img} onPreview={props.onPreviewImage}>
-                                              <View
-                                                onPress={() => props.onPreviewImage(img())}
-                                                class="rounded-[10px] overflow-hidden border border-border"
-                                              >
-                                                <Image
-                                                  src={src()!}
-                                                  style={{ width: 104, height: 78, objectFit: "cover" }}
-                                                />
-                                              </View>
-                                            </ImageThumbContextMenu>
-                                          </If>
-                                        );
-                                      }}
-                                    </Each>
-                                  </View>
-                                </If>
-                                <If when={userText().trim().length > 0}>
-                                  <Text
-                                    class="text-foreground"
-                                    style={{
-                                      fontSize: (14 / 16) * (look().rem ?? 16),
-                                      lineHeight: (21 / 16) * (look().rem ?? 16),
-                                    }}
-                                  >
-                                    {userText()}
-                                  </Text>
-                                </If>
-                              </View>
-                            </MessageContextWrapper>
+                          <View
+                            class="group/user"
+                            style={{
+                              width: "100%",
+                              flexDirection: "row",
+                              justifyContent: "flex-end",
+                              alignItems: "flex-end",
+                              paddingTop: 6,
+                              gap: 6,
+                            }}
+                          >
                             <If when={userText().trim().length > 0 || userImages().length === 1}>
                               <View
                                 class={
@@ -1044,7 +996,15 @@ export function MessageList(props: {
                                     ? "opacity-100"
                                     : "opacity-0 group-hover/user:opacity-100"
                                 }
-                                style={{ height: 24, flexDirection: "row", alignItems: "center" }}
+                                style={{
+                                  height: 24,
+                                  marginBottom: 8,
+                                  flexShrink: 0,
+                                  flexDirection: "row",
+                                  alignItems: "center",
+                                  transitionProperty: "opacity",
+                                  transitionDuration: 120,
+                                }}
                               >
                                 <SmeltButton
                                   quiet
@@ -1067,6 +1027,63 @@ export function MessageList(props: {
                                 />
                               </View>
                             </If>
+                            <View style={{ maxWidth: "72%", flexShrink: 1 }}>
+                              <MessageContextWrapper
+                                machine={props.machine}
+                                sessionId={props.sessionId}
+                                role="user"
+                                globalIndex={() => r().globalIndex}
+                                copyText={userText}
+                                copyImage={() => (userImages().length === 1 ? userImages()[0] : null)}
+                                canFork={() =>
+                                  props.canFork() &&
+                                  props.settled() &&
+                                  Boolean(props.supportsRewind()) &&
+                                  !isLatestUser()
+                                }
+                                canEditResend={() => Boolean(props.supportsRewind() && isLatestUser())}
+                                onFork={() => props.onForkAt(r().globalIndex, "user")}
+                                onEditResend={() => props.onEditResendAt(r().globalIndex, userText())}
+                              >
+                                <View class="rounded-[20px] bg-foreground/[0.08] px-4 py-2.5 gap-2">
+                                  <If when={userImages().length > 0}>
+                                    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+                                      <Each of={userImages()}>
+                                        {(img) => {
+                                          const src = computed(() => imageThumbSrc(img()));
+                                          return (
+                                            <If when={src() != null}>
+                                              <ImageThumbContextMenu img={img} onPreview={props.onPreviewImage}>
+                                                <View
+                                                  onPress={() => props.onPreviewImage(img())}
+                                                  class="rounded-[10px] overflow-hidden border border-border"
+                                                >
+                                                  <Image
+                                                    src={src()!}
+                                                    style={{ width: 104, height: 78, objectFit: "cover" }}
+                                                  />
+                                                </View>
+                                              </ImageThumbContextMenu>
+                                            </If>
+                                          );
+                                        }}
+                                      </Each>
+                                    </View>
+                                  </If>
+                                  <If when={userText().trim().length > 0}>
+                                    <Text
+                                      class="text-foreground"
+                                      style={{
+                                        fontSize: (14 / 16) * (look().rem ?? 16),
+                                        lineHeight: (21 / 16) * (look().rem ?? 16),
+                                      }}
+                                    >
+                                      {userText()}
+                                    </Text>
+                                  </If>
+                                </View>
+                              </MessageContextWrapper>
+                            </View>
                           </View>
                         </If>
                       );
