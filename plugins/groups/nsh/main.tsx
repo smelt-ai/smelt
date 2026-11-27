@@ -12,7 +12,9 @@ import {
   SmeltMarkdown,
   SmeltSwitch,
   t,
+  viewShown,
 } from "smelt/sdk";
+import { MAIN_VIEW } from "../contract.js";
 import { activeMentionPrefix, formatShortTime, pendingApprovalsInMessages } from "../model.js";
 import {
   activeGroup,
@@ -959,6 +961,7 @@ function InspectorDrawer() {
                 machine={null}
                 sessionId={inspected()!.session_id}
                 embedded={true}
+                active={viewShown(MAIN_VIEW) && drawerOpen() && drawerTab() === "member"}
                 reuseKey={`group-member:${inspected()!.session_id}`}
                 style={{ flex: 1, minHeight: 0, width: "100%" }}
               />
