@@ -2,8 +2,8 @@
 // 零跨 VM 插槽跳转；在 NSH 侧承载连接态/失败重试、断线提示、Cmd+F 搜索条、右键菜单、
 // 写入错误通知与 `send-text` 直投。
 
-import { cleanup, computed, effect, Image, signal, Text, View } from "nsh";
-import { Input, MenuItem, MenuSeparator, Submenu } from "nsh/base";
+import { cleanup, computed, Image, signal, Text, View } from "nsh";
+import { Input, Submenu } from "nsh/base";
 import {
   clipboardRead,
   clipboardWrite,
@@ -15,6 +15,8 @@ import {
   SmeltButton,
   SmeltContextMenu,
   SmeltIcon,
+  SmeltMenuItem,
+  SmeltMenuSeparator,
   SmeltNativeTerminal,
   SmeltTooltip,
   stableMemo,
@@ -70,46 +72,6 @@ function errText(error: unknown): string {
   return String(error ?? "");
 }
 
-function TerminalMenuEntry(props: {
-  label: string;
-  image?: string | null;
-  iconPath?: string | null;
-  disabled?: boolean;
-  onSelect: () => void;
-}) {
-  const look = currentTheme;
-  return (
-    <MenuItem
-      disabled={props.disabled}
-      closeOnSelect={true}
-      onSelect={props.onSelect}
-      class={MENU_ITEM_CLASS}
-      style={{ height: 28, gap: 8 }}
-    >
-      {props.image ? (
-        <View style={{ width: 14, height: 14, flexShrink: 0 }}>
-          <Image src={props.image} style={{ width: 14, height: 14, objectFit: "contain" }} />
-        </View>
-      ) : props.iconPath ? (
-        <View style={{ width: 14, height: 14, flexShrink: 0 }}>
-          <SmeltIcon path={props.iconPath} size={14} color={look().palette.muted} />
-        </View>
-      ) : null}
-      <Text
-        class="flex-1 min-w-0"
-        style={{
-          color: props.disabled ? look().palette.faint : look().palette.text,
-          fontSize: look().type.ui.size,
-          lineHeight: look().type.ui.line_height,
-          numberOfLines: 1,
-        }}
-      >
-        {props.label}
-      </Text>
-    </MenuItem>
-  );
-}
-
 function ContributedEntries(props: {
   items: ContributedMenuItem[];
   onRun: (item: ContributedMenuItem) => void;
@@ -154,10 +116,10 @@ function ContributedEntries(props: {
             );
           }
           return (
-            <TerminalMenuEntry
+            <SmeltMenuItem
               label={cur.label}
               image={cur.image}
-              iconPath={cur.icon}
+              icon={cur.icon}
               onSelect={() => props.onRun(cur)}
             />
           );
@@ -167,13 +129,76 @@ function ContributedEntries(props: {
   );
 }
 
+interface TerminalSpec {
+  machine: string | null;
+  session_id: string;
+  cwd: string | null;
+  launch: string | null;
+  reuseKey?: string;
+}
+
+/** 哪个终端：同一台机器上的同一段会话。原生终端也按它认画布（别的字段变了画布照旧）。 */
+interface TerminalIdentity {
+  machine: string | null;
+  session_id: string;
+}
+
 export function TerminalPane(props: {
   args: { machine?: string | null; session_id?: string; cwd?: string | null; launch?: string | null } | null;
   reuseKey?: string;
   focusSeq?: number;
   onFocusIn?: () => void;
 }) {
+  const spec = stableMemo((): TerminalSpec | null => {
+    const raw = props.args;
+    const sessionId = typeof raw?.session_id === "string" ? raw.session_id : "";
+    if (!sessionId) return null;
+    const machine = raw?.machine ?? null;
+    return {
+      machine,
+      session_id: sessionId,
+      cwd: typeof raw?.cwd === "string" && raw.cwd.length > 0 ? raw.cwd : null,
+      launch: typeof raw?.launch === "string" && raw.launch.length > 0 ? raw.launch : null,
+      ...(props.reuseKey ? { reuseKey: props.reuseKey } : {}),
+    };
+  });
+
+  const terminal = stableMemo((): TerminalIdentity | null => {
+    const s = spec();
+    return s ? { machine: s.machine, session_id: s.session_id } : null;
+  });
+
+  // 换了终端整块重建：搜索条、选区、菜单失败提示这些跟着终端的状态从头来。
+  return (
+    <View
+      style={{
+        position: "relative",
+        flex: 1,
+        width: "100%",
+        height: "100%",
+        minWidth: 0,
+        minHeight: 0,
+        overflow: "hidden",
+      }}
+    >
+      <Each of={terminal() ? [terminal()!] : []}>
+        {(id: () => TerminalIdentity) => (
+          <TerminalSession id={id()} spec={spec()} focusSeq={props.focusSeq} onFocusIn={props.onFocusIn} />
+        )}
+      </Each>
+    </View>
+  );
+}
+
+function TerminalSession(props: {
+  /** 这一块的终端，挂上后不变（换终端是整块重建）。 */
+  id: TerminalIdentity;
+  spec: TerminalSpec | null;
+  focusSeq?: number;
+  onFocusIn?: () => void;
+}) {
   const look = currentTheme;
+  const { machine, session_id: sessionId } = props.id;
   const status = signal<"idle" | "connecting" | "live" | "failed">("connecting");
   const connectError = signal<string | null>(null);
   const reconnecting = signal(false);
@@ -195,20 +220,6 @@ export function TerminalPane(props: {
   const contributedItems = signal<ContributedMenuItem[]>([]);
   const menuFailure = signal<string | null>(null);
 
-  const spec = stableMemo(() => {
-    const raw = props.args;
-    const sessionId = typeof raw?.session_id === "string" ? raw.session_id : "";
-    if (!sessionId) return null;
-    const machine = raw?.machine ?? null;
-    return {
-      machine,
-      session_id: sessionId,
-      cwd: typeof raw?.cwd === "string" && raw.cwd.length > 0 ? raw.cwd : null,
-      launch: typeof raw?.launch === "string" && raw.launch.length > 0 ? raw.launch : null,
-      ...(props.reuseKey ? { reuseKey: props.reuseKey } : {}),
-    };
-  });
-
   const effectiveFocusSeq = computed(() => (props.focusSeq ?? 0) + localFocusSeq());
 
   const searchQueryProp = stableMemo(() => ({
@@ -217,11 +228,9 @@ export function TerminalPane(props: {
   }));
 
   const runtimeName = computed(() => {
-    const s = spec();
-    if (!s) return "";
-    const entry = machineMetaEntry(s.machine);
+    const entry = machineMetaEntry(machine);
     if (entry?.name) return String(entry.name);
-    return typeof s.machine === "string" ? s.machine : "";
+    return typeof machine === "string" ? machine : "";
   });
 
   const closeSearch = () => {
@@ -237,16 +246,13 @@ export function TerminalPane(props: {
   };
 
   const loadContextMenu = async () => {
-    const s = spec();
     const [clip, items] = await Promise.all([
       clipboardRead().catch(() => null),
-      s
-        ? contextMenuItems(TERMINAL_MENU, s.machine, {
-            machine: s.machine,
-            session_id: s.session_id,
-            selection: selection(),
-          }).catch(() => [])
-        : Promise.resolve([]),
+      contextMenuItems(TERMINAL_MENU, machine, {
+        machine,
+        session_id: sessionId,
+        selection: selection(),
+      }).catch(() => []),
     ]);
     clipboardText.set(typeof clip === "string" && clip.length > 0 ? clip : null);
     contributedItems.set(Array.isArray(items) ? (items as ContributedMenuItem[]) : []);
@@ -260,318 +266,296 @@ export function TerminalPane(props: {
     });
   };
 
-  effect(() => {
-    const s = spec();
-    searchOpen.set(false);
-    searchQuery.set("");
-    searchStatus.set({ current: 0, total: 0 });
-    selection.set(null);
-    menuFailure.set(null);
-    if (!s) return;
-    const key = terminalPaneKey(s.machine, s.session_id);
-    const unreg = registerOpenTerminal(key, (chunk) => {
+  cleanup(
+    registerOpenTerminal(terminalPaneKey(machine, sessionId), (chunk) => {
       sendTextProp.set({ seq: ++nextSendSeq, text: chunk });
-    });
-    cleanup(unreg);
-  });
+    }),
+  );
 
   return (
-    <View
-      style={{
-        position: "relative",
-        flex: 1,
-        width: "100%",
-        height: "100%",
-        minWidth: 0,
-        minHeight: 0,
-        overflow: "hidden",
-      }}
-    >
-      <If when={spec() != null}>
-        <SmeltContextMenu
-          popupStyle={{ minWidth: 168 }}
-          onOpenChange={({ open }: { open: boolean }) => {
-            if (open) void loadContextMenu();
-          }}
-          trigger={
-            <View style={{ flex: 1, width: "100%", height: "100%", minWidth: 0, minHeight: 0 }}>
-              <SmeltNativeTerminal
-                spec={spec()}
-                focusSeq={effectiveFocusSeq()}
-                retrySeq={retrySeq()}
-                sendText={sendTextProp()}
-                searchQuery={searchQueryProp()}
-                searchStep={searchStepProp()}
-                onStateChange={(ev: { state?: string; error?: string | null }) => {
-                  const next = ev?.state;
-                  if (next === "idle" || next === "connecting" || next === "live" || next === "failed") {
-                    status.set(next);
-                  }
-                  connectError.set(typeof ev?.error === "string" ? ev.error : null);
-                }}
-                onReconnecting={(ev: { active?: boolean }) => {
-                  reconnecting.set(Boolean(ev?.active));
-                }}
-                onWriteError={(ev: { kind?: string }) => {
-                  const key = terminalWriteErrorKey(ev?.kind);
-                  if (!key) return;
-                  void run(NOTIFY_CMD, {
-                    subtitle: t("error.title"),
-                    body: t(key),
-                  }).catch(() => {});
-                }}
-                onFocusIn={() => {
-                  props.onFocusIn?.();
-                }}
-                onSearchOpen={() => {
-                  if (searchOpen()) {
-                    searchInputEl?.focus?.();
-                  } else {
-                    searchStatus.set({ current: 0, total: 0 });
-                    searchOpen.set(true);
-                  }
-                }}
-                onSearchStatus={(ev: { current?: number; total?: number }) => {
-                  searchStatus.set({
-                    current: typeof ev?.current === "number" ? ev.current : 0,
-                    total: typeof ev?.total === "number" ? ev.total : 0,
-                  });
-                }}
-                onSelectionChange={(ev: { text?: string | null }) => {
-                  selection.set(typeof ev?.text === "string" && ev.text.length > 0 ? ev.text : null);
-                }}
-                style={{ flex: 1, width: "100%", height: "100%" }}
-              />
-            </View>
-          }
-        >
-          <TerminalMenuEntry
-            label={t("terminal.copy")}
-            disabled={selection() == null}
-            onSelect={() => {
-              const text = selection();
-              if (text) void clipboardWrite(text).catch(() => {});
-            }}
-          />
-          <TerminalMenuEntry
-            label={t("terminal.paste")}
-            disabled={clipboardText() == null}
-            onSelect={() => {
-              const text = clipboardText();
-              if (text != null) {
-                sendTextProp.set({ seq: ++nextSendSeq, text });
-              }
-            }}
-          />
-          <If when={contributedItems().length > 0}>
-            <MenuSeparator style={{ height: 1, backgroundColor: look().palette.hair, marginVertical: 2 }} />
-            <ContributedEntries items={contributedItems()} onRun={runContributed} />
-          </If>
-        </SmeltContextMenu>
-
-        {/* Cmd+F 终端内搜索条：叠在右上角，不抢网格布局 */}
-        <If when={searchOpen()}>
-          <View
-            class="shadow-floating"
-            onPressDown={(e: any) => e?.stopPropagation?.()}
-            style={{
-              position: "absolute",
-              top: 8,
-              right: 8,
-              width: 300,
-              display: "flex",
-              flexDirection: "row",
-              alignItems: "center",
-              gap: 6,
-              paddingLeft: 8,
-              paddingRight: 8,
-              paddingTop: 4,
-              paddingBottom: 4,
-              borderRadius: look().radius.md,
-              backgroundColor: look().palette.surface,
-              borderWidth: 1,
-              borderColor: look().palette.hair,
-            }}
-          >
-            <Input
-              ref={(el: any) => {
-                searchInputEl = el ?? null;
-                el?.focus?.();
+    <>
+      <SmeltContextMenu
+        popupStyle={{ minWidth: 168 }}
+        onOpenChange={({ open }: { open: boolean }) => {
+          if (open) void loadContextMenu();
+        }}
+        trigger={
+          <View style={{ flex: 1, width: "100%", height: "100%", minWidth: 0, minHeight: 0 }}>
+            <SmeltNativeTerminal
+              spec={props.spec}
+              focusSeq={effectiveFocusSeq()}
+              retrySeq={retrySeq()}
+              sendText={sendTextProp()}
+              searchQuery={searchQueryProp()}
+              searchStep={searchStepProp()}
+              onStateChange={(ev: { state?: string; error?: string | null }) => {
+                const next = ev?.state;
+                if (next === "idle" || next === "connecting" || next === "live" || next === "failed") {
+                  status.set(next);
+                }
+                connectError.set(typeof ev?.error === "string" ? ev.error : null);
               }}
-              autoFocus={true}
-              value={searchQuery()}
-              placeholder={t("terminal.search_placeholder")}
-              accessibilityLabel={t("terminal.search_placeholder")}
-              onChange={({ value }: { value: string }) => searchQuery.set(value)}
-              captureKeys={["enter", "shift+enter", "escape"]}
-              onKeyDown={(ev: any) => {
-                if (ev?.key === "Escape") {
-                  closeSearch();
-                } else if (ev?.key === "Enter") {
-                  stepSearch(Boolean(ev?.modifiers?.shift));
+              onReconnecting={(ev: { active?: boolean }) => {
+                reconnecting.set(Boolean(ev?.active));
+              }}
+              onWriteError={(ev: { kind?: string }) => {
+                const key = terminalWriteErrorKey(ev?.kind);
+                if (!key) return;
+                void run(NOTIFY_CMD, {
+                  subtitle: t("error.title"),
+                  body: t(key),
+                }).catch(() => {});
+              }}
+              onFocusIn={() => {
+                props.onFocusIn?.();
+              }}
+              onSearchOpen={() => {
+                if (searchOpen()) {
+                  searchInputEl?.focus?.();
+                } else {
+                  searchStatus.set({ current: 0, total: 0 });
+                  searchOpen.set(true);
                 }
               }}
-              class="flex-1 min-w-0 rounded-(--radius) border border-input bg-card px-2 text-foreground"
-              style={{
-                height: 24,
-                fontSize: look().type.ui_compact.size,
-                lineHeight: look().type.ui_compact.line_height,
+              onSearchStatus={(ev: { current?: number; total?: number }) => {
+                searchStatus.set({
+                  current: typeof ev?.current === "number" ? ev.current : 0,
+                  total: typeof ev?.total === "number" ? ev.total : 0,
+                });
               }}
-            />
-            <If when={searchQuery().length > 0}>
-              <SmeltButton
-                quiet={true}
-                small={true}
-                icon="icons/x.svg"
-                accessibilityLabel={t("split.cancel")}
-                onPress={() => {
-                  searchQuery.set("");
-                  searchInputEl?.focus?.();
-                }}
-              />
-            </If>
-            <Text
-              style={{
-                fontSize: look().type.text_xsmall.size,
-                lineHeight: look().type.text_xsmall.line_height,
-                color: look().palette.muted,
-                flexShrink: 0,
+              onSelectionChange={(ev: { text?: string | null }) => {
+                selection.set(typeof ev?.text === "string" && ev.text.length > 0 ? ev.text : null);
               }}
-            >
-              {searchStatus().total === 0
-                ? t("terminal.search_none")
-                : `${searchStatus().current}/${searchStatus().total}`}
-            </Text>
-          </View>
-        </If>
-
-        <If when={status() === "idle" || status() === "connecting"}>
-          <View
-            style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              pointerEvents: "none",
-            }}
-          >
-            <Text
-              style={{
-                fontSize: look().type.ui.size,
-                lineHeight: look().type.ui.line_height,
-                color: look().palette.muted,
-              }}
-            >
-              {t("terminal.connecting")}
-            </Text>
-          </View>
-        </If>
-
-        <If when={status() === "failed"}>
-          <View
-            style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 12,
-              padding: 16,
-            }}
-          >
-            <Text
-              style={{
-                fontSize: look().type.ui.size,
-                lineHeight: look().type.ui.line_height,
-                color: look().palette.muted,
-              }}
-            >
-              {t("terminal.connect_error", { error: connectError() ?? "" })}
-            </Text>
-            <SmeltButton
-              small={true}
-              label={t("terminal.retry")}
-              onPress={() => retrySeq.set(retrySeq() + 1)}
+              style={{ flex: 1, width: "100%", height: "100%" }}
             />
           </View>
-        </If>
-
-        <If when={reconnecting()}>
-          <View
-            style={{
-              position: "absolute",
-              top: 8,
-              left: 8,
-              paddingLeft: 8,
-              paddingRight: 8,
-              paddingTop: 4,
-              paddingBottom: 4,
-              borderRadius: look().radius.md,
-              backgroundColor: look().palette.surface,
-              borderWidth: 1,
-              borderColor: look().palette.hair,
-              pointerEvents: "none",
-            }}
-          >
-            <Text
-              style={{
-                fontSize: look().type.text_xsmall.size,
-                lineHeight: look().type.text_xsmall.line_height,
-                color: look().palette.muted,
-              }}
-            >
-              {t("terminal.reconnecting", { runtime: runtimeName() })}
-            </Text>
-          </View>
-        </If>
-
-        {/* 右键菜单命令失败提示：挂在右下角，悬停看原因，点一下收起 */}
-        <If when={menuFailure() != null}>
-          <View
-            class="shadow-floating"
-            onPressDown={(e: any) => e?.stopPropagation?.()}
-            tooltip={
-              <SmeltTooltip>
-                <Text
-                  style={{
-                    color: look().palette.text,
-                    fontSize: look().type.text_xsmall.size,
-                    lineHeight: look().type.text_xsmall.line_height,
-                  }}
-                >
-                  {menuFailure() ?? ""}
-                </Text>
-              </SmeltTooltip>
+        }
+      >
+        <SmeltMenuItem
+          label={t("terminal.copy")}
+          disabled={selection() == null}
+          onSelect={() => {
+            const text = selection();
+            if (text) void clipboardWrite(text).catch(() => {});
+          }}
+        />
+        <SmeltMenuItem
+          label={t("terminal.paste")}
+          disabled={clipboardText() == null}
+          onSelect={() => {
+            const text = clipboardText();
+            if (text != null) {
+              sendTextProp.set({ seq: ++nextSendSeq, text });
             }
+          }}
+        />
+        <If when={contributedItems().length > 0}>
+          <SmeltMenuSeparator />
+          <ContributedEntries items={contributedItems()} onRun={runContributed} />
+        </If>
+      </SmeltContextMenu>
+
+      {/* Cmd+F 终端内搜索条：叠在右上角，不抢网格布局 */}
+      <If when={searchOpen()}>
+        <View
+          class="shadow-floating"
+          onPressDown={(e: any) => e?.stopPropagation?.()}
+          style={{
+            position: "absolute",
+            top: 8,
+            right: 8,
+            width: 300,
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 6,
+            paddingLeft: 8,
+            paddingRight: 8,
+            paddingTop: 4,
+            paddingBottom: 4,
+            borderRadius: look().radius.md,
+            backgroundColor: look().palette.surface,
+            borderWidth: 1,
+            borderColor: look().palette.hair,
+          }}
+        >
+          <Input
+            ref={(el: any) => {
+              searchInputEl = el ?? null;
+              el?.focus?.();
+            }}
+            autoFocus={true}
+            value={searchQuery()}
+            placeholder={t("terminal.search_placeholder")}
+            accessibilityLabel={t("terminal.search_placeholder")}
+            onChange={({ value }: { value: string }) => searchQuery.set(value)}
+            captureKeys={["enter", "shift+enter", "escape"]}
+            onKeyDown={(ev: any) => {
+              if (ev?.key === "Escape") {
+                closeSearch();
+              } else if (ev?.key === "Enter") {
+                stepSearch(Boolean(ev?.modifiers?.shift));
+              }
+            }}
+            class="flex-1 min-w-0 rounded-(--radius) border border-input bg-card px-2 text-foreground"
             style={{
-              position: "absolute",
-              bottom: 8,
-              right: 16,
-              borderRadius: look().radius.md,
-              backgroundColor: look().palette.surface,
-              borderWidth: 1,
-              borderColor: look().palette.hair,
+              height: 24,
+              fontSize: look().type.ui_compact.size,
+              lineHeight: look().type.ui_compact.line_height,
+            }}
+          />
+          <If when={searchQuery().length > 0}>
+            <SmeltButton
+              variant="quiet"
+              size="sm"
+              icon="icons/x.svg"
+              accessibilityLabel={t("split.cancel")}
+              onPress={() => {
+                searchQuery.set("");
+                searchInputEl?.focus?.();
+              }}
+            />
+          </If>
+          <Text
+            style={{
+              fontSize: look().type.text_xsmall.size,
+              lineHeight: look().type.text_xsmall.line_height,
+              color: look().palette.muted,
+              flexShrink: 0,
             }}
           >
-            <SmeltButton
-              danger={true}
-              quiet={true}
-              small={true}
-              icon="icons/circle-alert.svg"
-              accessibilityLabel={menuFailure() ?? t("split.dismiss_failure")}
-              onPress={() => menuFailure.set(null)}
-            />
-          </View>
-        </If>
+            {searchStatus().total === 0
+              ? t("terminal.search_none")
+              : `${searchStatus().current}/${searchStatus().total}`}
+          </Text>
+        </View>
       </If>
-    </View>
+
+      <If when={status() === "idle" || status() === "connecting"}>
+        <View
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            pointerEvents: "none",
+          }}
+        >
+          <Text
+            style={{
+              fontSize: look().type.ui.size,
+              lineHeight: look().type.ui.line_height,
+              color: look().palette.muted,
+            }}
+          >
+            {t("terminal.connecting")}
+          </Text>
+        </View>
+      </If>
+
+      <If when={status() === "failed"}>
+        <View
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 12,
+            padding: 16,
+          }}
+        >
+          <Text
+            style={{
+              fontSize: look().type.ui.size,
+              lineHeight: look().type.ui.line_height,
+              color: look().palette.muted,
+            }}
+          >
+            {t("terminal.connect_error", { error: connectError() ?? "" })}
+          </Text>
+          <SmeltButton
+            size="sm"
+            label={t("terminal.retry")}
+            onPress={() => retrySeq.set(retrySeq() + 1)}
+          />
+        </View>
+      </If>
+
+      <If when={reconnecting()}>
+        <View
+          style={{
+            position: "absolute",
+            top: 8,
+            left: 8,
+            paddingLeft: 8,
+            paddingRight: 8,
+            paddingTop: 4,
+            paddingBottom: 4,
+            borderRadius: look().radius.md,
+            backgroundColor: look().palette.surface,
+            borderWidth: 1,
+            borderColor: look().palette.hair,
+            pointerEvents: "none",
+          }}
+        >
+          <Text
+            style={{
+              fontSize: look().type.text_xsmall.size,
+              lineHeight: look().type.text_xsmall.line_height,
+              color: look().palette.muted,
+            }}
+          >
+            {t("terminal.reconnecting", { runtime: runtimeName() })}
+          </Text>
+        </View>
+      </If>
+
+      {/* 右键菜单命令失败提示：挂在右下角，悬停看原因，点一下收起 */}
+      <If when={menuFailure() != null}>
+        <View
+          class="shadow-floating"
+          onPressDown={(e: any) => e?.stopPropagation?.()}
+          tooltip={
+            <SmeltTooltip>
+              <Text
+                style={{
+                  color: look().palette.text,
+                  fontSize: look().type.text_xsmall.size,
+                  lineHeight: look().type.text_xsmall.line_height,
+                }}
+              >
+                {menuFailure() ?? ""}
+              </Text>
+            </SmeltTooltip>
+          }
+          style={{
+            position: "absolute",
+            bottom: 8,
+            right: 16,
+            borderRadius: look().radius.md,
+            backgroundColor: look().palette.surface,
+            borderWidth: 1,
+            borderColor: look().palette.hair,
+          }}
+        >
+          <SmeltButton
+            variant="danger-quiet"
+            size="sm"
+            icon="icons/circle-alert.svg"
+            accessibilityLabel={menuFailure() ?? t("split.dismiss_failure")}
+            onPress={() => menuFailure.set(null)}
+          />
+        </View>
+      </If>
+    </>
   );
 }

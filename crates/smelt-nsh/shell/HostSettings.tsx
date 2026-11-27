@@ -2,7 +2,7 @@
 // 所有数据与本地化文案由宿主 `crates/smelt` 经 `smelt.state.shell.host_settings` 推送，
 // 交互经 `shell.host_settings_action`（受 `SHELL_OWNER` 校验）回传宿主。
 import { computed, effect, host, Scroll, signal, Text, View } from "nsh";
-import { Button as BaseButton, Combobox, Input, Progress, Slider } from "nsh/base";
+import { Button as BaseButton, Combobox, Progress, Slider } from "nsh/base";
 import {
   DIALOG_SURFACE_CLASS,
   INPUT_CLASS,
@@ -13,7 +13,10 @@ import {
   SmeltButton,
   SmeltDialog,
   SmeltIcon,
+  SmeltInput,
   SmeltNativeWindowDrag,
+  SmeltRow,
+  SmeltSegmented,
   SmeltSelect,
   SmeltSwitch,
   stableMemo,
@@ -532,22 +535,10 @@ export function SettingsNavPanel() {
           flexShrink: 0,
         }}
       >
-        <BaseButton
+        <SmeltRow
           onPress={() => sendSettingsAction({ page: "nav", kind: "back" })}
-          style={{
-            height: 30,
-            paddingLeft: 8,
-            paddingRight: 8,
-            borderRadius: theme().radius.row,
-            display: "flex",
-            flexDirection: "row",
-            alignItems: "center",
-            gap: 8,
-            backgroundColor: "transparent",
-            cursor: "default",
-          }}
-          hoverStyle={{ backgroundColor: theme().palette.row_hover }}
-          activeStyle={{ backgroundColor: theme().palette.row_selected }}
+          class="gap-2"
+          style={{ height: 30, paddingLeft: 8, paddingRight: 8 }}
         >
           <SmeltIcon path="icons/chevron-left.svg" size={16} color={theme().palette.muted} />
           <Text
@@ -562,7 +553,7 @@ export function SettingsNavPanel() {
           >
             {nav()?.labels?.back ?? ""}
           </Text>
-        </BaseButton>
+        </SmeltRow>
 
         <View
           class={INPUT_CLASS}
@@ -577,17 +568,13 @@ export function SettingsNavPanel() {
           }}
         >
           <SmeltIcon path="icons/search.svg" size={14} color={theme().palette.muted} />
-          <Input
+          <SmeltInput
+            bare
             value={query()}
             placeholder={nav()?.labels?.search ?? ""}
+            accessibilityLabel={nav()?.labels?.search ?? ""}
             onChange={({ value }: { value: string }) => query.set(value)}
-            style={{
-              flex: 1,
-              minWidth: 0,
-              height: 28,
-              fontSize: theme().type.ui.size,
-              color: theme().palette.text,
-            }}
+            class="flex-1 min-w-0"
           />
         </View>
 
@@ -646,32 +633,13 @@ export function SettingsNavPanel() {
                   {(leaf: () => NavLeafSnapshot) => {
                     const selected = computed(() => nav()?.selected === leaf().id);
                     return (
-                      <BaseButton
+                      <SmeltRow
+                        selected={selected()}
                         onPress={() =>
                           sendSettingsAction({ page: "nav", kind: "select", id: leaf().id })
                         }
-                        style={{
-                          height: 30,
-                          paddingLeft: 8,
-                          paddingRight: 8,
-                          borderRadius: theme().radius.row,
-                          display: "flex",
-                          flexDirection: "row",
-                          alignItems: "center",
-                          gap: 8,
-                          backgroundColor: selected()
-                            ? theme().palette.row_selected
-                            : "transparent",
-                          cursor: "default",
-                        }}
-                        hoverStyle={{
-                          backgroundColor: selected()
-                            ? theme().palette.row_selected
-                            : theme().palette.row_hover,
-                        }}
-                        activeStyle={{
-                          backgroundColor: theme().palette.row_selected,
-                        }}
+                        class="gap-2"
+                        style={{ height: 30, paddingLeft: 8, paddingRight: 8 }}
                       >
                         <SmeltIcon
                           path={leaf().icon}
@@ -704,7 +672,7 @@ export function SettingsNavPanel() {
                             }}
                           />
                         </If>
-                      </BaseButton>
+                      </SmeltRow>
                     );
                   }}
                 </Each>
@@ -752,7 +720,7 @@ function TerminalSettingsView(props: { data: () => any }) {
             description={props.data().row_description}
           >
             <SmeltButton
-              small={true}
+              size="sm"
               label="−"
               accessibilityLabel={props.data().smaller_label}
               disabled={props.data().current <= props.data().min}
@@ -775,7 +743,7 @@ function TerminalSettingsView(props: { data: () => any }) {
               {`${props.data().current}px`}
             </Text>
             <SmeltButton
-              small={true}
+              size="sm"
               label="+"
               accessibilityLabel={props.data().larger_label}
               disabled={props.data().current >= props.data().max}
@@ -801,7 +769,7 @@ function CliSettingsView(props: { data: () => any }) {
         <SectionCell>
           <SettingsRowItem title={props.data().row_title} description={props.data().description}>
             <SmeltButton
-              small={true}
+              size="sm"
               label={props.data().button_label}
               loading={Boolean(props.data().installing)}
               disabled={Boolean(props.data().disabled)}
@@ -824,7 +792,7 @@ function CleanupSettingsView(props: { data: () => any }) {
           <SectionCell>
             <SettingsRowItem title={props.data().row_title} description={props.data().summary}>
               <SmeltButton
-                small={true}
+                size="sm"
                 label={props.data().action_label}
                 loading={Boolean(props.data().cleaning)}
                 disabled={!props.data().can_clean}
@@ -877,14 +845,14 @@ function CleanupSettingsView(props: { data: () => any }) {
           </Text>
           <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
             <SmeltButton
-              quiet={true}
-              small={true}
+              variant="quiet"
+              size="sm"
               label={props.data().confirm?.cancel ?? ""}
               onPress={() => confirmOpen.set(false)}
             />
             <SmeltButton
-              danger={true}
-              small={true}
+              variant="danger"
+              size="sm"
               label={props.data().confirm?.action ?? ""}
               onPress={() => {
                 confirmOpen.set(false);
@@ -977,15 +945,15 @@ function AboutSettingsView(props: { data: () => any }) {
 
                 <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
                   <SmeltButton
-                    small={true}
+                    size="sm"
                     label={upd()?.check_label ?? ""}
                     disabled={!upd()?.can_check_request}
                     onPress={() => sendSettingsAction({ page: "about", kind: "check" })}
                   />
                   <If when={Boolean(upd()?.move_label)}>
                     <SmeltButton
-                      primary={true}
-                      small={true}
+                      variant="primary"
+                      size="sm"
                       label={upd()?.move_label ?? ""}
                       disabled={Boolean(upd()?.moving_app)}
                       onPress={() => sendSettingsAction({ page: "about", kind: "move_app" })}
@@ -993,23 +961,23 @@ function AboutSettingsView(props: { data: () => any }) {
                   </If>
                   <If when={Boolean(upd()?.download_label)}>
                     <SmeltButton
-                      primary={true}
-                      small={true}
+                      variant="primary"
+                      size="sm"
                       label={upd()?.download_label ?? ""}
                       onPress={() => sendSettingsAction({ page: "about", kind: "download" })}
                     />
                   </If>
                   <If when={Boolean(upd()?.restart_label)}>
                     <SmeltButton
-                      primary={true}
-                      small={true}
+                      variant="primary"
+                      size="sm"
                       label={upd()?.restart_label ?? ""}
                       onPress={() => sendSettingsAction({ page: "about", kind: "restart" })}
                     />
                   </If>
                   <If when={Boolean(upd()?.manual_download_label && upd()?.manual_download_url)}>
                     <SmeltButton
-                      small={true}
+                      size="sm"
                       label={upd()?.manual_download_label ?? ""}
                       onPress={() =>
                         sendSettingsAction({
@@ -1064,41 +1032,15 @@ function AboutSettingsView(props: { data: () => any }) {
               title={upd()?.channel_label ?? ""}
               description={upd()?.channel_description ?? ""}
             >
-              <View
-                style={{
-                  display: "flex",
-                  flexDirection: "row",
-                  alignItems: "center",
-                  gap: 2,
-                  padding: 2,
-                  borderRadius: theme().radius.md,
-                  backgroundColor: theme().palette.soft,
-                  borderWidth: 1,
-                  borderColor: theme().palette.hair,
-                }}
-              >
-                <Each of={upd()?.channels ?? []} key={(ch: any) => ch.value}>
-                  {(ch: () => any) => {
-                    const active = computed(() => upd()?.selected_channel === ch().value);
-                    return (
-                      <SmeltButton
-                        quiet={!active()}
-                        small={true}
-                        selected={active()}
-                        disabled={!upd()?.can_change_channel}
-                        label={ch().label}
-                        onPress={() =>
-                          sendSettingsAction({
-                            page: "about",
-                            kind: "set_channel",
-                            value: ch().value,
-                          })
-                        }
-                      />
-                    );
-                  }}
-                </Each>
-              </View>
+              <SmeltSegmented
+                options={upd()?.channels ?? []}
+                value={upd()?.selected_channel ?? ""}
+                disabled={!upd()?.can_change_channel}
+                accessibilityLabel={upd()?.channel_label ?? ""}
+                onChange={(value: string) =>
+                  sendSettingsAction({ page: "about", kind: "set_channel", value })
+                }
+              />
             </SettingsRowItem>
           </SectionCell>
 
@@ -1134,8 +1076,8 @@ function AboutSettingsView(props: { data: () => any }) {
             description={props.data().help?.report_description ?? ""}
           >
             <SmeltButton
-              quiet={true}
-              small={true}
+              variant="quiet"
+              size="sm"
               label={props.data().help?.open_log_label ?? ""}
               onPress={() => sendSettingsAction({ page: "about", kind: "open_log" })}
             />
@@ -1189,13 +1131,13 @@ function PanelPluginsSettingsView(props: { data: () => any }) {
               description={props.data().import_hint ?? ""}
             >
               <SmeltButton
-                quiet={true}
-                small={true}
+                variant="quiet"
+                size="sm"
                 label={props.data().open_dir_label ?? ""}
                 onPress={() => sendSettingsAction({ page: "panel_plugins", kind: "open_dir" })}
               />
               <SmeltButton
-                small={true}
+                size="sm"
                 label={props.data().import_button_label ?? ""}
                 loading={Boolean(props.data().busy)}
                 disabled={Boolean(props.data().busy)}
@@ -1236,8 +1178,8 @@ function PanelPluginsSettingsView(props: { data: () => any }) {
                     when={isPending()}
                     else={
                       <SmeltButton
-                        quiet={true}
-                        small={true}
+                        variant="quiet"
+                        size="sm"
                         label={plugin().action_label}
                         disabled={Boolean(props.data().busy)}
                         onPress={() => pendingDelete.set(plugin().id)}
@@ -1245,8 +1187,8 @@ function PanelPluginsSettingsView(props: { data: () => any }) {
                     }
                   >
                     <SmeltButton
-                      danger={true}
-                      small={true}
+                      variant="danger"
+                      size="sm"
                       label={plugin().confirm_label}
                       disabled={Boolean(props.data().busy)}
                       onPress={() => {
@@ -1256,8 +1198,8 @@ function PanelPluginsSettingsView(props: { data: () => any }) {
                       }}
                     />
                     <SmeltButton
-                      quiet={true}
-                      small={true}
+                      variant="quiet"
+                      size="sm"
                       label={props.data().cancel_label ?? ""}
                       onPress={() => pendingDelete.set(null)}
                     />
@@ -1276,8 +1218,8 @@ function PanelPluginsSettingsView(props: { data: () => any }) {
             description={props.data().authoring?.description ?? ""}
           >
             <SmeltButton
-              quiet={true}
-              small={true}
+              variant="quiet"
+              size="sm"
               label={props.data().authoring?.open_log_label ?? ""}
               onPress={() => sendSettingsAction({ page: "panel_plugins", kind: "open_log" })}
             />
@@ -1528,7 +1470,7 @@ function AppearanceSettingsView(props: { data: () => any }) {
               description={props.data().reset_layout_hint ?? ""}
             >
               <SmeltButton
-                small={true}
+                size="sm"
                 label={props.data().reset_action_label ?? ""}
                 onPress={() => sendSettingsAction({ page: "appearance", kind: "reset_layout" })}
               />
@@ -1581,14 +1523,14 @@ function AppearanceSettingsView(props: { data: () => any }) {
               </Text>
             </If>
             <SmeltButton
-              small={true}
+              size="sm"
               label={props.data().image_button_label ?? ""}
               onPress={() => sendSettingsAction({ page: "appearance", kind: "pick_bg_image" })}
             />
             <If when={Boolean(props.data().image_name)}>
               <SmeltButton
-                quiet={true}
-                small={true}
+                variant="quiet"
+                size="sm"
                 label={props.data().clear_label ?? ""}
                 onPress={() => sendSettingsAction({ page: "appearance", kind: "clear_bg_image" })}
               />
@@ -1759,15 +1701,15 @@ function ShortcutsSettingsView(props: { data: () => any }) {
                     >
                       <If when={Boolean(row().reassigning)}>
                         <SmeltButton
-                          quiet={true}
-                          small={true}
+                          variant="quiet"
+                          size="sm"
                           label={labels().never_mind ?? ""}
                           onPress={() =>
                             sendSettingsAction({ page: "shortcuts", kind: "cancel_reassign" })
                           }
                         />
                         <SmeltButton
-                          small={true}
+                          size="sm"
                           label={labels().reassign ?? ""}
                           onPress={() =>
                             sendSettingsAction({ page: "shortcuts", kind: "confirm_reassign" })
@@ -1776,8 +1718,8 @@ function ShortcutsSettingsView(props: { data: () => any }) {
                       </If>
                       <If when={Boolean(row().overridden && !row().recording && !row().reassigning)}>
                         <SmeltButton
-                          quiet={true}
-                          small={true}
+                          variant="quiet"
+                          size="sm"
                           label={labels().reset ?? ""}
                           onPress={() =>
                             sendSettingsAction({ page: "shortcuts", kind: "reset", id: row().id })

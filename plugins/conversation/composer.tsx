@@ -23,6 +23,7 @@ import {
   SmeltDisclosure,
   SmeltDisclosureChevron,
   SmeltIcon,
+  SmeltRow,
   SmeltVector,
   theme,
   windowActive,
@@ -48,6 +49,14 @@ export interface AttachedImage {
   preview_uri: string;
   width: number;
   height: number;
+}
+
+/** 输入框的命令式接口：外面要往草稿里放东西时直接调，不经信号接力。 */
+export interface ComposerApi {
+  /** 接在草稿后面（草稿不是空格或换行结尾就先补一个空格），光标放到末尾并聚焦。 */
+  insert(text: string): void;
+  /** 把没发出去的草稿放回来：文字放在现有草稿前面，图片接在已有附件后面，并聚焦。 */
+  restore(text: string, images: AttachedImage[]): void;
 }
 
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp)$/i;
@@ -86,8 +95,8 @@ export function Composer(props: {
   focusSeq: () => number;
   /** 空对话：输入框在页面中间当主角，最低留三行；进了对话回到两行，不挤消息。 */
   roomy: () => boolean;
-  insertText: () => { seq: number; text: string } | null;
-  restoreDraft: () => { seq: number; text: string; images: AttachedImage[] } | null;
+  /** 挂上时给出输入框的命令式接口。 */
+  composerRef?: (api: ComposerApi) => void;
   onSend: (text: string, imageRefs: string[], followUp: boolean) => void;
   onCancel: () => void;
   onForceRestart: () => void;
@@ -118,14 +127,11 @@ export function Composer(props: {
   const planExpanded = signal(false);
   const workspaceFiles = signal<string[]>([]);
   const filesLoadedCwd = signal<string | null>(null);
-  const completionIndex = signal(0);
   const completionDismissed = signal(false);
   const caretPos = signal(0);
 
   let inputApi: any = null;
   let lastFocusSeq = 0;
-  let lastInsertSeq = 0;
-  let lastRestoreSeq = 0;
 
   effect(() => {
     const seq = props.focusSeq();
@@ -135,34 +141,25 @@ export function Composer(props: {
     }
   });
 
-  effect(() => {
-    const req = props.insertText();
-    if (req && req.seq !== lastInsertSeq) {
-      lastInsertSeq = req.seq;
+  const api: ComposerApi = {
+    insert(text) {
       const cur = draft();
-      const next = cur
-        ? `${cur}${cur.endsWith(" ") || cur.endsWith("\n") ? "" : " "}${req.text}`
-        : req.text;
+      const next = cur ? `${cur}${cur.endsWith(" ") || cur.endsWith("\n") ? "" : " "}${text}` : text;
       draft.set(next);
       caretPos.set(next.length);
       inputApi?.focus?.();
-    }
-  });
-
-  effect(() => {
-    const req = props.restoreDraft();
-    if (req && req.seq !== lastRestoreSeq) {
-      lastRestoreSeq = req.seq;
-      if (req.text) {
+    },
+    restore(text, images) {
+      if (text) {
         const cur = draft().trim();
-        draft.set(cur ? `${req.text}\n${cur}` : req.text);
+        draft.set(cur ? `${text}\n${cur}` : text);
       }
-      if (req.images.length > 0) {
-        attachments.set([...attachments(), ...req.images]);
+      if (images.length > 0) {
+        attachments.set([...attachments(), ...images]);
       }
       inputApi?.focus?.();
-    }
-  });
+    },
+  };
 
   const ensureWorkspaceFiles = () => {
     const cwd = props.cwd();
@@ -192,8 +189,13 @@ export function Composer(props: {
     if (trigger()?.kind === "at") {
       ensureWorkspaceFiles();
     }
-    completionIndex.set(0);
   });
+
+  // 弹层里高亮的那项只对这一次触发有效：输入一变（触发重算）就回到第一项。
+  const completionPick = signal<{ trigger: unknown; index: number }>({ trigger: null, index: 0 });
+  const completionIndex = computed(() =>
+    completionPick().trigger === trigger() ? completionPick().index : 0,
+  );
 
   const completionItems = computed(() =>
     buildCompletionCandidates(
@@ -239,7 +241,7 @@ export function Composer(props: {
     if (!inputFocused() || !completionOpen()) return;
     const step = (by: number) => () => {
       const n = completionItems().length;
-      if (n > 0) completionIndex.set((completionIndex() + by + n) % n);
+      if (n > 0) completionPick.set({ trigger: trigger(), index: (completionIndex() + by + n) % n });
     };
     const moves: Record<string, () => void> = { up: step(-1), down: step(1) };
     if (emacsKeys) {
@@ -414,7 +416,8 @@ export function Composer(props: {
       : "relative w-full rounded-3xl border border-border bg-card shadow-md overflow-hidden transition-colors duration-150",
   );
 
-  return (
+  // 输入框建好以后再交出接口，挂上时就来的文本也能拿到焦点。
+  const view = (
     <View
       style={{
         width: "100%",
@@ -445,18 +448,10 @@ export function Composer(props: {
                   {(item, idx) => {
                     const selected = computed(() => idx() === completionIndex());
                     return (
-                      <View
+                      <SmeltRow
+                        selected={selected()}
                         onPress={() => acceptCompletion(item())}
-                        class="hover:bg-accent"
-                        style={{
-                          height: 30,
-                          paddingHorizontal: 10,
-                          borderRadius: look().radius.row,
-                          flexDirection: "row",
-                          alignItems: "center",
-                          gap: 8,
-                          backgroundColor: selected() ? look().palette.row_selected : "transparent",
-                        }}
+                        style={{ height: 30, paddingHorizontal: 10, gap: 8 }}
                       >
                         <Text
                           style={{
@@ -481,7 +476,7 @@ export function Composer(props: {
                             {item().hint}
                           </Text>
                         </If>
-                      </View>
+                      </SmeltRow>
                     );
                   }}
                 </Each>
@@ -524,14 +519,9 @@ export function Composer(props: {
           <If when={planSummary() != null}>
             <SmeltDisclosure
               open={planExpanded()}
-              style={{
-                borderBottomWidth: 1,
-                borderBottomColor: look().palette.hair,
-                paddingHorizontal: 16,
-                paddingVertical: 8,
-              }}
+              style={{ borderBottomWidth: 1, borderBottomColor: look().palette.hair }}
               content={
-                <View style={{ marginTop: 6, paddingLeft: 18, gap: 4 }}>
+                <View style={{ paddingLeft: 34, paddingRight: 16, paddingBottom: 8, gap: 4 }}>
                   <Each of={planSummary()?.entries ?? []}>
                     {(step) => (
                       <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
@@ -570,9 +560,10 @@ export function Composer(props: {
                 </View>
               }
             >
-              <View
+              <SmeltRow
+                rounded={false}
                 onPress={() => planExpanded.set(!planExpanded())}
-                style={{ flexDirection: "row", alignItems: "center", gap: 6 }}
+                style={{ paddingHorizontal: 16, paddingVertical: 8, gap: 6 }}
               >
                 <SmeltDisclosureChevron
                   open={planExpanded()}
@@ -601,7 +592,7 @@ export function Composer(props: {
                     · {planSummary()?.active ?? ""}
                   </Text>
                 </If>
-              </View>
+              </SmeltRow>
             </SmeltDisclosure>
           </If>
 
@@ -627,7 +618,7 @@ export function Composer(props: {
                   {ct("queue.title")}
                 </Text>
                 <If when={props.queuedSteering().length > 0 || props.queuedFollowUp().length > 0}>
-                  <SmeltButton quiet small label={ct("queue.clear")} onPress={props.onClearQueue} />
+                  <SmeltButton variant="quiet" size="sm" label={ct("queue.clear")} onPress={props.onClearQueue} />
                 </If>
               </View>
               <Each of={props.pendingPrompts()}>
@@ -646,8 +637,8 @@ export function Composer(props: {
                     </Text>
                     <If when={Boolean(p().withdrawable)}>
                       <SmeltButton
-                        quiet
-                        small
+                        variant="quiet"
+                        size="sm"
                         label={ct("queue.withdraw")}
                         onPress={() => props.onWithdrawPendingPrompt(p().id)}
                       />
@@ -693,8 +684,8 @@ export function Composer(props: {
                       {txt()}
                     </Text>
                     <SmeltButton
-                      quiet
-                      small
+                      variant="quiet"
+                      size="sm"
                       label={ct("queue.send_now")}
                       onPress={() => props.onDeliverQueuedNow(txt())}
                     />
@@ -712,28 +703,25 @@ export function Composer(props: {
                   <View
                     style={{
                       position: "relative",
-                      borderRadius: 10,
+                      borderRadius: look().radius.xl,
                       borderWidth: 1,
                       borderColor: look().palette.hair,
                       overflow: "hidden",
                       backgroundColor: look().palette.bg,
                     }}
                   >
-                    <View onPress={() => props.onPreviewAttachment(att())}>
+                    <SmeltRow rounded={false} onPress={() => props.onPreviewAttachment(att())}>
                       <Image
                         src={att().preview_uri}
                         style={{ width: 64, height: 64, objectFit: "cover" }}
                       />
-                    </View>
+                    </SmeltRow>
                     <View style={{ position: "absolute", top: 3, right: 3 }}>
                       <SmeltButton
-                        dismiss
-                        small
+                        variant="floating"
+                        size="xs"
+                        shape="circle"
                         icon="icons/close.svg"
-                        style={{
-                          backgroundColor: look().palette.surface,
-                          borderRadius: 999,
-                        }}
                         onPress={() => {
                           const i = idx();
                           attachments.set(attachments().filter((_, k) => k !== i));
@@ -817,8 +805,8 @@ export function Composer(props: {
           >
             <If when={!props.readOnly() && !props.dead()}>
               <SmeltButton
-                quiet
-                circle
+                variant="quiet"
+                shape="circle"
                 icon="icons/plus.svg"
                 tooltip={ct("action.attach")}
                 onPress={() => void handlePickFiles()}
@@ -874,8 +862,8 @@ export function Composer(props: {
                 else={
                   <If when={!props.readOnly()}>
                     <SmeltButton
-                      primary
-                      circle
+                      variant="primary"
+                      shape="circle"
                       disabled={!canSend()}
                       icon="icons/arrow-up.svg"
                       tooltip={ct("action.send")}
@@ -895,8 +883,8 @@ export function Composer(props: {
                     />
                   </If>
                   <SmeltButton
-                    primary
-                    circle
+                    variant="primary"
+                    shape="circle"
                     icon="icons/stop.svg"
                     tooltip={ct("action.stop")}
                     onPress={props.onCancel}
@@ -909,4 +897,6 @@ export function Composer(props: {
       </View>
     </View>
   );
+  props.composerRef?.(api);
+  return view;
 }

@@ -1,6 +1,16 @@
 // 自动化目录：任务表、模板画廊、跨机器运行记录列表。
 import { computed, Scroll, Text, View } from "nsh";
-import { SmeltButton, SmeltIcon, SmeltMenu, t } from "smelt/sdk";
+import {
+  SmeltButton,
+  SmeltIcon,
+  SmeltMenu,
+  SmeltMenuItem,
+  SmeltMenuLabel,
+  SmeltMenuSeparator,
+  SmeltRow,
+  SmeltSegmented,
+  t,
+} from "smelt/sdk";
 import {
   actionAgentDefinitionId,
   activeRunForAutomation,
@@ -53,14 +63,9 @@ import {
 import {
   ContentCard,
   ErrorAlert,
-  MenuDivider,
-  MenuRow,
-  MenuSectionHeader,
   NeutralIconMark,
   PageToolbar,
-  RowItem,
   RunLines,
-  SegmentedControl,
   StatusDot,
   runStatusColor,
 } from "./ui.tsx";
@@ -79,7 +84,6 @@ function MachinePickingButton(props: {
   onPick: (machine: string | null) => void;
   testID?: string;
 }) {
-  const look = currentTheme;
   const targets = computed(() => {
     storeVersion();
     return creationMachines().map((m) => ({
@@ -98,55 +102,20 @@ function MachinePickingButton(props: {
           align="end"
           popupStyle={{ minWidth: 168 }}
           trigger={
-            <View
+            <SmeltButton
               testID={props.testID}
-              class="hover:bg-accent"
-              style={{
-                height: props.small ? 24 : 28,
-                paddingLeft: props.small ? 10 : 12,
-                paddingRight: props.small ? 8 : 10,
-                borderRadius: props.small ? look().radius.md : look().radius.lg,
-                backgroundColor: props.quiet
-                  ? "transparent"
-                  : look().palette.button_secondary[0],
-                display: "flex",
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 6,
-                flexShrink: 0,
-                cursor: "default",
-              }}
-            >
-              <If when={Boolean(props.icon)}>
-                <SmeltIcon
-                  path={props.icon!}
-                  size={props.small ? 14 : 15}
-                  color={props.quiet ? look().palette.muted : look().palette.text}
-                />
-              </If>
-              <Text
-                style={{
-                  fontSize: props.small ? look().type.small.size : look().type.ui_medium.size,
-                  lineHeight: props.small
-                    ? look().type.small.line_height
-                    : look().type.ui_medium.line_height,
-                  fontWeight: props.quiet
-                    ? look().type.small.weight
-                    : look().type.ui_medium.weight,
-                  color: props.quiet ? look().palette.muted : look().palette.text,
-                  numberOfLines: 1,
-                }}
-              >
-                {props.label}
-              </Text>
-              <SmeltIcon path="icons/chevron-down.svg" size={12} color={look().palette.muted} />
-            </View>
+              variant={props.quiet ? "quiet" : "secondary"}
+              size={props.small ? "sm" : "md"}
+              icon={props.icon}
+              label={props.label}
+              trailingIcon="icons/chevron-down.svg"
+            />
           }
         >
-          <MenuSectionHeader label={t("catalog.machine_menu")} />
+          <SmeltMenuLabel label={t("catalog.machine_menu")} />
           <Each of={targets()} key={(item: any) => item.key}>
             {(item: () => { key: string; machine: string | null; name: string }) => (
-              <MenuRow label={item().name} onSelect={() => props.onPick(item().machine)} />
+              <SmeltMenuItem label={item().name} onSelect={() => props.onPick(item().machine)} />
             )}
           </Each>
         </SmeltMenu>
@@ -154,8 +123,8 @@ function MachinePickingButton(props: {
     >
       <SmeltButton
         testID={props.testID}
-        quiet={props.quiet}
-        small={props.small}
+        variant={props.quiet ? "quiet" : "secondary"}
+        size={props.small ? "sm" : "md"}
         icon={props.icon}
         label={props.label}
         onPress={() => props.onPick(targets()[0]?.machine ?? null)}
@@ -174,11 +143,11 @@ export function CatalogHeader() {
 
   return (
     <PageToolbar>
-      <SegmentedControl
+      <SmeltSegmented
         testID="automations-tabs"
         options={tabs()}
-        selected={catalogTab()}
-        onSelect={(tab) => catalogTab.set(tab)}
+        value={catalogTab()}
+        onChange={(tab) => catalogTab.set(tab)}
       />
       <MachinePickingButton
         testID="automations-add"
@@ -304,31 +273,21 @@ function AutomationTableRow(props: { machine: string | null; automation: any }) 
   return (
     <View
       testID={`automation-row-${rowKey()}`}
-      class="hover:bg-accent/50"
       style={{
         width: "100%",
-        paddingLeft: 16,
         paddingRight: 16,
-        paddingTop: 10,
-        paddingBottom: 10,
         display: "flex",
         flexDirection: "row",
         alignItems: "center",
-        gap: 12,
       }}
     >
       {/* 左侧主区域整块点击进入编辑器，与右侧 ⋯ 菜单分离，避免嵌套按钮误触发 */}
-      <View
+      <SmeltRow
+        rounded={false}
+        accessibilityLabel={model().displayName}
         onPress={() => openAutomationEditor(target())}
-        style={{
-          flex: 1,
-          minWidth: 0,
-          display: "flex",
-          flexDirection: "row",
-          alignItems: "center",
-          gap: 12,
-          cursor: "default",
-        }}
+        class="flex-1 min-w-0 gap-3"
+        style={{ paddingLeft: 16, paddingRight: 12, paddingTop: 10, paddingBottom: 10 }}
       >
         <View
           style={{
@@ -437,7 +396,7 @@ function AutomationTableRow(props: { machine: string | null; automation: any }) 
             </Text>
           </If>
         </View>
-      </View>
+      </SmeltRow>
 
       <View style={{ width: COL_MENU, flexShrink: 0, display: "flex", alignItems: "flex-end" }}>
         <SmeltMenu
@@ -445,28 +404,19 @@ function AutomationTableRow(props: { machine: string | null; automation: any }) 
           align="end"
           popupStyle={{ minWidth: 168 }}
           trigger={
-            <View
+            <SmeltButton
               testID={`automation-row-more-${rowKey()}`}
+              variant="quiet"
+              size="xs"
+              icon="icons/ellipsis.svg"
               accessibilityLabel={t("catalog.more")}
-              class="hover:bg-accent"
-              style={{
-                width: 24,
-                height: 24,
-                borderRadius: look().radius.sm,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                cursor: "default",
-              }}
-            >
-              <SmeltIcon path="icons/ellipsis.svg" size={15} color={look().palette.muted} />
-            </View>
+            />
           }
         >
           <If
             when={model().cancelRunId != null}
             else={
-              <MenuRow
+              <SmeltMenuItem
                 label={t("menu.run_once")}
                 icon="icons/play.svg"
                 disabled={!model().canRun}
@@ -474,7 +424,7 @@ function AutomationTableRow(props: { machine: string | null; automation: any }) 
               />
             }
           >
-            <MenuRow
+            <SmeltMenuItem
               label={t("menu.stop")}
               icon="icons/close.svg"
               danger={true}
@@ -485,7 +435,7 @@ function AutomationTableRow(props: { machine: string | null; automation: any }) 
             />
           </If>
           <If when={model().latestRunId != null}>
-            <MenuRow
+            <SmeltMenuItem
               label={t("menu.view_runs")}
               icon="icons/eye.svg"
               onSelect={() => {
@@ -494,13 +444,13 @@ function AutomationTableRow(props: { machine: string | null; automation: any }) 
               }}
             />
           </If>
-          <MenuRow
+          <SmeltMenuItem
             label={model().enabled ? t("menu.pause") : t("menu.enable")}
             icon={model().enabled ? "icons/pause.svg" : "icons/circle-check.svg"}
             onSelect={() => setAutomationEnabled(target(), !model().enabled)}
           />
-          <MenuDivider />
-          <MenuRow
+          <SmeltMenuSeparator />
+          <SmeltMenuItem
             label={t("menu.delete")}
             icon="icons/trash.svg"
             danger={true}
@@ -631,11 +581,11 @@ function TemplatesSection() {
         >
           {t("catalog.templates")}
         </Text>
-        <SegmentedControl
+        <SmeltSegmented
           testID="automation-template-filters"
           options={filterOptions()}
-          selected={templateFilter() ?? "__all__"}
-          onSelect={(val) => templateFilter.set(val === "__all__" ? null : val)}
+          value={templateFilter() ?? "__all__"}
+          onChange={(val) => templateFilter.set(val === "__all__" ? null : val)}
         />
       </View>
 
@@ -870,20 +820,17 @@ function RunsCatalogBody() {
                 return { name, detail, err, status: r.status };
               };
               return (
-                <RowItem
+                <SmeltRow
                   testID={`automation-catalog-run-${item().key}`}
+                  rounded={false}
+                  accessibilityLabel={info().name}
                   onPress={() => openCatalogRun(item().machine, item().run.id)}
-                  style={{
-                    paddingLeft: 16,
-                    paddingRight: 16,
-                    paddingTop: 12,
-                    paddingBottom: 12,
-                    gap: 12,
-                  }}
+                  class="w-full gap-3"
+                  style={{ paddingLeft: 16, paddingRight: 16, paddingTop: 12, paddingBottom: 12 }}
                 >
                   <StatusDot size={7} color={runStatusColor(info().status, look().palette)} />
                   <RunLines title={info().name} detail={info().detail} error={info().err} />
-                </RowItem>
+                </SmeltRow>
               );
             }}
           </Each>

@@ -13,6 +13,7 @@ import {
   SmeltButton,
   SmeltIcon,
   SmeltPopover,
+  SmeltRow,
   SmeltSwitch,
   SmeltTooltip,
   t,
@@ -268,18 +269,14 @@ export function bar() {
           popupClass="rounded-xl border border-border bg-popover p-1 shadow-md"
           popupStyle={{ width: POPOVER_WIDTH }}
           trigger={
-            <View
-              class="hover:bg-accent"
+            <SmeltRow
+              selected={popoverOpen()}
               style={{
                 minWidth: 0,
                 paddingLeft: 6,
                 paddingRight: 6,
                 paddingTop: 4,
                 paddingBottom: 4,
-                borderRadius: look().radius.row,
-                backgroundColor: popoverOpen() ? look().palette.row_selected : "transparent",
-                display: "flex",
-                flexDirection: "row",
                 flexWrap: "wrap",
                 justifyContent: "flex-end",
                 alignItems: "center",
@@ -377,7 +374,7 @@ export function bar() {
                   </If>
                 </View>
               </If>
-            </View>
+            </SmeltRow>
           }
         >
           <View style={{ width: "100%", display: "flex", flexDirection: "column" }}>
@@ -445,16 +442,11 @@ export function bar() {
                 };
                 const usedPct = () => Math.min(Math.max(row().used, 0), 100);
                 return (
-                  <View
-                    class="hover:bg-accent"
+                  <SmeltRow
                     style={{
                       height: 30,
                       paddingLeft: 8,
                       paddingRight: 8,
-                      borderRadius: 6,
-                      display: "flex",
-                      flexDirection: "row",
-                      alignItems: "center",
                       gap: 8,
                     }}
                     tooltip={
@@ -479,20 +471,20 @@ export function bar() {
                       {row().name}
                     </Text>
                     <View
+                      class="rounded-full"
                       style={{
                         flex: 1,
                         height: 4,
-                        borderRadius: 2,
                         overflow: "hidden",
                         backgroundColor: p().hair,
                       }}
                     >
                       {usedPct() > 0 ? (
                         <View
+                          class="rounded-full"
                           style={{
                             height: "100%",
                             width: `${usedPct()}%`,
-                            borderRadius: 2,
                             backgroundColor: row().color,
                           }}
                         />
@@ -522,7 +514,7 @@ export function bar() {
                         </Text>
                       )}
                     </View>
-                  </View>
+                  </SmeltRow>
                 );
               }}
             </Each>
@@ -637,16 +629,16 @@ export function settings() {
 
                   {facts().denied ? (
                     <SmeltButton
-                      quiet={true}
-                      small={true}
+                      variant="quiet"
+                      size="sm"
                       loading={facts().refreshing}
                       label={t("retry")}
                       onPress={() => requestRefresh(facts().id)}
                     />
                   ) : facts().enabled ? (
                     <SmeltButton
-                      quiet={true}
-                      small={true}
+                      variant="quiet"
+                      size="sm"
                       loading={facts().refreshing}
                       icon="icons/refresh.svg"
                       tooltip={t("refresh_one", { name: target()!.name })}

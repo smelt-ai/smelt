@@ -304,7 +304,7 @@ export function Main() {
         <Text class="text-sm font-semibold text-foreground">{t("title")}</Text>
       </View>
       <Text class="text-xs text-muted-foreground">{t("count", { n: count() })}</Text>
-      <SmeltButton label={t("add")} primary onPress={() => count.update((n) => n + 1)} />
+      <SmeltButton label={t("add")} variant="primary" onPress={() => count.update((n) => n + 1)} />
     </View>
   );
 }

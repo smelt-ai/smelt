@@ -1,7 +1,7 @@
 // 技能插件（smelt.skills）：通过目标机器 smeltd 的 `skills.*` 控制 RPC 扫描与管理技能，
 // 桌面与远程机器行为一致，UI 进程不直接碰本地磁盘。
 import { computed, Scroll, signal, Text, View } from "nsh";
-import { Button as BaseButton, Input } from "nsh/base";
+import { Button as BaseButton, RadioGroup } from "nsh/base";
 import { Menu } from "nsh/desktop";
 import {
   activeContext,
@@ -17,9 +17,13 @@ import {
   revealPath,
   run,
   SmeltButton,
+  SmeltCheckbox,
+  SmeltConfirmDialog,
   SmeltDialog,
   SmeltDisclosure,
-  SmeltIcon,
+  SmeltInput,
+  SmeltRadio,
+  SmeltRow,
   stableMemo,
   t,
   text,
@@ -571,106 +575,20 @@ function BadgePill(props: { label: string; tone?: "neutral" | "ok" | "need" | "b
   );
 }
 
-function RadioItem(props: {
-  label: string;
-  checked: boolean;
-  disabled?: boolean;
-  onSelect: () => void;
-}) {
+/** 单选、复选项的标签字。 */
+function OptionLabel(props: { label: string }) {
   const look = currentTheme;
   return (
-    <BaseButton
-      disabled={props.disabled}
-      onPress={() => {
-        if (!props.disabled) props.onSelect();
-      }}
+    <Text
       style={{
-        display: "flex",
-        flexDirection: "row",
-        alignItems: "center",
-        gap: 6,
-        opacity: props.disabled ? 0.45 : 1,
+        fontSize: look().type.small.size,
+        lineHeight: look().type.small.line_height,
+        color: look().palette.text,
+        numberOfLines: 1,
       }}
     >
-      <View
-        style={{
-          width: 14,
-          height: 14,
-          borderRadius: 7,
-          borderWidth: 1.5,
-          borderColor: props.checked ? look().palette.ink : look().palette.hair_strong,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flexShrink: 0,
-        }}
-      >
-        <If when={props.checked}>
-          <View
-            style={{
-              width: 6,
-              height: 6,
-              borderRadius: 3,
-              backgroundColor: look().palette.ink,
-            }}
-          />
-        </If>
-      </View>
-      <Text
-        style={{
-          fontSize: look().type.small.size,
-          lineHeight: look().type.small.line_height,
-          color: look().palette.text,
-          numberOfLines: 1,
-        }}
-      >
-        {props.label}
-      </Text>
-    </BaseButton>
-  );
-}
-
-function CheckItem(props: { label: string; checked: boolean; onToggle: () => void }) {
-  const look = currentTheme;
-  return (
-    <BaseButton
-      onPress={() => props.onToggle()}
-      style={{
-        display: "flex",
-        flexDirection: "row",
-        alignItems: "center",
-        gap: 6,
-      }}
-    >
-      <View
-        style={{
-          width: 14,
-          height: 14,
-          borderRadius: 3,
-          borderWidth: 1.5,
-          borderColor: props.checked ? look().palette.ink : look().palette.hair_strong,
-          backgroundColor: props.checked ? look().palette.ink : "transparent",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flexShrink: 0,
-        }}
-      >
-        <If when={props.checked}>
-          <SmeltIcon path="icons/check.svg" size={10} color={look().palette.on_ink} />
-        </If>
-      </View>
-      <Text
-        style={{
-          fontSize: look().type.small.size,
-          lineHeight: look().type.small.line_height,
-          color: look().palette.text,
-          numberOfLines: 1,
-        }}
-      >
-        {props.label}
-      </Text>
-    </BaseButton>
+      {props.label}
+    </Text>
   );
 }
 
@@ -727,6 +645,10 @@ function ScopeForm(props: { kind: "scope" | "import" }) {
       (c) => c.installed || r.labels.includes(c.label),
     );
   });
+  const projectLabel = () =>
+    data().project
+      ? t("scope.project_at", { path: prettyPath(data().home, data().project!) })
+      : t("scope.project_none");
 
   return (
     <View style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -736,18 +658,25 @@ function ScopeForm(props: { kind: "scope" | "import" }) {
             {t("scope.for")}
           </Text>
         </View>
-        <View style={{ display: "flex", flexDirection: "row", flexWrap: "wrap", gap: 12, flex: 1 }}>
-          <RadioItem
-            label={t("scope.universal_all")}
+        <RadioGroup
+          accessibilityLabel={t("scope.for")}
+          style={{ display: "flex", flexDirection: "row", flexWrap: "wrap", gap: 12, flex: 1 }}
+        >
+          <SmeltRadio
             checked={req().universal}
-            onSelect={() => setFormUniversal(props.kind, true)}
-          />
-          <RadioItem
-            label={t("scope.specific")}
+            accessibilityLabel={t("scope.universal_all")}
+            onChange={() => setFormUniversal(props.kind, true)}
+          >
+            <OptionLabel label={t("scope.universal_all")} />
+          </SmeltRadio>
+          <SmeltRadio
             checked={!req().universal}
-            onSelect={() => setFormUniversal(props.kind, false)}
-          />
-        </View>
+            accessibilityLabel={t("scope.specific")}
+            onChange={() => setFormUniversal(props.kind, false)}
+          >
+            <OptionLabel label={t("scope.specific")} />
+          </SmeltRadio>
+        </RadioGroup>
       </View>
 
       <If when={!req().universal}>
@@ -761,17 +690,21 @@ function ScopeForm(props: { kind: "scope" | "import" }) {
           }}
         >
           <Each of={visibleAgents()} key={(c: any) => c.label}>
-            {(choice: () => { label: string; installed: boolean }) => (
-              <CheckItem
-                label={
-                  choice().installed
-                    ? choice().label
-                    : t("scope.not_installed", { agent: choice().label })
-                }
-                checked={req().labels.includes(choice().label)}
-                onToggle={() => toggleFormLabel(props.kind, choice().label)}
-              />
-            )}
+            {(choice: () => { label: string; installed: boolean }) => {
+              const label = () =>
+                choice().installed
+                  ? choice().label
+                  : t("scope.not_installed", { agent: choice().label });
+              return (
+                <SmeltCheckbox
+                  checked={req().labels.includes(choice().label)}
+                  accessibilityLabel={label()}
+                  onChange={() => toggleFormLabel(props.kind, choice().label)}
+                >
+                  <OptionLabel label={label()} />
+                </SmeltCheckbox>
+              );
+            }}
           </Each>
         </View>
       </If>
@@ -782,23 +715,26 @@ function ScopeForm(props: { kind: "scope" | "import" }) {
             {t("scope.level")}
           </Text>
         </View>
-        <View style={{ display: "flex", flexDirection: "row", flexWrap: "wrap", gap: 12, flex: 1 }}>
-          <RadioItem
-            label={t("scope.user")}
+        <RadioGroup
+          accessibilityLabel={t("scope.level")}
+          style={{ display: "flex", flexDirection: "row", flexWrap: "wrap", gap: 12, flex: 1 }}
+        >
+          <SmeltRadio
             checked={!req().project_scope}
-            onSelect={() => setFormLevel(props.kind, false)}
-          />
-          <RadioItem
-            label={
-              data().project
-                ? t("scope.project_at", { path: prettyPath(data().home, data().project!) })
-                : t("scope.project_none")
-            }
+            accessibilityLabel={t("scope.user")}
+            onChange={() => setFormLevel(props.kind, false)}
+          >
+            <OptionLabel label={t("scope.user")} />
+          </SmeltRadio>
+          <SmeltRadio
             checked={Boolean(data().project) && req().project_scope}
             disabled={!data().project}
-            onSelect={() => setFormLevel(props.kind, true)}
-          />
-        </View>
+            accessibilityLabel={projectLabel()}
+            onChange={() => setFormLevel(props.kind, true)}
+          >
+            <OptionLabel label={projectLabel()} />
+          </SmeltRadio>
+        </RadioGroup>
       </View>
     </View>
   );
@@ -842,8 +778,8 @@ function ImportDialog() {
               {t("import.title")}
             </Text>
             <SmeltButton
-              quiet={true}
-              small={true}
+              variant="quiet"
+              size="sm"
               icon="icons/close.svg"
               disabled={importSubmitting()}
               accessibilityLabel={t("notice.close")}
@@ -883,8 +819,8 @@ function ImportDialog() {
                         {t("import.source_hint")}
                       </Text>
                       <SmeltButton
-                        primary={true}
-                        small={true}
+                        variant="primary"
+                        size="sm"
                         loading={importPicking()}
                         disabled={importSubmitting()}
                         label={t("import.pick")}
@@ -928,7 +864,7 @@ function ImportDialog() {
                         </Text>
                       </View>
                       <SmeltButton
-                        small={true}
+                        size="sm"
                         loading={importPicking()}
                         disabled={importSubmitting()}
                         label={t("import.repick")}
@@ -1019,15 +955,15 @@ function ImportDialog() {
           {/* 底部按钮行 */}
           <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
             <SmeltButton
-              quiet={true}
-              small={true}
+              variant="quiet"
+              size="sm"
               disabled={importSubmitting()}
               label={t("cancel")}
               onPress={closeImportDialog}
             />
             <SmeltButton
-              primary={true}
-              small={true}
+              variant="primary"
+              size="sm"
               loading={importSubmitting()}
               disabled={!ready() || importSubmitting()}
               label={t("import.button")}
@@ -1118,8 +1054,8 @@ function SkillRow(props: { skill: any }) {
                   {t("conflict.title", { name: s().name })}
                 </Text>
                 <SmeltButton
-                  primary={true}
-                  small={true}
+                  variant="primary"
+                  size="sm"
                   label={t("conflict.keep")}
                   onPress={() => void resolveSkillConflict(s())}
                 />
@@ -1130,7 +1066,8 @@ function SkillRow(props: { skill: any }) {
                   trash: prettyPath(scanData().home, scanData().trash),
                 })}
               </Text>
-              <View
+              <RadioGroup
+                accessibilityLabel={t("conflict.title", { name: s().name })}
                 style={{
                   display: "flex",
                   flexDirection: "column",
@@ -1142,30 +1079,37 @@ function SkillRow(props: { skill: any }) {
                 }}
               >
                 <Each of={copies()} key={(c: any) => c.dir}>
-                  {(copy: () => any) => (
-                    <View style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                      <RadioItem
-                        label={`${placeLabel(copy().placement, t)} · ${formatModified(copy().modified_ms, t)}`}
-                        checked={selectedKeep() === copy().dir}
-                        onSelect={() =>
-                          keepChoices.set({ ...keepChoices(), [s().dir]: copy().dir })
-                        }
-                      />
-                      <Text
-                        style={{
-                          paddingLeft: 20,
-                          fontFamily: look().fonts?.mono,
-                          fontSize: 11,
-                          color: look().palette.muted,
-                          numberOfLines: 1,
-                        }}
-                      >
-                        {prettyPath(scanData().home, copy().dir)}
-                      </Text>
-                    </View>
-                  )}
+                  {(copy: () => any) => {
+                    const label = () =>
+                      `${placeLabel(copy().placement, t)} · ${formatModified(copy().modified_ms, t)}`;
+                    return (
+                      <View style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                        <SmeltRadio
+                          checked={selectedKeep() === copy().dir}
+                          accessibilityLabel={label()}
+                          onChange={() =>
+                            keepChoices.set({ ...keepChoices(), [s().dir]: copy().dir })
+                          }
+                        >
+                          <OptionLabel label={label()} />
+                        </SmeltRadio>
+                        <Text
+                          style={{
+                            // 和单选的标签字对齐：16 的圈 + 8 的间距。
+                            paddingLeft: 24,
+                            fontFamily: look().fonts?.mono,
+                            fontSize: 11,
+                            color: look().palette.muted,
+                            numberOfLines: 1,
+                          }}
+                        >
+                          {prettyPath(scanData().home, copy().dir)}
+                        </Text>
+                      </View>
+                    );
+                  }}
                 </Each>
-              </View>
+              </RadioGroup>
             </View>
           </If>
 
@@ -1184,16 +1128,16 @@ function SkillRow(props: { skill: any }) {
               </Text>
               <If when={s().placement?.kind === "legacy"}>
                 <SmeltButton
-                  primary={true}
-                  small={true}
+                  variant="primary"
+                  size="sm"
                   label={t("migrate.button")}
                   onPress={() => void migrateLegacySkills()}
                 />
               </If>
               <If when={s().placement?.kind !== "legacy" && missingAgents().length > 0}>
                 <SmeltButton
-                  primary={true}
-                  small={true}
+                  variant="primary"
+                  size="sm"
                   label={
                     missingAgents().length === 1
                       ? t("coverage.repair_one", { agent: missingAgents()[0] })
@@ -1263,7 +1207,7 @@ function SkillRow(props: { skill: any }) {
                   {`${scopeWho()} · ${scopeLevel()}`}
                 </Text>
                 <SmeltButton
-                  small={true}
+                  size="sm"
                   label={editingScope() ? t("scope.hide") : t("scope.change")}
                   onPress={() => toggleScope()}
                 />
@@ -1284,10 +1228,10 @@ function SkillRow(props: { skill: any }) {
                   <ScopeForm kind="scope" />
                   <PlanBlock plan={scopePlan()} idleText={t("scope.unchanged")} />
                   <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
-                    <SmeltButton small={true} label={t("cancel")} onPress={() => toggleScope()} />
+                    <SmeltButton size="sm" label={t("cancel")} onPress={() => toggleScope()} />
                     <SmeltButton
-                      primary={true}
-                      small={true}
+                      variant="primary"
+                      size="sm"
                       disabled={!scopeReady()}
                       label={t("scope.apply")}
                       onPress={() => void applyScopeChange()}
@@ -1329,8 +1273,8 @@ function SkillRow(props: { skill: any }) {
               </Text>
             </BaseButton>
             <SmeltButton
-              quiet={true}
-              small={true}
+              variant="quiet"
+              size="sm"
               label={t("delete.button")}
               onPress={() => deleteDialog.set({ name: s().name, dir: s().dir })}
             />
@@ -1338,21 +1282,16 @@ function SkillRow(props: { skill: any }) {
         </View>
       }
     >
-      <BaseButton
+      <SmeltRow
+        rounded={false}
+        selected={open()}
         onPress={() => toggleRow(s().dir)}
         style={{
-          display: "flex",
-          flexDirection: "row",
-          alignItems: "center",
           gap: 12,
           paddingLeft: 16,
           paddingRight: 16,
           paddingTop: 8,
           paddingBottom: 8,
-          backgroundColor: open() ? look().palette.row_selected : "transparent",
-        }}
-        hoverStyle={{
-          backgroundColor: open() ? look().palette.row_selected : look().palette.row_hover,
         }}
       >
         <View style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
@@ -1401,7 +1340,7 @@ function SkillRow(props: { skill: any }) {
         >
           <BadgePill label={summary().label} tone={summary().tone as any} />
         </If>
-      </BaseButton>
+      </SmeltRow>
     </SmeltDisclosure>
   );
 }
@@ -1413,6 +1352,10 @@ export function main() {
   const userSkills = computed(() => shown().filter((s) => !s.project_scope));
   const hasRepairable = computed(() => scanData().skills.some(needsRepair));
   const showBroken = computed(() => !query().trim() && scanData().broken.length > 0);
+  // 关上时框还在淡出：留着上一次的技能名，标题不在淡出途中变空。
+  const deleteShown = computed(
+    (prev: { name: string; dir: string } | null | undefined) => deleteDialog() ?? prev ?? null,
+  );
 
   const openMoreMenu = (e: any) => {
     const isLocal = targetContext().machine === null;
@@ -1469,23 +1412,23 @@ export function main() {
         }}
       >
         <View style={{ flex: 1, minWidth: 0 }}>
-          <Input
+          <SmeltInput
+            size="sm"
             value={query()}
             placeholder={t("search.placeholder")}
             accessibilityLabel={t("search.label")}
             onChange={({ value }: { value: string }) => query.set(value)}
-            style={{ width: "100%", height: 26, fontSize: look().type.small.size }}
           />
         </View>
         <SmeltButton
-          primary={true}
-          small={true}
+          variant="primary"
+          size="sm"
           label={t("import.button")}
           onPress={openImportDialog}
         />
         <SmeltButton
-          quiet={true}
-          small={true}
+          variant="quiet"
+          size="sm"
           icon="icons/ellipsis.svg"
           accessibilityLabel={t("menu.more")}
           onPress={openMoreMenu}
@@ -1534,8 +1477,8 @@ export function main() {
             </Text>
           </View>
           <SmeltButton
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             label={t("notice.close")}
             onPress={() => notice.set(null)}
           />
@@ -1659,8 +1602,8 @@ export function main() {
                   {`${t("broken.title")} ${scanData().broken.length}`}
                 </Text>
                 <SmeltButton
-                  quiet={true}
-                  small={true}
+                  variant="quiet"
+                  size="sm"
                   label={t("broken.button")}
                   onPress={() => pruneDialogOpen.set(true)}
                 />
@@ -1692,111 +1635,38 @@ export function main() {
       <ImportDialog />
 
       {/* 删除确认框 */}
-      <SmeltDialog
+      <SmeltConfirmDialog
         open={deleteDialog() != null}
-        role="alertdialog"
-        accessibilityLabel={t("delete.title", { name: deleteDialog()?.name ?? "" })}
-        onOpenChange={({ open }: { open: boolean }) => {
-          if (!open) deleteDialog.set(null);
+        title={t("delete.title", { name: deleteShown()?.name ?? "" })}
+        description={t("delete.body", { trash: prettyPath(scanData().home, scanData().trash) })}
+        confirmLabel={t("delete.confirm")}
+        cancelLabel={t("cancel")}
+        danger
+        onConfirm={() => {
+          const target = deleteDialog();
+          deleteDialog.set(null);
+          if (target) void trashSkill(target.name, target.dir);
         }}
-        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
-        style={{ width: 420, gap: 12 }}
-      >
-        <If when={deleteDialog() != null}>
-          <Text
-            style={{
-              color: look().palette.text,
-              fontSize: look().type.ui_medium.size,
-              fontWeight: look().type.ui_medium.weight,
-            }}
-          >
-            {t("delete.title", { name: deleteDialog()?.name ?? "" })}
-          </Text>
-          <Text
-            style={{
-              color: look().palette.muted,
-              fontSize: look().type.ui.size,
-              lineHeight: look().type.ui.line_height,
-            }}
-          >
-            {t("delete.body", { trash: prettyPath(scanData().home, scanData().trash) })}
-          </Text>
-          <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
-            <SmeltButton
-              quiet={true}
-              small={true}
-              label={t("cancel")}
-              onPress={() => deleteDialog.set(null)}
-            />
-            <SmeltButton
-              danger={true}
-              small={true}
-              label={t("delete.confirm")}
-              onPress={() => {
-                const target = deleteDialog();
-                deleteDialog.set(null);
-                if (target) void trashSkill(target.name, target.dir);
-              }}
-            />
-          </View>
-        </If>
-      </SmeltDialog>
+        onCancel={() => deleteDialog.set(null)}
+      />
 
       {/* 清理失效链接确认框 */}
-      <SmeltDialog
+      <SmeltConfirmDialog
         open={pruneDialogOpen()}
-        role="alertdialog"
-        accessibilityLabel={
+        title={
           scanData().broken.length === 1
             ? t("broken.confirm_title.one")
             : t("broken.confirm_title.other", { count: scanData().broken.length })
         }
-        onOpenChange={({ open }: { open: boolean }) => {
-          if (!open) pruneDialogOpen.set(false);
+        description={brokenConfirmBody(scanData().home, scanData().broken, t)}
+        confirmLabel={t("broken.confirm")}
+        cancelLabel={t("cancel")}
+        onConfirm={() => {
+          pruneDialogOpen.set(false);
+          void pruneBrokenLinks();
         }}
-        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
-        style={{ width: 420, gap: 12 }}
-      >
-        <If when={pruneDialogOpen()}>
-          <Text
-            style={{
-              color: look().palette.text,
-              fontSize: look().type.ui_medium.size,
-              fontWeight: look().type.ui_medium.weight,
-            }}
-          >
-            {scanData().broken.length === 1
-              ? t("broken.confirm_title.one")
-              : t("broken.confirm_title.other", { count: scanData().broken.length })}
-          </Text>
-          <Text
-            style={{
-              color: look().palette.muted,
-              fontSize: look().type.ui.size,
-              lineHeight: look().type.ui.line_height,
-            }}
-          >
-            {brokenConfirmBody(scanData().home, scanData().broken, t)}
-          </Text>
-          <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
-            <SmeltButton
-              quiet={true}
-              small={true}
-              label={t("cancel")}
-              onPress={() => pruneDialogOpen.set(false)}
-            />
-            <SmeltButton
-              primary={true}
-              small={true}
-              label={t("broken.confirm")}
-              onPress={() => {
-                pruneDialogOpen.set(false);
-                void pruneBrokenLinks();
-              }}
-            />
-          </View>
-        </If>
-      </SmeltDialog>
+        onCancel={() => pruneDialogOpen.set(false)}
+      />
     </View>
   );
 }

@@ -52,8 +52,8 @@ export function McpTab(props: { page: PageController }) {
               <SettingsRow title={preset().name} description={preset().summary}>
                 <If when={Boolean(preset().extension_url)}>
                   <SmeltButton
-                    quiet={true}
-                    small={true}
+                    variant="quiet"
+                    size="sm"
                     label={t("mcp.install_extension")}
                     tooltip={t("mcp.install_extension_tooltip")}
                     onPress={() => {
@@ -66,7 +66,7 @@ export function McpTab(props: { page: PageController }) {
                   when={preset().added}
                   else={
                     <SmeltButton
-                      small={true}
+                      size="sm"
                       label={t("mcp.add")}
                       tooltip={
                         preset().needs_sign_in
@@ -226,7 +226,7 @@ export function McpTab(props: { page: PageController }) {
                           <UsesPopover page={props.page} usable={usable()} />
                           <If when={isMcpServerHttp(server()) && server().enabled}>
                             <SmeltButton
-                              small={true}
+                              size="sm"
                               label={
                                 loggingIn()
                                   ? t("mcp.waiting")
@@ -240,8 +240,8 @@ export function McpTab(props: { page: PageController }) {
                             />
                           </If>
                           <SmeltButton
-                            quiet={true}
-                            small={true}
+                            variant="quiet"
+                            size="sm"
                             label={server().enabled ? t("mcp.disable") : t("mcp.enable")}
                             disabled={loggingIn()}
                             onPress={() =>
@@ -249,8 +249,8 @@ export function McpTab(props: { page: PageController }) {
                             }
                           />
                           <SmeltButton
-                            quiet={true}
-                            small={true}
+                            variant="quiet"
+                            size="sm"
                             icon="icons/trash.svg"
                             accessibilityLabel={t("mcp.remove_tooltip")}
                             tooltip={t("mcp.remove_tooltip")}
@@ -295,8 +295,8 @@ export function McpTab(props: { page: PageController }) {
             {t("config.native_files")}
           </Text>
           <SmeltButton
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             label="mcp.json"
             tooltip={mcpPath() || undefined}
             disabled={isRemote()}

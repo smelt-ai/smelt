@@ -1,34 +1,26 @@
 // 能力库共享 UI 原语（严格遵循 docs/ui-design-language.md 与 smelt-ui::settings 视觉语言）。
 
 import { computed, Scroll, signal, Text, View } from "nsh";
-import {
-  Button as BaseButton,
-  Input,
-  MenuItem,
-  MenuSeparator,
-  Submenu,
-} from "nsh/base";
+import { Submenu } from "nsh/base";
 import {
   clipboardWrite,
-  DIALOG_SURFACE_CLASS,
-  INPUT_CLASS,
   MENU_ITEM_CLASS,
   SmeltButton,
   SmeltCheckbox,
-  SmeltDialog,
   SmeltIcon,
+  SmeltInput,
   SmeltMenu,
+  SmeltMenuItem,
   SmeltPopover,
+  SmeltSegmented,
   SmeltTooltip,
   t,
 } from "smelt/sdk";
-export { INPUT_CLASS, MENU_ITEM_CLASS };
 import { agentUsesItem } from "../model.js";
 import {
   agentSettingsOn,
   allMachineList,
   type CapabilitiesTab,
-  type ConfirmRequest,
   currentTheme,
   type PageController,
 } from "./state.ts";
@@ -358,94 +350,37 @@ export function TextField(props: {
           {props.label ?? ""}
         </Text>
       </If>
-      <Input
+      <SmeltInput
         value={props.value}
         placeholder={props.placeholder ?? ""}
         masked={Boolean(props.masked)}
         disabled={Boolean(props.disabled)}
         accessibilityLabel={props.label || props.placeholder || undefined}
-        onChange={({ value }: { value: string }) => props.onChange(value)}
+        onChange={({ value }) => props.onChange(value)}
         onSubmit={props.onSubmit}
-        class={INPUT_CLASS}
-        style={{ height: 28, fontSize: look().type.ui.size, width: "100%" }}
+        class="w-full"
       />
     </View>
   );
 }
 
 export function CopyButton(props: { value: string; tooltip: string }) {
-  const look = currentTheme;
   const copiedValue = signal<string | null>(null);
   const isCopied = () => Boolean(props.value) && copiedValue() === props.value;
 
   return (
     <SmeltButton
-      quiet={true}
-      small={true}
+      variant="quiet"
+      size="sm"
       icon={isCopied() ? "icons/check.svg" : "icons/copy.svg"}
       accessibilityLabel={props.tooltip}
       tooltip={isCopied() ? t("auth.copied") : props.tooltip}
-      style={isCopied() ? { color: look().palette.ok } : undefined}
       onPress={() => {
         const val = props.value;
         if (!val) return;
         void clipboardWrite(val).then(() => copiedValue.set(val));
       }}
     />
-  );
-}
-
-export function MenuEntry(props: {
-  label: string;
-  checked?: boolean;
-  danger?: boolean;
-  disabled?: boolean;
-  onSelect: () => void;
-}) {
-  const look = currentTheme;
-  const color = () =>
-    props.disabled
-      ? look().palette.faint
-      : props.danger
-        ? look().palette.bad
-        : look().palette.text;
-  return (
-    <MenuItem
-      checked={props.checked}
-      disabled={props.disabled}
-      closeOnSelect={true}
-      onSelect={props.onSelect}
-      class={MENU_ITEM_CLASS}
-      style={{ height: 28, gap: 8 }}
-    >
-      <Text
-        class="flex-1 min-w-0"
-        style={{
-          color: color(),
-          fontSize: look().type.ui.size,
-          lineHeight: look().type.ui.line_height,
-          numberOfLines: 1,
-        }}
-      >
-        {props.label}
-      </Text>
-      <If when={props.checked != null}>
-        <View
-          style={{
-            width: 14,
-            height: 14,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            flexShrink: 0,
-          }}
-        >
-          <If when={Boolean(props.checked)}>
-            <SmeltIcon path="icons/check.svg" size={13} color={look().palette.text} />
-          </If>
-        </View>
-      </If>
-    </MenuItem>
   );
 }
 
@@ -482,10 +417,6 @@ export function MenuSub(props: {
   );
 }
 
-export function MenuDivider() {
-  return <MenuSeparator class="my-1 bg-border" style={{ height: 1 }} />;
-}
-
 /** 带小箭头的下拉菜单触发器按钮（保持菜单打开态选中视觉）。 */
 export function DropdownMenuButton(props: {
   label?: string;
@@ -514,8 +445,8 @@ export function DropdownMenuButton(props: {
   const renderTrigger = () =>
     props.iconOnly ? (
       <SmeltButton
-        quiet={true}
-        small={true}
+        variant="quiet"
+        size="sm"
         selected={open()}
         disabled={props.disabled}
         icon={props.iconOnly}
@@ -570,80 +501,6 @@ export function DropdownMenuButton(props: {
         {props.children}
       </SmeltMenu>
     </If>
-  );
-}
-
-/** 破坏性确认对话框（alertdialog、居中 m-auto、无右上角 ×、安静取消 + 危险确认）。 */
-export function ConfirmDialog(props: {
-  request: () => ConfirmRequest | null;
-  onDismiss: () => void;
-}) {
-  const look = currentTheme;
-  const req = props.request;
-  return (
-    <SmeltDialog
-      open={req() != null}
-      role="alertdialog"
-      accessibilityLabel={req()?.title ?? ""}
-      accessibilityDescription={req()?.description ?? ""}
-      onOpenChange={({ open }: { open: boolean }) => {
-        if (!open) props.onDismiss();
-      }}
-      class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
-      style={{ width: 420, gap: 12 }}
-    >
-      <If when={req() != null}>
-        <Text
-          style={{
-            color: look().palette.text,
-            fontSize: look().type.ui_medium.size,
-            lineHeight: look().type.ui_medium.line_height,
-            fontWeight: look().type.ui_medium.weight,
-          }}
-        >
-          {req()?.title ?? ""}
-        </Text>
-        <If when={Boolean(req()?.description)}>
-          <Text
-            style={{
-              color: look().palette.muted,
-              fontSize: look().type.ui.size,
-              lineHeight: look().type.ui.line_height,
-            }}
-          >
-            {req()?.description ?? ""}
-          </Text>
-        </If>
-        <View
-          style={{
-            display: "flex",
-            flexDirection: "row",
-            justifyContent: "flex-end",
-            alignItems: "center",
-            gap: 8,
-            marginTop: 4,
-          }}
-        >
-          <SmeltButton
-            quiet={true}
-            small={true}
-            label={t("common.cancel")}
-            onPress={props.onDismiss}
-          />
-          <SmeltButton
-            primary={!req()?.danger}
-            danger={Boolean(req()?.danger)}
-            small={true}
-            label={req()?.action ?? ""}
-            onPress={() => {
-              const fn = req()?.onConfirm;
-              props.onDismiss();
-              fn?.();
-            }}
-          />
-        </View>
-      </If>
-    </SmeltDialog>
   );
 }
 
@@ -786,6 +643,9 @@ export function PageToolbar(props: { page: PageController }) {
   const severalMachines = computed(() => machineList().length > 1);
   const showTabs = props.page.tabs.length > 1;
   const showBar = computed(() => showTabs || severalMachines());
+  const tabOptions = computed(() =>
+    props.page.tabs.map((tab) => ({ value: tab, label: tabLabel(tab) })),
+  );
 
   return (
     <If when={showBar()}>
@@ -807,63 +667,11 @@ export function PageToolbar(props: { page: PageController }) {
         }}
       >
         <If when={showTabs}>
-          <View
-            style={{
-              display: "flex",
-              flexDirection: "row",
-              alignItems: "center",
-              height: 28,
-              padding: 2,
-              borderRadius: look().radius.md,
-              backgroundColor: look().palette.soft,
-              borderWidth: 1,
-              borderColor: look().palette.hair,
-              gap: 2,
-            }}
-          >
-            <Each of={[...props.page.tabs]} key={(item: CapabilitiesTab) => item}>
-              {(item: () => CapabilitiesTab) => {
-                const selected = () => props.page.tab() === item();
-                const p = () => look().palette;
-                return (
-                  <BaseButton
-                    selected={selected()}
-                    onPress={() => props.page.selectTab(item())}
-                    style={{
-                      height: 22,
-                      paddingLeft: 12,
-                      paddingRight: 12,
-                      borderRadius: look().radius.sm,
-                      backgroundColor: selected() ? p().bg : "transparent",
-                      borderWidth: selected() ? 1 : 0,
-                      borderColor: selected() ? p().hair_strong : "transparent",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      cursor: "default",
-                    }}
-                    hoverStyle={{
-                      backgroundColor: selected() ? p().bg : p().row_hover,
-                    }}
-                  >
-                    <Text
-                      style={{
-                        fontSize: look().type.ui.size,
-                        lineHeight: look().type.ui.line_height,
-                        fontWeight: selected()
-                          ? look().type.ui_medium.weight
-                          : look().type.ui.weight,
-                        color: selected() ? p().text : p().muted,
-                        numberOfLines: 1,
-                      }}
-                    >
-                      {tabLabel(item())}
-                    </Text>
-                  </BaseButton>
-                );
-              }}
-            </Each>
-          </View>
+          <SmeltSegmented
+            options={tabOptions()}
+            value={props.page.tab()}
+            onChange={(tab) => props.page.selectTab(tab)}
+          />
         </If>
 
         <View style={{ flex: 1 }} />
@@ -880,7 +688,7 @@ export function PageToolbar(props: { page: PageController }) {
                 const label = () =>
                   m().unavailable ? `${m().name}（${m().unavailable}）` : m().name;
                 return (
-                  <MenuEntry
+                  <SmeltMenuItem
                     label={label()}
                     checked={props.page.machine() === key()}
                     onSelect={() => props.page.selectMachine(key())}

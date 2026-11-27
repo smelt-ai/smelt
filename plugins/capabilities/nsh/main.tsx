@@ -13,6 +13,7 @@ import {
   registerTopics,
   registerViews,
   run,
+  SmeltConfirmDialog,
   t,
   text,
 } from "smelt/sdk";
@@ -41,7 +42,7 @@ import {
   type PageController,
   startRefreshAutoProvidersOnceOnline,
 } from "./state.ts";
-import { ConfirmDialog, PageToolbar } from "./ui.tsx";
+import { PageToolbar } from "./ui.tsx";
 
 // 三个视图各持有一份独立状态（与 Rust CapabilitiesPage 同构）。
 const mainPage = createPageController(VIEW, ["skills", "extensions", "mcp"]);
@@ -234,9 +235,19 @@ function CapabilitiesShell(props: { page: PageController; initialArgs?: any }) {
           <MemoryTab page={props.page} />
         </If>
       </View>
-      <ConfirmDialog
-        request={props.page.confirmDialog}
-        onDismiss={props.page.dismissConfirm}
+      <SmeltConfirmDialog
+        open={props.page.confirmDialog() != null}
+        title={props.page.confirmDialog()?.title ?? ""}
+        description={props.page.confirmDialog()?.description ?? ""}
+        confirmLabel={props.page.confirmDialog()?.action ?? ""}
+        cancelLabel={t("common.cancel")}
+        danger={Boolean(props.page.confirmDialog()?.danger)}
+        onConfirm={() => {
+          const fn = props.page.confirmDialog()?.onConfirm;
+          props.page.dismissConfirm();
+          fn?.();
+        }}
+        onCancel={props.page.dismissConfirm}
       />
     </View>
   );

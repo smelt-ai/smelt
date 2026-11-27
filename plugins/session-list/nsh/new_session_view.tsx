@@ -1,13 +1,25 @@
 // 新建会话菜单的界面，逻辑在 `../new_session.js`：项目/工作树行「+」的弹层，和命令打开的、钉在窗口上方的面板。
 
 import { computed, Scroll, signal, Text, View } from "nsh";
-import { DIALOG_SURFACE_CLASS, newSessionIcon, SmeltButton, SmeltDialog, SmeltIcon, SmeltMenu, SmeltPopover } from "smelt/sdk";
+import {
+  DIALOG_SURFACE_CLASS,
+  newSessionIcon,
+  SmeltButton,
+  SmeltDialog,
+  SmeltIcon,
+  SmeltMenu,
+  SmeltMenuItem,
+  SmeltMenuLabel,
+  SmeltMenuSeparator,
+  SmeltPopover,
+  SmeltRow,
+} from "smelt/sdk";
 
 import { OPEN_PROJECT } from "../contract.js";
 import { digit_key, initial_location, NewSession, pinned_by_digit } from "../new_session.js";
 import { icon } from "../util.js";
 import { list, t, theme, tick } from "./bridge.ts";
-import { MenuDivider, MenuEntry, MenuSectionTitle, Tip } from "./menus.tsx";
+import { Tip } from "./menus.tsx";
 
 const WIDTH = 280;
 const PALETTE_WIDTH = 360;
@@ -142,23 +154,23 @@ function LocationRow(props: { menu: () => any }) {
         <Each of={entries()} key={(e: any) => e.key}>
           {(entry: () => any) =>
             entry().kind === "section" ? (
-              <MenuSectionTitle text={entry().label} />
+              <SmeltMenuLabel label={entry().label} />
             ) : entry().kind === "disabled" ? (
-              <MenuEntry label={entry().label} disabled={true} onSelect={() => {}} />
+              <SmeltMenuItem label={entry().label} disabled={true} onSelect={() => {}} />
             ) : (
-              <MenuEntry
+              <SmeltMenuItem
                 label={entry().label}
-                iconPath={icon(entry().kind === "workset" ? "git-branch" : "folder")}
+                icon={icon(entry().kind === "workset" ? "git-branch" : "folder")}
                 checked={entry().checked}
                 onSelect={entry().onSelect}
               />
             )
           }
         </Each>
-        <MenuDivider />
-        <MenuEntry
+        <SmeltMenuSeparator />
+        <SmeltMenuItem
           label={t("menu.new_workset")}
-          iconPath={icon("git-branch")}
+          icon={icon("git-branch")}
           disabled={menu().root == null}
           onSelect={() => {
             const m = menu();
@@ -243,7 +255,7 @@ function MenuBody(props: { menu: () => any; localTick?: () => number; maxHeight?
               </View>
               <View style={{ paddingHorizontal: 6, paddingBottom: 4 }}>
                 <SmeltButton
-                  small={true}
+                  size="sm"
                   label={t("command.open_project")}
                   onPress={() => {
                     const m = props.menu();
@@ -348,8 +360,8 @@ function MenuBody(props: { menu: () => any; localTick?: () => number; maxHeight?
                     return row ? digit_key(row, index) : null;
                   });
                   return (
-                    <View
-                      role="button"
+                    <SmeltRow
+                      selected={selected()}
                       class="group/row"
                       onMouseEnter={() => props.menu()?.hover(index)}
                       onPress={() => props.menu()?.launch(index)}
@@ -357,11 +369,6 @@ function MenuBody(props: { menu: () => any; localTick?: () => number; maxHeight?
                         height: ROW_HEIGHT,
                         paddingLeft: 12,
                         paddingRight: 8,
-                        borderRadius: look().radius.sm,
-                        backgroundColor: selected() ? look().palette.row_hover : "transparent",
-                        display: "flex",
-                        flexDirection: "row",
-                        alignItems: "center",
                         gap: 8,
                         flexShrink: 0,
                       }}
@@ -414,7 +421,7 @@ function MenuBody(props: { menu: () => any; localTick?: () => number; maxHeight?
                                 minWidth: 18,
                                 paddingHorizontal: 5,
                                 height: 18,
-                                borderRadius: 4,
+                                borderRadius: look().radius.sm,
                                 borderWidth: 1,
                                 borderColor: look().palette.hair_strong,
                                 display: "flex",
@@ -459,7 +466,7 @@ function MenuBody(props: { menu: () => any; localTick?: () => number; maxHeight?
                           </View>
                         ) : null}
                       </View>
-                    </View>
+                    </SmeltRow>
                   );
                 }}
               </Each>
@@ -546,8 +553,8 @@ export function NewSessionPopover(props: {
         popupStyle={{ width: WIDTH }}
         trigger={
           <SmeltButton
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             selected={open()}
             icon={icon("plus")}
             tooltip={props.tooltip}

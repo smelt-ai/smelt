@@ -1,8 +1,14 @@
 // 设置里的「Agent」页：本机 Agent CLI、Hooks、自定义 Agent、项目「+」新建菜单启动项。
 
 import { cleanup, computed, Scroll, Text, View } from "nsh";
-import { Input } from "nsh/base";
-import { locale, SmeltButton, t } from "smelt/sdk";
+import {
+  locale,
+  SmeltButton,
+  SmeltInput,
+  SmeltMenuItem,
+  SmeltMenuSeparator,
+  t,
+} from "smelt/sdk";
 
 import {
   cliExecutableForAgent,
@@ -44,12 +50,7 @@ import {
   updateLaunchRow,
   updateProfileDraft,
 } from "./state.ts";
-import {
-  DropdownButton,
-  INPUT_CLASS,
-  MenuDivider,
-  MenuEntry,
-} from "./ui.tsx";
+import { DropdownButton } from "./ui.tsx";
 
 function SettingsSection(props: { title: string; description?: string; children?: any }) {
   const look = currentTheme;
@@ -97,10 +98,10 @@ function SettingsSection(props: { title: string; description?: string; children?
 function StatusDot(props: { size: number; color: string }) {
   return (
     <View
+      class="rounded-full"
       style={{
         width: props.size,
         height: props.size,
-        borderRadius: props.size / 2,
         backgroundColor: props.color,
         flexShrink: 0,
       }}
@@ -161,8 +162,8 @@ function CliSectionContent() {
           {checkedText()}
         </Text>
         <SmeltButton
-          quiet={true}
-          small={true}
+          variant="quiet"
+          size="sm"
           icon="icons/refresh.svg"
           loading={cliRefreshing()}
           disabled={busy()}
@@ -257,7 +258,7 @@ function CliSectionContent() {
                 </View>
                 <If when={!avail()}>
                   <SmeltButton
-                    small={true}
+                    size="sm"
                     icon="icons/plus.svg"
                     label={installingThis() ? t("cli.installing") : t("cli.install")}
                     loading={installingThis()}
@@ -348,15 +349,15 @@ function HooksSectionContent() {
         <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 6 }}>
           <If when={showRemove()}>
             <SmeltButton
-              quiet={true}
-              small={true}
+              variant="quiet"
+              size="sm"
               label={t("hooks.remove")}
               disabled={busy()}
               onPress={() => setHooks(false)}
             />
           </If>
           <SmeltButton
-            small={true}
+            size="sm"
             label={allInstalled() ? t("hooks.reinstall") : t("hooks.install")}
             disabled={busy()}
             onPress={() => setHooks(true)}
@@ -505,15 +506,15 @@ function ProfileRowCell(props: { profile: () => any }) {
       >
         <View style={{ width: 152, flexShrink: 0 }}>
           <DropdownButton label={kindLabel()} small={true} fill={true} minWidth={184}>
-            <MenuEntry
+            <SmeltMenuItem
               label={t("profile.kind_generic")}
               checked={props.profile().kind_id === "custom"}
               onSelect={() => setProfileKind(props.profile().id, "custom")}
             />
-            <MenuDivider />
+            <SmeltMenuSeparator />
             <Each of={agents()} key={(a: any) => a.id}>
               {(agent: () => any) => (
-                <MenuEntry
+                <SmeltMenuItem
                   label={t("profile.kind_based", { agent: agent().label })}
                   checked={props.profile().kind_id === agent().id}
                   onSelect={() => setProfileKind(props.profile().id, agent().id)}
@@ -523,7 +524,7 @@ function ProfileRowCell(props: { profile: () => any }) {
           </DropdownButton>
         </View>
         <View style={{ flex: 1, minWidth: 0 }}>
-          <Input
+          <SmeltInput
             value={draft().label}
             placeholder={t("profile.label_placeholder")}
             accessibilityLabel={t("profile.label_placeholder")}
@@ -531,13 +532,11 @@ function ProfileRowCell(props: { profile: () => any }) {
               updateProfileDraft(props.profile().id, { label: value })
             }
             onBlur={() => flushProfileDraft(props.profile().id)}
-            class={INPUT_CLASS}
-            style={{ height: 28, fontSize: look().type.ui.size }}
           />
         </View>
         <SmeltButton
-          quiet={true}
-          small={true}
+          variant="quiet"
+          size="sm"
           icon="icons/close.svg"
           tooltip={t("profile.delete")}
           onPress={() => removeProfile(props.profile().id)}
@@ -548,7 +547,7 @@ function ProfileRowCell(props: { profile: () => any }) {
       <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
         <Text style={captionStyle()}>{t("profile.command")}</Text>
         <View style={{ flex: 1, minWidth: 0 }}>
-          <Input
+          <SmeltInput
             value={draft().command}
             placeholder={commandPlaceholder()}
             accessibilityLabel={t("profile.command")}
@@ -556,12 +555,7 @@ function ProfileRowCell(props: { profile: () => any }) {
               updateProfileDraft(props.profile().id, { command: value })
             }
             onBlur={() => flushProfileDraft(props.profile().id)}
-            class={INPUT_CLASS}
-            style={{
-              height: 28,
-              fontSize: look().type.ui.size,
-              fontFamily: look().fonts?.mono,
-            }}
+            mono
           />
         </View>
       </View>
@@ -572,7 +566,7 @@ function ProfileRowCell(props: { profile: () => any }) {
           <Text style={captionStyle()}>{t("profile.env")}</Text>
         </View>
         <View style={{ flex: 1, minWidth: 0 }}>
-          <Input
+          <SmeltInput
             multiline={true}
             value={draft().envText}
             placeholder={t("profile.env_placeholder")}
@@ -581,14 +575,9 @@ function ProfileRowCell(props: { profile: () => any }) {
               updateProfileDraft(props.profile().id, { envText: value })
             }
             onBlur={() => flushProfileDraft(props.profile().id)}
-            class="rounded-(--radius) border border-input bg-card p-2 text-foreground"
-            style={{
-              minHeight: 40,
-              maxHeight: 160,
-              fontSize: look().type.small.size,
-              lineHeight: look().type.small.line_height,
-              fontFamily: look().fonts?.mono,
-            }}
+            size="sm"
+            mono
+            class="min-h-10 max-h-40"
           />
         </View>
       </View>
@@ -598,7 +587,7 @@ function ProfileRowCell(props: { profile: () => any }) {
         <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
           <Text style={captionStyle()}>{t("profile.dir")}</Text>
           <View style={{ flex: 1, minWidth: 0 }}>
-            <Input
+            <SmeltInput
               value={draft().workspace_dir}
               placeholder={t("profile.dir_placeholder")}
               accessibilityLabel={t("profile.dir")}
@@ -606,12 +595,7 @@ function ProfileRowCell(props: { profile: () => any }) {
                 updateProfileDraft(props.profile().id, { workspace_dir: value })
               }
               onBlur={() => flushProfileDraft(props.profile().id)}
-              class={INPUT_CLASS}
-              style={{
-                height: 28,
-                fontSize: look().type.ui.size,
-                fontFamily: look().fonts?.mono,
-              }}
+              mono
             />
           </View>
           <Text
@@ -683,7 +667,7 @@ function CustomAgentsSection() {
         </Each>
         <View style={{ padding: 14, display: "flex", flexDirection: "row" }}>
           <SmeltButton
-            small={true}
+            size="sm"
             icon="icons/plus.svg"
             label={t("profile.add")}
             onPress={addProfile}
@@ -774,7 +758,7 @@ function LaunchMenuSection() {
                   }}
                 >
                   <View style={{ width: 140, flexShrink: 0 }}>
-                    <Input
+                    <SmeltInput
                       value={row().label}
                       placeholder={t("launch.label_placeholder")}
                       accessibilityLabel={t("launch.name_column")}
@@ -782,12 +766,10 @@ function LaunchMenuSection() {
                         updateLaunchRow(row().uid, { label: value })
                       }
                       onBlur={flushLaunchEdits}
-                      class={INPUT_CLASS}
-                      style={{ height: 28, fontSize: look().type.ui.size }}
                     />
                   </View>
                   <View style={{ flex: 1, minWidth: 0 }}>
-                    <Input
+                    <SmeltInput
                       value={row().command}
                       placeholder={t("launch.command_placeholder")}
                       accessibilityLabel={t("launch.command_column")}
@@ -795,12 +777,7 @@ function LaunchMenuSection() {
                         updateLaunchRow(row().uid, { command: value })
                       }
                       onBlur={flushLaunchEdits}
-                      class={INPUT_CLASS}
-                      style={{
-                        height: 28,
-                        fontSize: look().type.ui.size,
-                        fontFamily: look().fonts?.mono,
-                      }}
+                      mono
                     />
                   </View>
                   <If
@@ -808,8 +785,8 @@ function LaunchMenuSection() {
                     else={<View style={{ width: 24, height: 24, flexShrink: 0 }} />}
                   >
                     <SmeltButton
-                      quiet={true}
-                      small={true}
+                      variant="quiet"
+                      size="sm"
                       icon="icons/close.svg"
                       tooltip={t("launch.delete")}
                       onPress={() => removeLaunchEntry(row().uid)}
@@ -823,7 +800,7 @@ function LaunchMenuSection() {
 
         <View style={{ padding: 14, display: "flex", flexDirection: "row" }}>
           <SmeltButton
-            small={true}
+            size="sm"
             icon="icons/plus.svg"
             label={t("launch.add")}
             onPress={addLaunchEntry}

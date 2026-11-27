@@ -8,6 +8,7 @@ import {
   SmeltIcon,
   SmeltMarkdown,
   SmeltPopover,
+  SmeltRow,
   theme,
 } from "smelt/sdk";
 import type { BlobAt, EntryWindow } from "smelt/sdk";
@@ -42,12 +43,12 @@ export function SubagentsControl(props: {
         popupStyle={{ width: 344 }}
         trigger={
           <SmeltButton
-            quiet
-            small
+            variant="quiet"
+            size="sm"
             selected={open()}
             icon="icons/bot.svg"
             label={ct("subagent.summary", { count: active().length })}
-            style={{ borderRadius: 999 }}
+            shape="pill"
           />
         }
       >
@@ -57,9 +58,8 @@ export function SubagentsControl(props: {
               {ct("subagent.title")}
             </Text>
             <SmeltButton
-              quiet
-              danger
-              small
+              variant="danger-quiet"
+              size="sm"
               label={ct("subagent.stop_all")}
               onPress={() => {
                 for (const s of active()) props.onStop(s.id);
@@ -70,20 +70,12 @@ export function SubagentsControl(props: {
             <View style={{ gap: 4 }}>
               <Each of={active()}>
                 {(sub) => (
-                  <View
+                  <SmeltRow
                     onPress={() => {
                       open.set(false);
                       props.onInspect(sub());
                     }}
-                    class="hover:bg-accent"
-                    style={{
-                      paddingHorizontal: 8,
-                      paddingVertical: 6,
-                      borderRadius: 6,
-                      flexDirection: "row",
-                      alignItems: "center",
-                      gap: 8,
-                    }}
+                    style={{ paddingHorizontal: 8, paddingVertical: 6, gap: 8 }}
                   >
                     <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
                       <Text style={{ fontSize: look().type.small.size, color: look().palette.text, numberOfLines: 1 }}>
@@ -94,13 +86,12 @@ export function SubagentsControl(props: {
                       </Text>
                     </View>
                     <SmeltButton
-                      quiet
-                      danger
-                      small
+                      variant="danger-quiet"
+                      size="sm"
                       label={ct("action.stop")}
                       onPress={() => props.onStop(sub().id)}
                     />
-                  </View>
+                  </SmeltRow>
                 )}
               </Each>
             </View>
@@ -131,12 +122,12 @@ export function BackgroundTasksControl(props: {
         popupStyle={{ width: 344 }}
         trigger={
           <SmeltButton
-            quiet
-            small
+            variant="quiet"
+            size="sm"
             selected={open()}
             icon="icons/terminal.svg"
             label={ct("task.summary", { count: active().length })}
-            style={{ borderRadius: 999 }}
+            shape="pill"
           />
         }
       >
@@ -152,7 +143,7 @@ export function BackgroundTasksControl(props: {
                     style={{
                       paddingHorizontal: 8,
                       paddingVertical: 6,
-                      borderRadius: 6,
+                      borderRadius: look().radius.md,
                       flexDirection: "row",
                       alignItems: "center",
                       gap: 8,
@@ -176,9 +167,8 @@ export function BackgroundTasksControl(props: {
                       </If>
                     </View>
                     <SmeltButton
-                      quiet
-                      danger
-                      small
+                      variant="danger-quiet"
+                      size="sm"
                       label={ct("action.stop")}
                       onPress={() => props.onStop(task().id)}
                     />
@@ -378,7 +368,7 @@ export function SubagentDrawer(props: {
           >
             {props.inspected()?.title ?? ct("subagent.title")}
           </Text>
-          <SmeltButton quiet small icon="icons/close.svg" onPress={props.onClose} />
+          <SmeltButton variant="quiet" size="sm" icon="icons/close.svg" onPress={props.onClose} />
         </View>
         <List
           each={nestedEntries()}
@@ -395,8 +385,8 @@ export function SubagentDrawer(props: {
           header={
             <If when={hasOlder()}>
               <SmeltButton
-                quiet
-                small
+                variant="quiet"
+                size="sm"
                 loading={loadingOlder()}
                 label={ct("status.load_older")}
                 onPress={loadOlder}
@@ -438,7 +428,7 @@ function SubagentEntry(props: { entry: any; cwd: string | null; machine: string 
           style={{
             paddingHorizontal: 8,
             paddingVertical: 5,
-            borderRadius: 6,
+            borderRadius: look().radius.md,
             backgroundColor: look().palette.bg,
             borderWidth: 1,
             borderColor: look().palette.hair,

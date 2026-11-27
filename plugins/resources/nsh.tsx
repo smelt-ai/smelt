@@ -11,7 +11,6 @@
 // - 可见期间收到 `sessions_changed` / `machines_changed` / `locale_changed` 立即重建快照。
 
 import { cleanup, computed, effect, Scroll, signal, Text, View } from "nsh";
-import { Button as BaseButton } from "nsh/base";
 import {
   bootTask,
   call,
@@ -26,6 +25,8 @@ import {
   SmeltButton,
   SmeltDisclosure,
   SmeltDisclosureChevron,
+  SmeltIcon,
+  SmeltRow,
   SmeltVector,
   t,
   text,
@@ -429,7 +430,7 @@ function SortHeader(props: { label: string; column: string; width: number }) {
   const look = theme;
   const active = computed(() => sortBy() === props.column);
   return (
-    <BaseButton
+    <SmeltRow
       onPress={() => sortBy.set(props.column)}
       style={{
         width: props.width + 2 * SORT_HEADER_PAD,
@@ -439,20 +440,9 @@ function SortHeader(props: { label: string; column: string; width: number }) {
         paddingRight: SORT_HEADER_PAD,
         paddingTop: 2,
         paddingBottom: 2,
-        borderRadius: look().radius.sm,
-        backgroundColor: "transparent",
-        display: "flex",
-        flexDirection: "row",
         justifyContent: "flex-end",
-        alignItems: "center",
+        gap: 2,
         flexShrink: 0,
-        cursor: "default",
-      }}
-      hoverStyle={{
-        backgroundColor: look().palette.row_hover,
-      }}
-      activeStyle={{
-        backgroundColor: look().palette.row_selected,
       }}
     >
       <Text
@@ -465,9 +455,12 @@ function SortHeader(props: { label: string; column: string; width: number }) {
           numberOfLines: 1,
         }}
       >
-        {active() ? `${props.label} ↓` : props.label}
+        {props.label}
       </Text>
-    </BaseButton>
+      <If when={active()}>
+        <SmeltIcon path="icons/arrow-down.svg" size={10} color={look().palette.text} />
+      </If>
+    </SmeltRow>
   );
 }
 
@@ -747,23 +740,15 @@ function MachineSection(props: { section: () => any }) {
                     </View>
                   }
                 >
-                  <BaseButton
+                  <SmeltRow
                     onPress={() => toggleRow(row().id)}
                     style={{
-                      display: "flex",
-                      flexDirection: "row",
-                      alignItems: "center",
                       paddingLeft: 8,
                       paddingRight: 8,
                       paddingTop: 4,
                       paddingBottom: 4,
                       gap: 12,
-                      borderRadius: look().radius.row,
-                      backgroundColor: "transparent",
-                      cursor: "default",
                     }}
-                    hoverStyle={{ backgroundColor: look().palette.row_hover }}
-                    activeStyle={{ backgroundColor: look().palette.row_selected }}
                   >
                     <Disclosure open={isOpen()} />
                     <RowLabel label={row().label} detail={row().detail} />
@@ -772,7 +757,7 @@ function MachineSection(props: { section: () => any }) {
                       memoryBytes={row().usage.memory_bytes}
                       color={look().palette.text}
                     />
-                  </BaseButton>
+                  </SmeltRow>
                 </If>
               </SmeltDisclosure>
             );
@@ -904,20 +889,14 @@ function MachineSection(props: { section: () => any }) {
                   </View>
                 }
               >
-                <View
-                  class="hover:bg-accent active:bg-sidebar-accent"
+                <SmeltRow
                   onPress={() => toggleRow(item().id)}
                   style={{
-                    display: "flex",
-                    flexDirection: "row",
-                    alignItems: "center",
                     paddingLeft: 8,
                     paddingRight: 8,
                     paddingTop: 4,
                     paddingBottom: 4,
                     gap: 12,
-                    borderRadius: look().radius.row,
-                    cursor: "default",
                   }}
                 >
                   <Disclosure open={isOpen()} />
@@ -929,8 +908,8 @@ function MachineSection(props: { section: () => any }) {
                       onPressDown={(e: any) => e?.stopPropagation?.()}
                     >
                       <SmeltButton
-                        quiet={true}
-                        small={true}
+                        variant="quiet"
+                        size="sm"
                         icon="icons/external-link.svg"
                         tooltip={t("jump")}
                         accessibilityLabel={t("jump")}
@@ -949,7 +928,7 @@ function MachineSection(props: { section: () => any }) {
                     memoryBytes={item().group.usage.memory_bytes}
                     color={look().palette.text}
                   />
-                </View>
+                </SmeltRow>
               </SmeltDisclosure>
             );
           }}

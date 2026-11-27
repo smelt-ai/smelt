@@ -2,7 +2,7 @@
 // 零跨 VM 插槽；点选条目或「新建自动化」经 `smelt.app/open-view` 跳到 `smelt.automations/main`。
 
 import { computed, Scroll, Text, View } from "nsh";
-import { locale, SmeltButton, t } from "smelt/sdk";
+import { locale, SmeltButton, SmeltRow, t } from "smelt/sdk";
 
 import {
   agentDisplayName,
@@ -211,12 +211,15 @@ export function AgentAutomationsTab() {
           }}
         >
           <If when={automationsTabError() != null}>
-            <View
+            <SmeltRow
+              accessibilityLabel={automationsTabError() ?? ""}
               onPress={clearAutomationsTabError}
-              style={{ cursor: "default" }}
+              class="w-full"
             >
-              <ErrorAlert message={automationsTabError() ?? ""} />
-            </View>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <ErrorAlert message={automationsTabError() ?? ""} />
+              </View>
+            </SmeltRow>
           </If>
 
           <View style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -225,7 +228,7 @@ export function AgentAutomationsTab() {
               action={
                 <SmeltButton
                   testID="agent-tab-new-automation"
-                  small={true}
+                  size="sm"
                   icon="icons/plus.svg"
                   label={t("automations.new")}
                   onPress={() => {
@@ -261,20 +264,17 @@ export function AgentAutomationsTab() {
                   {(item: () => { id: string; name: string; detail: string; enabled: boolean }) => (
                     <View
                       testID={`agent-tab-automation-${item().id}`}
-                      class="hover:bg-accent/50"
                       style={{
                         width: "100%",
-                        paddingLeft: 16,
                         paddingRight: 16,
-                        paddingTop: 12,
-                        paddingBottom: 12,
                         display: "flex",
                         flexDirection: "row",
                         alignItems: "center",
-                        gap: 12,
                       }}
                     >
-                      <View
+                      <SmeltRow
+                        rounded={false}
+                        accessibilityLabel={item().name}
                         onPress={() => {
                           const tgt = target();
                           if (!tgt) return;
@@ -283,10 +283,11 @@ export function AgentAutomationsTab() {
                             automation: item().id,
                           });
                         }}
-                        style={{ flex: 1, minWidth: 0, cursor: "default" }}
+                        class="flex-1 min-w-0 self-stretch"
+                        style={{ paddingLeft: 16, paddingRight: 12, paddingTop: 12, paddingBottom: 12 }}
                       >
                         <RunLines title={item().name} detail={item().detail} />
-                      </View>
+                      </SmeltRow>
                       <ToggleSwitch
                         checked={item().enabled}
                         accessibilityLabel={t("automations.enabled")}
@@ -316,9 +317,10 @@ export function AgentAutomationsTab() {
                     error: string | null;
                     status: string;
                   }) => (
-                    <View
+                    <SmeltRow
                       testID={`agent-tab-run-${r().id}`}
-                      class="hover:bg-accent/50"
+                      rounded={false}
+                      accessibilityLabel={r().name}
                       onPress={() => {
                         const tgt = target();
                         if (!tgt) return;
@@ -328,30 +330,20 @@ export function AgentAutomationsTab() {
                           run: r().id,
                         });
                       }}
-                      style={{
-                        width: "100%",
-                        paddingLeft: 16,
-                        paddingRight: 16,
-                        paddingTop: 12,
-                        paddingBottom: 12,
-                        display: "flex",
-                        flexDirection: "row",
-                        alignItems: "center",
-                        gap: 12,
-                        cursor: "default",
-                      }}
+                      class="w-full gap-3"
+                      style={{ paddingLeft: 16, paddingRight: 16, paddingTop: 12, paddingBottom: 12 }}
                     >
                       <View
+                        class="rounded-full"
                         style={{
                           width: 7,
                           height: 7,
-                          borderRadius: 4,
                           backgroundColor: runStatusColor(r().status, look().palette),
                           flexShrink: 0,
                         }}
                       />
                       <RunLines title={r().name} detail={r().detail} error={r().error} />
-                    </View>
+                    </SmeltRow>
                   )}
                 </Each>
               </SurfaceCard>

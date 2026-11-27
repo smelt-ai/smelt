@@ -1,5 +1,5 @@
 import type { Signal } from "../nsh/index";
-import type { JSX, StyleProp, TextStyle, ViewStyle } from "../nsh/types";
+import type { AccessibilityRole, Bounds, InputRef, JSX, StyleProp, TextStyle, ViewStyle } from "../nsh/types";
 import type { Collapsible, ContextMenu, Dialog, Menu, Popover, Select, Tooltip } from "../nsh/base";
 
 export type LocalizedText = string | Record<string, string>;
@@ -725,27 +725,48 @@ export declare function SmeltRadio(props: {
   children?: JSX.Element;
 }): JSX.Element;
 
+/** 按钮的颜色角色。`secondary` 次要（默认），`quiet` 安静（无底，悬停才铺），`danger` 次要底红字，
+ * `danger-quiet` 安静红字，`floating` 浮在内容上（`surface` 底加投影），`dismiss` 卡片角上的关闭。 */
+export type SmeltButtonVariant =
+  | "secondary"
+  | "primary"
+  | "quiet"
+  | "danger"
+  | "danger-quiet"
+  | "floating"
+  | "dismiss";
+/** 控件尺寸：按钮（纯图标按钮见方）和输入框共用一张表，同一档并排一样高。图标跟同档的字配，有字没字一样大。
+ * `xs` 20 高、small 字、图标 14：行里的就地操作。
+ * `sm` 24 高、text_xsmall 字、图标 14：面板顶栏、工具条。
+ * `md` 28 高、ui 字、图标 16：标题栏、表单、对话框。 */
+export type SmeltControlSize = "xs" | "sm" | "md";
+/** 外形只改圆角：`rounded` 走主题圆角，`pill` 两端全圆，`circle` 用在纯图标按钮上。 */
+export type SmeltButtonShape = "rounded" | "pill" | "circle";
+
 export interface SmeltButtonProps {
   label?: string;
   icon?: SmeltIconPath | (string & {});
   trailingIcon?: SmeltIconPath | (string & {});
   tooltip?: string;
   accessibilityLabel?: string;
+  /** 读屏角色，默认 `button`；页签传 `tab`、列表项传 `option`，选中态随 `selected` 播报。 */
+  role?: AccessibilityRole;
+  /** 读屏补充：按下会做什么（「插入到输入框」）。 */
+  accessibilityHint?: string;
   command?: string;
-  quiet?: boolean;
-  primary?: boolean;
-  danger?: boolean;
-  dismiss?: boolean;
-  floating?: boolean;
-  circle?: boolean;
-  small?: boolean;
+  /** 默认 `secondary`。 */
+  variant?: SmeltButtonVariant;
+  /** 默认 `md`。 */
+  size?: SmeltControlSize;
+  /** 默认 `rounded`。 */
+  shape?: SmeltButtonShape;
+  /** 撑满父级宽度（文字过长时截断）。 */
   fill?: boolean;
   disabled?: boolean;
   loading?: boolean;
   selected?: boolean;
-  toggled?: boolean;
+  /** 只放布局：宽度、`flex`、外边距、对齐。颜色、圆角、内边距、字由 `variant` / `size` / `shape` 定，不接 `style`。 */
   class?: string;
-  style?: StyleProp<ViewStyle>;
   testID?: string;
   onPress?: (e?: any) => void;
   children?: JSX.Element;
@@ -784,6 +805,115 @@ export declare function SmeltDialog(
 ): JSX.Element;
 
 export declare function SmeltButton(props: SmeltButtonProps): JSX.Element;
+
+/** 列表行：悬停 `row_hover`、选中 `row_selected`（只靠底色，不画竖条），箭头光标，键盘可聚焦。
+ * 行高、内边距、缩进、间距放 `class` / `style`；颜色和圆角归组件，`style` 里写了也会被盖掉。 */
+export declare function SmeltRow(props: {
+  selected?: boolean;
+  disabled?: boolean;
+  /** 默认圆角 `radius.row`；贴边铺满的行传 `false`。 */
+  rounded?: boolean;
+  accessibilityLabel?: string;
+  /** 读屏角色，默认 `button`；页签传 `tab`、列表项传 `option`，选中态随 `selected` 播报。 */
+  role?: AccessibilityRole;
+  /** 读屏补充：按下会做什么（「插入到输入框」）。 */
+  accessibilityHint?: string;
+  tooltip?: JSX.Element;
+  testID?: string;
+  class?: string;
+  style?: StyleProp<ViewStyle>;
+  onPress?: (e?: any) => void;
+  onPressDown?: () => void;
+  onMouseEnter?: (e: any) => void;
+  onMouseLeave?: (e: any) => void;
+  ref?: any;
+  children?: JSX.Element;
+}): JSX.Element;
+
+/** 文本框：`card` 底、`input` 色细边、主题圆角。单行 `md` 28 高 `ui` 字、`sm` 26 高 `small` 字；
+ * 多行的最小高度放 `class`。 */
+export declare function SmeltInput(props: {
+  value?: string;
+  defaultValue?: string;
+  placeholder?: string;
+  masked?: boolean;
+  multiline?: boolean;
+  disabled?: boolean;
+  readonly?: boolean;
+  autoFocus?: boolean;
+  selectTextOnFocus?: boolean;
+  maxLength?: number;
+  /** 校验没过：边框换 `bad`。 */
+  invalid?: boolean;
+  /** 不画底和边：嵌在已有外框里（搜索条、菜单里的过滤框）。 */
+  bare?: boolean;
+  /** 高度和字档同按钮（见 `SmeltControlSize`），默认 `md`。行里就地改名用 `md`：字和行标题同为 ui，进出编辑不跳。 */
+  size?: SmeltControlSize;
+  /** 等宽字（命令、路径、代码）。 */
+  mono?: boolean;
+  accessibilityLabel?: string;
+  testID?: string;
+  ref?: InputRef | ((ref: InputRef) => void);
+  /** 只放布局：宽度、`flex`、最小高度、外边距。 */
+  class?: string;
+  onChange?: (e: { value: string }) => void;
+  onSubmit?: (e: { text: string }) => void;
+  onKeyPress?: (e: { key: string }) => void;
+  onFocus?: () => void;
+  onBlur?: () => void;
+  onLayout?: (e: { bounds: Bounds }) => void;
+}): JSX.Element;
+
+/** 分段控件：一组互斥的选项，`multiple` 时可多选。整组是 Tab 的一站，左右键移焦点，空格 / 回车按下。 */
+export declare function SmeltSegmented<T extends string>(props: {
+  /** `tooltip` 给这一段的悬停说明。 */
+  options: ReadonlyArray<{ value: T; label: string; disabled?: boolean; tooltip?: string }>;
+  /** 单选：当前值；`multiple` 时传选中的值数组。 */
+  value: T | ReadonlyArray<T>;
+  multiple?: boolean;
+  /** 单选：按下那段的值；`multiple` 时是被切换的那段，增删由调用方定。 */
+  onChange: (value: T) => void;
+  disabled?: boolean;
+  accessibilityLabel?: string;
+  testID?: string;
+  /** 只放布局。 */
+  class?: string;
+}): JSX.Element;
+
+/** 菜单项：28 高，左边可选 14 的图标或图片，右边可选勾；`danger` 用 `bad`。放在 `SmeltMenu` / `SmeltContextMenu` 里。 */
+export declare function SmeltMenuItem(props: {
+  label: string;
+  icon?: SmeltIconPath | (string & {}) | null;
+  image?: string | null;
+  iconColor?: string;
+  /** 给了就留勾的位置（`false` 只留空位），对齐一组可勾选的项。 */
+  checked?: boolean;
+  danger?: boolean;
+  disabled?: boolean;
+  /** 默认 `true`。 */
+  closeOnSelect?: boolean;
+  testID?: string;
+  onSelect: () => void;
+}): JSX.Element;
+/** 菜单分隔线。 */
+export declare function SmeltMenuSeparator(): JSX.Element;
+/** 菜单分组名：`small_medium`、`faint`，不可点。 */
+export declare function SmeltMenuLabel(props: { label: string }): JSX.Element;
+
+/** 确认框：标题、说明、可选补充（`children`，在说明下面），右下角取消 + 确认（`danger` 时是危险按钮）。
+ * 只能用按钮或 Esc 关；`busy` 时确认转圈，取消和 Esc 不可用。开关归调用方：`onConfirm` 里自己把 `open` 置回。 */
+export declare function SmeltConfirmDialog(props: {
+  open: boolean;
+  title: string;
+  description?: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  danger?: boolean;
+  busy?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+  children?: JSX.Element;
+}): JSX.Element;
 export declare function SmeltWindowBar(props: { view: string }): JSX.Element;
 
 export declare function SmeltMarkdown(props: {

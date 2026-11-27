@@ -1,8 +1,7 @@
 // 项目的仓库对话框的界面，逻辑在 `../repositories.js`。
 
 import { computed, Scroll, Text, View } from "nsh";
-import { Input } from "nsh/base";
-import { DIALOG_SURFACE_CLASS, SmeltButton, SmeltCheckbox, SmeltDialog, SmeltIcon } from "smelt/sdk";
+import { DIALOG_SURFACE_CLASS, SmeltButton, SmeltCheckbox, SmeltDialog, SmeltIcon, SmeltInput } from "smelt/sdk";
 
 import { icon } from "../util.js";
 import { list, MemoryInputState, t, theme, tick } from "./bridge.ts";
@@ -31,13 +30,12 @@ function FieldInput(props: {
   autoFocus?: boolean;
   onCancel?: () => void;
 }) {
-  const look = () => theme();
   const value = () => {
     tick();
     return props.field()?.value() ?? "";
   };
   return (
-    <Input
+    <SmeltInput
       ref={(el: any) => {
         if (props.autoFocus) el?.focus?.();
       }}
@@ -50,12 +48,6 @@ function FieldInput(props: {
       onSubmit={() => props.field()?.submit()}
       onKeyPress={(e: any) => {
         if (e?.key === "Escape") props.onCancel?.();
-      }}
-      class="rounded-(--radius) border border-input bg-card px-2 text-foreground"
-      style={{
-        height: 30,
-        fontSize: look().type.ui.size,
-        lineHeight: look().type.ui.line_height,
       }}
     />
   );
@@ -181,7 +173,7 @@ export function RepositoriesDialog() {
                     </Text>
                     <View style={{ display: "flex", flexDirection: "row" }}>
                       <SmeltButton
-                        small={true}
+                        size="sm"
                         label={t("repo.choose_folder")}
                         disabled={busy()}
                         onPress={() => dialog()?.choose_folder()}
@@ -279,8 +271,8 @@ export function RepositoriesDialog() {
 
                             <If when={mode() === "manage"}>
                               <SmeltButton
-                                quiet={true}
-                                small={true}
+                                variant="quiet"
+                                size="sm"
                                 label={t("repo.remove")}
                                 disabled={busy() || referenced() !== ""}
                                 tooltip={
@@ -301,20 +293,20 @@ export function RepositoriesDialog() {
 
               <View style={{ display: "flex", flexDirection: "row", gap: 8 }}>
                 <SmeltButton
-                  small={true}
+                  size="sm"
                   label={t("repo.bind_more")}
                   disabled={busy()}
                   onPress={() => dialog()?.switch("bind")}
                 />
                 <SmeltButton
-                  small={true}
+                  size="sm"
                   label={t("repo.clone_more")}
                   disabled={busy()}
                   onPress={() => dialog()?.switch("clone")}
                 />
                 <If when={mode() === "manage"}>
                   <SmeltButton
-                    small={true}
+                    size="sm"
                     label={t("menu.new_workset")}
                     disabled={busy() || repos().length === 0}
                     onPress={() => dialog()?.switch("create")}
@@ -332,15 +324,15 @@ export function RepositoriesDialog() {
               </Text>
               <View style={{ display: "flex", flexDirection: "row", gap: 8 }}>
                 <SmeltButton
-                  quiet={true}
-                  small={true}
+                  variant="quiet"
+                  size="sm"
                   label={t("repo.keep")}
                   disabled={busy()}
                   onPress={() => dialog()?.keep()}
                 />
                 <SmeltButton
-                  danger={true}
-                  small={true}
+                  variant="danger"
+                  size="sm"
                   label={t("repo.confirm_remove")}
                   disabled={busy()}
                   onPress={() => dialog()?.confirm_remove()}
@@ -368,8 +360,8 @@ export function RepositoriesDialog() {
           >
             <If when={dialog()?.back?.() != null}>
               <SmeltButton
-                quiet={true}
-                small={true}
+                variant="quiet"
+                size="sm"
                 label={t("repo.back")}
                 disabled={busy()}
                 onPress={() => dialog()?.go_back()}
@@ -377,16 +369,16 @@ export function RepositoriesDialog() {
             </If>
             <If when={mode() !== "manage"}>
               <SmeltButton
-                quiet={true}
-                small={true}
+                variant="quiet"
+                size="sm"
                 label={t("close.confirm")}
                 disabled={busy()}
                 onPress={() => dialog()?.dismiss()}
               />
             </If>
             <SmeltButton
-              primary={true}
-              small={true}
+              variant="primary"
+              size="sm"
               label={t(busy() ? "repo.busy" : (SUBMIT[mode()] ?? "repo.done"))}
               loading={busy()}
               disabled={submitDisabled()}

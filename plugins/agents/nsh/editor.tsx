@@ -1,15 +1,21 @@
 // 智能体编辑页：页头（返回/缩写/标题/页签分段/开始对话）、配置页签、自动化页签与记忆页签。
 
 import { cleanup, computed, Scroll, Text, View } from "nsh";
-import { Input, Submenu } from "nsh/base";
+import { Submenu } from "nsh/base";
 import {
   locale,
+  MENU_ITEM_CLASS,
   pathJoin,
   pathStyle,
   SmeltButton,
   SmeltDisclosure,
   SmeltDisclosureChevron,
   SmeltIcon,
+  SmeltInput,
+  SmeltMenuItem,
+  SmeltMenuSeparator,
+  SmeltRow,
+  SmeltSegmented,
   t,
   views,
   workspaceDirectory,
@@ -92,14 +98,8 @@ import {
   EngineChip,
   EngineMark,
   ErrorAlert,
-  INPUT_CLASS,
-  MENU_ITEM_CLASS,
-  MenuDivider,
-  MenuEntry,
   PageToolbar,
   QuietBadge,
-  SegmentedControl,
-  SegmentedOption,
   SurfaceCard,
   ToggleSwitch,
 } from "./ui.tsx";
@@ -173,9 +173,9 @@ function EngineControl(props: { agentId: () => string; engineId: () => string })
       >
         <Each of={engines()} key={(eng: any) => eng.id}>
           {(eng: () => any) => (
-            <MenuEntry
+            <SmeltMenuItem
               label={eng().label}
-              iconPath={eng().icon}
+              icon={eng().icon}
               checked={eng().id === props.engineId()}
               onSelect={() => setAgentEngine(props.agentId(), eng().id)}
             />
@@ -211,13 +211,13 @@ function ModelControl(props: {
       small={true}
       minWidth={196}
     >
-      <MenuEntry
+      <SmeltMenuItem
         label={t("model.inherit")}
         checked={inherit()}
         onSelect={() => setAgentModel(props.agentId(), "", "")}
       />
       <If when={groups().length > 0}>
-        <MenuDivider />
+        <SmeltMenuSeparator />
         <Each of={groups()} key={(g: any) => String(g.provider)}>
           {(group: () => any) => (
             <Submenu
@@ -247,7 +247,7 @@ function ModelControl(props: {
                 key={(m: any) => `${m.provider}:${m.id}`}
               >
                 {(choice: () => any) => (
-                  <MenuEntry
+                  <SmeltMenuItem
                     label={modelChoiceShortLabel(choice())}
                     checked={
                       choice().provider === props.modelProvider() &&
@@ -352,8 +352,8 @@ function ContextCard(props: { ref: () => AgentRef | null; agent: () => any | nul
           </Text>
         </View>
         <SmeltButton
-          quiet={true}
-          small={true}
+          variant="quiet"
+          size="sm"
           icon="icons/plus.svg"
           label={t("context.folder")}
           tooltip={t("context.folder_tooltip")}
@@ -426,8 +426,8 @@ function ContextCard(props: { ref: () => AgentRef | null; agent: () => any | nul
                   {row().value}
                 </Text>
                 <SmeltButton
-                  quiet={true}
-                  small={true}
+                  variant="quiet"
+                  size="sm"
                   icon="icons/trash.svg"
                   tooltip={
                     row().isFolder ? t("context.unbind_folder") : t("context.remove_link")
@@ -462,21 +462,19 @@ function ContextCard(props: { ref: () => AgentRef | null; agent: () => any | nul
         }}
       >
         <View style={{ flex: 1, minWidth: 0 }}>
-          <Input
+          <SmeltInput
             value={contextLinkInput()}
             placeholder={t("context.link_placeholder")}
             accessibilityLabel={t("context.link_label")}
-            onChange={({ value }: { value: string }) => contextLinkInput.set(value)}
+            onChange={({ value }) => contextLinkInput.set(value)}
             onSubmit={() => {
               const id = props.agent()?.id;
               if (id) addAgentContextLink(id);
             }}
-            class={INPUT_CLASS}
-            style={{ height: 28, fontSize: look().type.ui.size }}
           />
         </View>
         <SmeltButton
-          small={true}
+          size="sm"
           label={t("common.add")}
           disabled={contextLinkInput().trim().length === 0}
           onPress={() => {
@@ -583,8 +581,8 @@ function MemorySummaryCard(props: { agent: () => any | null }) {
         </If>
       </View>
       <SmeltButton
-        quiet={true}
-        small={true}
+        variant="quiet"
+        size="sm"
         label={t("common.manage")}
         icon="icons/chevron-right.svg"
         tooltip={t("memory.manage_tooltip")}
@@ -659,16 +657,16 @@ function CapabilitiesCard(props: { agent: () => any | null }) {
         </View>
         <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 4 }}>
           <SmeltButton
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             icon="icons/refresh.svg"
             tooltip={t("capabilities.rescan")}
             onPress={refreshAgentPiConfig}
           />
           <If when={hasCapabilitiesView()}>
             <SmeltButton
-              quiet={true}
-              small={true}
+              variant="quiet"
+              size="sm"
               label={t("common.manage")}
               icon="icons/chevron-right.svg"
               tooltip={t("capabilities.manage_tooltip")}
@@ -692,18 +690,17 @@ function CapabilitiesCard(props: { agent: () => any | null }) {
           }}
         >
           <View style={{ flex: 1, minWidth: 0 }}>
-            <Input
+            <SmeltInput
               value={capabilityQuery()}
               placeholder={t("capabilities.filter_placeholder")}
               accessibilityLabel={t("capabilities.filter_placeholder")}
-              onChange={({ value }: { value: string }) => capabilityQuery.set(value)}
-              class={INPUT_CLASS}
-              style={{ height: 28, fontSize: look().type.ui.size }}
+              onChange={({ value }) => capabilityQuery.set(value)}
             />
           </View>
           <If when={capabilityQuery().length > 0}>
             <SmeltButton
-              dismiss={true}
+              variant="dismiss"
+              size="xs"
               icon="icons/close.svg"
               accessibilityLabel={t("common.cancel")}
               onPress={() => capabilityQuery.set("")}
@@ -892,8 +889,8 @@ function DeleteAgentRow(props: { ref: () => AgentRef | null }) {
         </Text>
       </View>
       <SmeltButton
-        danger={true}
-        small={true}
+        variant="danger"
+        size="sm"
         label={t("common.delete")}
         disabled={blocked()}
         onPress={() => {
@@ -966,8 +963,8 @@ function MemorySection(props: {
         {/* 远程机器隐藏本机专用的「打开记忆文件夹」按钮 */}
         <If when={isLocal()}>
           <SmeltButton
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             icon="icons/folder-open.svg"
             tooltip={t("memory.open_folder")}
             onPress={() => {
@@ -1048,7 +1045,7 @@ function MemorySection(props: {
                         marginRight: 12,
                         marginBottom: 8,
                         maxHeight: 240,
-                        borderRadius: 6,
+                        borderRadius: look().radius.md,
                         backgroundColor: look().palette.side,
                       }}
                     >
@@ -1121,63 +1118,59 @@ function MemorySection(props: {
                       {memoryKindLabel(entry().kind)}
                     </Text>
 
-                    <View
-                      role="button"
+                    <SmeltRow
+                      accessibilityLabel={entry().name}
                       onPress={() => toggleMemoryExpanded(props.layer, entry().file_name)}
-                      style={{
-                        flex: 1,
-                        minWidth: 0,
-                        paddingLeft: 4,
-                        paddingRight: 4,
-                        paddingTop: 2,
-                        paddingBottom: 2,
-                        borderRadius: look().radius.sm,
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 2,
-                        cursor: "default",
-                      }}
-                      hoverStyle={{
-                        backgroundColor: look().palette.row_hover,
-                      }}
+                      class="flex-1 min-w-0"
+                      style={{ paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 }}
                     >
                       <View
                         style={{
+                          flex: 1,
+                          minWidth: 0,
                           display: "flex",
-                          flexDirection: "row",
-                          alignItems: "center",
-                          gap: 4,
+                          flexDirection: "column",
+                          gap: 2,
                         }}
                       >
-                        <SmeltDisclosureChevron
-                          open={isExpanded()}
-                          size={12}
-                          color={look().palette.faint}
-                        />
-                        <Text
+                        <View
                           style={{
-                            flex: 1,
-                            minWidth: 0,
-                            color: look().palette.text,
-                            fontSize: look().type.text_xsmall.size,
-                            lineHeight: look().type.text_xsmall.line_height,
-                            numberOfLines: 1,
+                            display: "flex",
+                            flexDirection: "row",
+                            alignItems: "center",
+                            gap: 4,
                           }}
                         >
-                          {entry().name}
+                          <SmeltDisclosureChevron
+                            open={isExpanded()}
+                            size={12}
+                            color={look().palette.faint}
+                          />
+                          <Text
+                            style={{
+                              flex: 1,
+                              minWidth: 0,
+                              color: look().palette.text,
+                              fontSize: look().type.text_xsmall.size,
+                              lineHeight: look().type.text_xsmall.line_height,
+                              numberOfLines: 1,
+                            }}
+                          >
+                            {entry().name}
+                          </Text>
+                        </View>
+                        <Text
+                          style={{
+                            color: look().palette.faint,
+                            fontSize: look().type.text_xsmall.size,
+                            lineHeight: look().type.text_xsmall.line_height,
+                            numberOfLines: 2,
+                          }}
+                        >
+                          {subtitle()}
                         </Text>
                       </View>
-                      <Text
-                        style={{
-                          color: look().palette.faint,
-                          fontSize: look().type.text_xsmall.size,
-                          lineHeight: look().type.text_xsmall.line_height,
-                          numberOfLines: 2,
-                        }}
-                      >
-                        {subtitle()}
-                      </Text>
-                    </View>
+                    </SmeltRow>
 
                     <If when={usage() != null}>
                       <Text
@@ -1195,8 +1188,8 @@ function MemorySection(props: {
                     {/* 远程机器隐藏本机专用的「用文本编辑器打开」按钮 */}
                     <If when={isLocal() && typeof entry().path === "string" && entry().path.length > 0}>
                       <SmeltButton
-                        quiet={true}
-                        small={true}
+                        variant="quiet"
+                        size="sm"
                         icon="icons/external-link.svg"
                         tooltip={t("memory.open_in_editor")}
                         onPress={() => openAgentMemoryFile(entry().path)}
@@ -1205,8 +1198,8 @@ function MemorySection(props: {
 
                     <If when={entry().pending_reason != null}>
                       <SmeltButton
-                        quiet={true}
-                        small={true}
+                        variant="quiet"
+                        size="sm"
                         icon="icons/check.svg"
                         accessibilityLabel={t("memory.accept")}
                         tooltip={t("memory.accept_tooltip")}
@@ -1218,8 +1211,8 @@ function MemorySection(props: {
                     </If>
 
                     <SmeltButton
-                      quiet={true}
-                      small={true}
+                      variant="quiet"
+                      size="sm"
                       icon="icons/close.svg"
                       tooltip={t("memory.delete_tooltip")}
                       onPress={() => {
@@ -1250,17 +1243,17 @@ function MemoryTabPanel(props: { ref: () => AgentRef | null; agent: () => any | 
   const filter = () => memoryFilter();
   const narrowed = () => query().trim().length > 0 || filter() !== "all";
 
-  const filterOptions = computed<SegmentedOption[]>(() => {
+  const filterOptions = computed<Array<{ value: MemoryFilter; label: string; tooltip: string }>>(() => {
     locale();
     return [
-      { key: "all", label: t("memory.filter.all"), tooltip: t("memory.filter.all_tooltip") },
+      { value: "all", label: t("memory.filter.all"), tooltip: t("memory.filter.all_tooltip") },
       {
-        key: "pending",
+        value: "pending",
         label: t("memory.filter.pending"),
         tooltip: t("memory.filter.pending_tooltip"),
       },
-      { key: "rules", label: t("memory.filter.rules"), tooltip: t("memory.filter.rules_tooltip") },
-      { key: "facts", label: t("memory.filter.facts"), tooltip: t("memory.filter.facts_tooltip") },
+      { value: "rules", label: t("memory.filter.rules"), tooltip: t("memory.filter.rules_tooltip") },
+      { value: "facts", label: t("memory.filter.facts"), tooltip: t("memory.filter.facts_tooltip") },
     ];
   });
 
@@ -1301,8 +1294,8 @@ function MemoryTabPanel(props: { ref: () => AgentRef | null; agent: () => any | 
         </View>
         <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
           <SmeltButton
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             icon="icons/refresh.svg"
             tooltip={t("memory.reload")}
             onPress={refreshAgentMemories}
@@ -1346,28 +1339,27 @@ function MemoryTabPanel(props: { ref: () => AgentRef | null; agent: () => any | 
           }}
         >
           <View style={{ flex: 1, minWidth: 0 }}>
-            <Input
+            <SmeltInput
               value={query()}
               placeholder={t("memory.search_placeholder")}
               accessibilityLabel={t("memory.search_placeholder")}
-              onChange={({ value }: { value: string }) => memoryQuery.set(value)}
-              class={INPUT_CLASS}
-              style={{ height: 28, fontSize: look().type.ui.size }}
+              onChange={({ value }) => memoryQuery.set(value)}
             />
           </View>
           <If when={query().length > 0}>
             <SmeltButton
-              dismiss={true}
+              variant="dismiss"
+              size="xs"
               icon="icons/close.svg"
               accessibilityLabel={t("common.cancel")}
               onPress={() => memoryQuery.set("")}
             />
           </If>
         </View>
-        <SegmentedControl
+        <SmeltSegmented
           options={filterOptions()}
-          selectedKey={filter()}
-          onSelect={(key) => memoryFilter.set(key as MemoryFilter)}
+          value={filter()}
+          onChange={(value) => memoryFilter.set(value)}
         />
       </View>
 
@@ -1412,16 +1404,19 @@ export function AgentEditorView() {
     return getAgentDefinition(r.machine, r.id);
   });
 
-  const tabOptions = computed<SegmentedOption[]>(() => {
+  type TabKey = "config" | "automations" | "memory";
+  const tabOptions = computed(() => {
     locale();
     views();
     const pending = memoryPendingCount(memoriesState());
-    const list: SegmentedOption[] = [{ key: "config", label: t("tab.config") }];
+    const list: Array<{ value: TabKey; label: string }> = [
+      { value: "config", label: t("tab.config") },
+    ];
     if (automationsViewRegistered()) {
-      list.push({ key: "automations", label: t("tab.automations") });
+      list.push({ value: "automations", label: t("tab.automations") });
     }
     list.push({
-      key: "memory",
+      value: "memory",
       label:
         pending > 0 ? t("tab.memory_pending", { count: pending }) : t("memory.title"),
     });
@@ -1430,7 +1425,7 @@ export function AgentEditorView() {
 
   const selectedTabKey = computed(() => editorTab().kind);
 
-  const handleTabSelect = (key: string) => {
+  const handleTabSelect = (key: TabKey) => {
     if (key === "config") {
       selectEditorTab({ kind: "config" });
     } else if (key === "automations") {
@@ -1470,7 +1465,7 @@ export function AgentEditorView() {
       >
         <PageToolbar>
           <SmeltButton
-            quiet={true}
+            variant="quiet"
             icon="icons/chevron-left.svg"
             tooltip={editingConversationDraft() ? t("editor.cancel") : t("editor.back")}
             onPress={closeAgentSettings}
@@ -1513,17 +1508,17 @@ export function AgentEditorView() {
             </If>
           </View>
 
-          <SegmentedControl
+          <SmeltSegmented
             options={tabOptions()}
-            selectedKey={selectedTabKey()}
-            onSelect={handleTabSelect}
+            value={selectedTabKey()}
+            onChange={handleTabSelect}
           />
 
           <If
             when={editingConversationDraft()}
             else={
               <SmeltButton
-                primary={true}
+                variant="primary"
                 label={t("new_conversation.title")}
                 tooltip={t("new_conversation.tooltip")}
                 onPress={() => {
@@ -1534,7 +1529,7 @@ export function AgentEditorView() {
             }
           >
             <SmeltButton
-              primary={true}
+              variant="primary"
               label={t("editor.start")}
               onPress={() => {
                 void commitConversationDraft();
@@ -1575,7 +1570,7 @@ export function AgentEditorView() {
                   gap: 10,
                 }}
               >
-                <Input
+                <SmeltInput
                   value={editorName()}
                   placeholder={t("editor.name_placeholder")}
                   accessibilityLabel={t("agent.name_label")}
@@ -1585,12 +1580,6 @@ export function AgentEditorView() {
                   }}
                   onSubmit={() => {
                     void flushEditorText();
-                  }}
-                  class={INPUT_CLASS}
-                  style={{
-                    height: 30,
-                    fontSize: look().type.ui_medium.size,
-                    fontWeight: 600,
                   }}
                 />
                 <View
@@ -1657,7 +1646,7 @@ export function AgentEditorView() {
                   </Text>
                 </View>
                 <View style={{ paddingLeft: 20, paddingRight: 20, paddingBottom: 12 }}>
-                  <Input
+                  <SmeltInput
                     multiline={true}
                     value={editorPrompt()}
                     placeholder={t("editor.instructions_placeholder")}
@@ -1666,13 +1655,7 @@ export function AgentEditorView() {
                     onBlur={() => {
                       void flushEditorText();
                     }}
-                    class="rounded-(--radius) border border-input bg-card p-2 text-foreground"
-                    style={{
-                      minHeight: 160,
-                      maxHeight: 360,
-                      fontSize: look().type.ui.size,
-                      lineHeight: look().type.ui.line_height,
-                    }}
+                    class="min-h-40 max-h-90"
                   />
                 </View>
                 <View style={{ paddingLeft: 20, paddingRight: 20, paddingTop: 2, paddingBottom: 12 }}>

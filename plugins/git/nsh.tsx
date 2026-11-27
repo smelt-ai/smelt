@@ -4,14 +4,9 @@
 //           + 右 <ResizablePanelGroup> 多仓分组改动树 & 每仓独立提交框
 // - 历史页：三栏 <ResizablePanelGroup>（分支树 + <SmeltVector> 矢量贝塞尔分支图/提交列表 + 提交详情/单文件 Diff）
 // - 全事件驱动（project.watch / project_changed / reconnected / window_activated），仅前台可见时 60s 自动 fetch。
-import { computed, effect, Overlay, Scroll, signal, Text, View } from "nsh";
-import {
-  Input,
-  MenuItem,
-  MenuSeparator,
-  ResizablePanel,
-  ResizablePanelGroup,
-} from "nsh/base";
+import { computed, effect, List, Overlay, Scroll, signal, Text, View } from "nsh";
+import { ResizablePanel, ResizablePanelGroup } from "nsh/base";
+import type { SmeltIconPath } from "smelt/sdk";
 import {
   activeContext,
   bootTask,
@@ -19,10 +14,8 @@ import {
   callWithBlobs,
   clipboardWrite,
   currentTheme,
-  DIALOG_SURFACE_CLASS,
   initHost,
   localOs,
-  MENU_ITEM_CLASS,
   onCommand,
   onEvent,
   onSlices,
@@ -37,12 +30,17 @@ import {
   revealPath,
   run,
   SmeltButton,
+  SmeltConfirmDialog,
   SmeltContextMenu,
-  SmeltDialog,
   SmeltDiffView,
   SmeltDisclosureChevron,
   SmeltIcon,
+  SmeltInput,
   SmeltMenu,
+  SmeltMenuItem,
+  SmeltMenuSeparator,
+  SmeltRow,
+  SmeltSegmented,
   SmeltTooltip,
   SmeltVector,
   stableMemo,
@@ -80,7 +78,6 @@ import {
   projectKey,
   pullRequestLink,
   releaseGitWrite,
-  repoKindGlyph,
   repoNeedsAttention,
   reserveGitWrite,
   resolveGitWriteTarget,
@@ -168,6 +165,20 @@ interface GitDiffState {
   hasStaged: boolean;
 }
 
+/** 分支栏的一行：分组名（`header`，`text` 是组名）或一个分支（`text` 是分支名）。 */
+interface BranchRow {
+  key: string;
+  header: boolean;
+  text: string;
+  remote: boolean;
+}
+
+/** 历史列表的一行：提交和它那一行分支图，每次读日志时配好一次。 */
+interface LogRow {
+  commit: CommitNode;
+  graph: any;
+}
+
 interface DangerDialogState {
   title: string;
   body: string;
@@ -208,8 +219,7 @@ const dangerDialog = signal<DangerDialogState | null>(null);
 
 // 日志页状态
 const logScope = signal<LogScope>("head");
-const logCommits = signal<CommitNode[]>([]);
-const logGraphRows = signal<any[]>([]);
+const logRows = signal<LogRow[]>([]);
 const logLoading = signal<boolean>(false);
 const logSelectedHash = signal<string | null>(null);
 const logDetailFiles = signal<Array<[string, string]>>([]);
@@ -1238,8 +1248,8 @@ function reloadLog(repo: ProjectRef) {
     .then((res: any) => {
       if (logLoadedRootKey !== k) return;
       const commits: CommitNode[] = Array.isArray(res?.commits) ? res.commits : [];
-      logCommits.set(commits);
-      logGraphRows.set(layoutGraph(commits));
+      const graph = layoutGraph(commits);
+      logRows.set(commits.map((commit, ix) => ({ commit, graph: graph[ix] })));
       logLoading.set(false);
       logSelectedHash.set(null);
       logDetailFiles.set([]);
@@ -1248,8 +1258,7 @@ function reloadLog(repo: ProjectRef) {
     })
     .catch(() => {
       if (logLoadedRootKey !== k) return;
-      logCommits.set([]);
-      logGraphRows.set([]);
+      logRows.set([]);
       logLoading.set(false);
     });
 }
@@ -1562,42 +1571,12 @@ onEvent(
 
 // ---- 主题与共用组件 ----
 
-
-function MenuRow(props: {
-  label: string;
-  iconPath?: string;
-  danger?: boolean;
-  disabled?: boolean;
-  onSelect: () => void;
-}) {
-  const look = currentTheme;
-  return (
-    <MenuItem
-      closeOnSelect={true}
-      disabled={props.disabled}
-      class={MENU_ITEM_CLASS}
-      style={{ height: 28, gap: 8 }}
-      onSelect={props.onSelect}
-    >
-      <If when={Boolean(props.iconPath)}>
-        <SmeltIcon
-          path={props.iconPath}
-          size={14}
-          color={props.danger ? look().palette.bad : look().palette.muted}
-        />
-      </If>
-      <Text
-        style={{
-          fontSize: look().type.ui_compact.size,
-          lineHeight: look().type.ui_compact.line_height,
-          color: props.danger ? look().palette.bad : look().palette.text,
-        }}
-      >
-        {props.label}
-      </Text>
-    </MenuItem>
-  );
-}
+/** 仓库种类的图标：主仓、子模块、嵌套的独立仓库。 */
+const REPO_KIND_ICON: Record<DiscoveredRepo["kind"], SmeltIconPath> = {
+  root: "icons/repositories.svg",
+  submodule: "icons/folder-tree.svg",
+  nested: "icons/folder.svg",
+};
 
 function Placeholder(props: { text: string; subtext?: string }) {
   const look = currentTheme;
@@ -1654,6 +1633,7 @@ function busyLabel(op: string): string {
   return t(key);
 }
 
+/** 同步菜单（推送、获取、拉取、储藏、丢弃全部）。`triggerLabel` 为空时触发器只显示「更多」图标。 */
 function OpsMenu(props: {
   repo: ProjectRef;
   ahead: number;
@@ -1662,9 +1642,7 @@ function OpsMenu(props: {
   hasChanges: boolean;
   upstream: boolean;
   triggerLabel: string;
-  triggerColor: string;
 }) {
-  const look = currentTheme;
   const runOn = (fn: (repo: ProjectRef) => void) => {
     setActiveRepo(props.repo);
     fn(props.repo);
@@ -1675,61 +1653,47 @@ function OpsMenu(props: {
       align="end"
       popupStyle={{ minWidth: 168 }}
       trigger={
-        <View
-          class="rounded hover:bg-accent"
-          style={{
-            paddingLeft: 6,
-            paddingRight: 6,
-            height: 22,
-            display: "flex",
-            flexDirection: "row",
-            alignItems: "center",
-            gap: 3,
-            cursor: "pointer",
-            flexShrink: 0,
-          }}
-        >
-          <Text
-            style={{
-              fontFamily: look().fonts?.mono,
-              fontSize: look().type.text_xsmall.size,
-              color: props.triggerColor,
-            }}
-          >
-            {props.triggerLabel}
-          </Text>
-        </View>
+        <SmeltButton
+          variant="quiet"
+          size="xs"
+          icon={props.triggerLabel ? undefined : "icons/ellipsis.svg"}
+          label={props.triggerLabel || undefined}
+          tooltip={t("ops.more")}
+        />
       }
     >
       <If when={props.ahead > 0}>
-        <MenuRow label={t("ops.push", { ahead: props.ahead })} onSelect={() => runOn(runPushOnly)} />
+        <SmeltMenuItem
+          label={t("ops.push", { ahead: props.ahead })}
+          onSelect={() => runOn(runPushOnly)}
+        />
       </If>
       <If when={props.ahead === 0 && props.upstream}>
-        <MenuRow
+        <SmeltMenuItem
           label={t("command.open_pull_request")}
           onSelect={() => runOn((r) => void openPullRequest(r))}
         />
       </If>
-      <MenuRow label={t("ops.fetch")} onSelect={() => runOn((r) => runFetch(r, false))} />
-      <MenuRow
+      <SmeltMenuItem label={t("ops.fetch")} onSelect={() => runOn((r) => runFetch(r, false))} />
+      <SmeltMenuItem
         label={props.behind > 0 ? t("ops.pull_behind", { behind: props.behind }) : t("ops.pull")}
         onSelect={() => runOn(runPull)}
       />
       <If when={props.hasChanges}>
-        <MenuSeparator class="my-1 bg-border" style={{ height: 1 }} />
-        <MenuRow label={t("ops.stash")} onSelect={() => runOn(runStashPush)} />
+        <SmeltMenuSeparator />
+        <SmeltMenuItem label={t("ops.stash")} onSelect={() => runOn(runStashPush)} />
       </If>
       <If when={props.stashCount > 0}>
-        <MenuRow
+        <SmeltMenuItem
           label={t("ops.stash_pop", { count: props.stashCount })}
           onSelect={() => runOn(runStashPop)}
         />
       </If>
       <If when={props.hasChanges}>
-        <MenuSeparator class="my-1 bg-border" style={{ height: 1 }} />
-        <MenuRow
+        <SmeltMenuSeparator />
+        <SmeltMenuItem
           label={t("discard.all_menu")}
-          iconPath="icons/trash.svg"
+          icon="icons/trash.svg"
           danger={true}
           onSelect={() => runOn(startDiscardAll)}
         />
@@ -1738,11 +1702,425 @@ function OpsMenu(props: {
   );
 }
 
+/** 没放进汇总补丁的一个文件：路径和原因。能单独打开的（`separate`）是可点的行，其余只是说明。 */
+function LeftOutEntry(props: { entry: any; onOpen: () => void }) {
+  const look = currentTheme;
+  const reason = computed(() => diffLeftOutReason(props.entry));
+  const rowStyle = { height: 22, paddingLeft: 12, paddingRight: 12, gap: 8 };
+  const content = () => (
+    <>
+      <Text
+        style={{
+          flex: 1,
+          minWidth: 0,
+          fontFamily: look().fonts?.mono,
+          fontSize: look().type.text_xsmall.size,
+          color: look().palette.text,
+          numberOfLines: 1,
+        }}
+      >
+        {props.entry.path}
+      </Text>
+      <Text
+        style={{
+          flexShrink: 0,
+          fontSize: look().type.small.size,
+          color: look().palette.muted,
+        }}
+      >
+        {reason() === "directory"
+          ? t("diff.left_out_directory")
+          : t(reason() === "too_large" ? "diff.left_out_too_large" : "diff.left_out_separate", {
+              size: formatSize(props.entry.size),
+            })}
+      </Text>
+    </>
+  );
+  return (
+    <If
+      when={reason() === "separate"}
+      else={
+        <View class="flex-row items-center" style={rowStyle}>
+          {content()}
+        </View>
+      }
+    >
+      <SmeltRow rounded={false} onPress={props.onOpen} style={rowStyle}>
+        {content()}
+      </SmeltRow>
+    </If>
+  );
+}
+
+// ---- 改动列表的行（`changeListModel` 摊平的各种行） ----
+
+/** 多仓时每个仓库的标题行：点了切成当前仓库，左边收起 / 展开，右边同步菜单。 */
+function RepoHeaderRow(props: { row: any }) {
+  const look = currentTheme;
+  return (
+    <SmeltRow
+      selected={Boolean(props.row.active)}
+      onPress={() => setActiveRepo(props.row.repo)}
+      style={{
+        gap: 4,
+        height: 24,
+        marginLeft: 4,
+        marginRight: 4,
+        paddingLeft: 4,
+        paddingRight: 4,
+      }}
+    >
+      <SmeltButton
+        variant="quiet"
+        size="sm"
+        icon={props.row.collapsed ? "icons/chevron-right.svg" : "icons/chevron-down.svg"}
+        tooltip={props.row.collapsed ? t("repo.expand") : t("repo.collapse")}
+        onPress={() => {
+          const rk = projectKey(props.row.repo.machine, props.row.repo.root);
+          if (repoCollapsed.has(rk)) repoCollapsed.delete(rk);
+          else repoCollapsed.add(rk);
+          bump();
+        }}
+      />
+      <SmeltIcon
+        path={REPO_KIND_ICON[props.row.repoKind as DiscoveredRepo["kind"]] ?? REPO_KIND_ICON.nested}
+        size={12}
+        color={props.row.active ? look().palette.text : look().palette.faint}
+      />
+      <Text
+        style={{
+          flex: 1,
+          minWidth: 0,
+          fontSize: look().type.text_xsmall.size,
+          fontWeight: 600,
+          color: look().palette.text,
+          numberOfLines: 1,
+        }}
+      >
+        {props.row.label}
+      </Text>
+      <Text
+        tooltip={
+          <SmeltTooltip>
+            <Text
+              style={{
+                fontSize: look().type.text_xsmall.size,
+                color: look().palette.text,
+              }}
+            >
+              {props.row.branch}
+            </Text>
+          </SmeltTooltip>
+        }
+        style={{
+          maxWidth: 80,
+          fontSize: look().type.text_xsmall.size,
+          color: look().palette.faint,
+          numberOfLines: 1,
+        }}
+      >
+        {props.row.branch}
+      </Text>
+      <OpsMenu
+        repo={props.row.repo}
+        ahead={props.row.ahead}
+        behind={props.row.behind}
+        stashCount={props.row.stashCount}
+        hasChanges={props.row.hasChanges}
+        upstream={props.row.upstream}
+        triggerLabel={
+          props.row.ahead + props.row.behind > 0 ? `↑${props.row.ahead} ↓${props.row.behind}` : ""
+        }
+      />
+    </SmeltRow>
+  );
+}
+
+/** 每仓独立的提交框：提交说明、提交并推送 / 仅提交 / 推送。 */
+function CommitBoxRow(props: { row: any }) {
+  const look = currentTheme;
+  const message = () => commitMessageSignal(props.row.repoKey)();
+  const canCommit = () => message().trim().length > 0 && props.row.hasStaged && !props.row.writeOp;
+  return (
+    <View
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        paddingLeft: 12 + props.row.depth * 10,
+        paddingRight: 8,
+        paddingTop: 4,
+        paddingBottom: 6,
+      }}
+    >
+      <SmeltInput
+        multiline={true}
+        size="sm"
+        value={message()}
+        placeholder={
+          props.row.branch
+            ? t("commit.placeholder_branch", { branch: props.row.branch })
+            : t("commit.placeholder")
+        }
+        onChange={({ value }: { value: string }) => {
+          commitMessageSignal(props.row.repoKey).set(value);
+        }}
+        class="min-h-13 max-h-30"
+      />
+      <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 4 }}>
+        <SmeltButton
+          variant="primary"
+          size="sm"
+          fill={true}
+          disabled={!canCommit()}
+          label={t(commitButtonBusyKey(props.row.writeOp))}
+          onPress={() => {
+            setActiveRepo(props.row.repo);
+            runCommit(props.row.repo, true);
+          }}
+        />
+        <SmeltButton
+          variant="quiet"
+          size="sm"
+          disabled={!canCommit()}
+          label={t("commit.commit_only")}
+          onPress={() => {
+            setActiveRepo(props.row.repo);
+            runCommit(props.row.repo, false);
+          }}
+        />
+        <SmeltButton
+          variant="quiet"
+          size="sm"
+          disabled={!(props.row.ahead > 0 && !props.row.writeOp)}
+          label={`↑${props.row.ahead}`}
+          onPress={() => {
+            setActiveRepo(props.row.repo);
+            runPushOnly(props.row.repo);
+          }}
+        />
+      </View>
+      <If when={message().trim().length > 0 && !props.row.hasStaged}>
+        <Text
+          style={{
+            fontSize: look().type.text_xsmall.size,
+            color: look().palette.faint,
+          }}
+        >
+          {t("commit.stage_first")}
+        </Text>
+      </If>
+      <If when={Boolean(props.row.error)}>
+        <View
+          style={{
+            padding: 6,
+            borderRadius: look().radius.sm,
+            backgroundColor: look().palette.surface,
+          }}
+        >
+          <Text
+            style={{
+              fontFamily: look().fonts?.mono,
+              fontSize: look().type.text_xsmall.size,
+              color: look().palette.bad,
+            }}
+          >
+            {props.row.error ?? ""}
+          </Text>
+        </View>
+      </If>
+    </View>
+  );
+}
+
+/** 分组标题（已暂存 / 更改）：右边整组暂存或取消暂存。 */
+function GroupHeaderRow(props: { row: any }) {
+  const look = currentTheme;
+  return (
+    <View
+      style={{
+        display: "flex",
+        flexDirection: "row",
+        alignItems: "center",
+        height: 24,
+        paddingLeft: 12 + props.row.depth * 10,
+        paddingRight: 10,
+      }}
+    >
+      <Text
+        style={{
+          flex: 1,
+          minWidth: 0,
+          fontSize: look().type.ui_medium.size,
+          fontWeight: look().type.ui_medium.weight,
+          color: look().palette.faint,
+          numberOfLines: 1,
+        }}
+      >
+        {props.row.title}
+      </Text>
+      <SmeltButton
+        variant="quiet"
+        size="sm"
+        icon={props.row.staged ? "icons/minus.svg" : "icons/plus.svg"}
+        tooltip={props.row.staged ? t("stage.unstage") : t("stage.stage")}
+        onPress={() => stagePaths(props.row.repo, props.row.paths, !props.row.staged)}
+      />
+    </View>
+  );
+}
+
+/** 压缩目录行：点了收起 / 展开，右边整个目录暂存或取消暂存。 */
+function TreeDirRow(props: { row: any }) {
+  const look = currentTheme;
+  return (
+    <SmeltRow
+      onPress={() => {
+        if (treeCollapsed.has(props.row.path)) treeCollapsed.delete(props.row.path);
+        else treeCollapsed.add(props.row.path);
+        bump();
+      }}
+      style={{
+        gap: 4,
+        height: 24,
+        marginLeft: 4,
+        marginRight: 4,
+        paddingLeft: 10 + props.row.depth * 12,
+        paddingRight: 8,
+      }}
+    >
+      <SmeltDisclosureChevron open={!props.row.collapsed} size={10} color={look().palette.muted} />
+      <Text
+        style={{
+          flex: 1,
+          minWidth: 0,
+          fontSize: look().type.ui.size,
+          color: look().palette.muted,
+          numberOfLines: 1,
+        }}
+      >
+        {props.row.name}
+      </Text>
+      <SmeltButton
+        variant="quiet"
+        size="sm"
+        icon={props.row.isStaged ? "icons/minus.svg" : "icons/plus.svg"}
+        tooltip={props.row.isStaged ? t("stage.unstage") : t("stage.stage")}
+        onPress={() => stagePaths(props.row.repo, [props.row.path], !props.row.isStaged)}
+      />
+    </SmeltRow>
+  );
+}
+
+/** 改动文件行：点了在汇总补丁里定位；右键菜单是单文件 Diff、复制路径、在文件管理器中显示、丢弃。 */
+function TreeFileRow(props: { row: any }) {
+  const look = currentTheme;
+  const isMac = localOs() === "darwin";
+  const code = () => String(props.row.status ?? " M");
+  const letter = () => code().trim()[0] ?? "M";
+  const letterColor = () => {
+    if (code() === "??" || letter() === "A") return look().palette.ok;
+    if (letter() === "D") return look().palette.bad;
+    return look().palette.need;
+  };
+  return (
+    <SmeltContextMenu
+      popupStyle={{ minWidth: 168 }}
+      trigger={
+        <SmeltRow
+          onPress={() => openAggregateFile(props.row.repo, props.row.path)}
+          style={{
+            width: "100%",
+            gap: 4,
+            height: 24,
+            marginLeft: 4,
+            marginRight: 4,
+            paddingLeft: 10 + props.row.depth * 12,
+            paddingRight: 8,
+            overflow: "hidden",
+          }}
+        >
+          <If when={Boolean(props.row.gitlink)}>
+            <SmeltIcon path={REPO_KIND_ICON.submodule} size={12} color={look().palette.faint} />
+          </If>
+          <Text
+            style={{
+              flex: 1,
+              minWidth: 0,
+              fontFamily: look().fonts?.mono,
+              fontSize: look().type.text_xsmall.size,
+              color: look().palette.text,
+              numberOfLines: 1,
+            }}
+          >
+            {props.row.name}
+          </Text>
+          <If when={Boolean(props.row.gitlink)}>
+            <Text
+              style={{
+                fontSize: look().type.text_xsmall.size,
+                color: look().palette.faint,
+              }}
+            >
+              {t("file.submodule")}
+            </Text>
+          </If>
+          <SmeltButton
+            variant="quiet"
+            size="sm"
+            disabled={Boolean(props.row.busy)}
+            icon={props.row.isStaged ? "icons/minus.svg" : "icons/plus.svg"}
+            tooltip={props.row.isStaged ? t("stage.unstage") : t("stage.stage")}
+            onPress={() => stageFile(props.row.repo, props.row.path, !props.row.isStaged)}
+          />
+          <Text
+            style={{
+              fontFamily: look().fonts?.mono,
+              fontSize: look().type.text_xsmall.size,
+              flexShrink: 0,
+              color: letterColor(),
+            }}
+          >
+            {letter()}
+          </Text>
+        </SmeltRow>
+      }
+    >
+      <SmeltMenuItem
+        label={t("file.open_diff")}
+        onSelect={() => openDiff(props.row.repo, props.row.path, props.row.status === "??")}
+      />
+      <SmeltMenuItem
+        label={t("file.copy_path")}
+        onSelect={() => {
+          const full = pathJoin(pathStyle(props.row.repo.machine), props.row.repo.root, props.row.path);
+          void clipboardWrite(full);
+        }}
+      />
+      <If when={props.row.repo.machine == null}>
+        <SmeltMenuItem
+          label={isMac ? t("file.reveal") : t("file.reveal_file_manager")}
+          onSelect={() => {
+            const full = pathJoin(pathStyle(null), props.row.repo.root, props.row.path);
+            void revealPath(full);
+          }}
+        />
+      </If>
+      <SmeltMenuSeparator />
+      <SmeltMenuItem
+        label={props.row.status === "??" ? t("discard.file_untracked_ok") : t("discard.file_ok")}
+        icon="icons/trash.svg"
+        danger={true}
+        onSelect={() => startDiscardFile(props.row.repo, props.row.path)}
+      />
+    </SmeltContextMenu>
+  );
+}
+
 // ---- 主视图 ----
 
 export function Main() {
   const look = currentTheme;
-  const isMac = localOs() === "darwin";
 
   const activeRepo = computed(() => {
     stateVersion();
@@ -1945,7 +2323,7 @@ export function Main() {
 
   const diffLeftOut = computed(() => (gitDiff()?.entries ?? []).filter((e) => !e.in_patch));
 
-  const logGraphW = computed(() => graphWidth(logGraphRows()));
+  const logGraphW = computed(() => graphWidth(logRows().map((r) => r.graph)));
   const logSummary = computed(() => {
     const sc = logScope();
     const head = activeStatus()?.branch || null;
@@ -1957,13 +2335,28 @@ export function Main() {
         : sc === "all"
           ? t("log.all_branches")
           : sc.branch;
-    return t("log.summary", { scope: scopeName, count: logCommits().length });
+    return t("log.summary", { scope: scopeName, count: logRows().length });
   });
 
   const selectedCommitObj = computed(() => {
     const h = logSelectedHash();
     if (!h) return null;
-    return logCommits().find((c) => c.hash === h) ?? null;
+    return logRows().find((r) => r.commit.hash === h)?.commit ?? null;
+  });
+
+  // 分支栏：分组名和分支摊平成一列（远端分支可能上百条，走 List）。
+  const branchRows = computed((): BranchRow[] => {
+    const { local, remote } = activeBranches();
+    const rows: BranchRow[] = [];
+    if (local.length > 0) {
+      rows.push({ key: "label:local", header: true, text: t("branch.local"), remote: false });
+      for (const b of local) rows.push({ key: `local:${b}`, header: false, text: b, remote: false });
+    }
+    if (remote.length > 0) {
+      rows.push({ key: "label:remote", header: true, text: t("branch.remote"), remote: true });
+      for (const b of remote) rows.push({ key: `remote:${b}`, header: false, text: b, remote: true });
+    }
+    return rows;
   });
 
   const isShown = computed(() => viewShown(VIEW_ID));
@@ -2007,41 +2400,19 @@ export function Main() {
             flexShrink: 0,
           }}
         >
-          <View
-            style={{
-              display: "flex",
-              flexDirection: "row",
-              alignItems: "center",
-              gap: 2,
-              padding: 2,
-              borderRadius: look().radius.md,
-              backgroundColor: look().palette.soft,
+          <SmeltSegmented
+            options={[
+              { value: "changes", label: t("tab.changes") },
+              { value: "log", label: t("tab.history") },
+            ]}
+            value={gitTab()}
+            onChange={(tab: GitTab) => {
+              if (gitTab() === tab) return;
+              gitTab.set(tab);
+              if (tab === "changes") resetDiffView();
+              refreshVisible();
             }}
-          >
-            <SmeltButton
-              quiet={true}
-              small={true}
-              selected={gitTab() === "changes"}
-              label={t("tab.changes")}
-              onPress={() => {
-                if (gitTab() === "changes") return;
-                gitTab.set("changes");
-                resetDiffView();
-                refreshVisible();
-              }}
-            />
-            <SmeltButton
-              quiet={true}
-              small={true}
-              selected={gitTab() === "log"}
-              label={t("tab.history")}
-              onPress={() => {
-                if (gitTab() === "log") return;
-                gitTab.set("log");
-                refreshVisible();
-              }}
-            />
-          </View>
+          />
 
           <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 6 }}>
             <If when={gitTab() === "changes"}>
@@ -2050,29 +2421,17 @@ export function Main() {
                 align="end"
                 popupStyle={{ minWidth: 140 }}
                 trigger={
-                  <View
-                    class="rounded hover:bg-accent"
-                    style={{
-                      paddingLeft: 8,
-                      paddingRight: 6,
-                      height: 24,
-                      display: "flex",
-                      flexDirection: "row",
-                      alignItems: "center",
-                      gap: 4,
-                      cursor: "pointer",
-                    }}
-                  >
-                    <Text style={{ fontSize: look().type.small.size, color: look().palette.muted }}>
-                      {scopeLabel(diffScope())}
-                    </Text>
-                    <SmeltIcon path="icons/chevron-down.svg" size={12} color={look().palette.muted} />
-                  </View>
+                  <SmeltButton
+                    variant="quiet"
+                    size="sm"
+                    label={scopeLabel(diffScope())}
+                    trailingIcon="icons/chevron-down.svg"
+                  />
                 }
               >
-                <MenuRow label={t("scope.all")} onSelect={() => setScope("all")} />
-                <MenuRow label={t("scope.staged")} onSelect={() => setScope("staged")} />
-                <MenuRow label={t("scope.unstaged")} onSelect={() => setScope("unstaged")} />
+                <SmeltMenuItem label={t("scope.all")} onSelect={() => setScope("all")} />
+                <SmeltMenuItem label={t("scope.staged")} onSelect={() => setScope("staged")} />
+                <SmeltMenuItem label={t("scope.unstaged")} onSelect={() => setScope("unstaged")} />
               </SmeltMenu>
             </If>
 
@@ -2082,33 +2441,21 @@ export function Main() {
                 align="end"
                 popupStyle={{ minWidth: 168 }}
                 trigger={
-                  <View
-                    class="rounded hover:bg-accent"
-                    style={{
-                      paddingLeft: 8,
-                      paddingRight: 6,
-                      height: 24,
-                      display: "flex",
-                      flexDirection: "row",
-                      alignItems: "center",
-                      gap: 4,
-                      cursor: "pointer",
-                    }}
-                  >
-                    <Text style={{ fontSize: look().type.small.size, color: look().palette.text }}>
-                      {(() => {
-                        const ar = activeRepo();
-                        const found = repos().find((r) => r.root === ar?.root);
-                        return found ? repoLabelOf(found) : (ar?.root ?? "");
-                      })()}
-                    </Text>
-                    <SmeltIcon path="icons/chevron-down.svg" size={12} color={look().palette.muted} />
-                  </View>
+                  <SmeltButton
+                    variant="quiet"
+                    size="sm"
+                    label={(() => {
+                      const ar = activeRepo();
+                      const found = repos().find((r) => r.root === ar?.root);
+                      return found ? repoLabelOf(found) : (ar?.root ?? "");
+                    })()}
+                    trailingIcon="icons/chevron-down.svg"
+                  />
                 }
               >
                 <Each of={repos()} key={(r: DiscoveredRepo) => r.root}>
                   {(r: () => DiscoveredRepo) => (
-                    <MenuRow
+                    <SmeltMenuItem
                       label={repoLabelOf(r())}
                       onSelect={() => {
                         const proj = currentProject();
@@ -2133,11 +2480,6 @@ export function Main() {
                     ? busyLabel(activeBusy()!)
                     : `↑${activeStatus()?.ahead ?? 0} ↓${activeStatus()?.behind ?? 0}`
                 }
-                triggerColor={
-                  activeBusy() || (activeStatus()?.ahead ?? 0) + (activeStatus()?.behind ?? 0) > 0
-                    ? look().palette.text
-                    : look().palette.faint
-                }
               />
             </If>
           </View>
@@ -2155,240 +2497,150 @@ export function Main() {
               >
                 {/* 左栏：分支树 */}
                 <ResizablePanel size={190} minSize={130} maxSize={320}>
-                  <Scroll style={{ flex: 1, width: "100%", height: "100%" }}>
-                    <View style={{ display: "flex", flexDirection: "column", padding: 6, gap: 2 }}>
-                      <View
-                        class="rounded hover:bg-accent"
-                        onPress={() => activeRepo() && setLogScope(activeRepo()!, "head")}
-                        style={{
-                          paddingLeft: 8,
-                          paddingRight: 8,
-                          height: 24,
-                          display: "flex",
-                          flexDirection: "row",
-                          alignItems: "center",
-                          backgroundColor:
-                            logScope() === "head" ? look().palette.row_selected : "transparent",
-                          cursor: "pointer",
-                        }}
-                      >
-                        <Text
-                          style={{
-                            fontSize: look().type.small.size,
-                            color: look().palette.text,
-                            numberOfLines: 1,
-                          }}
+                  <List
+                    each={branchRows()}
+                    keyExtractor={(r: BranchRow) => r.key}
+                    estimatedItemSize={24}
+                    style={{ flex: 1, width: "100%", height: "100%" }}
+                    contentStyle={{ padding: 6, gap: 2 }}
+                    header={
+                      <View style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                        <SmeltRow
+                          selected={logScope() === "head"}
+                          onPress={() => activeRepo() && setLogScope(activeRepo()!, "head")}
+                          style={{ paddingLeft: 8, paddingRight: 8, height: 24 }}
                         >
-                          {activeStatus()?.branch
-                            ? t("log.head_named", { branch: activeStatus()!.branch })
-                            : t("log.head")}
-                        </Text>
+                          <Text
+                            style={{
+                              fontSize: look().type.small.size,
+                              color: look().palette.text,
+                              numberOfLines: 1,
+                            }}
+                          >
+                            {activeStatus()?.branch
+                              ? t("log.head_named", { branch: activeStatus()!.branch })
+                              : t("log.head")}
+                          </Text>
+                        </SmeltRow>
+                        <SmeltRow
+                          selected={logScope() === "all"}
+                          onPress={() => activeRepo() && setLogScope(activeRepo()!, "all")}
+                          style={{ paddingLeft: 8, paddingRight: 8, height: 24 }}
+                        >
+                          <Text
+                            style={{
+                              fontSize: look().type.small.size,
+                              color: look().palette.text,
+                              numberOfLines: 1,
+                            }}
+                          >
+                            {t("log.all_branches")}
+                          </Text>
+                        </SmeltRow>
                       </View>
-                      <View
-                        class="rounded hover:bg-accent"
-                        onPress={() => activeRepo() && setLogScope(activeRepo()!, "all")}
-                        style={{
-                          paddingLeft: 8,
-                          paddingRight: 8,
-                          height: 24,
-                          display: "flex",
-                          flexDirection: "row",
-                          alignItems: "center",
-                          backgroundColor:
-                            logScope() === "all" ? look().palette.row_selected : "transparent",
-                          cursor: "pointer",
-                        }}
-                      >
-                        <Text
-                          style={{
-                            fontSize: look().type.small.size,
-                            color: look().palette.text,
-                            numberOfLines: 1,
-                          }}
+                    }
+                  >
+                    {(row: () => BranchRow) => {
+                      const isHead = () => !row().remote && activeStatus()?.branch === row().text;
+                      const selected = () => {
+                        const sc = logScope();
+                        return typeof sc === "object" && sc.branch === row().text;
+                      };
+                      return (
+                        <If
+                          when={!row().header}
+                          else={
+                            /* 分组名（本地 / 远程） */
+                            <Text
+                              style={{
+                                paddingLeft: 8,
+                                paddingTop: 6,
+                                paddingBottom: 2,
+                                fontSize: look().type.text_xsmall.size,
+                                color: look().palette.muted,
+                              }}
+                            >
+                              {row().text}
+                            </Text>
+                          }
                         >
-                          {t("log.all_branches")}
-                        </Text>
-                      </View>
-
-                      {/* 本地分支 */}
-                      <If when={activeBranches().local.length > 0}>
-                        <Text
-                          style={{
-                            paddingLeft: 8,
-                            paddingTop: 6,
-                            paddingBottom: 2,
-                            fontSize: look().type.text_xsmall.size,
-                            color: look().palette.muted,
-                          }}
-                        >
-                          {t("branch.local")}
-                        </Text>
-                        <Each of={activeBranches().local} key={(b: string) => `local:${b}`}>
-                          {(b: () => string) => {
-                            const isHead = () => activeStatus()?.branch === b();
-                            const selected = () => {
-                              const sc = logScope();
-                              return typeof sc === "object" && sc.branch === b();
-                            };
-                            return (
-                              <SmeltContextMenu
-                                popupStyle={{ minWidth: 168 }}
-                                disabled={isHead()}
-                                trigger={
-                                  <View
-                                    class="rounded hover:bg-accent"
-                                    onPress={() =>
-                                      activeRepo() && setLogScope(activeRepo()!, { branch: b() })
-                                    }
-                                    style={{
-                                      width: "100%",
-                                      paddingLeft: 12,
-                                      paddingRight: 8,
-                                      height: 24,
-                                      display: "flex",
-                                      flexDirection: "row",
-                                      alignItems: "center",
-                                      gap: 4,
-                                      backgroundColor: selected()
-                                        ? look().palette.row_selected
-                                        : "transparent",
-                                      cursor: "pointer",
-                                    }}
-                                  >
-                                    <Text
-                                      style={{
-                                        width: 8,
-                                        fontSize: look().type.text_xsmall.size,
-                                        color: look().palette.ok,
-                                      }}
-                                    >
-                                      {isHead() ? "●" : ""}
-                                    </Text>
-                                    <Text
-                                      style={{
-                                        flex: 1,
-                                        minWidth: 0,
-                                        fontSize: look().type.small.size,
-                                        color: look().palette.text,
-                                        numberOfLines: 1,
-                                      }}
-                                    >
-                                      {b()}
-                                    </Text>
-                                  </View>
+                          <SmeltContextMenu
+                            popupStyle={{ minWidth: 168 }}
+                            disabled={isHead()}
+                            trigger={
+                              <SmeltRow
+                                selected={selected()}
+                                onPress={() =>
+                                  activeRepo() && setLogScope(activeRepo()!, { branch: row().text })
                                 }
+                                style={{
+                                  width: "100%",
+                                  paddingLeft: 12,
+                                  paddingRight: 8,
+                                  height: 24,
+                                  gap: 4,
+                                }}
                               >
-                                <MenuRow
-                                  label={t("branch.checkout")}
-                                  onSelect={() => activeRepo() && runCheckout(activeRepo()!, b())}
-                                />
-                                <MenuRow
-                                  label={t("branch.merge")}
-                                  onSelect={() => activeRepo() && runMerge(activeRepo()!, b())}
-                                />
-                                <MenuSeparator class="my-1 bg-border" style={{ height: 1 }} />
-                                <MenuRow
-                                  label={t("branch.delete")}
-                                  iconPath="icons/trash.svg"
-                                  danger={true}
-                                  onSelect={() =>
-                                    activeRepo() && startDeleteBranch(activeRepo()!, b(), false)
-                                  }
-                                />
-                              </SmeltContextMenu>
-                            );
-                          }}
-                        </Each>
-                      </If>
-
-                      {/* 远程分支 */}
-                      <If when={activeBranches().remote.length > 0}>
-                        <Text
-                          style={{
-                            paddingLeft: 8,
-                            paddingTop: 6,
-                            paddingBottom: 2,
-                            fontSize: look().type.text_xsmall.size,
-                            color: look().palette.muted,
-                          }}
-                        >
-                          {t("branch.remote")}
-                        </Text>
-                        <Each of={activeBranches().remote} key={(b: string) => `remote:${b}`}>
-                          {(b: () => string) => {
-                            const selected = () => {
-                              const sc = logScope();
-                              return typeof sc === "object" && sc.branch === b();
-                            };
-                            return (
-                              <SmeltContextMenu
-                                popupStyle={{ minWidth: 168 }}
-                                trigger={
-                                  <View
-                                    class="rounded hover:bg-accent"
-                                    onPress={() =>
-                                      activeRepo() && setLogScope(activeRepo()!, { branch: b() })
-                                    }
-                                    style={{
-                                      width: "100%",
-                                      paddingLeft: 12,
-                                      paddingRight: 8,
-                                      height: 24,
-                                      display: "flex",
-                                      flexDirection: "row",
-                                      alignItems: "center",
-                                      gap: 4,
-                                      backgroundColor: selected()
-                                        ? look().palette.row_selected
-                                        : "transparent",
-                                      cursor: "pointer",
-                                    }}
-                                  >
-                                    <View style={{ width: 8 }} />
-                                    <Text
-                                      style={{
-                                        flex: 1,
-                                        minWidth: 0,
-                                        fontSize: look().type.small.size,
-                                        color: look().palette.muted,
-                                        numberOfLines: 1,
-                                      }}
-                                    >
-                                      {b()}
-                                    </Text>
-                                  </View>
-                                }
-                              >
-                                <MenuRow
-                                  label={t("branch.checkout")}
-                                  onSelect={() => {
-                                    const repo = activeRepo();
-                                    if (!repo) return;
-                                    const slash = b().indexOf("/");
-                                    const short = slash >= 0 ? b().slice(slash + 1) : b();
-                                    runCheckout(repo, short);
+                                {/* 当前分支打勾；远端分支留同宽的空位对齐 */}
+                                <View
+                                  style={{
+                                    width: 10,
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
                                   }}
-                                />
-                                <MenuRow
-                                  label={t("branch.merge")}
-                                  onSelect={() => activeRepo() && runMerge(activeRepo()!, b())}
-                                />
-                                <MenuSeparator class="my-1 bg-border" style={{ height: 1 }} />
-                                <MenuRow
-                                  label={t("branch.delete_remote")}
-                                  iconPath="icons/trash.svg"
-                                  danger={true}
-                                  onSelect={() =>
-                                    activeRepo() && startDeleteBranch(activeRepo()!, b(), true)
-                                  }
-                                />
-                              </SmeltContextMenu>
-                            );
-                          }}
-                        </Each>
-                      </If>
-                    </View>
-                  </Scroll>
+                                >
+                                  <If when={isHead()}>
+                                    <SmeltIcon path="icons/check.svg" size={10} color={look().palette.ok} />
+                                  </If>
+                                </View>
+                                <Text
+                                  style={{
+                                    flex: 1,
+                                    minWidth: 0,
+                                    fontSize: look().type.small.size,
+                                    color: row().remote ? look().palette.muted : look().palette.text,
+                                    numberOfLines: 1,
+                                  }}
+                                >
+                                  {row().text}
+                                </Text>
+                              </SmeltRow>
+                            }
+                          >
+                            <SmeltMenuItem
+                              label={t("branch.checkout")}
+                              onSelect={() => {
+                                const repo = activeRepo();
+                                if (!repo) return;
+                                const b = row().text;
+                                if (!row().remote) {
+                                  runCheckout(repo, b);
+                                  return;
+                                }
+                                const slash = b.indexOf("/");
+                                runCheckout(repo, slash >= 0 ? b.slice(slash + 1) : b);
+                              }}
+                            />
+                            <SmeltMenuItem
+                              label={t("branch.merge")}
+                              onSelect={() => activeRepo() && runMerge(activeRepo()!, row().text)}
+                            />
+                            <SmeltMenuSeparator />
+                            <SmeltMenuItem
+                              label={row().remote ? t("branch.delete_remote") : t("branch.delete")}
+                              icon="icons/trash.svg"
+                              danger={true}
+                              onSelect={() =>
+                                activeRepo() &&
+                                startDeleteBranch(activeRepo()!, row().text, row().remote)
+                              }
+                            />
+                          </SmeltContextMenu>
+                        </If>
+                      );
+                    }}
+                  </List>
                 </ResizablePanel>
 
                 {/* 中栏：提交列表 + 矢量分支图 */}
@@ -2432,132 +2684,121 @@ export function Main() {
                         {logSummary()}
                       </Text>
                       <SmeltButton
-                        quiet={true}
-                        small={true}
+                        variant="quiet"
+                        size="sm"
                         label={t("log.reload")}
                         onPress={() => activeRepo() && reloadLog(activeRepo()!)}
                       />
                     </View>
 
                     <If
-                      when={logCommits().length > 0}
+                      when={logRows().length > 0}
                       else={<Placeholder text={logLoading() ? t("log.loading") : t("log.empty")} />}
                     >
-                      <Scroll style={{ flex: 1, width: "100%", height: "100%" }}>
-                        <View style={{ display: "flex", flexDirection: "column" }}>
-                          <Each
-                            of={logCommits().map((commit, ix) => ({
-                              commit,
-                              graph: logGraphRows()[ix],
-                            }))}
-                            key={(item: any) => item.commit.hash}
-                          >
-                            {(item: () => { commit: CommitNode; graph: any }) => {
-                              const sel = () => logSelectedHash() === item().commit.hash;
-                              return (
-                                <View
-                                  class="hover:bg-accent"
-                                  onPress={() =>
-                                    activeRepo() && selectCommit(activeRepo()!, item().commit.hash)
-                                  }
-                                  style={{
-                                    display: "flex",
-                                    flexDirection: "row",
-                                    alignItems: "center",
-                                    height: GRAPH_ROW_H,
-                                    paddingRight: 12,
-                                    gap: 8,
-                                    backgroundColor: sel()
-                                      ? look().palette.row_selected
-                                      : "transparent",
-                                    cursor: "pointer",
-                                    overflow: "hidden",
-                                  }}
-                                >
-                                  <If when={item().graph != null}>
-                                    <SmeltVector
-                                      markup={commitGraphRowSvg(
-                                        item().graph,
-                                        logGraphW(),
-                                        GRAPH_ROW_H,
-                                        look().palette.chart,
-                                      )}
-                                      width={logGraphW()}
-                                      height={GRAPH_ROW_H}
-                                    />
-                                  </If>
-                                  <Each
-                                    of={(item().commit.refs ?? []).slice(0, 2)}
-                                    key={(r: string) => r}
-                                  >
-                                    {(r: () => string) => (
-                                      <View
-                                        style={{
-                                          paddingLeft: 5,
-                                          paddingRight: 5,
-                                          height: 18,
-                                          borderRadius: 4,
-                                          backgroundColor: look().palette.soft,
-                                          display: "flex",
-                                          alignItems: "center",
-                                          justifyContent: "center",
-                                          maxWidth: 110,
-                                          flexShrink: 0,
-                                          overflow: "hidden",
-                                        }}
-                                      >
-                                        <Text
-                                          style={{
-                                            fontSize: look().type.text_xsmall.size,
-                                            color: look().palette.text,
-                                            numberOfLines: 1,
-                                          }}
-                                        >
-                                          {r()}
-                                        </Text>
-                                      </View>
-                                    )}
-                                  </Each>
-                                  <Text
+                      <List
+                        each={logRows()}
+                        keyExtractor={(r: LogRow) => r.commit.hash}
+                        estimatedItemSize={GRAPH_ROW_H}
+                        style={{ flex: 1, width: "100%", height: "100%" }}
+                      >
+                        {(item: () => LogRow) => {
+                          const sel = () => logSelectedHash() === item().commit.hash;
+                          return (
+                            <SmeltRow
+                              rounded={false}
+                              selected={sel()}
+                              onPress={() =>
+                                activeRepo() && selectCommit(activeRepo()!, item().commit.hash)
+                              }
+                              style={{
+                                height: GRAPH_ROW_H,
+                                paddingRight: 12,
+                                gap: 8,
+                                overflow: "hidden",
+                              }}
+                            >
+                              <If when={item().graph != null}>
+                                <SmeltVector
+                                  markup={commitGraphRowSvg(
+                                    item().graph,
+                                    logGraphW(),
+                                    GRAPH_ROW_H,
+                                    look().palette.chart,
+                                  )}
+                                  width={logGraphW()}
+                                  height={GRAPH_ROW_H}
+                                />
+                              </If>
+                              <Each
+                                of={(item().commit.refs ?? []).slice(0, 2)}
+                                key={(r: string) => r}
+                              >
+                                {(r: () => string) => (
+                                  <View
                                     style={{
-                                      flex: 1,
-                                      minWidth: 0,
-                                      fontSize: look().type.ui.size,
-                                      color: look().palette.text,
-                                      numberOfLines: 1,
-                                    }}
-                                  >
-                                    {item().commit.subject}
-                                  </Text>
-                                  <Text
-                                    style={{
-                                      width: 96,
+                                      paddingLeft: 5,
+                                      paddingRight: 5,
+                                      height: 18,
+                                      borderRadius: look().radius.sm,
+                                      backgroundColor: look().palette.soft,
+                                      display: "flex",
+                                      alignItems: "center",
+                                      justifyContent: "center",
+                                      maxWidth: 110,
                                       flexShrink: 0,
-                                      fontSize: look().type.text_xsmall.size,
-                                      color: look().palette.muted,
-                                      numberOfLines: 1,
+                                      overflow: "hidden",
                                     }}
                                   >
-                                    {item().commit.author}
-                                  </Text>
-                                  <Text
-                                    style={{
-                                      width: 88,
-                                      flexShrink: 0,
-                                      textAlign: "right",
-                                      fontSize: look().type.text_xsmall.size,
-                                      color: look().palette.muted,
-                                      numberOfLines: 1,
-                                    }}
-                                  >
-                                    {formatCommitTime(item().commit.time)}
-                                  </Text>
-                                </View>
-                              );
-                            }}
-                          </Each>
-                        </View>
-                      </Scroll>
+                                    <Text
+                                      style={{
+                                        fontSize: look().type.text_xsmall.size,
+                                        color: look().palette.text,
+                                        numberOfLines: 1,
+                                      }}
+                                    >
+                                      {r()}
+                                    </Text>
+                                  </View>
+                                )}
+                              </Each>
+                              <Text
+                                style={{
+                                  flex: 1,
+                                  minWidth: 0,
+                                  fontSize: look().type.ui.size,
+                                  color: look().palette.text,
+                                  numberOfLines: 1,
+                                }}
+                              >
+                                {item().commit.subject}
+                              </Text>
+                              <Text
+                                style={{
+                                  width: 96,
+                                  flexShrink: 0,
+                                  fontSize: look().type.text_xsmall.size,
+                                  color: look().palette.muted,
+                                  numberOfLines: 1,
+                                }}
+                              >
+                                {item().commit.author}
+                              </Text>
+                              <Text
+                                style={{
+                                  width: 88,
+                                  flexShrink: 0,
+                                  textAlign: "right",
+                                  fontSize: look().type.text_xsmall.size,
+                                  color: look().palette.muted,
+                                  numberOfLines: 1,
+                                }}
+                              >
+                                {formatCommitTime(item().commit.time)}
+                              </Text>
+                            </SmeltRow>
+                          );
+                        }}
+                      </List>
                     </If>
                   </View>
                 </ResizablePanel>
@@ -2644,30 +2885,14 @@ export function Main() {
                             }}
                           >
                             <View style={{ padding: 4, display: "flex", flexDirection: "column" }}>
-                              <Each
-                                of={logDetailFiles().map(([st, p]) => ({ st, path: p }))}
-                                key={(f: any) => f.path}
-                              >
-                                {(f: () => { st: string; path: string }) => (
-                                  <View
-                                    class="rounded hover:bg-accent"
+                              <Each of={logDetailFiles()} key={(f: [string, string]) => f[1]}>
+                                {(f: () => [string, string]) => (
+                                  <SmeltRow
+                                    selected={logDetailFile() === f()[1]}
                                     onPress={() =>
-                                      activeRepo() && selectCommitFile(activeRepo()!, f().path)
+                                      activeRepo() && selectCommitFile(activeRepo()!, f()[1])
                                     }
-                                    style={{
-                                      display: "flex",
-                                      flexDirection: "row",
-                                      alignItems: "center",
-                                      gap: 8,
-                                      paddingLeft: 8,
-                                      paddingRight: 8,
-                                      height: 22,
-                                      backgroundColor:
-                                        logDetailFile() === f().path
-                                          ? look().palette.row_selected
-                                          : "transparent",
-                                      cursor: "pointer",
-                                    }}
+                                    style={{ gap: 8, paddingLeft: 8, paddingRight: 8, height: 22 }}
                                   >
                                     <Text
                                       style={{
@@ -2676,7 +2901,7 @@ export function Main() {
                                         color: look().palette.muted,
                                       }}
                                     >
-                                      {f().st}
+                                      {f()[0]}
                                     </Text>
                                     <Text
                                       style={{
@@ -2687,9 +2912,9 @@ export function Main() {
                                         numberOfLines: 1,
                                       }}
                                     >
-                                      {f().path}
+                                      {f()[1]}
                                     </Text>
-                                  </View>
+                                  </SmeltRow>
                                 )}
                               </Each>
                             </View>
@@ -2804,8 +3029,8 @@ export function Main() {
                           <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 4 }}>
                             <If when={Boolean(gitDiff()?.worktreeFile)}>
                               <SmeltButton
-                                quiet={true}
-                                small={true}
+                                variant="quiet"
+                                size="sm"
                                 label={t("diff.open_in_file")}
                                 onPress={() => {
                                   const d = gitDiff();
@@ -2820,8 +3045,8 @@ export function Main() {
                             </If>
                             <If when={Boolean(gitDiff()?.aggregate)}>
                               <SmeltButton
-                                quiet={true}
-                                small={true}
+                                variant="quiet"
+                                size="sm"
                                 label={
                                   allAggregateCollapsed()
                                     ? t("diff.expand_all")
@@ -2831,8 +3056,8 @@ export function Main() {
                               />
                             </If>
                             <SmeltButton
-                              quiet={true}
-                              small={true}
+                              variant="quiet"
+                              size="sm"
                               selected={diffSplit()}
                               label={t("diff.split")}
                               tooltip={t("diff.split_tooltip")}
@@ -2864,57 +3089,15 @@ export function Main() {
                                 {t("diff.left_out", { count: diffLeftOut().length })}
                               </Text>
                               <Each of={diffLeftOut()} key={(e: any) => e.path}>
-                                {(entry: () => any) => {
-                                  const reason = computed(() => diffLeftOutReason(entry()));
-                                  return (
-                                    <View
-                                      class={reason() === "separate" ? "hover:bg-accent" : undefined}
-                                      onPress={() => {
-                                        const cur = gitDiff();
-                                        if (cur && reason() === "separate") openEntryAlone(cur.root, entry());
-                                      }}
-                                      style={{
-                                        height: 22,
-                                        paddingLeft: 12,
-                                        paddingRight: 12,
-                                        display: "flex",
-                                        flexDirection: "row",
-                                        alignItems: "center",
-                                        gap: 8,
-                                        ...(reason() === "separate" ? { cursor: "pointer" } : {}),
-                                      }}
-                                    >
-                                      <Text
-                                        style={{
-                                          flex: 1,
-                                          minWidth: 0,
-                                          fontFamily: look().fonts?.mono,
-                                          fontSize: look().type.text_xsmall.size,
-                                          color: look().palette.text,
-                                          numberOfLines: 1,
-                                        }}
-                                      >
-                                        {entry().path}
-                                      </Text>
-                                      <Text
-                                        style={{
-                                          flexShrink: 0,
-                                          fontSize: look().type.small.size,
-                                          color: look().palette.muted,
-                                        }}
-                                      >
-                                        {reason() === "directory"
-                                          ? t("diff.left_out_directory")
-                                          : t(
-                                              reason() === "too_large"
-                                                ? "diff.left_out_too_large"
-                                                : "diff.left_out_separate",
-                                              { size: formatSize(entry().size) },
-                                            )}
-                                      </Text>
-                                    </View>
-                                  );
-                                }}
+                                {(entry: () => any) => (
+                                  <LeftOutEntry
+                                    entry={entry()}
+                                    onOpen={() => {
+                                      const cur = gitDiff();
+                                      if (cur) openEntryAlone(cur.root, entry());
+                                    }}
+                                  />
+                                )}
                               </Each>
                             </View>
                           </Scroll>
@@ -2957,7 +3140,6 @@ export function Main() {
                                 style={{
                                   flex: 1,
                                   height: "100%",
-                                  paddingLeft: 10,
                                   paddingRight: 10,
                                   display: "flex",
                                   flexDirection: "row",
@@ -2968,16 +3150,16 @@ export function Main() {
                                   borderBottomColor: look().palette.hair,
                                 }}
                               >
-                                <View
+                                {/* 折叠头：箭头、路径、增删数，点了收起 / 展开这个文件 */}
+                                <SmeltRow
+                                  rounded={false}
                                   onPress={() => changesDiffApi?.toggleFile?.(file.path)}
                                   style={{
                                     flex: 1,
                                     minWidth: 0,
-                                    display: "flex",
-                                    flexDirection: "row",
-                                    alignItems: "center",
+                                    height: "100%",
+                                    paddingLeft: 10,
                                     gap: 6,
-                                    cursor: "pointer",
                                   }}
                                 >
                                   <SmeltDisclosureChevron
@@ -3019,11 +3201,11 @@ export function Main() {
                                       {`-${file.deleted}`}
                                     </Text>
                                   </If>
-                                </View>
+                                </SmeltRow>
                                 <If when={!gitDiff()?.aggregate && ops() !== "none"}>
                                   <SmeltButton
-                                    quiet={true}
-                                    small={true}
+                                    variant="quiet"
+                                    size="sm"
                                     label={ops() === "unstage" ? t("stage.unstage") : t("stage.stage")}
                                     onPress={() => {
                                       const cur = gitDiff();
@@ -3034,8 +3216,8 @@ export function Main() {
                                 </If>
                                 <If when={Boolean(fullPath())}>
                                   <SmeltButton
-                                    quiet={true}
-                                    small={true}
+                                    variant="quiet"
+                                    size="sm"
                                     label={t("diff.open")}
                                     onPress={() => {
                                       const cur = gitDiff();
@@ -3087,8 +3269,8 @@ export function Main() {
                                 <If when={!gitDiff()?.aggregate && ops() === "stage_discard"}>
                                   <View style={{ display: "flex", flexDirection: "row", gap: 4 }}>
                                     <SmeltButton
-                                      quiet={true}
-                                      small={true}
+                                      variant="quiet"
+                                      size="sm"
                                       label={t("hunk.stage")}
                                       onPress={() => {
                                         const cur = gitDiff();
@@ -3096,9 +3278,8 @@ export function Main() {
                                       }}
                                     />
                                     <SmeltButton
-                                      quiet={true}
-                                      danger={true}
-                                      small={true}
+                                      variant="danger-quiet"
+                                      size="sm"
                                       label={t("hunk.discard")}
                                       onPress={() => {
                                         const cur = gitDiff();
@@ -3109,8 +3290,8 @@ export function Main() {
                                 </If>
                                 <If when={!gitDiff()?.aggregate && ops() === "unstage"}>
                                   <SmeltButton
-                                    quiet={true}
-                                    small={true}
+                                    variant="quiet"
+                                    size="sm"
                                     label={t("hunk.unstage")}
                                     onPress={() => {
                                       const cur = gitDiff();
@@ -3123,14 +3304,13 @@ export function Main() {
                           }}
                           renderAddAnnotation={(range: any) => (
                             <SmeltButton
-                              primary={true}
-                              small={true}
+                              variant="primary"
+                              size="xs"
                               icon="icons/plus.svg"
                               onPress={() => {
                                 commentRange.set(range);
                                 commentOpen.set(true);
                               }}
-                              style={{ width: 18, height: 18, minHeight: 18, borderRadius: 4 }}
                             />
                           )}
                           renderAnnotation={() => (
@@ -3177,11 +3357,12 @@ export function Main() {
                                   {commentRangeTitle()}
                                 </Text>
                               </View>
-                              <Input
+                              <SmeltInput
                                 ref={(el: any) => {
                                   el?.focus?.();
                                 }}
                                 multiline={true}
+                                size="sm"
                                 autoFocus={true}
                                 value={commentText()}
                                 placeholder={t("comment.placeholder")}
@@ -3189,12 +3370,7 @@ export function Main() {
                                 onKeyPress={(e: any) => {
                                   if (e?.key === "Escape") clearComment();
                                 }}
-                                class="rounded-(--radius) border border-input bg-card p-2 text-foreground"
-                                style={{
-                                  minHeight: 52,
-                                  fontSize: look().type.small.size,
-                                  lineHeight: look().type.small.line_height,
-                                }}
+                                class="min-h-13"
                               />
                               <Overlay
                                 onCancel={clearComment}
@@ -3202,14 +3378,14 @@ export function Main() {
                               />
                               <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 6 }}>
                                 <SmeltButton
-                                  quiet={true}
-                                  small={true}
+                                  variant="quiet"
+                                  size="sm"
                                   label={t("comment.cancel")}
                                   onPress={clearComment}
                                 />
                                 <SmeltButton
-                                  primary={true}
-                                  small={true}
+                                  variant="primary"
+                                  size="sm"
                                   label={t("comment.send")}
                                   onPress={sendDiffComment}
                                 />
@@ -3282,12 +3458,7 @@ export function Main() {
                             ? busyLabel(activeBusy()!)
                             : (activeStatus()?.ahead ?? 0) + (activeStatus()?.behind ?? 0) > 0
                               ? `↑${activeStatus()?.ahead ?? 0} ↓${activeStatus()?.behind ?? 0}`
-                              : "⋯"
-                        }
-                        triggerColor={
-                          activeBusy() || (activeStatus()?.ahead ?? 0) + (activeStatus()?.behind ?? 0) > 0
-                            ? look().palette.text
-                            : look().palette.faint
+                              : ""
                         }
                       />
                     </If>
@@ -3304,496 +3475,43 @@ export function Main() {
                       />
                     }
                   >
-                    <Scroll style={{ flex: 1, width: "100%", height: "100%" }}>
-                      <View style={{ display: "flex", flexDirection: "column", paddingBottom: 8 }}>
-                        <Each of={changeListModel().rows} key={(row: any) => row.key}>
-                          {(row: () => any) => (
+                    <List
+                      each={changeListModel().rows}
+                      keyExtractor={(row: any) => row.key}
+                      estimatedItemSize={24}
+                      style={{ flex: 1, width: "100%", height: "100%" }}
+                      contentStyle={{ paddingBottom: 8 }}
+                    >
+                      {(row: () => any) => (
+                        <If
+                          when={row().kind === "repo_header"}
+                          else={
                             <If
-                              when={row().kind === "repo_header"}
+                              when={row().kind === "commit_box"}
                               else={
                                 <If
-                                  when={row().kind === "commit_box"}
+                                  when={row().kind === "group_header"}
                                   else={
                                     <If
-                                      when={row().kind === "group_header"}
-                                      else={
-                                        <If
-                                          when={row().kind === "tree_dir"}
-                                          else={
-                                            /* 改动文件行 */
-                                            <SmeltContextMenu
-                                              popupStyle={{ minWidth: 168 }}
-                                              trigger={
-                                                <View
-                                                  class="hover:bg-accent"
-                                                  onPress={() =>
-                                                    openAggregateFile(row().repo, row().path)
-                                                  }
-                                                  style={{
-                                                    width: "100%",
-                                                    display: "flex",
-                                                    flexDirection: "row",
-                                                    alignItems: "center",
-                                                    gap: 4,
-                                                    height: 24,
-                                                    marginLeft: 4,
-                                                    marginRight: 4,
-                                                    paddingLeft: 10 + row().depth * 12,
-                                                    paddingRight: 8,
-                                                    borderRadius: look().radius.row,
-                                                    cursor: "pointer",
-                                                    overflow: "hidden",
-                                                  }}
-                                                >
-                                                  <If when={Boolean(row().gitlink)}>
-                                                    <Text
-                                                      style={{
-                                                        fontSize: look().type.text_xsmall.size,
-                                                        color: look().palette.faint,
-                                                      }}
-                                                    >
-                                                      {repoKindGlyph("submodule")}
-                                                    </Text>
-                                                  </If>
-                                                  <Text
-                                                    style={{
-                                                      flex: 1,
-                                                      minWidth: 0,
-                                                      fontFamily: look().fonts?.mono,
-                                                      fontSize: look().type.text_xsmall.size,
-                                                      color: look().palette.text,
-                                                      numberOfLines: 1,
-                                                    }}
-                                                  >
-                                                    {row().name}
-                                                  </Text>
-                                                  <If when={Boolean(row().gitlink)}>
-                                                    <Text
-                                                      style={{
-                                                        fontSize: look().type.text_xsmall.size,
-                                                        color: look().palette.faint,
-                                                      }}
-                                                    >
-                                                      {t("file.submodule")}
-                                                    </Text>
-                                                  </If>
-                                                  <SmeltButton
-                                                    quiet={true}
-                                                    small={true}
-                                                    disabled={Boolean(row().busy)}
-                                                    icon={
-                                                      row().isStaged
-                                                        ? "icons/minus.svg"
-                                                        : "icons/plus.svg"
-                                                    }
-                                                    tooltip={
-                                                      row().isStaged
-                                                        ? t("stage.unstage")
-                                                        : t("stage.stage")
-                                                    }
-                                                    onPress={() =>
-                                                      stageFile(row().repo, row().path, !row().isStaged)
-                                                    }
-                                                  />
-                                                  <Text
-                                                    style={{
-                                                      fontFamily: look().fonts?.mono,
-                                                      fontSize: look().type.text_xsmall.size,
-                                                      flexShrink: 0,
-                                                      color: (() => {
-                                                        const code = String(row().status ?? " M");
-                                                        const ch = code.trim()[0] ?? "M";
-                                                        if (code === "??" || ch === "A") {
-                                                          return look().palette.ok;
-                                                        }
-                                                        if (ch === "D") return look().palette.bad;
-                                                        return look().palette.need;
-                                                      })(),
-                                                    }}
-                                                  >
-                                                    {String(row().status ?? " M").trim()[0] ?? "M"}
-                                                  </Text>
-                                                </View>
-                                              }
-                                            >
-                                              <MenuRow
-                                                label={t("file.open_diff")}
-                                                onSelect={() =>
-                                                  openDiff(
-                                                    row().repo,
-                                                    row().path,
-                                                    row().status === "??",
-                                                  )
-                                                }
-                                              />
-                                              <MenuRow
-                                                label={t("file.copy_path")}
-                                                onSelect={() => {
-                                                  const full = pathJoin(
-                                                    pathStyle(row().repo.machine),
-                                                    row().repo.root,
-                                                    row().path,
-                                                  );
-                                                  void clipboardWrite(full);
-                                                }}
-                                              />
-                                              <If when={row().repo.machine == null}>
-                                                <MenuRow
-                                                  label={
-                                                    isMac
-                                                      ? t("file.reveal")
-                                                      : t("file.reveal_file_manager")
-                                                  }
-                                                  onSelect={() => {
-                                                    const full = pathJoin(
-                                                      pathStyle(null),
-                                                      row().repo.root,
-                                                      row().path,
-                                                    );
-                                                    void revealPath(full);
-                                                  }}
-                                                />
-                                              </If>
-                                              <MenuSeparator
-                                                class="my-1 bg-border"
-                                                style={{ height: 1 }}
-                                              />
-                                              <MenuRow
-                                                label={
-                                                  row().status === "??"
-                                                    ? t("discard.file_untracked_ok")
-                                                    : t("discard.file_ok")
-                                                }
-                                                iconPath="icons/trash.svg"
-                                                danger={true}
-                                                onSelect={() =>
-                                                  startDiscardFile(row().repo, row().path)
-                                                }
-                                              />
-                                            </SmeltContextMenu>
-                                          }
-                                        >
-                                          {/* 压缩目录行 */}
-                                          <View
-                                            class="hover:bg-accent"
-                                            onPress={() => {
-                                              if (treeCollapsed.has(row().path)) {
-                                                treeCollapsed.delete(row().path);
-                                              } else {
-                                                treeCollapsed.add(row().path);
-                                              }
-                                              bump();
-                                            }}
-                                            style={{
-                                              display: "flex",
-                                              flexDirection: "row",
-                                              alignItems: "center",
-                                              gap: 4,
-                                              height: 24,
-                                              marginLeft: 4,
-                                              marginRight: 4,
-                                              paddingLeft: 10 + row().depth * 12,
-                                              paddingRight: 8,
-                                              borderRadius: look().radius.row,
-                                              cursor: "pointer",
-                                            }}
-                                          >
-                                            <SmeltDisclosureChevron
-                                              open={!row().collapsed}
-                                              size={10}
-                                              color={look().palette.muted}
-                                            />
-                                            <Text
-                                              style={{
-                                                flex: 1,
-                                                minWidth: 0,
-                                                fontSize: look().type.ui.size,
-                                                color: look().palette.muted,
-                                                numberOfLines: 1,
-                                              }}
-                                            >
-                                              {row().name}
-                                            </Text>
-                                            <SmeltButton
-                                              quiet={true}
-                                              small={true}
-                                              icon={
-                                                row().isStaged
-                                                  ? "icons/minus.svg"
-                                                  : "icons/plus.svg"
-                                              }
-                                              tooltip={
-                                                row().isStaged
-                                                  ? t("stage.unstage")
-                                                  : t("stage.stage")
-                                              }
-                                              onPress={() =>
-                                                stagePaths(row().repo, [row().path], !row().isStaged)
-                                              }
-                                            />
-                                          </View>
-                                        </If>
-                                      }
+                                      when={row().kind === "tree_dir"}
+                                      else={<TreeFileRow row={row()} />}
                                     >
-                                      {/* 分组标题（已暂存 / 更改） */}
-                                      <View
-                                        style={{
-                                          display: "flex",
-                                          flexDirection: "row",
-                                          alignItems: "center",
-                                          height: 24,
-                                          paddingLeft: 12 + row().depth * 10,
-                                          paddingRight: 10,
-                                        }}
-                                      >
-                                        <Text
-                                          style={{
-                                            flex: 1,
-                                            minWidth: 0,
-                                            fontSize: look().type.ui_medium.size,
-                                            fontWeight: look().type.ui_medium.weight,
-                                            color: look().palette.faint,
-                                            numberOfLines: 1,
-                                          }}
-                                        >
-                                          {row().title}
-                                        </Text>
-                                        <SmeltButton
-                                          quiet={true}
-                                          small={true}
-                                          icon={
-                                            row().staged ? "icons/minus.svg" : "icons/plus.svg"
-                                          }
-                                          tooltip={
-                                            row().staged ? t("stage.unstage") : t("stage.stage")
-                                          }
-                                          onPress={() =>
-                                            stagePaths(row().repo, row().paths, !row().staged)
-                                          }
-                                        />
-                                      </View>
+                                      <TreeDirRow row={row()} />
                                     </If>
                                   }
                                 >
-                                  {/* 每仓独立提交框 */}
-                                  <View
-                                    style={{
-                                      display: "flex",
-                                      flexDirection: "column",
-                                      gap: 6,
-                                      paddingLeft: 12 + row().depth * 10,
-                                      paddingRight: 8,
-                                      paddingTop: 4,
-                                      paddingBottom: 6,
-                                    }}
-                                  >
-                                    <Input
-                                      multiline={true}
-                                      value={commitMessageSignal(row().repoKey)()}
-                                      placeholder={
-                                        row().branch
-                                          ? t("commit.placeholder_branch", { branch: row().branch })
-                                          : t("commit.placeholder")
-                                      }
-                                      onChange={({ value }: { value: string }) => {
-                                        commitMessageSignal(row().repoKey).set(value);
-                                      }}
-                                      class="rounded-(--radius) border border-input bg-card p-2 text-foreground"
-                                      style={{
-                                        minHeight: 52,
-                                        maxHeight: 120,
-                                        fontSize: look().type.small.size,
-                                        lineHeight: look().type.small.line_height,
-                                      }}
-                                    />
-                                    <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 4 }}>
-                                      <SmeltButton
-                                        primary={true}
-                                        small={true}
-                                        fill={true}
-                                        disabled={
-                                          !(
-                                            commitMessageSignal(row().repoKey)().trim().length > 0 &&
-                                            row().hasStaged &&
-                                            !row().writeOp
-                                          )
-                                        }
-                                        label={t(commitButtonBusyKey(row().writeOp))}
-                                        onPress={() => {
-                                          setActiveRepo(row().repo);
-                                          runCommit(row().repo, true);
-                                        }}
-                                      />
-                                      <SmeltButton
-                                        quiet={true}
-                                        small={true}
-                                        disabled={
-                                          !(
-                                            commitMessageSignal(row().repoKey)().trim().length > 0 &&
-                                            row().hasStaged &&
-                                            !row().writeOp
-                                          )
-                                        }
-                                        label={t("commit.commit_only")}
-                                        onPress={() => {
-                                          setActiveRepo(row().repo);
-                                          runCommit(row().repo, false);
-                                        }}
-                                      />
-                                      <SmeltButton
-                                        quiet={true}
-                                        small={true}
-                                        disabled={!(row().ahead > 0 && !row().writeOp)}
-                                        label={`↑${row().ahead}`}
-                                        onPress={() => {
-                                          setActiveRepo(row().repo);
-                                          runPushOnly(row().repo);
-                                        }}
-                                      />
-                                    </View>
-                                    <If
-                                      when={
-                                        commitMessageSignal(row().repoKey)().trim().length > 0 &&
-                                        !row().hasStaged
-                                      }
-                                    >
-                                      <Text
-                                        style={{
-                                          fontSize: look().type.text_xsmall.size,
-                                          color: look().palette.faint,
-                                        }}
-                                      >
-                                        {t("commit.stage_first")}
-                                      </Text>
-                                    </If>
-                                    <If when={Boolean(row().error)}>
-                                      <View
-                                        style={{
-                                          padding: 6,
-                                          borderRadius: look().radius.sm,
-                                          backgroundColor: look().palette.surface,
-                                        }}
-                                      >
-                                        <Text
-                                          style={{
-                                            fontFamily: look().fonts?.mono,
-                                            fontSize: look().type.text_xsmall.size,
-                                            color: look().palette.bad,
-                                          }}
-                                        >
-                                          {row().error ?? ""}
-                                        </Text>
-                                      </View>
-                                    </If>
-                                  </View>
+                                  <GroupHeaderRow row={row()} />
                                 </If>
                               }
                             >
-                              {/* 多仓标题行 */}
-                              <View
-                                class="hover:bg-accent"
-                                onPress={() => setActiveRepo(row().repo)}
-                                style={{
-                                  display: "flex",
-                                  flexDirection: "row",
-                                  alignItems: "center",
-                                  gap: 4,
-                                  height: 24,
-                                  marginLeft: 4,
-                                  marginRight: 4,
-                                  paddingLeft: 4,
-                                  paddingRight: 4,
-                                  borderRadius: look().radius.row,
-                                  backgroundColor: row().active
-                                    ? look().palette.soft
-                                    : "transparent",
-                                  cursor: "pointer",
-                                }}
-                              >
-                                <SmeltButton
-                                  quiet={true}
-                                  small={true}
-                                  icon={
-                                    row().collapsed
-                                      ? "icons/chevron-right.svg"
-                                      : "icons/chevron-down.svg"
-                                  }
-                                  tooltip={row().collapsed ? t("repo.expand") : t("repo.collapse")}
-                                  onPress={() => {
-                                    const rk = projectKey(row().repo.machine, row().repo.root);
-                                    if (repoCollapsed.has(rk)) repoCollapsed.delete(rk);
-                                    else repoCollapsed.add(rk);
-                                    bump();
-                                  }}
-                                />
-                                <Text
-                                  style={{
-                                    fontSize: look().type.text_xsmall.size,
-                                    color: row().active
-                                      ? look().palette.text
-                                      : look().palette.faint,
-                                  }}
-                                >
-                                  {repoKindGlyph(row().repoKind)}
-                                </Text>
-                                <Text
-                                  style={{
-                                    flex: 1,
-                                    minWidth: 0,
-                                    fontSize: look().type.text_xsmall.size,
-                                    fontWeight: 600,
-                                    color: look().palette.text,
-                                    numberOfLines: 1,
-                                  }}
-                                >
-                                  {row().label}
-                                </Text>
-                                <Text
-                                  tooltip={
-                                    <SmeltTooltip>
-                                      <Text
-                                        style={{
-                                          fontSize: look().type.text_xsmall.size,
-                                          color: look().palette.text,
-                                        }}
-                                      >
-                                        {row().branch}
-                                      </Text>
-                                    </SmeltTooltip>
-                                  }
-                                  style={{
-                                    maxWidth: 80,
-                                    fontSize: look().type.text_xsmall.size,
-                                    color: look().palette.faint,
-                                    numberOfLines: 1,
-                                  }}
-                                >
-                                  {row().branch}
-                                </Text>
-                                <OpsMenu
-                                  repo={row().repo}
-                                  ahead={row().ahead}
-                                  behind={row().behind}
-                                  stashCount={row().stashCount}
-                                  hasChanges={row().hasChanges}
-                                  upstream={row().upstream}
-                                  triggerLabel={
-                                    row().ahead + row().behind > 0
-                                      ? `↑${row().ahead} ↓${row().behind}`
-                                      : "⋯"
-                                  }
-                                  triggerColor={
-                                    row().ahead + row().behind > 0
-                                      ? look().palette.text
-                                      : look().palette.faint
-                                  }
-                                />
-                              </View>
+                              <CommitBoxRow row={row()} />
                             </If>
-                          )}
-                        </Each>
-                      </View>
-                    </Scroll>
+                          }
+                        >
+                          <RepoHeaderRow row={row()} />
+                        </If>
+                      )}
+                    </List>
                   </If>
 
                   <If when={reposTruncated()}>
@@ -3811,67 +3529,33 @@ export function Main() {
       </If>
 
       {/* 危险操作确认框（丢弃文件 / 丢弃全部 / 丢弃块 / 删除分支） */}
-      <SmeltDialog
+      <SmeltConfirmDialog
         open={dangerDialog() != null}
-        role="alertdialog"
-        accessibilityLabel={dangerDialog()?.title ?? ""}
-        onOpenChange={({ open }: { open: boolean }) => {
-          if (!open) dangerDialog.set(null);
+        title={dangerDialog()?.title ?? ""}
+        description={dangerDialog()?.body ?? ""}
+        confirmLabel={dangerDialog()?.okLabel ?? ""}
+        cancelLabel={t("cancel")}
+        danger={true}
+        onCancel={() => dangerDialog.set(null)}
+        onConfirm={async () => {
+          const dlg = dangerDialog();
+          if (!dlg) return;
+          const close = await dlg.onConfirm();
+          if (close) dangerDialog.set(null);
         }}
-        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
-        style={{ width: 440, gap: 10 }}
       >
-        <If when={dangerDialog() != null}>
+        <If when={Boolean(dangerDialog()?.warning)}>
           <Text
             style={{
-              color: look().palette.text,
-              fontSize: look().type.ui_medium.size,
-              fontWeight: look().type.ui_medium.weight,
+              color: look().palette.bad,
+              fontSize: look().type.small.size,
+              lineHeight: look().type.small.line_height,
             }}
           >
-            {dangerDialog()?.title ?? ""}
+            {dangerDialog()?.warning ?? ""}
           </Text>
-          <Text
-            style={{
-              color: look().palette.muted,
-              fontSize: look().type.ui.size,
-              lineHeight: look().type.ui.line_height,
-            }}
-          >
-            {dangerDialog()?.body ?? ""}
-          </Text>
-          <If when={Boolean(dangerDialog()?.warning)}>
-            <Text
-              style={{
-                color: look().palette.bad,
-                fontSize: look().type.small.size,
-                lineHeight: look().type.small.line_height,
-              }}
-            >
-              {dangerDialog()?.warning ?? ""}
-            </Text>
-          </If>
-          <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
-            <SmeltButton
-              quiet={true}
-              small={true}
-              label={t("cancel")}
-              onPress={() => dangerDialog.set(null)}
-            />
-            <SmeltButton
-              danger={true}
-              small={true}
-              label={dangerDialog()?.okLabel ?? ""}
-              onPress={async () => {
-                const dlg = dangerDialog();
-                if (!dlg) return;
-                const close = await dlg.onConfirm();
-                if (close) dangerDialog.set(null);
-              }}
-            />
-          </View>
         </If>
-      </SmeltDialog>
+      </SmeltConfirmDialog>
     </View>
   );
 }

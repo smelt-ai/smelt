@@ -89,10 +89,20 @@ export function Panel() {
 ### `SmeltButton`
 
 ```tsx
-<SmeltButton label="保存" primary onPress={save} />
-<SmeltButton icon="icons/trash.svg" tooltip="删除" quiet onPress={remove} />
-<SmeltButton label="刷新" icon="icons/refresh.svg" small loading={busy()} onPress={refresh} />
+<SmeltButton label="保存" variant="primary" onPress={save} />
+<SmeltButton icon="icons/trash.svg" tooltip="删除" variant="quiet" onPress={remove} />
+<SmeltButton label="刷新" icon="icons/refresh.svg" size="sm" loading={busy()} onPress={refresh} />
 ```
+
+颜色由 `variant` 定，几何（高度、内边距、字档、图标）由 `size` 定，`shape` 只改圆角。不接 `style`：颜色、圆角、内边距不能在调用处改，`class` 只放布局（宽度、`flex`、外边距）。
+
+按钮和输入框共用一张尺寸表，同一档并排时一样高；只有图标的按钮见方，边长等于高度。图标跟同档的字配，有字没字一样大，嫌图标小就换大一档，不单调图标。
+
+| 档 | 高 | 字 | 图标 | 用在 |
+| --- | --- | --- | --- | --- |
+| `xs` | 20 | `small` | 14 | 行里的就地操作（关闭、暂存、加号） |
+| `sm` | 24 | `text_xsmall` | 14 | 面板顶栏、工具条 |
+| `md` | 28 | `ui` | 16 | 标题栏、表单、对话框 |
 
 | Prop | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
@@ -102,21 +112,26 @@ export function Panel() {
 | `tooltip` | `string` | | 悬停提示 |
 | `command` | `string` | | 命令 id。只用来在提示里显示这条命令的快捷键，**不会**替你执行，执行写在 `onPress` 里 |
 | `onPress` | `(e) => void` | | 点了。`disabled`、`loading` 时不调 |
-| `primary` | `boolean` | `false` | 主按钮。一块界面里最多一个 |
-| `quiet` | `boolean` | `false` | 没有底，悬停才有。工具栏、行内操作用 |
-| `danger` | `boolean` | `false` | 危险操作，红字。可以和 `quiet` 一起用 |
-| `dismiss` | `boolean` | `false` | 关闭按钮：20×20，最淡的字色 |
-| `floating` | `boolean` | `false` | 浮在内容上的按钮：表面色、带投影、胶囊形 |
-| `circle` | `boolean` | `false` | 只有图标时画成圆的 |
-| `small` | `boolean` | `false` | 小一号 |
+| `variant` | `"secondary"` `"primary"` `"quiet"` `"danger"` `"danger-quiet"` `"floating"` `"dismiss"` | `"secondary"` | `primary` 主按钮，一块界面里最多一个；`quiet` 没有底、悬停才有，工具栏和行内操作用；`danger` 红字；`danger-quiet` 安静的红字；`floating` 浮在内容上（表面色、带投影）；`dismiss` 卡片角上的关闭，最淡的字色 |
+| `size` | `"xs"` `"sm"` `"md"` | `"md"` | 见上表 |
+| `shape` | `"rounded"` `"pill"` `"circle"` | `"rounded"` | `pill` 两端全圆；`circle` 用在只有图标的按钮上 |
 | `fill` | `boolean` | `false` | 撑满宽度 |
 | `disabled` | `boolean` | `false` | 不能点 |
 | `loading` | `boolean` | `false` | 在忙：不能点，显示转圈 |
-| `selected` | `boolean` | `false` | 选中的样子。`quiet` 按钮选中时有底 |
-| `toggled` | `boolean` | `false` | 开关按钮按下的状态（无障碍上算选中） |
+| `selected` | `boolean` | `false` | 选中的样子（无障碍上算选中）。`quiet` 按钮选中时有底 |
 | `accessibilityLabel` | `string` | `label` 或 `tooltip` | 读屏念的名字。只有图标时一定要给 `tooltip` 或它 |
-| `class`、`style`、`testID` | | | |
+| `class`、`testID` | | | `class` 只放布局 |
 | `children` | `JSX.Element` | | 自定义内容，代替 `label` |
+
+### 行、输入框、分段、菜单项、确认框
+
+| 组件 | 基于 | 用途 |
+| --- | --- | --- |
+| `SmeltRow` | `Button` | 可点的列表行、树行。键盘可聚焦，悬停 `row_hover`、选中 `row_selected`（只靠底色，不画竖条），箭头光标。行高、内边距、缩进放 `class` / `style`，颜色和圆角归组件。不要用 `<View onPress>` 搭行 |
+| `SmeltInput` | `Input` | 文本框：`size` 同按钮的尺寸表（行里就地改名用 `md`，字和行标题一样），`invalid` 红边，`bare` 不画底和边（嵌在已有外框里），`multiline` 多行，`mono` 等宽字；`onFocus` / `onBlur` / `onLayout` 照常转发 |
+| `SmeltSegmented` | `ToggleGroup` | 分段控件：`options`（每项可带 `tooltip`）、`value`、`onChange`；`multiple` 时可多选 |
+| `SmeltMenuItem`、`SmeltMenuSeparator`、`SmeltMenuLabel` | `MenuItem`、`MenuSeparator` | 菜单项（图标、勾、危险色）、分隔线、分组名。放在 `SmeltMenu` / `SmeltContextMenu` 里 |
+| `SmeltConfirmDialog` | `SmeltDialog` | 确认框：标题、说明、取消 + 确认（`danger` 时是危险按钮）。只能按钮或 Esc 关，`busy` 时确认转圈 |
 
 ### 浮层
 

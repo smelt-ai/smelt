@@ -44,7 +44,7 @@ export default function Probe() {
   return (
     <View style={{ width: 800, height: 100, alignItems: "flex-start" }}>
       <View onLayout={report("button")}>
-        <SmeltButton floating small label={LABEL} style={{ maxWidth: 200 }}>
+        <SmeltButton variant="floating" shape="pill" size="sm" label={LABEL} class="max-w-50">
           <View onLayout={report("end")} style={{ width: 1, height: 1 }} />
         </SmeltButton>
       </View>

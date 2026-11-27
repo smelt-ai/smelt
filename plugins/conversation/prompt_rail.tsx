@@ -182,13 +182,13 @@ export function PromptRail(props: {
             {/* 仅在悬停且超窗时左侧浮现 1.5px 无轨丝线指示当前滚动位置。 */}
             <If when={railHovered() && canScroll()}>
               <View
+                class="rounded-full"
                 style={{
                   position: "absolute",
                   left: 0,
                   top: scrollMetrics().thumbTop,
                   width: 1.5,
                   height: scrollMetrics().thumbHeight,
-                  borderRadius: 1,
                   backgroundColor: look().palette.faint,
                   opacity: 0.45,
                   pointerEvents: "none",
@@ -267,10 +267,10 @@ export function PromptRail(props: {
                         }}
                       >
                         <View
+                          class="rounded-full"
                           style={{
                             width: width(),
                             height: 2,
-                            borderRadius: 1,
                             backgroundColor: color(),
                             opacity: opacity(),
                             // 宽度是布局，NSH 不按样式过渡它；整串里有一个认不出整串作废，所以只写能过渡的。
@@ -288,7 +288,7 @@ export function PromptRail(props: {
 
           <If when={hoveredItem() != null}>
             <View
-              class="w-72 px-3 py-2.5 rounded-[10px] border border-border bg-popover shadow-md pointer-events-none"
+              class="w-72 px-3 py-2.5 rounded-lg border border-border bg-popover shadow-md pointer-events-none"
               style={{ gap: 5 }}
             >
               <Text

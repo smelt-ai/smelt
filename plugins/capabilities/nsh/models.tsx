@@ -1,8 +1,7 @@
 // 设置「模型」页：默认模型、推理强度、服务商凭据与自定义服务商、原生配置文件。
 
 import { computed, Text, View } from "nsh";
-import { Input } from "nsh/base";
-import { SmeltButton, t } from "smelt/sdk";
+import { SmeltButton, SmeltInput, SmeltMenuItem, SmeltMenuSeparator, t } from "smelt/sdk";
 import {
   authStatusConfigured,
   authStatusNote,
@@ -28,9 +27,6 @@ import {
 import {
   BadgePill,
   DropdownMenuButton,
-  INPUT_CLASS,
-  MenuDivider,
-  MenuEntry,
   MenuSub,
   SectionCell,
   SettingsPageShell,
@@ -129,14 +125,14 @@ function DefaultModelSection(props: { page: PageController }) {
               align="end"
               minWidth={200}
             >
-              <MenuEntry
+              <SmeltMenuItem
                 label={t("default_model.auto")}
                 checked={current() == null}
                 onSelect={() => props.page.clearDefaultModel()}
               />
-              <MenuDivider />
+              <SmeltMenuSeparator />
               <If when={groups().length === 0}>
-                <MenuEntry label={t("default_model.none")} disabled={true} onSelect={() => {}} />
+                <SmeltMenuItem label={t("default_model.none")} disabled={true} onSelect={() => {}} />
               </If>
               <Each of={groups()} key={(g: any) => g.provider}>
                 {(group: () => any) => {
@@ -145,7 +141,7 @@ function DefaultModelSection(props: { page: PageController }) {
                     <MenuSub label={group().name} checked={inGroup()}>
                       <Each of={group().models} key={(m: any) => m.id}>
                         {(m: () => { id: string; name: string }) => (
-                          <MenuEntry
+                          <SmeltMenuItem
                             label={m().name}
                             checked={inGroup() && current()?.model === m().id}
                             onSelect={() => props.page.setDefaultModel(group().provider, m().id)}
@@ -156,8 +152,8 @@ function DefaultModelSection(props: { page: PageController }) {
                   );
                 }}
               </Each>
-              <MenuDivider />
-              <MenuEntry
+              <SmeltMenuSeparator />
+              <SmeltMenuItem
                 label={t("default_model.manual_menu")}
                 onSelect={() => props.page.openManualModelEditor()}
               />
@@ -188,7 +184,7 @@ function DefaultModelSection(props: { page: PageController }) {
             <DropdownMenuButton label={thinkingLabel()} align="end" minWidth={140}>
               <Each of={PI_THINKING_LEVELS} key={(lv: string) => lv}>
                 {(lv: () => string) => (
-                  <MenuEntry
+                  <SmeltMenuItem
                     label={thinkingLevelLabel(lv(), t)}
                     checked={thinking() === lv()}
                     onSelect={() => props.page.setThinkingLevel(lv())}
@@ -253,15 +249,15 @@ function ManualModelForm(props: {
       </If>
       <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
         <SmeltButton
-          quiet={true}
-          small={true}
+          variant="quiet"
+          size="sm"
           disabled={saving()}
           label={t("common.cancel")}
           onPress={() => props.page.cancelManualModelEditor()}
         />
         <SmeltButton
-          primary={true}
-          small={true}
+          variant="primary"
+          size="sm"
           loading={saving()}
           disabled={saving()}
           label={t("common.save")}
@@ -430,8 +426,8 @@ function ProvidersSection(props: { page: PageController }) {
                   />
                 </View>
                 <SmeltButton
-                  quiet={true}
-                  small={true}
+                  variant="quiet"
+                  size="sm"
                   label={t("common.retry")}
                   onPress={() => props.page.refreshAuthProviders()}
                 />
@@ -444,8 +440,8 @@ function ProvidersSection(props: { page: PageController }) {
               }
             >
               <SmeltButton
-                quiet={true}
-                small={true}
+                variant="quiet"
+                size="sm"
                 label={
                   props.page.authShowAll()
                     ? t("providers.show_common")
@@ -456,8 +452,8 @@ function ProvidersSection(props: { page: PageController }) {
             </If>
           </View>
           <SmeltButton
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             icon="icons/plus.svg"
             label={t("provider.add")}
             tooltip={t("provider.add_tooltip")}
@@ -488,7 +484,7 @@ function BuiltinProviderRow(props: {
     <SettingsRow title={props.provider().name} note={authStatusNote(props.provider(), t)}>
       <If when={!configured() && props.provider().supportsOauth}>
         <SmeltButton
-          small={true}
+          size="sm"
           label={t("auth.sign_in")}
           tooltip={t("auth.sign_in_tooltip")}
           disabled={props.busy()}
@@ -504,7 +500,7 @@ function BuiltinProviderRow(props: {
       </If>
       <If when={!configured() && !props.provider().supportsOauth && props.provider().supportsApiKey}>
         <SmeltButton
-          small={true}
+          size="sm"
           label={t("auth.enter_api_key")}
           disabled={props.busy()}
           onPress={() =>
@@ -525,7 +521,7 @@ function BuiltinProviderRow(props: {
           align="end"
         >
           <If when={showReauth()}>
-            <MenuEntry
+            <SmeltMenuItem
               label={t("auth.sign_in_again")}
               onSelect={() =>
                 props.page.startProviderLogin(
@@ -538,7 +534,7 @@ function BuiltinProviderRow(props: {
             />
           </If>
           <If when={showStepByStep()}>
-            <MenuEntry
+            <SmeltMenuItem
               label={t("auth.sign_in_step_by_step")}
               onSelect={() =>
                 props.page.startProviderLogin(
@@ -551,7 +547,7 @@ function BuiltinProviderRow(props: {
             />
           </If>
           <If when={showApiKeyMenu()}>
-            <MenuEntry
+            <SmeltMenuItem
               label={apiKeyMenuLabel()}
               onSelect={() =>
                 props.page.startProviderLogin(
@@ -565,9 +561,9 @@ function BuiltinProviderRow(props: {
           </If>
           <If when={configured()}>
             <If when={showReauth() || showStepByStep() || showApiKeyMenu()}>
-              <MenuDivider />
+              <SmeltMenuSeparator />
             </If>
-            <MenuEntry
+            <SmeltMenuItem
               label={t("auth.sign_out")}
               danger={true}
               onSelect={() =>
@@ -594,8 +590,8 @@ function CustomProviderRow(props: {
       note={customProviderNote(props.provider(), props.isAuto(), t)}
     >
       <SmeltButton
-        quiet={true}
-        small={true}
+        variant="quiet"
+        size="sm"
         label={t("provider.edit")}
         disabled={props.busy()}
         onPress={() => props.page.openCustomProviderEditor(props.provider().id)}
@@ -606,7 +602,7 @@ function CustomProviderRow(props: {
         disabled={props.busy()}
         align="end"
       >
-        <MenuEntry
+        <SmeltMenuItem
           label={t("provider.remove")}
           danger={true}
           onSelect={() => props.page.requestRemoveCustomProvider(props.provider().id, title())}
@@ -693,7 +689,7 @@ function CustomProviderForm(props: {
             >
               <Each of={PROVIDER_API_PROTOCOLS} key={(proto: string) => proto}>
                 {(proto: () => string) => (
-                  <MenuEntry
+                  <SmeltMenuItem
                     label={proto()}
                     checked={props.draft().api === proto()}
                     onSelect={() => props.page.setCustomProviderApi(proto())}
@@ -739,16 +735,16 @@ function CustomProviderForm(props: {
         </Text>
         <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 4 }}>
           <SmeltButton
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             label={t("provider.fetch_models")}
             loading={discovering()}
             disabled={discovering() || saving()}
             onPress={() => props.page.discoverCustomModels()}
           />
           <SmeltButton
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             icon="icons/plus.svg"
             label={t("provider.add_model")}
             disabled={saving()}
@@ -787,57 +783,57 @@ function CustomProviderForm(props: {
             {(row: () => CustomModelRowDraft) => (
               <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8, width: "100%" }}>
                 <View style={{ flex: 3, minWidth: 0 }}>
-                  <Input
+                  <SmeltInput
                     value={row().id}
                     placeholder={t("model_row.id_placeholder")}
+                    accessibilityLabel={t("model_row.id")}
                     disabled={saving()}
-                    onChange={({ value }: { value: string }) =>
+                    onChange={({ value }) =>
                       props.page.updateCustomModelRow(row().key, { id: value })
                     }
-                    class={INPUT_CLASS}
-                    style={{ height: 28, fontSize: look().type.ui.size, width: "100%" }}
+                    class="w-full"
                   />
                 </View>
                 <View style={{ flex: 3, minWidth: 0 }}>
-                  <Input
+                  <SmeltInput
                     value={row().name}
                     placeholder={t("model_row.name_placeholder")}
+                    accessibilityLabel={t("model_row.name")}
                     disabled={saving()}
-                    onChange={({ value }: { value: string }) =>
+                    onChange={({ value }) =>
                       props.page.updateCustomModelRow(row().key, { name: value })
                     }
-                    class={INPUT_CLASS}
-                    style={{ height: 28, fontSize: look().type.ui.size, width: "100%" }}
+                    class="w-full"
                   />
                 </View>
                 <View style={{ flex: 2, minWidth: 0 }}>
-                  <Input
+                  <SmeltInput
                     value={row().contextWindow}
                     placeholder={t("model_row.context_placeholder")}
+                    accessibilityLabel={t("model_row.context")}
                     disabled={saving()}
-                    onChange={({ value }: { value: string }) =>
+                    onChange={({ value }) =>
                       props.page.updateCustomModelRow(row().key, { contextWindow: value })
                     }
-                    class={INPUT_CLASS}
-                    style={{ height: 28, fontSize: look().type.ui.size, width: "100%" }}
+                    class="w-full"
                   />
                 </View>
                 <View style={{ flex: 2, minWidth: 0 }}>
-                  <Input
+                  <SmeltInput
                     value={row().maxTokens}
                     placeholder={t("model_row.max_tokens_placeholder")}
+                    accessibilityLabel={t("model_row.max_tokens")}
                     disabled={saving()}
-                    onChange={({ value }: { value: string }) =>
+                    onChange={({ value }) =>
                       props.page.updateCustomModelRow(row().key, { maxTokens: value })
                     }
-                    class={INPUT_CLASS}
-                    style={{ height: 28, fontSize: look().type.ui.size, width: "100%" }}
+                    class="w-full"
                   />
                 </View>
                 <View style={{ width: 24, flexShrink: 0, display: "flex", alignItems: "center" }}>
                   <SmeltButton
-                    quiet={true}
-                    small={true}
+                    variant="quiet"
+                    size="sm"
                     icon="icons/trash.svg"
                     accessibilityLabel={t("model_row.remove_tooltip")}
                     tooltip={t("model_row.remove_tooltip")}
@@ -857,21 +853,21 @@ function CustomProviderForm(props: {
 
       <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
         <SmeltButton
-          quiet={true}
-          small={true}
+          variant="quiet"
+          size="sm"
           disabled={saving()}
           label={t("common.cancel")}
           onPress={() => props.page.cancelCustomProviderEditor()}
         />
         <SmeltButton
-          small={true}
+          size="sm"
           disabled={saving()}
           label={t("provider.save_default")}
           onPress={() => props.page.saveCustomProvider(true)}
         />
         <SmeltButton
-          primary={true}
-          small={true}
+          variant="primary"
+          size="sm"
           loading={saving()}
           disabled={saving()}
           label={t("common.save")}
@@ -939,7 +935,7 @@ function ModelDiscoverySection(props: {
                 const taken = () => props.adoptedIds().includes(m().id);
                 return (
                   <SmeltButton
-                    small={true}
+                    size="sm"
                     selected={taken()}
                     disabled={taken()}
                     label={discoveredModelLabel(m())}
@@ -971,32 +967,32 @@ function NativeFilesSection(props: { page: PageController }) {
           }
         >
           <SmeltButton
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             label="settings.json"
             tooltip={paths().settings || undefined}
             disabled={isRemote()}
             onPress={() => props.page.openConfigFile("settings")}
           />
           <SmeltButton
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             label="models.json"
             tooltip={paths().models || undefined}
             disabled={isRemote()}
             onPress={() => props.page.openConfigFile("models")}
           />
           <SmeltButton
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             label="auth.json"
             tooltip={paths().auth || undefined}
             disabled={isRemote()}
             onPress={() => props.page.openConfigFile("credentials")}
           />
           <SmeltButton
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             icon="icons/refresh.svg"
             accessibilityLabel={t("config.reload_tooltip")}
             tooltip={t("config.reload_tooltip")}

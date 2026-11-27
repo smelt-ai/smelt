@@ -61,7 +61,7 @@ export function Main() {
         <Text class="text-sm font-semibold text-foreground">{t("title")}</Text>
       </View>
       <Text class="text-xs text-muted-foreground">{t("count", { n: count() })}</Text>
-      <SmeltButton label={t("add")} primary onPress={() => count.update((n) => n + 1)} />
+      <SmeltButton label={t("add")} variant="primary" onPress={() => count.update((n) => n + 1)} />
     </View>
   );
 }
@@ -162,7 +162,7 @@ export function Main() {
   return (
     <View class="flex-1 items-center justify-center gap-3 bg-background p-6">
       <Text class="text-2xl font-semibold text-foreground">{String(count())}</Text>
-      <SmeltButton label={t("add")} primary onPress={() => void save(count() + 1)} />
+      <SmeltButton label={t("add")} variant="primary" onPress={() => void save(count() + 1)} />
     </View>
   );
 }

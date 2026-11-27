@@ -1,10 +1,9 @@
 // 就地展开的登录面板：内置服务商的订阅 / API key 登录，和 MCP 服务器的 OAuth 登录共用。
 
 import { computed, Text, View } from "nsh";
-import { Input } from "nsh/base";
-import { openUrl, SmeltButton, t } from "smelt/sdk";
+import { openUrl, SmeltButton, SmeltInput, t } from "smelt/sdk";
 import { currentTheme, type LoginViewState, type PageController } from "./state.ts";
-import { CopyButton, INPUT_CLASS } from "./ui.tsx";
+import { CopyButton } from "./ui.tsx";
 
 export function LoginPanel(props: { page: PageController; view: () => LoginViewState }) {
   const look = currentTheme;
@@ -65,8 +64,8 @@ export function LoginPanel(props: { page: PageController; view: () => LoginViewS
           </If>
         </View>
         <SmeltButton
-          quiet={true}
-          small={true}
+          variant="quiet"
+          size="sm"
           label={failed() ? t("common.close") : t("common.cancel")}
           onPress={() => props.page.cancelLogin()}
         />
@@ -112,7 +111,7 @@ export function LoginPanel(props: { page: PageController; view: () => LoginViewS
               tooltip={t("common.copy")}
             />
             <SmeltButton
-              small={true}
+              size="sm"
               label={t("auth.open_verification")}
               onPress={() => {
                 const uri = view().deviceCode?.verificationUri;
@@ -136,7 +135,7 @@ export function LoginPanel(props: { page: PageController; view: () => LoginViewS
         <View style={{ display: "flex", flexDirection: "column", width: "100%", gap: 6 }}>
           <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
             <SmeltButton
-              small={true}
+              size="sm"
               label={t("auth.open_authorization")}
               onPress={() => {
                 const url = view().authUrl;
@@ -194,21 +193,18 @@ export function LoginPanel(props: { page: PageController; view: () => LoginViewS
                 }}
               >
                 <View style={{ flex: 1, minWidth: 0 }}>
-                  <Input
+                  <SmeltInput
                     value={view().inputValue}
                     masked={view().prompt?.kind === "secret"}
                     placeholder={view().prompt?.placeholder ?? ""}
                     accessibilityLabel={view().prompt?.message ?? ""}
-                    onChange={({ value }: { value: string }) =>
-                      props.page.setLoginInputValue(value)
-                    }
+                    onChange={({ value }) => props.page.setLoginInputValue(value)}
                     onSubmit={() => props.page.submitLoginPrompt()}
-                    class={INPUT_CLASS}
-                    style={{ height: 28, fontSize: look().type.ui.size, width: "100%" }}
+                    class="w-full"
                   />
                 </View>
                 <SmeltButton
-                  small={true}
+                  size="sm"
                   label={
                     view().inputValue.trim().length === 0
                       ? t("auth.submit_empty")
@@ -231,7 +227,7 @@ export function LoginPanel(props: { page: PageController; view: () => LoginViewS
               <Each of={view().prompt?.options ?? []} key={(opt: any) => opt.id}>
                 {(opt: () => { id: string; label: string }) => (
                   <SmeltButton
-                    small={true}
+                    size="sm"
                     label={opt().label}
                     onPress={() => props.page.chooseLoginOption(opt().id)}
                   />

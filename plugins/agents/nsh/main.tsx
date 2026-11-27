@@ -3,7 +3,7 @@
 // - `settings`：设置里的「Agent」页（本机 CLI、Hooks、自定义 Agent、新建菜单启动项）
 
 import { computed, View } from "nsh";
-import { machineMeta } from "smelt/sdk";
+import { machineMeta, SmeltConfirmDialog, t } from "smelt/sdk";
 
 import { AgentCatalogView } from "./catalog.tsx";
 import { AgentEditorView } from "./editor.tsx";
@@ -15,7 +15,6 @@ import {
   getAgentDefinition,
   initPlugin,
 } from "./state.ts";
-import { ConfirmDialog } from "./ui.tsx";
 
 initPlugin();
 
@@ -43,9 +42,19 @@ export function main() {
       <If when={isEditing()} else={<AgentCatalogView />}>
         <AgentEditorView />
       </If>
-      <ConfirmDialog
-        request={() => confirmDialog()}
-        onDismiss={() => confirmDialog.set(null)}
+      <SmeltConfirmDialog
+        open={confirmDialog() != null}
+        title={confirmDialog()?.title ?? ""}
+        description={confirmDialog()?.description ?? ""}
+        confirmLabel={confirmDialog()?.action ?? ""}
+        cancelLabel={t("common.cancel")}
+        danger={Boolean(confirmDialog()?.danger)}
+        onConfirm={() => {
+          const fn = confirmDialog()?.onConfirm;
+          confirmDialog.set(null);
+          fn?.();
+        }}
+        onCancel={() => confirmDialog.set(null)}
       />
     </View>
   );

@@ -14,6 +14,7 @@ import {
   shellState,
   SmeltBackdropRegion,
   SmeltButton,
+  SmeltConfirmDialog,
   SmeltDialog,
   SmeltIcon,
   SmeltNativeView,
@@ -84,7 +85,6 @@ function HostView(props: {
 }
 
 const TOP_BAR_HEIGHT = 34;
-const DOCK_TOGGLE_WIDTH = 20;
 const WINDOW_EDGE_MARGIN = 18;
 
 interface StackNodeSpec {
@@ -470,11 +470,11 @@ function TabItem(props: { pageKey: string; panelId: string; active: boolean }) {
       </Text>
       <If when={badge() !== null}>
         <View
+          class="rounded-full"
           style={{
             paddingLeft: 5,
             paddingRight: 5,
             height: 16,
-            borderRadius: 8,
             backgroundColor: theme().palette.soft,
             display: "flex",
             alignItems: "center",
@@ -540,10 +540,9 @@ function TabBarTrailing(props: {
       <If when={trailing().canZoom}>
         <View style={{ flexShrink: 0, paddingRight: 4 }}>
           <SmeltButton
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             selected={props.zoomed}
-            toggled={props.zoomed}
             icon={props.zoomed ? "icons/minimize.svg" : "icons/maximize.svg"}
             tooltip={props.zoomed ? trailing().restoreLabel : trailing().zoomLabel}
             onPress={props.onToggleZoom}
@@ -705,7 +704,6 @@ function PageWorkspace(props: { pageKey: string }) {
                 position: "absolute",
                 top: 0,
                 left: leftToggleX(),
-                width: DOCK_TOGGLE_WIDTH,
                 height: TOP_BAR_HEIGHT,
                 display: "flex",
                 alignItems: "center",
@@ -713,8 +711,7 @@ function PageWorkspace(props: { pageKey: string }) {
               }}
             >
               <SmeltButton
-                quiet={true}
-                small={true}
+                variant="quiet"
                 icon={leftDockOpen() ? "icons/panel-left-filled.svg" : "icons/panel-left.svg"}
                 tooltip={
                   leftDockOpen()
@@ -734,7 +731,6 @@ function PageWorkspace(props: { pageKey: string }) {
                 position: "absolute",
                 top: 0,
                 right: WINDOW_EDGE_MARGIN,
-                width: DOCK_TOGGLE_WIDTH,
                 height: TOP_BAR_HEIGHT,
                 display: "flex",
                 alignItems: "center",
@@ -742,8 +738,7 @@ function PageWorkspace(props: { pageKey: string }) {
               }}
             >
               <SmeltButton
-                quiet={true}
-                small={true}
+                variant="quiet"
                 icon={rightDockOpen() ? "icons/panel-right-filled.svg" : "icons/panel-right.svg"}
                 tooltip={
                   rightDockOpen()
@@ -829,15 +824,15 @@ function HostDialogs() {
           </Text>
           <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
             <SmeltButton
-              quiet={true}
-              small={true}
+              variant="quiet"
+              size="sm"
               disabled={Boolean(quit()?.quitting)}
               label={quit()?.cancel_label ?? ""}
               onPress={() => sendHostDialogAction("quit_cancel")}
             />
             <SmeltButton
-              primary={true}
-              small={true}
+              variant="primary"
+              size="sm"
               loading={Boolean(quit()?.quitting)}
               disabled={Boolean(quit()?.quitting)}
               label={quit()?.confirm_label ?? ""}
@@ -873,16 +868,16 @@ function HostDialogs() {
 
           <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
             <SmeltButton
-              quiet={true}
-              small={true}
+              variant="quiet"
+              size="sm"
               icon="icons/arrow-up.svg"
               tooltip={picker()?.up_tooltip ?? ""}
               disabled={!picker()?.can_go_up}
               onPress={() => sendHostDialogAction("dir_picker_up")}
             />
             <SmeltButton
-              quiet={true}
-              small={true}
+              variant="quiet"
+              size="sm"
               label={picker()?.home_label ?? ""}
               onPress={() => sendHostDialogAction("dir_picker_home")}
             />
@@ -1026,8 +1021,8 @@ function HostDialogs() {
                         <If when={Boolean(picker()?.multiple && entry().is_dir)}>
                           <View style={{ flexShrink: 0, paddingRight: 8 }}>
                             <SmeltButton
-                              quiet={true}
-                              small={true}
+                              variant="quiet"
+                              size="sm"
                               icon={entry().selected ? "icons/check.svg" : "icons/plus.svg"}
                               tooltip={
                                 entry().selected
@@ -1060,14 +1055,14 @@ function HostDialogs() {
 
           <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
             <SmeltButton
-              quiet={true}
-              small={true}
+              variant="quiet"
+              size="sm"
               label={picker()?.cancel_label ?? ""}
               onPress={() => sendHostDialogAction("dir_picker_cancel")}
             />
             <SmeltButton
-              primary={true}
-              small={true}
+              variant="primary"
+              size="sm"
               disabled={!picker()?.can_confirm}
               label={picker()?.confirm_label ?? ""}
               onPress={() => sendHostDialogAction("dir_picker_confirm")}
@@ -1076,70 +1071,29 @@ function HostDialogs() {
         </If>
       </SmeltDialog>
 
-      <SmeltDialog
+      <SmeltConfirmDialog
         open={confirm() != null}
-        role="alertdialog"
-        closeOnBackdropPress={false}
-        closeOnEscape={!confirm()?.busy}
-        accessibilityLabel={confirm()?.title ?? ""}
-        accessibilityDescription={confirm()?.description ?? ""}
-        onOpenChange={({ open }: { open: boolean }) => {
-          if (!open && !confirm()?.busy) sendHostDialogAction("confirm_cancel");
-        }}
-        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
-        style={{ width: 440, gap: 12 }}
+        title={confirm()?.title ?? ""}
+        description={confirm()?.description ?? ""}
+        confirmLabel={confirm()?.confirm_label ?? ""}
+        cancelLabel={confirm()?.cancel_label ?? ""}
+        danger={Boolean(confirm()?.danger)}
+        busy={Boolean(confirm()?.busy)}
+        onConfirm={() => sendHostDialogAction("confirm_accept")}
+        onCancel={() => sendHostDialogAction("confirm_cancel")}
       >
-        <If when={confirm() != null}>
-          <Text
-            style={{
-              fontSize: theme().type.ui_medium.size,
-              lineHeight: theme().type.ui_medium.line_height,
-              fontWeight: theme().type.ui_medium.weight,
-              color: theme().palette.text,
-            }}
-          >
-            {confirm()?.title ?? ""}
-          </Text>
+        <If when={Boolean(confirm()?.note)}>
           <Text
             style={{
               fontSize: theme().type.ui.size,
               lineHeight: theme().type.ui.line_height,
-              color: theme().palette.muted,
+              color: confirm()?.note_bad ? theme().palette.bad : theme().palette.muted,
             }}
           >
-            {confirm()?.description ?? ""}
+            {confirm()?.note ?? ""}
           </Text>
-          <If when={Boolean(confirm()?.note)}>
-            <Text
-              style={{
-                fontSize: theme().type.ui.size,
-                lineHeight: theme().type.ui.line_height,
-                color: confirm()?.note_bad ? theme().palette.bad : theme().palette.muted,
-              }}
-            >
-              {confirm()?.note ?? ""}
-            </Text>
-          </If>
-          <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
-            <SmeltButton
-              quiet={true}
-              small={true}
-              disabled={Boolean(confirm()?.busy)}
-              label={confirm()?.cancel_label ?? ""}
-              onPress={() => sendHostDialogAction("confirm_cancel")}
-            />
-            <SmeltButton
-              primary={!confirm()?.danger}
-              danger={Boolean(confirm()?.danger)}
-              small={true}
-              loading={Boolean(confirm()?.busy)}
-              disabled={Boolean(confirm()?.busy)}
-              label={confirm()?.confirm_label ?? ""}
-              onPress={() => sendHostDialogAction("confirm_accept")}
-            />
-          </View>
         </If>
-      </SmeltDialog>
+      </SmeltConfirmDialog>
     </>
   );
 }

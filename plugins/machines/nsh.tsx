@@ -4,7 +4,6 @@
 // - 角标：有机器离线、不兼容、高延迟或机器表读取失败时在「远程」页挂 "!" 角标。
 
 import { Canvas, cleanup, computed, Scroll, signal, Text, View } from "nsh";
-import { Input } from "nsh/base";
 import {
   bootTask,
   call,
@@ -21,10 +20,10 @@ import {
   registerViews,
   run,
   SmeltButton,
+  SmeltConfirmDialog,
   SmeltDialog,
-  SmeltIcon,
+  SmeltInput,
   SmeltSwitch,
-  SmeltTooltip,
   smeltVersion,
   t,
   text,
@@ -643,10 +642,10 @@ function toneColor(palette: any, tone: string): string {
 function StatusDot(props: { size: number; color: string }) {
   return (
     <View
+      class="rounded-full"
       style={{
         width: props.size,
         height: props.size,
-        borderRadius: props.size / 2,
         backgroundColor: props.color,
         flexShrink: 0,
       }}
@@ -655,6 +654,7 @@ function StatusDot(props: { size: number; color: string }) {
 }
 
 function QrCanvas(props: { matrix: { size: number; bits: string }; displaySize?: number }) {
+  const look = theme;
   const pxSize = props.displaySize ?? 132;
   const quiet = 2;
   return (
@@ -662,7 +662,7 @@ function QrCanvas(props: { matrix: { size: number; bits: string }; displaySize?:
       style={{
         flexShrink: 0,
         padding: 8,
-        borderRadius: 8,
+        borderRadius: look().radius.lg,
         // 二维码底必须是纯白，两种主题都一样：深色底上的二维码扫不出来。
         backgroundColor: "#ffffff",
       }}
@@ -828,7 +828,7 @@ export function remote() {
                     </View>
                     <If when={Boolean(conn().can_upgrade)}>
                       <SmeltButton
-                        small={true}
+                        size="sm"
                         label={t("upgrade.action")}
                         tooltip={t("upgrade.tooltip", { version: smeltVersion() })}
                         onPress={() => {
@@ -840,7 +840,7 @@ export function remote() {
                       />
                     </If>
                     <SmeltButton
-                      small={true}
+                      size="sm"
                       label={t("remove.action")}
                       onPress={() => openRemoveDialog(conn().machine, conn().name)}
                     />
@@ -861,18 +861,16 @@ export function remote() {
             </View>
             <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
               <View style={{ flex: 1, minWidth: 0 }}>
-                <Input
+                <SmeltInput
                   value={pairingInput()}
                   placeholder="smelt+iroh://…"
                   disabled={adding()}
                   onChange={({ value }: { value: string }) => pairingInput.set(value)}
                   onSubmit={submitAddMachine}
-                  class="rounded-(--radius) border border-input bg-card px-2 text-foreground"
-                  style={{ height: 28, fontSize: look().type.ui.size }}
                 />
               </View>
               <SmeltButton
-                small={true}
+                size="sm"
                 label={adding() ? t("add.adding") : t("add.action")}
                 loading={adding()}
                 disabled={adding()}
@@ -958,7 +956,7 @@ export function remote() {
                 </Text>
               </View>
               <SmeltButton
-                small={true}
+                size="sm"
                 label={t("pairing.begin")}
                 disabled={!running()}
                 tooltip={running() ? undefined : t("pairing.needs_access")}
@@ -1015,7 +1013,7 @@ export function remote() {
                       </Text>
                     </View>
                     <SmeltButton
-                      small={true}
+                      size="sm"
                       label={t("devices.revoke")}
                       onPress={() => revokeDevice(dev().endpoint_id)}
                     />
@@ -1044,15 +1042,13 @@ export function remote() {
               </Text>
             </View>
             <View style={{ width: 220, flexShrink: 0 }}>
-              <Input
+              <SmeltInput
                 value={relayInput()}
                 disabled={!loaded()}
                 accessibilityLabel={t("relay.custom")}
                 onChange={({ value }: { value: string }) => scheduleRelayCommit(value)}
                 onBlur={() => flushRelayCommit()}
                 onSubmit={() => flushRelayCommit()}
-                class="rounded-(--radius) border border-input bg-card px-2 text-foreground"
-                style={{ height: 28, fontSize: look().type.ui.size }}
               />
             </View>
           </View>
@@ -1071,12 +1067,11 @@ function DialogInput(props: {
   onSubmit: () => void;
   onCancel: () => void;
 }) {
-  const look = theme;
   let inputEl: any = null;
   let initialSelected = false;
   let edited = false;
   return (
-    <Input
+    <SmeltInput
       ref={(el: any) => {
         inputEl = el ?? null;
         // 同步抢占焦点，避免右键菜单关闭时的 focus_back 把焦点拉回触发行。
@@ -1100,8 +1095,6 @@ function DialogInput(props: {
       onKeyPress={(e: any) => {
         if (e?.key === "Escape") props.onCancel();
       }}
-      class="rounded-(--radius) border border-input bg-card px-2 text-foreground"
-      style={{ height: 28, fontSize: look().type.ui.size }}
     />
   );
 }
@@ -1109,48 +1102,23 @@ function DialogInput(props: {
 /** 全局对话框（挂载在主壳无头根层，从会话列表右键菜单或设置页都能弹出）。 */
 export function root() {
   const look = theme;
+  // 关上时框还在淡出：留着上一次的机器名，说明不在淡出途中变空。
+  const removeShown = computed(
+    (prev: RemovePrompt | null | undefined) => removePrompt() ?? prev ?? null,
+  );
   return (
     <>
       {/* 移除机器确认框 */}
-      <SmeltDialog
+      <SmeltConfirmDialog
         open={removePrompt() != null}
-        role="alertdialog"
-        accessibilityLabel={t("remove.title")}
-        onOpenChange={({ open }: { open: boolean }) => {
-          if (!open) removePrompt.set(null);
-        }}
-        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
-        style={{ width: 380, gap: 12 }}
-      >
-        <If when={removePrompt() != null}>
-          <Text
-            style={{
-              color: look().palette.text,
-              fontSize: look().type.ui_medium.size,
-              fontWeight: look().type.ui_medium.weight,
-            }}
-          >
-            {t("remove.title")}
-          </Text>
-          <Text style={{ color: look().palette.muted, fontSize: look().type.text_xsmall.size }}>
-            {t("remove.description", { name: removePrompt()?.name ?? "" })}
-          </Text>
-          <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
-            <SmeltButton
-              quiet={true}
-              small={true}
-              label={t("action.cancel")}
-              onPress={() => removePrompt.set(null)}
-            />
-            <SmeltButton
-              danger={true}
-              small={true}
-              label={t("remove.action")}
-              onPress={confirmRemove}
-            />
-          </View>
-        </If>
-      </SmeltDialog>
+        title={t("remove.title")}
+        description={t("remove.description", { name: removeShown()?.name ?? "" })}
+        confirmLabel={t("remove.action")}
+        cancelLabel={t("action.cancel")}
+        danger
+        onConfirm={confirmRemove}
+        onCancel={() => removePrompt.set(null)}
+      />
 
       {/* 重命名机器框 */}
       <SmeltDialog
@@ -1188,14 +1156,14 @@ export function root() {
           />
           <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
             <SmeltButton
-              quiet={true}
-              small={true}
+              variant="quiet"
+              size="sm"
               label={t("action.cancel")}
               onPress={() => renamePrompt.set(null)}
             />
             <SmeltButton
-              primary={true}
-              small={true}
+              variant="primary"
+              size="sm"
               label={t("rename.action")}
               onPress={submitRename}
             />
@@ -1250,14 +1218,14 @@ export function root() {
           </If>
           <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
             <SmeltButton
-              quiet={true}
-              small={true}
+              variant="quiet"
+              size="sm"
               label={t("action.cancel")}
               onPress={closeRelayDialog}
             />
             <SmeltButton
-              primary={true}
-              small={true}
+              variant="primary"
+              size="sm"
               loading={Boolean(relayPrompt()?.saving)}
               disabled={Boolean(relayPrompt()?.saving)}
               label={t("relay.save")}
@@ -1327,30 +1295,18 @@ export function root() {
                 >
                   {offer()?.uri ?? ""}
                 </Text>
-                <View
-                  role="button"
+                <SmeltButton
+                  variant="quiet"
+                  size="sm"
+                  icon={pairingCopied() ? "icons/check.svg" : "icons/copy.svg"}
                   accessibilityLabel={t("pairing.copy")}
-                  class="items-center justify-center rounded-(--radius) hover:bg-accent"
-                  style={{ width: 24, height: 24, flexShrink: 0 }}
-                  tooltip={
-                    <SmeltTooltip>
-                      <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.text }}>
-                        {pairingCopied() ? t("pairing.copied") : t("pairing.copy")}
-                      </Text>
-                    </SmeltTooltip>
-                  }
+                  tooltip={pairingCopied() ? t("pairing.copied") : t("pairing.copy")}
                   onPress={() => {
                     const uri = offer()?.uri;
                     if (!uri) return;
                     void clipboardWrite(uri).then(() => pairingCopied.set(true));
                   }}
-                >
-                  <SmeltIcon
-                    path={pairingCopied() ? "icons/check.svg" : "icons/copy.svg"}
-                    size={13}
-                    color={pairingCopied() ? look().palette.ok : look().palette.muted}
-                  />
-                </View>
+                />
               </View>
               <Text style={{ color: look().palette.muted, fontSize: look().type.text_xsmall.size }}>
                 {t("pairing.expiry")}
@@ -1360,14 +1316,14 @@ export function root() {
         </If>
         <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
           <SmeltButton
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             disabled={generatingOffer()}
             label={t("pairing.regenerate")}
             onPress={beginPairing}
           />
           <SmeltButton
-            small={true}
+            size="sm"
             label={t("pairing.done")}
             onPress={() => {
               pairingOpen.set(false);

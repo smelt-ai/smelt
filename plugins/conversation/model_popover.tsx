@@ -1,7 +1,15 @@
 // 输入栏工具弹层：模型与推理强度/配置弹层、能力（Skills/MCP）弹层、上下文用量弹层。
 import { computed, Scroll, signal, Text, View } from "nsh";
-import { Input } from "nsh/base";
-import { SmeltButton, SmeltIcon, SmeltPopover, SmeltSwitch, theme } from "smelt/sdk";
+import {
+  SmeltButton,
+  SmeltIcon,
+  SmeltInput,
+  SmeltPopover,
+  SmeltRow,
+  SmeltSegmented,
+  SmeltSwitch,
+  theme,
+} from "smelt/sdk";
 import { ct } from "./i18n.ts";
 import {
   buildVisibleModels,
@@ -63,16 +71,12 @@ export function ModelConfigPopover(props: {
       popupStyle={{ width: 348 }}
       trigger={
         <SmeltButton
-          quiet
-          small
+          variant="quiet"
+          size="sm"
           selected={open()}
           trailingIcon="icons/chevron-down.svg"
           accessibilityLabel={label()}
-          style={{
-            borderRadius: 999,
-            paddingLeft: 10,
-            paddingRight: 8,
-          }}
+          shape="pill"
         >
           <View style={{ flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 }}>
             <Text
@@ -117,18 +121,12 @@ export function ModelConfigPopover(props: {
               }}
             >
               <SmeltIcon path="icons/search.svg" size={14} color={look().palette.faint} />
-              <Input
+              <SmeltInput
+                bare
+                class="flex-1 min-w-0"
                 value={query()}
                 placeholder={ct("model.search")}
-                onChange={({ value }: any) => query.set(value)}
-                style={{
-                  flex: 1,
-                  height: 34,
-                  backgroundColor: "transparent",
-                  color: look().palette.text,
-                  placeholderColor: look().palette.faint,
-                  fontSize: look().type.ui.size,
-                }}
+                onChange={({ value }) => query.set(value)}
               />
             </View>
 
@@ -154,43 +152,26 @@ export function ModelConfigPopover(props: {
                         (group().options ?? []).some(([value]: any) => value === props.model()?.current_value),
                       );
                       return (
-                        <View
-                          onPress={() => activeProvider.set(group().id)}
-                          class={active() ? undefined : "hover:bg-accent"}
+                        <SmeltButton
+                          variant="quiet"
+                          size="sm"
+                          shape="pill"
                           role="tab"
-                          accessibilityState={{ selected: active() }}
-                          style={{
-                            height: 24,
-                            paddingHorizontal: 10,
-                            borderRadius: 99,
-                            flexDirection: "row",
-                            justifyContent: "center",
-                            alignItems: "center",
-                            gap: 6,
-                            backgroundColor: active() ? look().palette.row_selected : "transparent",
-                          }}
+                          selected={active()}
+                          label={group().name}
+                          onPress={() => activeProvider.set(group().id)}
                         >
-                          <Text
-                            style={{
-                              fontSize: look().type.small_medium.size,
-                              fontWeight: active() ? look().type.small_medium.weight : look().type.small.weight,
-                              color: active() ? look().palette.text : look().palette.muted,
-                              numberOfLines: 1,
-                            }}
-                          >
-                            {group().name}
-                          </Text>
                           <If when={holdsCurrent()}>
                             <View
+                              class="rounded-full"
                               style={{
                                 width: 5,
                                 height: 5,
-                                borderRadius: 3,
                                 backgroundColor: active() ? look().palette.text : look().palette.muted,
                               }}
                             />
                           </If>
-                        </View>
+                        </SmeltButton>
                       );
                     }}
                   </Each>
@@ -221,23 +202,15 @@ export function ModelConfigPopover(props: {
                     {(item) => {
                       const selected = computed(() => props.model()?.current_value === item().value);
                       return (
-                        <View
+                        <SmeltRow
                           onPress={() => {
                             const cfgId = props.model()?.config_id || "model";
                             props.onSelectConfig(cfgId, item().value);
                           }}
-                          class="hover:bg-accent"
                           role="option"
+                          selected={selected()}
                           accessibilityLabel={item().label}
-                          accessibilityState={{ selected: selected() }}
-                          style={{
-                            height: 30,
-                            paddingHorizontal: 10,
-                            borderRadius: look().radius.row,
-                            flexDirection: "row",
-                            alignItems: "center",
-                            gap: 8,
-                          }}
+                          style={{ height: 30, paddingHorizontal: 10, gap: 8 }}
                         >
                           <Text
                             style={{
@@ -266,7 +239,7 @@ export function ModelConfigPopover(props: {
                           <If when={selected()}>
                             <SmeltIcon path="icons/check.svg" size={13} color={look().palette.text} />
                           </If>
-                        </View>
+                        </SmeltRow>
                       );
                     }}
                   </Each>
@@ -365,11 +338,12 @@ function ConfigRow(props: {
               </Text>
             }
           >
-            <ConfigSegments
-              label={name()}
-              options={options}
-              current={currentName}
-              onSelect={(value) => props.onSelectConfig(props.cfg().config_id, value)}
+            <SmeltSegmented
+              class="flex-wrap max-w-full"
+              accessibilityLabel={name()}
+              options={options().map((o) => ({ value: String(o[0]), label: String(o[1]) }))}
+              value={String(options().find((o) => o[1] === currentName())?.[0] ?? "")}
+              onChange={(value) => props.onSelectConfig(props.cfg().config_id, value)}
             />
           </If>
         }
@@ -383,71 +357,6 @@ function ConfigRow(props: {
           }}
         />
       </If>
-    </View>
-  );
-}
-
-/** 配置项的档位：紧凑分段控件，选中的那段浮起（`surface` 底、`hair_strong` 边），其余悬停变底。 */
-function ConfigSegments(props: {
-  label: string;
-  options: () => any[];
-  current: () => string | null | undefined;
-  onSelect: (value: string) => void;
-}) {
-  const look = theme;
-  return (
-    <View
-      role="radiogroup"
-      accessibilityLabel={props.label}
-      style={{
-        flexDirection: "row",
-        flexWrap: "wrap",
-        maxWidth: "100%",
-        gap: 2,
-        padding: 2,
-        borderRadius: 8,
-        backgroundColor: look().palette.bg,
-        borderWidth: 1,
-        borderColor: look().palette.hair,
-      }}
-    >
-      <Each of={props.options()}>
-        {(opt) => {
-          const active = computed(() => props.current() === opt()[1]);
-          return (
-            <View
-              onPress={() => props.onSelect(opt()[0])}
-              class={active() ? undefined : "hover:bg-accent"}
-              role="radio"
-              accessibilityLabel={opt()[1]}
-              accessibilityState={{ checked: active() }}
-              style={{
-                height: 22,
-                paddingHorizontal: 9,
-                borderRadius: 6,
-                alignItems: "center",
-                justifyContent: "center",
-                borderWidth: 1,
-                borderColor: active() ? look().palette.hair_strong : "transparent",
-                backgroundColor: active() ? look().palette.surface : "transparent",
-                transitionProperty: "backgroundColor, borderColor",
-                transitionDuration: 150,
-              }}
-            >
-              <Text
-                style={{
-                  fontSize: look().type.text_xsmall.size,
-                  fontWeight: active() ? 530 : 440,
-                  color: active() ? look().palette.text : look().palette.muted,
-                  numberOfLines: 1,
-                }}
-              >
-                {opt()[1]}
-              </Text>
-            </View>
-          );
-        }}
-      </Each>
     </View>
   );
 }
@@ -477,14 +386,14 @@ export function CapabilitiesPopover(props: {
         popupStyle={{ width: 320 }}
         trigger={
           <SmeltButton
-            quiet
-            small
+            variant="quiet"
+            size="sm"
             selected={open()}
             icon="icons/puzzle.svg"
             label={String(total())}
             tooltip={ct("capabilities.title")}
             accessibilityLabel={ct("capabilities.title")}
-            style={{ borderRadius: 999 }}
+            shape="pill"
           />
         }
       >
@@ -496,23 +405,15 @@ export function CapabilitiesPopover(props: {
                 <CapabilityHeader icon="icons/sparkles.svg" label={ct("capabilities.skills")} count={props.skills().length} />
                 <Each of={props.skills()}>
                   {(skill) => (
-                    <View
+                    <SmeltRow
                       onPress={() => {
                         open.set(false);
                         props.onUseSkill(skill().command);
                       }}
-                      class="group/row hover:bg-accent"
-                      role="button"
+                      class="group/row"
                       accessibilityLabel={skill().name}
                       accessibilityHint={ct("capabilities.insert")}
-                      style={{
-                        flexDirection: "row",
-                        alignItems: "center",
-                        gap: 10,
-                        paddingHorizontal: 8,
-                        paddingVertical: 6,
-                        borderRadius: look().radius.row,
-                      }}
+                      style={{ gap: 10, paddingHorizontal: 8, paddingVertical: 6 }}
                     >
                       <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
                         <Text style={{ fontSize: look().type.ui.size, color: look().palette.text, numberOfLines: 1 }}>
@@ -531,12 +432,12 @@ export function CapabilitiesPopover(props: {
                         </If>
                       </View>
                       <Text
-                        class="opacity-0 group-hover/row:opacity-100"
+                        class="opacity-0 group-hover/row:opacity-100 group-focus-within/row:opacity-100"
                         style={{ fontSize: look().type.small.size, color: look().palette.muted, numberOfLines: 1 }}
                       >
                         {ct("capabilities.insert")}
                       </Text>
-                    </View>
+                    </SmeltRow>
                   )}
                 </Each>
               </If>
@@ -588,8 +489,8 @@ export function CapabilitiesPopover(props: {
                 {props.byAgent() ? ct("capabilities.by_agent") : ct("capabilities.by_pi")}
               </Text>
               <SmeltButton
-                quiet
-                small
+                variant="quiet"
+                size="sm"
                 trailingIcon="icons/arrow-right.svg"
                 label={props.byAgent() ? ct("capabilities.edit_agent") : ct("capabilities.manage_library")}
                 onPress={() => {
@@ -688,12 +589,12 @@ export function UsagePopover(props: {
         popupStyle={{ width: 280 }}
         trigger={
           <SmeltButton
-            quiet
-            small
+            variant="quiet"
+            size="sm"
             selected={open()}
             tooltip={`${ct("usage.title")} ${pct()}%`}
             accessibilityLabel={`${ct("usage.title")} ${pct()}%`}
-            style={{ borderRadius: 999, paddingLeft: 7, paddingRight: 7 }}
+            shape="pill"
           >
             <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
               <If
@@ -701,10 +602,10 @@ export function UsagePopover(props: {
                 else={
                   // 用量饼：灰底圆上按比例填一块扇形，平时只画它，具体数字在悬停提示里
                   <View
+                    class="rounded-full"
                     style={{
                       width: 13,
                       height: 13,
-                      borderRadius: 999,
                       backgroundImage: `conic-gradient(${meterColor()} 0%, ${meterColor()} ${pct()}%, ${meterTrack()} ${pct()}%, ${meterTrack()} 100%)`,
                     }}
                   />
@@ -751,10 +652,10 @@ export function UsagePopover(props: {
 
           {/* 分类占比进度条 */}
           <View
+            class="rounded-full"
             style={{
               width: "100%",
               height: 6,
-              borderRadius: 3,
               backgroundColor: look().palette.soft,
               flexDirection: "row",
               overflow: "hidden",
@@ -765,12 +666,8 @@ export function UsagePopover(props: {
               when={rows().length > 0}
               else={
                 <View
-                  style={{
-                    width: `${pct()}%`,
-                    height: "100%",
-                    backgroundColor: meterColor(),
-                    borderRadius: 3,
-                  }}
+                  class="rounded-full"
+                  style={{ width: `${pct()}%`, height: "100%", backgroundColor: meterColor() }}
                 />
               }
             >
@@ -821,7 +718,7 @@ export function UsagePopover(props: {
             <View style={{ borderTopWidth: 1, borderTopColor: look().palette.hair, paddingTop: 8 }}>
               <SmeltButton
                 fill
-                small
+                size="sm"
                 disabled={props.compacting()}
                 label={props.compacting() ? ct("usage.compacting") : ct("usage.compact")}
                 onPress={() => {

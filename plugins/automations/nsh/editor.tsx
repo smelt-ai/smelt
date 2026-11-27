@@ -5,7 +5,12 @@ import {
   pathStyle,
   SmeltButton,
   SmeltIcon,
+  SmeltInput,
   SmeltMenu,
+  SmeltMenuItem,
+  SmeltMenuSeparator,
+  SmeltRow,
+  SmeltSegmented,
   SmeltSwitch,
   t,
 } from "smelt/sdk";
@@ -91,21 +96,16 @@ import {
   ContentCard,
   ErrorAlert,
   FieldHint,
-  MenuDivider,
-  MenuRow,
-  MultiSegmentedControl,
   NeutralIconMark,
   PageToolbar,
-  RowItem,
   RunLines,
   SectionHeading,
-  SegmentedControl,
   StatusDot,
-  StyledInput,
   runStatusColor,
 } from "./ui.tsx";
 
 const EDITOR_MAX_WIDTH = 640;
+const WEEKDAY_INDICES = [0, 1, 2, 3, 4, 5, 6];
 
 export function DrillHeader() {
   const look = currentTheme;
@@ -153,7 +153,7 @@ export function DrillHeader() {
     <PageToolbar justify="start">
       <SmeltButton
         testID="automation-drill-back"
-        quiet={true}
+        variant="quiet"
         icon="icons/chevron-left.svg"
         tooltip={headerModel().backTooltip}
         accessibilityLabel={headerModel().backTooltip}
@@ -236,7 +236,7 @@ export function DrillHeader() {
               {/* Bug Fix #1 & #7: loading 仅由 runningOnce 驱动；点击前先冲刷未保存草稿 */}
               <SmeltButton
                 testID="automation-editor-run"
-                small={true}
+                size="sm"
                 icon="icons/play.svg"
                 label={t("menu.run_once")}
                 loading={Boolean(headerModel().activeEd?.runningOnce)}
@@ -248,25 +248,16 @@ export function DrillHeader() {
                 align="end"
                 popupStyle={{ minWidth: 168 }}
                 trigger={
-                  <View
+                  <SmeltButton
                     testID="automation-editor-more"
+                    variant="quiet"
+                    size="xs"
+                    icon="icons/ellipsis.svg"
                     accessibilityLabel={t("catalog.more")}
-                    class="hover:bg-accent"
-                    style={{
-                      width: 24,
-                      height: 24,
-                      borderRadius: look().radius.md,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      cursor: "default",
-                    }}
-                  >
-                    <SmeltIcon path="icons/ellipsis.svg" size={16} color={look().palette.muted} />
-                  </View>
+                  />
                 }
               >
-                <MenuRow
+                <SmeltMenuItem
                   label={t("menu.delete")}
                   icon="icons/trash.svg"
                   danger={true}
@@ -283,7 +274,7 @@ export function DrillHeader() {
         >
           <SmeltButton
             testID="automation-create"
-            primary={true}
+            variant="primary"
             label={t("editor.create")}
             loading={headerModel().activeEd?.savingAction === "create"}
             disabled={headerModel().missing.length > 0}
@@ -319,17 +310,13 @@ export function RunHistoryColumn(props: {
       <Scroll style={{ flex: 1, minHeight: 0, width: "100%" }}>
         <View style={{ padding: 8, display: "flex", flexDirection: "column", gap: 4 }}>
           <If when={props.showTask}>
-            <RowItem
+            <SmeltRow
               testID="automation-run-column-task"
               selected={selRunId() == null}
+              accessibilityLabel={t("editor.settings")}
               onPress={showAutomationTask}
-              style={{
-                paddingLeft: 8,
-                paddingRight: 8,
-                paddingTop: 8,
-                paddingBottom: 8,
-                borderRadius: look().radius.row,
-              }}
+              class="w-full"
+              style={{ paddingLeft: 8, paddingRight: 8, paddingTop: 8, paddingBottom: 8 }}
             >
               <Text
                 style={{
@@ -341,7 +328,7 @@ export function RunHistoryColumn(props: {
               >
                 {t("editor.settings")}
               </Text>
-            </RowItem>
+            </SmeltRow>
           </If>
 
           <View style={{ paddingLeft: 8, paddingRight: 8, paddingTop: 8, paddingBottom: 4 }}>
@@ -374,18 +361,18 @@ export function RunHistoryColumn(props: {
                 return { title, detail, err, status: r.status };
               };
               return (
-                <RowItem
+                <SmeltRow
                   testID={`automation-editor-run-${runItem().id}`}
                   selected={selected()}
+                  accessibilityLabel={info().title}
                   onPress={() => selectAutomationRun(props.machine, runItem().id)}
+                  class="w-full gap-2"
                   style={{
                     paddingLeft: 8,
                     paddingRight: 8,
                     paddingTop: 8,
                     paddingBottom: 8,
-                    borderRadius: look().radius.row,
                     alignItems: "flex-start",
-                    gap: 8,
                   }}
                 >
                   <StatusDot
@@ -399,7 +386,7 @@ export function RunHistoryColumn(props: {
                     error={info().err}
                     selected={selected()}
                   />
-                </RowItem>
+                </SmeltRow>
               );
             }}
           </Each>
@@ -443,13 +430,13 @@ function ScheduleRuleBody(props: { uid: string; rule: ScheduleRuleDraft }) {
     ];
   });
 
-  const weekdayItems = computed(() => {
+  const weekdayOptions = computed(() => {
+    return WEEKDAY_INDICES.map((idx) => ({ value: String(idx), label: weekdayLabel(idx, t) }));
+  });
+
+  const activeWeekdays = computed(() => {
     const mask = r().weekdayMask;
-    return [0, 1, 2, 3, 4, 5, 6].map((idx) => ({
-      key: String(idx),
-      label: weekdayLabel(idx, t),
-      active: (mask & (1 << idx)) !== 0,
-    }));
+    return WEEKDAY_INDICES.filter((idx) => (mask & (1 << idx)) !== 0).map(String);
   });
 
   const tz = computed(() => {
@@ -460,21 +447,23 @@ function ScheduleRuleBody(props: { uid: string; rule: ScheduleRuleDraft }) {
     <View style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <If when={r().kind !== "interval"}>
         <View style={{ display: "flex", flexDirection: "row" }}>
-          <SegmentedControl
+          <SmeltSegmented
             testID={`automation-trigger-frequency-${props.uid}`}
             options={clockKinds()}
-            selected={r().kind === "weekdays" || r().kind === "weekly" ? r().kind : "daily"}
-            onSelect={(kind) => setTriggerScheduleKind(props.uid, kind)}
+            value={r().kind === "weekdays" || r().kind === "weekly" ? r().kind : "daily"}
+            onChange={(kind) => setTriggerScheduleKind(props.uid, kind)}
           />
         </View>
       </If>
 
       <If when={r().kind === "weekly"}>
         <View style={{ display: "flex", flexDirection: "row" }}>
-          <MultiSegmentedControl
+          <SmeltSegmented
             testID={`automation-weekday-${props.uid}`}
-            items={weekdayItems()}
-            onToggle={(idxStr) => toggleTriggerWeekday(props.uid, 1 << Number(idxStr))}
+            multiple={true}
+            options={weekdayOptions()}
+            value={activeWeekdays()}
+            onChange={(idxStr) => toggleTriggerWeekday(props.uid, 1 << Number(idxStr))}
           />
         </View>
       </If>
@@ -482,7 +471,7 @@ function ScheduleRuleBody(props: { uid: string; rule: ScheduleRuleDraft }) {
       <If when={r().kind !== "interval"}>
         <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
           <View style={{ width: 108 }}>
-            <StyledInput
+            <SmeltInput
               testID={`automation-time-${props.uid}`}
               value={r().time}
               placeholder="09:00"
@@ -494,7 +483,7 @@ function ScheduleRuleBody(props: { uid: string; rule: ScheduleRuleDraft }) {
                     : t("schedule.run_time")
               }
               invalid={validationError() != null}
-              onChange={(val) => setTriggerTime(props.uid, val)}
+              onChange={({ value }) => setTriggerTime(props.uid, value)}
             />
           </View>
           <Text
@@ -513,38 +502,40 @@ function ScheduleRuleBody(props: { uid: string; rule: ScheduleRuleDraft }) {
         <View style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
             <View style={{ width: 120 }}>
-              <StyledInput
+              <SmeltInput
                 testID={`automation-interval-${props.uid}`}
                 value={r().interval}
                 placeholder="1"
                 accessibilityLabel={t("trigger_preset.interval")}
                 invalid={validationError() != null}
-                onChange={(val) => setTriggerInterval(props.uid, val)}
+                onChange={({ value }) => setTriggerInterval(props.uid, value)}
               />
             </View>
-            <SegmentedControl
+            <SmeltSegmented
               testID={`automation-interval-unit-${props.uid}`}
               options={intervalUnits()}
-              selected={r().intervalUnit}
-              onSelect={(unit) => setTriggerIntervalUnit(props.uid, unit)}
+              value={r().intervalUnit}
+              onChange={(unit) => setTriggerIntervalUnit(props.uid, unit)}
             />
           </View>
 
           <View style={{ display: "flex", flexDirection: "row" }}>
-            <SegmentedControl
+            <SmeltSegmented
               testID={`automation-interval-days-${props.uid}`}
               options={dayScopes()}
-              selected={r().intervalDayScope}
-              onSelect={(scope) => setTriggerIntervalDayScope(props.uid, scope)}
+              value={r().intervalDayScope}
+              onChange={(scope) => setTriggerIntervalDayScope(props.uid, scope)}
             />
           </View>
 
           <If when={r().intervalDayScope === "weekly"}>
             <View style={{ display: "flex", flexDirection: "row" }}>
-              <MultiSegmentedControl
+              <SmeltSegmented
                 testID={`automation-interval-weekday-${props.uid}`}
-                items={weekdayItems()}
-                onToggle={(idxStr) => toggleTriggerWeekday(props.uid, 1 << Number(idxStr))}
+                multiple={true}
+                options={weekdayOptions()}
+                value={activeWeekdays()}
+                onChange={(idxStr) => toggleTriggerWeekday(props.uid, 1 << Number(idxStr))}
               />
             </View>
           </If>
@@ -555,8 +546,8 @@ function ScheduleRuleBody(props: { uid: string; rule: ScheduleRuleDraft }) {
               <View style={{ display: "flex", flexDirection: "row" }}>
                 <SmeltButton
                   testID={`automation-interval-window-open-${props.uid}`}
-                  quiet={true}
-                  small={true}
+                  variant="quiet"
+                  size="sm"
                   label={t("schedule.limit_hours")}
                   onPress={() => setTriggerWindowOpen(props.uid, true)}
                 />
@@ -576,26 +567,26 @@ function ScheduleRuleBody(props: { uid: string; rule: ScheduleRuleDraft }) {
                 {t("schedule.from")}
               </Text>
               <View style={{ width: 108 }}>
-                <StyledInput
+                <SmeltInput
                   testID={`automation-window-start-${props.uid}`}
                   value={r().windowStart}
                   placeholder={t("schedule.window_start")}
                   accessibilityLabel={t("schedule.start_time")}
                   invalid={validationError() != null}
-                  onChange={(val) => setTriggerWindowStart(props.uid, val)}
+                  onChange={({ value }) => setTriggerWindowStart(props.uid, value)}
                 />
               </View>
               <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.muted }}>
                 {t("schedule.to")}
               </Text>
               <View style={{ width: 108 }}>
-                <StyledInput
+                <SmeltInput
                   testID={`automation-window-end-${props.uid}`}
                   value={r().windowEnd}
                   placeholder={t("schedule.window_end")}
                   accessibilityLabel={t("schedule.end_time")}
                   invalid={validationError() != null}
-                  onChange={(val) => setTriggerWindowEnd(props.uid, val)}
+                  onChange={({ value }) => setTriggerWindowEnd(props.uid, value)}
                 />
               </View>
               <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.muted }}>
@@ -603,8 +594,8 @@ function ScheduleRuleBody(props: { uid: string; rule: ScheduleRuleDraft }) {
               </Text>
               <SmeltButton
                 testID={`automation-interval-window-clear-${props.uid}`}
-                quiet={true}
-                small={true}
+                variant="quiet"
+                size="sm"
                 label={t("schedule.all_day")}
                 onPress={() => setTriggerWindowOpen(props.uid, false)}
               />
@@ -687,7 +678,7 @@ function WebhookEntryBody(props: { uid: string; secret: string; editor: EditorSt
               paddingRight: 12,
               paddingTop: 8,
               paddingBottom: 8,
-              borderRadius: 8,
+              borderRadius: look().radius.lg,
               borderWidth: 1,
               borderColor: look().palette.hair_strong,
               backgroundColor: look().palette.side,
@@ -706,8 +697,8 @@ function WebhookEntryBody(props: { uid: string; secret: string; editor: EditorSt
           </View>
           <SmeltButton
             testID={copyId()}
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             label={buttonLabel(copyId(), t("webhook.copy"))}
             onPress={() => {
               const url = info().liveUrl;
@@ -721,8 +712,8 @@ function WebhookEntryBody(props: { uid: string; secret: string; editor: EditorSt
         <If when={info().liveUrl != null}>
           <SmeltButton
             testID={curlId()}
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             label={buttonLabel(curlId(), t("webhook.copy_example"))}
             onPress={() => {
               const url = info().liveUrl;
@@ -734,8 +725,8 @@ function WebhookEntryBody(props: { uid: string; secret: string; editor: EditorSt
           {/* Bug Fix #1: 仅该条 webhook 重新生成中时显示 spinner */}
           <SmeltButton
             testID={regenId()}
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             loading={props.editor.regeneratingUid === props.uid}
             label={buttonLabel(regenId(), t("webhook.regenerate"))}
             onPress={() => regenerateWebhookSecret(props.uid)}
@@ -798,8 +789,8 @@ function TriggerEntryCard(props: { entry: TriggerEntryDraft; editor: EditorState
         </View>
         <SmeltButton
           testID={`automation-remove-trigger-${e().uid}`}
-          quiet={true}
-          small={true}
+          variant="quiet"
+          size="sm"
           icon="icons/trash.svg"
           tooltip={t("trigger.delete")}
           accessibilityLabel={t("trigger.delete")}
@@ -839,11 +830,10 @@ function AddTriggerButton() {
       trigger={
         <View
           testID="automation-add-trigger"
-          class="hover:bg-accent"
+          class="rounded-full hover:bg-accent"
           style={{
             width: "100%",
             height: 36,
-            borderRadius: 18,
             borderWidth: 1,
             borderStyle: "dashed",
             borderColor: look().palette.hair_strong,
@@ -870,7 +860,7 @@ function AddTriggerButton() {
     >
       <Each of={regularPresets} key={(p: string) => p}>
         {(preset: () => string) => (
-          <MenuRow
+          <SmeltMenuItem
             icon={triggerPresetIconPath(preset())}
             label={`${triggerPresetLabel(preset(), t)} · ${triggerPresetHint(preset(), t)}`}
             onSelect={() => addEditorTriggerPreset(preset())}
@@ -878,10 +868,10 @@ function AddTriggerButton() {
         )}
       </Each>
       <If when={advancedPresets.length > 0}>
-        <MenuDivider />
+        <SmeltMenuSeparator />
         <Each of={advancedPresets} key={(p: string) => p}>
           {(preset: () => string) => (
-            <MenuRow
+            <SmeltMenuItem
               icon={triggerPresetIconPath(preset())}
               label={`${triggerPresetLabel(preset(), t)} · ${triggerPresetHint(preset(), t)}`}
               onSelect={() => addEditorTriggerPreset(preset())}
@@ -988,13 +978,13 @@ export function EditorForm(props: { editor: EditorState }) {
         {/* 名称 */}
         <View style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <SectionHeading label={t("missing.name")} />
-          <StyledInput
+          <SmeltInput
             testID="automation-name"
             autoFocus={ed().autoFocusName}
             value={ed().name}
             placeholder={t("editor.name_placeholder")}
             accessibilityLabel={t("missing.name")}
-            onChange={(val) => setEditorName(val)}
+            onChange={({ value }) => setEditorName(value)}
           />
         </View>
 
@@ -1010,11 +1000,11 @@ export function EditorForm(props: { editor: EditorState }) {
               gap: 12,
             }}
           >
-            <SegmentedControl
+            <SmeltSegmented
               testID="automation-action-kind"
               options={actionOptions()}
-              selected={ed().actionKind}
-              onSelect={(kind) => setEditorActionKind(kind)}
+              value={ed().actionKind}
+              onChange={(kind) => setEditorActionKind(kind)}
             />
 
             <If when={isAgent()}>
@@ -1024,8 +1014,8 @@ export function EditorForm(props: { editor: EditorState }) {
                   <If when={canOpenAgents()}>
                     <SmeltButton
                       testID="automation-open-agents"
-                      quiet={true}
-                      small={true}
+                      variant="quiet"
+                      size="sm"
                       icon="icons/bot.svg"
                       label={t("editor.create_agent")}
                       onPress={() => openAgentsView(ed().machine)}
@@ -1038,39 +1028,19 @@ export function EditorForm(props: { editor: EditorState }) {
                   align="end"
                   popupStyle={{ minWidth: 168 }}
                   trigger={
-                    <View
+                    <SmeltButton
                       testID="automation-agent"
-                      class="hover:bg-accent"
-                      style={{
-                        height: 24,
-                        paddingLeft: 10,
-                        paddingRight: 8,
-                        borderRadius: look().radius.md,
-                        display: "flex",
-                        flexDirection: "row",
-                        alignItems: "center",
-                        gap: 6,
-                        cursor: "default",
-                      }}
-                    >
-                      <SmeltIcon path="icons/bot.svg" size={14} color={look().palette.muted} />
-                      <Text
-                        style={{
-                          fontSize: look().type.small.size,
-                          lineHeight: look().type.small.line_height,
-                          color: look().palette.text,
-                          numberOfLines: 1,
-                        }}
-                      >
-                        {currentAgentName()}
-                      </Text>
-                      <SmeltIcon path="icons/chevron-down.svg" size={12} color={look().palette.muted} />
-                    </View>
+                      variant="quiet"
+                      size="sm"
+                      icon="icons/bot.svg"
+                      label={currentAgentName()}
+                      trailingIcon="icons/chevron-down.svg"
+                    />
                   }
                 >
                   <Each of={readyAgents()} key={(a: any) => a.id}>
                     {(agent: () => any) => (
-                      <MenuRow
+                      <SmeltMenuItem
                         icon="icons/bot.svg"
                         label={agent().name || t("agent.unnamed")}
                         onSelect={() => setEditorAgent(agent().id)}
@@ -1103,26 +1073,28 @@ export function EditorForm(props: { editor: EditorState }) {
             <If
               when={isAgent()}
               else={
-                <StyledInput
+                <SmeltInput
                   testID="automation-command"
                   multiline={true}
                   bare={true}
+                  mono={true}
+                  class="min-h-28"
                   value={ed().command}
                   placeholder={t("editor.command_placeholder")}
                   accessibilityLabel={t("missing.command")}
-                  onChange={(val) => setEditorCommand(val)}
-                  style={{ fontFamily: look().fonts?.mono }}
+                  onChange={({ value }: { value: string }) => setEditorCommand(value)}
                 />
               }
             >
-              <StyledInput
+              <SmeltInput
                 testID="automation-prompt"
                 multiline={true}
                 bare={true}
+                class="min-h-28"
                 value={ed().prompt}
                 placeholder={t("editor.prompt_placeholder")}
                 accessibilityLabel={t("missing.prompt")}
-                onChange={(val) => setEditorPrompt(val)}
+                onChange={({ value }) => setEditorPrompt(value)}
               />
             </If>
           </ContentCard>
@@ -1170,15 +1142,15 @@ export function EditorForm(props: { editor: EditorState }) {
             </Text>
             <SmeltButton
               testID="automation-workspace-choose"
-              small={true}
+              size="sm"
               label={t("workspace.choose")}
               onPress={pickEditorWorkspace}
             />
             <If when={customDir() != null}>
               <SmeltButton
                 testID="automation-workspace-reset"
-                small={true}
-                quiet={true}
+                variant="quiet"
+                size="sm"
                 label={t("workspace.reset")}
                 onPress={() => setEditorWorkspace(null)}
               />
@@ -1195,11 +1167,11 @@ export function EditorForm(props: { editor: EditorState }) {
         <View style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <SectionHeading label={t("notification.title")} />
           <View style={{ display: "flex", flexDirection: "row" }}>
-            <SegmentedControl
+            <SmeltSegmented
               testID="automation-notification"
               options={notifyOptions()}
-              selected={ed().notification}
-              onSelect={(notify) => setEditorNotification(notify)}
+              value={ed().notification}
+              onChange={(notify) => setEditorNotification(notify)}
             />
           </View>
           <FieldHint text={notifyHint(ed().notification, t)} />

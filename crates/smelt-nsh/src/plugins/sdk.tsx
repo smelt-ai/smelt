@@ -1,6 +1,7 @@
 // Smelt NSH Guest SDK（通过 `import { ... } from "smelt/sdk"` 导入）。
 // 封装通用的宿主状态、离散事件、命令双向派发、SQLite 存储、纯同步模型函数，以及原子原生能力组件。
 // 不含任何具体插件逻辑，也不提供插件嵌插件的跨 VM 插槽。
+import type { AccessibilityRole } from "nsh";
 import {
   cleanup,
   computed,
@@ -23,12 +24,17 @@ import {
   Dialog,
   DiffView as BaseDiffView,
   Editor as BaseEditor,
+  Input as BaseInput,
   Menu,
+  MenuItem as BaseMenuItem,
+  MenuSeparator as BaseMenuSeparator,
   Popover,
   Radio as BaseRadio,
   Select,
   Switch as BaseSwitch,
   TextView,
+  Toggle as BaseToggle,
+  ToggleGroup as BaseToggleGroup,
   Tooltip,
 } from "nsh/base";
 import { Icon as NativeSvgIcon, Vector as NativeSvgVector } from "smelt/host";
@@ -1642,6 +1648,8 @@ export function SmeltDisclosureChevron(props: {
 const CONTROL_TRANSITION = "duration-[200ms] ease-[cubic-bezier(0.32,0.72,0,1)]";
 const FOCUS_RING =
   "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background";
+// 列表行的焦点环画在行内，不被相邻行和滚动区裁掉。
+const ROW_FOCUS_RING = "focus-visible:inset-ring-2 focus-visible:inset-ring-ring";
 // 复选框、单选整行可点，焦点环只圈指示块：行上挂 `group`，指示块跟着它的键盘焦点。
 const INDICATOR_FOCUS_RING =
   "group-focus-visible:ring-2 group-focus-visible:ring-ring group-focus-visible:ring-offset-1 group-focus-visible:ring-offset-background";
@@ -1755,27 +1763,55 @@ export function SmeltRadio(props: {
   );
 }
 
+/** 按钮的颜色角色（docs/ui-design-language.md 第 5 节）。 */
+export type SmeltButtonVariant =
+  | "secondary"
+  | "primary"
+  | "quiet"
+  | "danger"
+  | "danger-quiet"
+  | "floating"
+  | "dismiss";
+/** 控件尺寸：一档同时决定高度、字档、图标、左右内边距和圆角，见 `CONTROL`。 */
+export type SmeltControlSize = "xs" | "sm" | "md";
+
+/**
+ * 控件尺寸表：按钮（纯图标按钮见方，边长等于高度）和输入框都从这里取，同一档的控件并排时一样高。
+ * 图标跟同档的字配（字号约 1.2 倍取偶数），有字没字都一样大；要大图标就换大一档，不单改图标。
+ * 场合定档：行里的就地操作 `xs`，面板顶栏、工具条 `sm`，标题栏、表单、对话框 `md`。
+ */
+const CONTROL = {
+  xs: { height: 20, icon: 14, px: 6, gap: 4, radius: "sm", text: "small", textMedium: "small_medium" },
+  sm: { height: 24, icon: 14, px: 8, gap: 4, radius: "md", text: "text_xsmall", textMedium: "text_xsmall_medium" },
+  md: { height: 28, icon: 16, px: 12, gap: 6, radius: "md", text: "ui", textMedium: "ui_medium" },
+} as const;
+/** 按钮外形：`rounded` 走主题圆角，`pill` 两端全圆，`circle` 只用在纯图标按钮上。 */
+export type SmeltButtonShape = "rounded" | "pill" | "circle";
+
 export interface SmeltButtonProps {
   label?: string;
   icon?: string;
   trailingIcon?: string;
   tooltip?: string;
   accessibilityLabel?: string;
+  /** 读屏角色，默认 `button`；页签传 `tab`、列表项传 `option`，选中态随 `selected` 播报。 */
+  role?: AccessibilityRole;
+  /** 读屏补充：按下会做什么（「插入到输入框」）。 */
+  accessibilityHint?: string;
   command?: string;
-  quiet?: boolean;
-  primary?: boolean;
-  danger?: boolean;
-  dismiss?: boolean;
-  floating?: boolean;
-  circle?: boolean;
-  small?: boolean;
+  /** 默认 `secondary`。 */
+  variant?: SmeltButtonVariant;
+  /** 默认 `md`。 */
+  size?: SmeltControlSize;
+  /** 默认 `rounded`。 */
+  shape?: SmeltButtonShape;
+  /** 撑满父级宽度（文字过长时截断）。 */
   fill?: boolean;
   disabled?: boolean;
   loading?: boolean;
   selected?: boolean;
-  toggled?: boolean;
+  /** 只放布局：宽度、`flex`、外边距、对齐。颜色、圆角、内边距、字由 `variant` / `size` / `shape` 决定。 */
   class?: string;
-  style?: any;
   testID?: string;
   onPress?: (e?: any) => void;
   children?: any;
@@ -1872,6 +1908,8 @@ export function SmeltTooltip(props: any) {
 export const MENU_ITEM_CLASS =
   "flex-row items-center rounded-(--radius) px-2 hover:bg-accent focus:bg-accent";
 export const INPUT_CLASS = "rounded-(--radius) border border-input bg-card px-2 text-foreground";
+// 多行文本框四边同距。
+const INPUT_MULTILINE_CLASS = "rounded-(--radius) border border-input bg-card p-2 text-foreground";
 /** 对话框的面：`surface` 底，收边的细圈在 `overlay` 投影里。 */
 export const DIALOG_SURFACE_CLASS = "rounded-xl bg-popover shadow-overlay";
 
@@ -1894,6 +1932,8 @@ export function SmeltDialog(props: any) {
 /** 统一纯 JS/NSH 按钮（建在 `nsh/base <Button>` 上）：无 `BlockMouse` 悬停断层，完整遵循宿主主题色阶。 */
 export function SmeltButton(props: SmeltButtonProps) {
   const look = theme;
+  const variant = (): SmeltButtonVariant => props.variant ?? "secondary";
+  const size = (): SmeltControlSize => props.size ?? "md";
   const iconOnly = () => !props.label && !props.children && Boolean(props.icon) && !props.trailingIcon;
   const interactive = () => !props.disabled && !props.loading;
   const hasTooltip = computed(() => Boolean(props.tooltip));
@@ -1905,134 +1945,100 @@ export function SmeltButton(props: SmeltButtonProps) {
     const primaryFg = iconOnly() ? p.button_submit_foreground : p.button_primary_foreground;
     const neutral = p.button_secondary;
     const neutralFg = p.button_secondary_foreground;
-
-    if (props.dismiss) {
-      return {
-        bg: "transparent",
-        fg: p.faint,
-        hoverBg: p.row_hover,
-        hoverFg: p.text,
-        pressBg: p.row_selected,
-        pressFg: p.text,
-        surfaceClass: "",
-        disabledOpacity: 0.5,
-      };
+    switch (variant()) {
+      case "dismiss":
+        return {
+          bg: "transparent",
+          fg: p.faint,
+          hoverBg: p.row_hover,
+          hoverFg: p.text,
+          pressBg: p.row_selected,
+          pressFg: p.text,
+          surfaceClass: "",
+          disabledOpacity: 0.5,
+        };
+      case "floating":
+        return {
+          bg: p.surface,
+          fg: p.text,
+          hoverBg: p.soft,
+          hoverFg: p.text,
+          pressBg: p.soft_hover,
+          pressFg: p.text,
+          surfaceClass: "shadow-button-floating",
+          disabledOpacity: 0.45,
+        };
+      case "primary":
+        return {
+          bg: primary[0],
+          fg: primaryFg,
+          hoverBg: primary[1],
+          hoverFg: primaryFg,
+          pressBg: primary[2],
+          pressFg: primaryFg,
+          surfaceClass: "shadow-button-primary",
+          disabledOpacity: 0.35,
+        };
+      case "danger-quiet":
+        return {
+          bg: "transparent",
+          fg: p.bad,
+          hoverBg: p.row_hover,
+          hoverFg: p.bad,
+          pressBg: p.row_selected,
+          pressFg: p.bad,
+          surfaceClass: "",
+          disabledOpacity: 0.5,
+        };
+      case "danger":
+        return {
+          bg: neutral[0],
+          fg: p.bad,
+          hoverBg: neutral[1],
+          hoverFg: p.bad,
+          pressBg: neutral[2],
+          pressFg: p.bad,
+          surfaceClass: "shadow-button",
+          disabledOpacity: 0.5,
+        };
+      case "quiet":
+        return {
+          bg: props.selected ? p.row_selected : "transparent",
+          fg: props.selected ? p.text : p.muted,
+          hoverBg: p.row_hover,
+          hoverFg: p.text,
+          pressBg: p.row_selected,
+          pressFg: p.text,
+          surfaceClass: "",
+          disabledOpacity: 0.5,
+        };
+      default:
+        return {
+          bg: props.selected ? p.soft_hover : neutral[0],
+          fg: neutralFg,
+          hoverBg: neutral[1],
+          hoverFg: neutralFg,
+          pressBg: neutral[2],
+          pressFg: neutralFg,
+          surfaceClass: "shadow-button",
+          disabledOpacity: 0.5,
+        };
     }
-    if (props.floating) {
-      return {
-        bg: p.surface,
-        fg: p.text,
-        hoverBg: p.soft,
-        hoverFg: p.text,
-        pressBg: p.soft_hover,
-        pressFg: p.text,
-        surfaceClass: "shadow-button-floating",
-        disabledOpacity: 0.45,
-      };
-    }
-    if (props.primary) {
-      return {
-        bg: primary[0],
-        fg: primaryFg,
-        hoverBg: primary[1],
-        hoverFg: primaryFg,
-        pressBg: primary[2],
-        pressFg: primaryFg,
-        surfaceClass: "shadow-button-primary",
-        disabledOpacity: 0.35,
-      };
-    }
-    if (props.danger && props.quiet) {
-      return {
-        bg: "transparent",
-        fg: p.bad,
-        hoverBg: p.row_hover,
-        hoverFg: p.bad,
-        pressBg: p.row_selected,
-        pressFg: p.bad,
-        surfaceClass: "",
-        disabledOpacity: 0.5,
-      };
-    }
-    if (props.danger) {
-      return {
-        bg: neutral[0],
-        fg: p.bad,
-        hoverBg: neutral[1],
-        hoverFg: p.bad,
-        pressBg: neutral[2],
-        pressFg: p.bad,
-        surfaceClass: "shadow-button",
-        disabledOpacity: 0.5,
-      };
-    }
-    if (props.quiet) {
-      return {
-        bg: props.selected ? p.row_selected : "transparent",
-        fg: props.selected ? p.text : p.muted,
-        hoverBg: p.row_hover,
-        hoverFg: p.text,
-        pressBg: p.row_selected,
-        pressFg: p.text,
-        surfaceClass: "",
-        disabledOpacity: 0.5,
-      };
-    }
-    return {
-      bg: props.selected ? p.soft_hover : neutral[0],
-      fg: neutralFg,
-      hoverBg: neutral[1],
-      hoverFg: neutralFg,
-      pressBg: neutral[2],
-      pressFg: neutralFg,
-      surfaceClass: "shadow-button",
-      disabledOpacity: 0.5,
-    };
   });
 
+  // 尺寸档：高度、左右内边距、图标、间距、字档一起变；外形只改圆角。
   const metrics = computed(() => {
-    const r = look().radius;
-    const ty = look().type;
-    if (props.dismiss) {
-      return {
-        width: 20,
-        height: 20,
-        px: 0,
-        radius: r.md ?? 6,
-        iconSize: 13,
-        gap: 0,
-        textStyle: ty.ui,
-      };
-    }
-    if (props.circle && iconOnly()) {
-      return props.small
-        ? { width: 24, height: 24, px: 0, radius: 999, iconSize: 13, gap: 0, textStyle: ty.small }
-        : { width: 28, height: 28, px: 0, radius: 999, iconSize: 15, gap: 0, textStyle: ty.ui };
-    }
-    if (iconOnly()) {
-      return props.small
-        ? { width: 22, height: 22, px: 0, radius: r.md ?? 6, iconSize: 14, gap: 0, textStyle: ty.small }
-        : { width: 28, height: 28, px: 0, radius: r.md ?? 6, iconSize: 15, gap: 0, textStyle: ty.ui };
-    }
-    if (props.small) {
-      return {
-        width: undefined,
-        height: 26,
-        px: 9,
-        radius: props.floating ? 999 : (r.md ?? 6),
-        iconSize: 14,
-        gap: 5,
-        textStyle: props.quiet ? (ty.text_xsmall ?? ty.small) : (ty.text_xsmall_medium ?? ty.small_medium),
-      };
-    }
+    const c = CONTROL[size()];
+    const light = variant() === "quiet" || variant() === "danger-quiet" || variant() === "dismiss";
+    const round = props.shape === "pill" || props.shape === "circle";
     return {
-      width: undefined,
-      height: 28,
-      px: 12,
-      radius: props.floating ? 999 : (r.lg ?? r.md ?? 8),
-      iconSize: 15,
-      gap: 6,
-      textStyle: props.quiet ? ty.ui : ty.ui_medium,
+      width: iconOnly() ? c.height : undefined,
+      height: c.height,
+      px: iconOnly() ? 0 : c.px,
+      radius: round ? 999 : look().radius[c.radius],
+      iconSize: c.icon,
+      gap: c.gap,
+      textStyle: look().type[light ? c.text : c.textMedium],
     };
   });
 
@@ -2040,8 +2046,9 @@ export function SmeltButton(props: SmeltButtonProps) {
   const buttonClass = () => {
     const parts: string[] = [];
     if (interactive() && colors().surfaceClass) parts.push(colors().surfaceClass);
+    parts.push(FOCUS_RING);
     if (props.class) parts.push(props.class);
-    return parts.length > 0 ? parts.join(" ") : undefined;
+    return parts.join(" ");
   };
 
   return (
@@ -2049,8 +2056,10 @@ export function SmeltButton(props: SmeltButtonProps) {
       class={buttonClass()}
       testID={props.testID}
       disabled={!interactive()}
-      selected={Boolean(props.selected || props.toggled)}
+      selected={Boolean(props.selected)}
       accessibilityLabel={a11yLabel()}
+      accessibilityHint={props.accessibilityHint}
+      role={props.role}
       onPress={(e: any) => {
         if (!interactive()) return;
         props.onPress?.(e);
@@ -2077,14 +2086,13 @@ export function SmeltButton(props: SmeltButtonProps) {
         ...(props.fill ? { width: "100%", minWidth: 0 } : {}),
         ...(metrics().width != null ? { width: metrics().width } : {}),
         minHeight: metrics().height,
-        height: iconOnly() || props.dismiss ? metrics().height : undefined,
+        height: iconOnly() ? metrics().height : undefined,
         paddingLeft: metrics().px,
         paddingRight: metrics().px,
         borderRadius: metrics().radius,
         backgroundColor: props.loading ? look().palette.soft_hover : colors().bg,
         color: props.loading ? look().palette.text : colors().fg,
         cursor: "default",
-        ...(props.style ?? {}),
       }}
       hoverStyle={{
         backgroundColor: colors().hoverBg,
@@ -2152,6 +2160,373 @@ export function SmeltButton(props: SmeltButtonProps) {
         </View>
       </If>
     </BaseButton>
+  );
+}
+
+/**
+ * 列表行：可点、可聚焦的一行（文件树、提交、会话、设置里的可选行）。悬停 `row_hover`、选中 `row_selected`，
+ * 选中只靠底色，不画竖条；光标是箭头。行高、内边距、缩进、间距由调用方的 `class` / `style` 给，颜色和圆角归这里。
+ */
+export function SmeltRow(props: {
+  selected?: boolean;
+  disabled?: boolean;
+  /** 圆角：列表里默认 `radius.row`；贴边铺满的行传 `false`。 */
+  rounded?: boolean;
+  accessibilityLabel?: string;
+  /** 读屏角色，默认 `button`；页签传 `tab`、列表项传 `option`，选中态随 `selected` 播报。 */
+  role?: AccessibilityRole;
+  /** 读屏补充：按下会做什么（「插入到输入框」）。 */
+  accessibilityHint?: string;
+  tooltip?: any;
+  testID?: string;
+  class?: string;
+  style?: any;
+  onPress?: (e?: any) => void;
+  onPressDown?: () => void;
+  onMouseEnter?: (e: any) => void;
+  onMouseLeave?: (e: any) => void;
+  ref?: any;
+  children?: any;
+}) {
+  const look = theme;
+  return (
+    <BaseButton
+      ref={props.ref}
+      onMouseEnter={props.onMouseEnter}
+      onMouseLeave={props.onMouseLeave}
+      class={`flex-row items-center ${ROW_FOCUS_RING} ${props.class ?? ""}`}
+      testID={props.testID}
+      disabled={Boolean(props.disabled)}
+      selected={Boolean(props.selected)}
+      accessibilityLabel={props.accessibilityLabel}
+      accessibilityHint={props.accessibilityHint}
+      role={props.role}
+      tooltip={props.tooltip}
+      onPress={props.onPress}
+      onPressDown={props.onPressDown}
+      style={{
+        ...(props.style ?? {}),
+        borderRadius: props.rounded === false ? 0 : look().radius.row,
+        backgroundColor: props.selected ? look().palette.row_selected : "transparent",
+        cursor: "default",
+      }}
+      hoverStyle={{
+        backgroundColor: props.selected ? look().palette.row_selected : look().palette.row_hover,
+      }}
+      activeStyle={{ backgroundColor: look().palette.row_selected }}
+      disabledStyle={{ opacity: 0.5 }}
+    >
+      {props.children}
+    </BaseButton>
+  );
+}
+
+/** 文本框：`card` 底、`input` 色细边、主题圆角。单行高度和字号见 `size`；多行高度由 `class` 给最小值。 */
+export function SmeltInput(props: {
+  value?: string;
+  defaultValue?: string;
+  placeholder?: string;
+  masked?: boolean;
+  multiline?: boolean;
+  disabled?: boolean;
+  readonly?: boolean;
+  autoFocus?: boolean;
+  selectTextOnFocus?: boolean;
+  maxLength?: number;
+  /** 校验没过：边框换 `bad`。 */
+  invalid?: boolean;
+  /** 不画底和边：嵌在已有外框里的输入框（搜索条、菜单里的过滤框）。 */
+  bare?: boolean;
+  /** 高度和字档见 `CONTROL`，默认 `md`。行里就地改名用 `md`：字和行标题同为 ui，进出编辑不跳。 */
+  size?: SmeltControlSize;
+  /** 等宽字（命令、路径、代码）。 */
+  mono?: boolean;
+  accessibilityLabel?: string;
+  testID?: string;
+  ref?: any;
+  /** 只放布局：宽度、`flex`、最小高度、外边距。 */
+  class?: string;
+  onChange?: (e: { value: string }) => void;
+  onSubmit?: (e: { text: string }) => void;
+  onKeyPress?: (e: { key: string }) => void;
+  onFocus?: () => void;
+  onBlur?: () => void;
+  onLayout?: (e: any) => void;
+}) {
+  const look = theme;
+  const control = () => CONTROL[props.size ?? "md"];
+  const text = () => look().type[control().text];
+  return (
+    <BaseInput
+      ref={props.ref}
+      value={props.value}
+      defaultValue={props.defaultValue}
+      placeholder={props.placeholder}
+      masked={props.masked}
+      multiline={props.multiline}
+      disabled={props.disabled}
+      readonly={props.readonly}
+      autoFocus={props.autoFocus}
+      selectTextOnFocus={props.selectTextOnFocus}
+      maxLength={props.maxLength}
+      accessibilityLabel={props.accessibilityLabel}
+      testID={props.testID}
+      onChange={props.onChange}
+      onSubmit={props.onSubmit}
+      onKeyPress={props.onKeyPress}
+      onFocus={props.onFocus}
+      onBlur={props.onBlur}
+      onLayout={props.onLayout}
+      class={`${props.bare ? "text-foreground" : props.multiline ? INPUT_MULTILINE_CLASS : INPUT_CLASS} ${props.class ?? ""}`}
+      style={{
+        ...(props.multiline ? {} : { height: control().height }),
+        ...(props.size === "xs" ? { paddingLeft: control().px, paddingRight: control().px } : {}),
+        fontSize: text().size,
+        lineHeight: text().line_height,
+        ...(props.mono ? { fontFamily: look().fonts?.mono } : {}),
+        ...(props.invalid && !props.bare ? { borderColor: look().palette.bad } : {}),
+      }}
+    />
+  );
+}
+
+/**
+ * 分段控件：一组互斥（或 `multiple` 时可多选）的选项。轨道 `soft` 底加 `hair` 细边，选中段 `bg` 底加 `hair_strong` 细边。
+ * 整组是 Tab 的一站，左右键在段之间移焦点，空格 / 回车按下。
+ */
+export function SmeltSegmented<T extends string>(props: {
+  /** `tooltip` 给这一段的悬停说明。 */
+  options: ReadonlyArray<{ value: T; label: string; disabled?: boolean; tooltip?: string }>;
+  /** 单选：当前值。`multiple` 时传选中的值数组。 */
+  value: T | ReadonlyArray<T>;
+  multiple?: boolean;
+  /** 单选：按下的那段的值；`multiple` 时是被切换的那段的值，增删由调用方定。 */
+  onChange: (value: T) => void;
+  disabled?: boolean;
+  accessibilityLabel?: string;
+  testID?: string;
+  /** 只放布局。 */
+  class?: string;
+}) {
+  const look = theme;
+  const isOn = (v: T) =>
+    props.multiple ? (props.value as ReadonlyArray<T>).includes(v) : props.value === v;
+  return (
+    <BaseToggleGroup
+      disabled={props.disabled}
+      accessibilityLabel={props.accessibilityLabel}
+      testID={props.testID}
+      class={`flex-row items-center shrink-0 ${props.class ?? ""}`}
+      style={{
+        padding: 2,
+        gap: 2,
+        borderRadius: look().radius.md,
+        backgroundColor: look().palette.soft,
+        borderWidth: 1,
+        borderColor: look().palette.hair,
+      }}
+    >
+      <Each of={props.options} key={(o: { value: T }) => o.value}>
+        {(opt: () => { value: T; label: string; disabled?: boolean; tooltip?: string }) => {
+          const on = () => isOn(opt().value);
+          return (
+            <BaseToggle
+              pressed={on()}
+              disabled={opt().disabled}
+              accessibilityLabel={opt().label}
+              tooltip={
+                opt().tooltip ? (
+                  <SmeltTooltip>
+                    <Text class="text-xs text-foreground">{opt().tooltip}</Text>
+                  </SmeltTooltip>
+                ) : undefined
+              }
+              onChange={() => props.onChange(opt().value)}
+              class={`items-center justify-center ${FOCUS_RING}`}
+              style={{
+                height: 24,
+                paddingLeft: 10,
+                paddingRight: 10,
+                borderRadius: look().radius.sm,
+                borderWidth: 1,
+                borderColor: on() ? look().palette.hair_strong : "transparent",
+                backgroundColor: on() ? look().palette.bg : "transparent",
+                cursor: "default",
+              }}
+              hoverStyle={{ backgroundColor: on() ? look().palette.bg : look().palette.row_hover }}
+              disabledStyle={{ opacity: 0.5 }}
+            >
+              <Text
+                style={{
+                  fontSize: look().type.small.size,
+                  lineHeight: look().type.small.line_height,
+                  fontWeight: on() ? look().type.small_medium.weight : look().type.small.weight,
+                  color: on() ? look().palette.text : look().palette.muted,
+                  numberOfLines: 1,
+                }}
+              >
+                {opt().label}
+              </Text>
+            </BaseToggle>
+          );
+        }}
+      </Each>
+    </BaseToggleGroup>
+  );
+}
+
+/** 菜单项：28 高，左边可选 14 的图标或图片，右边可选勾。`danger` 字和图标用 `bad`。放在 `SmeltMenu` / `SmeltContextMenu` 里。 */
+export function SmeltMenuItem(props: {
+  label: string;
+  icon?: string | null;
+  image?: string | null;
+  iconColor?: string;
+  /** 给了就留勾的位置（`false` 只留空位），对齐一组可勾选的项。 */
+  checked?: boolean;
+  danger?: boolean;
+  disabled?: boolean;
+  /** 默认 `true`。 */
+  closeOnSelect?: boolean;
+  testID?: string;
+  onSelect: () => void;
+}) {
+  const look = theme;
+  const fg = () => (props.danger ? look().palette.bad : look().palette.text);
+  const iconFg = () => props.iconColor ?? (props.danger ? look().palette.bad : look().palette.muted);
+  return (
+    <BaseMenuItem
+      checked={props.checked}
+      disabled={props.disabled}
+      closeOnSelect={props.closeOnSelect ?? true}
+      testID={props.testID}
+      onSelect={props.onSelect}
+      class={MENU_ITEM_CLASS}
+      style={{ height: 28, gap: 8 }}
+      disabledStyle={{ opacity: 0.45 }}
+    >
+      <If when={Boolean(props.image)}>
+        <Image src={props.image ?? ""} style={{ width: 14, height: 14, flexShrink: 0, objectFit: "contain" }} />
+      </If>
+      <If when={!props.image && Boolean(props.icon)}>
+        <SmeltIcon path={props.icon ?? ""} size={14} color={iconFg()} style={{ flexShrink: 0 }} />
+      </If>
+      <Text
+        class="flex-1 min-w-0"
+        style={{
+          color: fg(),
+          fontSize: look().type.ui.size,
+          lineHeight: look().type.ui.line_height,
+          numberOfLines: 1,
+        }}
+      >
+        {props.label}
+      </Text>
+      <If when={props.checked != null}>
+        <View class="items-center justify-center shrink-0" style={{ width: 14, height: 14 }}>
+          <If when={Boolean(props.checked)}>
+            <SmeltIcon path="icons/check.svg" size={13} color={look().palette.text} />
+          </If>
+        </View>
+      </If>
+    </BaseMenuItem>
+  );
+}
+
+/** 菜单分隔线。 */
+export function SmeltMenuSeparator() {
+  return <BaseMenuSeparator class="my-1 bg-border" style={{ height: 1 }} />;
+}
+
+/** 菜单分组名：`small_medium`、`faint`，不可点。 */
+export function SmeltMenuLabel(props: { label: string }) {
+  const look = theme;
+  return (
+    <View class="px-2 py-1">
+      <Text
+        style={{
+          color: look().palette.faint,
+          fontSize: look().type.small_medium.size,
+          lineHeight: look().type.small_medium.line_height,
+          fontWeight: look().type.small_medium.weight,
+          numberOfLines: 1,
+        }}
+      >
+        {props.label}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * 确认框：标题、说明、可选的补充（`children`，放在说明下面），右下角取消 + 确认。确认 `danger` 时是危险按钮，否则主按钮。
+ * 只能用按钮或 Esc 关；`busy` 时确认转圈、取消和 Esc 都不可用。开关归调用方：`onConfirm` 里自己把 `open` 置回。
+ */
+export function SmeltConfirmDialog(props: {
+  open: boolean;
+  title: string;
+  description?: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  danger?: boolean;
+  busy?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+  children?: any;
+}) {
+  const look = theme;
+  return (
+    <SmeltDialog
+      open={props.open}
+      role="alertdialog"
+      closeOnBackdropPress={false}
+      closeOnEscape={!props.busy}
+      accessibilityLabel={props.title}
+      accessibilityDescription={props.description ?? ""}
+      onOpenChange={({ open }: { open: boolean }) => {
+        if (!open && !props.busy) props.onCancel();
+      }}
+      class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
+      style={{ width: 440, gap: 12 }}
+    >
+      <Text
+        style={{
+          color: look().palette.text,
+          fontSize: look().type.ui_medium.size,
+          lineHeight: look().type.ui_medium.line_height,
+          fontWeight: look().type.ui_medium.weight,
+        }}
+      >
+        {props.title}
+      </Text>
+      <If when={Boolean(props.description)}>
+        <Text
+          style={{
+            color: look().palette.muted,
+            fontSize: look().type.ui.size,
+            lineHeight: look().type.ui.line_height,
+          }}
+        >
+          {props.description ?? ""}
+        </Text>
+      </If>
+      {props.children}
+      <View class="flex-row items-center justify-end gap-2" style={{ marginTop: 4 }}>
+        <SmeltButton
+          variant="quiet"
+          size="sm"
+          disabled={Boolean(props.busy)}
+          label={props.cancelLabel}
+          onPress={props.onCancel}
+        />
+        <SmeltButton
+          variant={props.danger ? "danger" : "primary"}
+          size="sm"
+          loading={Boolean(props.busy)}
+          label={props.confirmLabel}
+          onPress={props.onConfirm}
+        />
+      </View>
+    </SmeltDialog>
   );
 }
 

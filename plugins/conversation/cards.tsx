@@ -1,7 +1,16 @@
 // 输入框上方的交互卡片：权限审批卡、Elicitation 提问表单卡、记忆变更审核卡。
 import { computed, Scroll, signal, Text, View } from "nsh";
-import { Input } from "nsh/base";
-import { call, openUrl, SmeltButton, SmeltDisclosure, SmeltDisclosureChevron, SmeltIcon, theme } from "smelt/sdk";
+import {
+  call,
+  openUrl,
+  SmeltButton,
+  SmeltDisclosure,
+  SmeltDisclosureChevron,
+  SmeltIcon,
+  SmeltInput,
+  SmeltRow,
+  theme,
+} from "smelt/sdk";
 import { ct } from "./i18n.ts";
 
 function isAllowPermissionKind(kind: unknown): boolean {
@@ -66,14 +75,7 @@ export function PermissionTray(props: {
         }}
       >
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <View
-            style={{
-              width: 7,
-              height: 7,
-              borderRadius: 4,
-              backgroundColor: look().palette.need,
-            }}
-          />
+          <View class="rounded-full" style={{ width: 7, height: 7, backgroundColor: look().palette.need }} />
           <Text
             style={{
               fontSize: look().type.ui_medium.size,
@@ -165,21 +167,13 @@ export function PermissionTray(props: {
               {(opt, idx) => {
                 const isPrimary = computed(() => idx() === primaryIndex());
                 return (
-                  <View
+                  <SmeltRow
+                    selected={isPrimary()}
                     onPress={() => {
                       const p = first();
                       if (p) props.onSelect(p.tool_call_id, opt().option_id);
                     }}
-                    class="hover:bg-accent"
-                    style={{
-                      height: 32,
-                      paddingHorizontal: 10,
-                      borderRadius: 8,
-                      flexDirection: "row",
-                      alignItems: "center",
-                      gap: 8,
-                      backgroundColor: isPrimary() ? look().palette.row_selected : "transparent",
-                    }}
+                    style={{ height: 32, paddingHorizontal: 10, gap: 8 }}
                   >
                     <Text
                       style={{
@@ -198,7 +192,7 @@ export function PermissionTray(props: {
                         ⌘⏎
                       </Text>
                     </If>
-                  </View>
+                  </SmeltRow>
                 );
               }}
             </Each>
@@ -236,14 +230,7 @@ export function ElicitationCard(props: {
         }}
       >
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <View
-            style={{
-              width: 7,
-              height: 7,
-              borderRadius: 4,
-              backgroundColor: look().palette.need,
-            }}
-          />
+          <View class="rounded-full" style={{ width: 7, height: 7, backgroundColor: look().palette.need }} />
           <Text
             style={{
               flex: 1,
@@ -254,7 +241,7 @@ export function ElicitationCard(props: {
           >
             {item()?.message || ct("elicit.title")}
           </Text>
-          <SmeltButton quiet small label={ct("elicit.skip")} onPress={props.onDismiss} />
+          <SmeltButton variant="quiet" size="sm" label={ct("elicit.skip")} onPress={props.onDismiss} />
         </View>
 
         <Scroll style={{ maxHeight: 260 }}>
@@ -284,8 +271,8 @@ export function ElicitationCard(props: {
                     </If>
                     <If when={externalUrl() != null}>
                       <SmeltButton
-                        quiet
-                        small
+                        variant="quiet"
+                        size="sm"
                         icon="icons/external-link.svg"
                         label={externalUrl() ?? ""}
                         onPress={() => {
@@ -300,15 +287,14 @@ export function ElicitationCard(props: {
                           {(opt, optIdx) => {
                             const selected = computed(() => chosenList().includes(optIdx()));
                             return (
-                              <View
+                              <SmeltRow
+                                selected={selected()}
                                 onPress={() => props.onChoose(fieldIdx(), optIdx())}
                                 style={{
+                                  flexDirection: "column",
+                                  alignItems: "flex-start",
                                   paddingHorizontal: 10,
                                   paddingVertical: 6,
-                                  borderRadius: look().radius.row,
-                                  borderWidth: 1,
-                                  borderColor: selected() ? look().palette.ink : look().palette.hair,
-                                  backgroundColor: selected() ? look().palette.row_selected : "transparent",
                                   gap: 2,
                                 }}
                               >
@@ -320,31 +306,21 @@ export function ElicitationCard(props: {
                                     {opt().description}
                                   </Text>
                                 </If>
-                              </View>
+                              </SmeltRow>
                             );
                           }}
                         </Each>
                       </View>
                     </If>
                     <If when={isTextKind() || Boolean(field().allow_custom_input)}>
-                      <Input
+                      <SmeltInput
+                        size="sm"
                         value={text()}
                         placeholder={ct("elicit.custom_placeholder")}
                         masked={Boolean(field()?.kind?.Text?.secret)}
-                        onChange={({ value }: any) => {
+                        onChange={({ value }) => {
                           text.set(value);
                           props.onText(fieldIdx(), value);
-                        }}
-                        style={{
-                          height: 32,
-                          paddingHorizontal: 10,
-                          borderRadius: 6,
-                          borderWidth: 1,
-                          borderColor: look().palette.hair,
-                          backgroundColor: look().palette.bg,
-                          color: look().palette.text,
-                          placeholderColor: look().palette.faint,
-                          fontSize: look().type.small.size,
                         }}
                       />
                     </If>
@@ -356,7 +332,7 @@ export function ElicitationCard(props: {
         </Scroll>
 
         <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
-          <SmeltButton primary small label={ct("elicit.submit")} onPress={props.onSubmit} />
+          <SmeltButton variant="primary" size="sm" label={ct("elicit.submit")} onPress={props.onSubmit} />
         </View>
       </View>
       )}
@@ -408,7 +384,7 @@ export function MemoryChangesCard(props: {
     <If when={visible() != null}>
       <View style={{ width: "100%", alignItems: "center", paddingHorizontal: 16, paddingTop: 8 }}>
         <View
-          class="w-full rounded-[14px] border border-border bg-card shadow-md overflow-hidden"
+          class="w-full rounded-2xl border border-border bg-card shadow-md overflow-hidden"
           style={{ maxWidth: 768 }}
         >
           <View
@@ -428,8 +404,8 @@ export function MemoryChangesCard(props: {
             </Text>
             <If when={Boolean(props.onOpenAgentMemory)}>
               <SmeltButton
-                quiet
-                small
+                variant="quiet"
+                size="sm"
                 label={ct("memory.page")}
                 onPress={() => {
                   const id = visible()?.agent_id;
@@ -438,8 +414,8 @@ export function MemoryChangesCard(props: {
               />
             </If>
             <SmeltButton
-              quiet
-              small
+              variant="quiet"
+              size="sm"
               icon="icons/close.svg"
               onPress={() => {
                 const id = visible()?.id;
@@ -459,9 +435,8 @@ export function MemoryChangesCard(props: {
                   return (
                     <SmeltDisclosure
                       open={expanded() && Boolean(entry().body || entry().content)}
-                      style={{ paddingHorizontal: 8, paddingVertical: 6 }}
                       content={
-                        <Scroll style={{ maxHeight: 140, marginTop: 4, paddingLeft: 18 }}>
+                        <Scroll style={{ maxHeight: 140, paddingLeft: 26, paddingRight: 8, marginBottom: 6 }}>
                           <Text
                             style={{
                               fontSize: look().type.text_xsmall.size,
@@ -474,10 +449,10 @@ export function MemoryChangesCard(props: {
                         </Scroll>
                       }
                     >
-                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                        <View
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingRight: 8 }}>
+                        <SmeltRow
                           onPress={() => expandedKey.set(expanded() ? null : rowKey())}
-                          style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 }}
+                          style={{ flex: 1, gap: 6, minWidth: 0, paddingHorizontal: 8, paddingVertical: 6 }}
                         >
                           <SmeltDisclosureChevron
                             open={expanded()}
@@ -505,19 +480,18 @@ export function MemoryChangesCard(props: {
                                 .join(" · ")}
                             </Text>
                           </View>
-                        </View>
+                        </SmeltRow>
                         <If when={Boolean(entry().pending_reason)}>
                           <SmeltButton
-                            small
+                            size="sm"
                             disabled={busy()}
                             label={ct("memory.approve")}
                             onPress={() => void runAction("approve", entry())}
                           />
                         </If>
                         <SmeltButton
-                          quiet={!armed()}
-                          danger={armed()}
-                          small
+                          variant={armed() ? "danger" : "quiet"}
+                          size="sm"
                           disabled={busy()}
                           label={armed() ? ct("memory.confirm_delete") : ct("memory.delete")}
                           onPress={() => {

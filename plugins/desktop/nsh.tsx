@@ -439,24 +439,24 @@ export function desktop(props: { args?: { machine?: string | null } | null }) {
             >
               <If when={closed()}>
                 <SmeltButton
-                  primary={true}
-                  small={true}
+                  variant="primary"
+                  size="sm"
                   label={t("action.reconnect")}
                   onPress={handleReconnect}
                 />
               </If>
               <If when={connected()}>
                 <SmeltButton
-                  small={true}
-                  primary={!controlling()}
+                  size="sm"
+                  variant={controlling() ? "secondary" : "primary"}
                   label={controlling() ? t("action.view_only") : t("action.take_control")}
                   onPress={() => controlling.set(!controlling())}
                 />
               </If>
               <If when={!closed()}>
                 <SmeltButton
-                  quiet={true}
-                  small={true}
+                  variant="quiet"
+                  size="sm"
                   label={t("action.disconnect")}
                   onPress={handleDisconnect}
                 />

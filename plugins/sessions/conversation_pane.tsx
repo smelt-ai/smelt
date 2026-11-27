@@ -1,7 +1,7 @@
 // 会话内对话分屏格：直接嵌入通用 SDK 能力 `<SmeltConversation>`（零跨 VM 插槽、零 Rust UI 视图），
 // 负责查找工作区目录里的 `WorkspaceAcp`、读写 `smelt.agents` 记住的配置、响应 `pi_config.changed`
 // 模型刷新、以及承载 `smelt.sessions/send-text` 直投。
-import { cleanup, computed, effect, signal, Text, View } from "nsh";
+import { cleanup, computed, effect, signal, Text, untracked, View } from "nsh";
 import {
   machineMetaEntry,
   rememberAcpConfigValue,
@@ -13,7 +13,7 @@ import {
   t,
   workspaceDirectory,
 } from "smelt/sdk";
-import { SmeltConversation } from "smelt/conversation";
+import { SmeltConversation, type SmeltConversationApi } from "smelt/conversation";
 import { machineKey, terminalPaneKey } from "./model.js";
 
 const OPEN_VIEW_CMD = "smelt.app/open-view";
@@ -27,7 +27,6 @@ const REVEAL_IN_LIST_CMD = "smelt.session-list/reveal-in-list";
 // ---- 外部直投文本注册表（对齐 `terminal_pane.tsx`） ----
 
 const openConversations = new Map<string, Set<(text: string) => void>>();
-let nextInsertSeq = 0;
 
 function registerOpenConversation(key: string, insert: (text: string) => void): () => void {
   let set = openConversations.get(key);
@@ -169,7 +168,9 @@ export function ConversationPane(props: {
   onOpenConversation: (machine: string | null, sid: string) => void;
 }) {
   const look = currentTheme;
-  const insertTextProp = signal<{ seq: number; text: string } | null>(null);
+  const conversation = signal<SmeltConversationApi | null>(null);
+  /** 对话还没挂上（目录里还没有这段会话）时来的文本：挂上后补进输入框，只留最后一段。 */
+  let pendingInsert: string | null = null;
 
   const machine = () => props.args?.machine ?? null;
   const sessionId = () => (typeof props.args?.session_id === "string" ? props.args.session_id : "");
@@ -183,9 +184,24 @@ export function ConversationPane(props: {
     if (!sid) return;
     const key = terminalPaneKey(machine(), sid);
     const unreg = registerOpenConversation(key, (chunk) => {
-      insertTextProp.set({ seq: ++nextInsertSeq, text: chunk });
+      const api = untracked(conversation);
+      if (api) api.insertText(chunk);
+      else pendingInsert = chunk;
     });
-    cleanup(unreg);
+    cleanup(() => {
+      unreg();
+      // 等着的那段是给这段会话的，换了会话不带过去。
+      pendingInsert = null;
+    });
+  });
+
+  // 渲染完再补：这时输入框已在窗口里，聚焦才生效。
+  effect(() => {
+    const api = conversation();
+    if (!api || pendingInsert == null) return;
+    const text = pendingInsert;
+    pendingInsert = null;
+    untracked(() => api.insertText(text));
   });
 
   const directory = computed(() => workspaceDirectory(machine()));
@@ -274,7 +290,7 @@ export function ConversationPane(props: {
           safeArea={props.safeArea}
           reuseKey={props.reuseKey}
           focusSeq={props.focusSeq ?? 0}
-          insertText={insertTextProp()}
+          conversationRef={(api) => conversation.set(api)}
           refreshModelsSeq={piConfigSeq()}
           onAtLatestChange={(atLatest) => props.onAtLatestChange(machine(), sessionId(), atLatest)}
           onFocusIn={props.onFocusIn}

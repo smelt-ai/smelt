@@ -280,12 +280,6 @@ export function commitButtonBusyKey(op) {
   return "commit.commit_and_push";
 }
 
-export function repoKindGlyph(kind) {
-  if (kind === "root") return "◆";
-  if (kind === "submodule") return "◇";
-  return "◌";
-}
-
 export function seenChange(status, path) {
   const found = (status?.files ?? []).find(([, p]) => p === path);
   if (!found) return null;
