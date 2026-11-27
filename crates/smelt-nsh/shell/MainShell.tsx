@@ -412,12 +412,27 @@ function TabBarLeading(props: { pageKey: string; groupId: string }) {
 
 function TabItem(props: { pageKey: string; panelId: string; active: boolean }) {
   const theme = currentTheme;
-  const tabMeta = stableMemo(() => {
+  const tabSpec = stableMemo(() => {
     const pages = (shellState() as ShellSnapshot | undefined)?.pages ?? [];
-    const meta = pages.find((p) => p.key === props.pageKey)?.meta?.[props.panelId];
+    const page = pages.find((p) => p.key === props.pageKey);
+    const meta = page?.meta?.[props.panelId];
     const title = typeof meta?.title === "string" && meta.title.length > 0 ? meta.title : props.panelId;
-    const badge = typeof meta?.badge === "string" && meta.badge.length > 0 ? meta.badge : null;
-    return { title, badge };
+    const rawView = typeof meta?.view === "string" ? meta.view : null;
+    const viewId = rawView === "smelt/outlet" ? (page?.outlet?.id ?? null) : rawView;
+    const fallbackBadge = typeof meta?.badge === "string" && meta.badge.length > 0 ? meta.badge : null;
+    return { title, viewId, fallbackBadge };
+  });
+  // 角标直接读 `views` 切片，避免 `ViewBadgesChanged` 触发整份 `shell` 快照重建与全页 memo 重算。
+  const badge = computed(() => {
+    const spec = tabSpec();
+    if (spec.viewId) {
+      const list = views() ?? [];
+      const found = list.find((v: any) => v?.id === spec.viewId);
+      if (found) {
+        return typeof found.badge === "string" && found.badge.length > 0 ? found.badge : null;
+      }
+    }
+    return spec.fallbackBadge;
   });
   const tStyle = computed(() => (props.active ? theme().type.ui_medium : theme().type.ui));
 
@@ -446,9 +461,9 @@ function TabItem(props: { pageKey: string; panelId: string; active: boolean }) {
           numberOfLines: 1,
         }}
       >
-        {tabMeta().title}
+        {tabSpec().title}
       </Text>
-      <If when={tabMeta().badge !== null}>
+      <If when={badge() !== null}>
         <View
           style={{
             paddingLeft: 5,
@@ -467,7 +482,7 @@ function TabItem(props: { pageKey: string; panelId: string; active: boolean }) {
               color: theme().palette.text,
             }}
           >
-            {tabMeta().badge ?? ""}
+            {badge() ?? ""}
           </Text>
         </View>
       </If>
@@ -586,6 +601,7 @@ function PageWorkspace(props: { pageKey: string }) {
   const theme = currentTheme;
   const labels = stableMemo(() => (shellState() as ShellSnapshot | undefined)?.labels);
   const padding = computed(() => (shellState() as ShellSnapshot | undefined)?.padding ?? 0);
+  const hasBackdrop = computed(() => Boolean((shellState() as any)?.has_backdrop));
 
   const reportLayout = (event: { layout?: any } | any) => {
     const nextLayout = event?.layout ?? event;
@@ -645,12 +661,16 @@ function PageWorkspace(props: { pageKey: string }) {
               borderColor: theme().palette.focus,
               borderRadius: theme().radius.md,
             }}
-            renderRegionBackdrop={(placement: string) => (
-              <SmeltBackdropRegion
-                placement={placement}
-                style={{ width: "100%", height: "100%", pointerEvents: "none" }}
-              />
-            )}
+            renderRegionBackdrop={
+              hasBackdrop()
+                ? (placement: string) => (
+                    <SmeltBackdropRegion
+                      placement={placement}
+                      style={{ width: "100%", height: "100%", pointerEvents: "none" }}
+                    />
+                  )
+                : undefined
+            }
             renderTabBarLeading={(group: any) => (
               <TabBarLeading pageKey={props.pageKey} groupId={String(group.id)} />
             )}

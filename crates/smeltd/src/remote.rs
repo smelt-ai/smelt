@@ -663,8 +663,13 @@ fn bind_endpoint(relay: Option<smelt_iroh::RelaySettings>) -> Result<RemoteEndpo
     let bind_relay = relay.clone();
     thread::spawn(move || {
         // 往外拨对端的客户端也拿着它：endpoint 关了之后在途的拨号直接失败，不会撞上已经
-        // 退出的运行时。
-        let runtime = match tokio::runtime::Runtime::new() {
+        // 退出的运行时。限 2 条工作线程（与 smelt-iroh 客户端一致），避免按核数起十余条空转线程。
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("smeltd-remote-iroh")
+            .enable_all()
+            .build()
+        {
             Ok(runtime) => Arc::new(runtime),
             Err(error) => {
                 let _ = ready_tx.send(Err(format!("Couldn't start the tokio runtime: {error}")));

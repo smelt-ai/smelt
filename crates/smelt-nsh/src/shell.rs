@@ -1200,6 +1200,7 @@ impl MainShell {
                 .collect();
             json!({
                 "padding": self.padding,
+                "has_backdrop": self.backdrop_hooks.borrow().record.is_some(),
                 "pages": pages_json,
                 "settings_page": self.settings_page.as_ref().map(|(id, title)| json!({
                     "id": id,

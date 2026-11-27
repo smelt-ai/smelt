@@ -256,6 +256,8 @@ struct EventSub {
 struct Shared {
     /// 推给 Guest 插件的状态快照（不含仅主壳消费的 `shell` 布局树）。
     plugin_state: BTreeMap<String, Arc<Value>>,
+    /// 按机器独立持有的 `sessions_data` 快照项，避免每次状态变更把全部机器深拷贝拼成整包再全树判等。
+    sessions_machines: Vec<Arc<Value>>,
     plugin_revision: u64,
     /// 推给主壳 VM（`__shell__`）的状态快照（只包含主壳消费的布局与视觉切片）。
     shell_state: BTreeMap<String, Arc<Value>>,
@@ -290,6 +292,37 @@ struct SessionsDataCache {
     last_keys: Vec<(RuntimeKey, (u64, u64), PathStyle)>,
 }
 
+struct SessionsDataUpdate {
+    all_machines: Vec<Arc<Value>>,
+    order: Vec<Value>,
+    changed: Vec<Arc<Value>>,
+    full_required: bool,
+}
+
+impl SessionsDataUpdate {
+    fn to_delivery_entry(&self) -> (&'static str, Value) {
+        if !self.full_required
+            && !self.changed.is_empty()
+            && self.changed.len() < self.all_machines.len()
+        {
+            let upserted: Vec<Value> = self.changed.iter().map(|v| v.as_ref().clone()).collect();
+            (
+                "sessions_data_delta",
+                json!({
+                    "order": self.order,
+                    "upserted": upserted,
+                }),
+            )
+        } else {
+            let all: Vec<Value> = self
+                .all_machines
+                .iter()
+                .map(|v| v.as_ref().clone())
+                .collect();
+            ("sessions_data", Value::Array(all))
+        }
+    }
+}
 #[derive(Default)]
 struct BridgeInner {
     shared: Mutex<Shared>,
@@ -629,7 +662,7 @@ impl Bridge {
             } else {
                 Vec::new()
             };
-            let (rev, entries, single_text, member_texts) = {
+            let (rev, entries, sessions_snapshot, single_text, member_texts) = {
                 let mut shared = bridge.lock();
                 if !is_shell && let Some(keys) = &requested {
                     let sub = shared.state_subs.entry(plugin.to_owned()).or_default();
@@ -642,10 +675,20 @@ impl Bridge {
                 } else {
                     &shared.plugin_state
                 };
+                let mut sessions_snapshot = None;
                 let entries: Vec<(String, Arc<Value>)> = match &requested {
                     Some(keys) => keys
                         .iter()
-                        .filter_map(|key| source.get(key).map(|val| (key.clone(), Arc::clone(val))))
+                        .filter_map(|key| {
+                            if !is_shell
+                                && key == "sessions_data"
+                                && !shared.sessions_machines.is_empty()
+                            {
+                                sessions_snapshot = Some(shared.sessions_machines.clone());
+                                return None;
+                            }
+                            source.get(key).map(|val| (key.clone(), Arc::clone(val)))
+                        })
                         .collect(),
                     None => source
                         .iter()
@@ -670,11 +713,19 @@ impl Bridge {
                 } else {
                     shared.plugin_revision
                 };
-                (rev, entries, single_text, member_texts)
+                (rev, entries, sessions_snapshot, single_text, member_texts)
             };
-            let mut out = serde_json::Map::with_capacity(entries.len() + 3);
+            let mut out = serde_json::Map::with_capacity(
+                entries.len() + 3 + usize::from(sessions_snapshot.is_some()),
+            );
             for (key, val) in entries {
                 out.insert(key, val.as_ref().clone());
+            }
+            if let Some(machines) = sessions_snapshot {
+                out.insert(
+                    "sessions_data".into(),
+                    Value::Array(machines.iter().map(|m| m.as_ref().clone()).collect()),
+                );
             }
             let texts = single_text
                 .map(|table| table.as_ref().clone())
@@ -1444,7 +1495,7 @@ impl Bridge {
 
     /// 登记插件按需订阅的状态切片与事件类型，并返回新增切片的补齐快照（锁外拼 JSON）。
     fn apply_subscribe(&self, plugin: &str, data: &Value) -> Value {
-        let (rev, patch_entries) = {
+        let (rev, patch_entries, sessions_snapshot) = {
             let mut shared = self.lock();
             if plugin == crate::plugins::SHELL_OWNER {
                 return json!({
@@ -1462,6 +1513,7 @@ impl Bridge {
                 let Shared {
                     state_subs,
                     plugin_state,
+                    sessions_machines,
                     ..
                 } = &mut *shared;
                 let sub = state_subs.entry(plugin.to_owned()).or_default();
@@ -1470,6 +1522,9 @@ impl Bridge {
                         if key != "revision" && !sub.slices.contains(key) {
                             added_keys.insert(key.clone());
                         }
+                    }
+                    if !sessions_machines.is_empty() && !sub.slices.contains("sessions_data") {
+                        added_keys.insert("sessions_data".to_owned());
                     }
                     sub.all = true;
                 }
@@ -1498,21 +1553,37 @@ impl Bridge {
                 }
             }
 
-            let patch_entries: Vec<(String, Arc<Value>)> = added_keys
-                .into_iter()
-                .filter_map(|key| {
-                    shared
-                        .plugin_state
-                        .get(&key)
-                        .map(|val| (key, Arc::clone(val)))
-                })
-                .collect();
-            (shared.plugin_revision, patch_entries)
+            let (patch_entries, sessions_snapshot) = {
+                let mut sessions_snapshot = None;
+                let entries: Vec<(String, Arc<Value>)> = added_keys
+                    .into_iter()
+                    .filter_map(|key| {
+                        if key == "sessions_data" && !shared.sessions_machines.is_empty() {
+                            sessions_snapshot = Some(shared.sessions_machines.clone());
+                            return None;
+                        }
+                        shared
+                            .plugin_state
+                            .get(&key)
+                            .map(|val| (key, Arc::clone(val)))
+                    })
+                    .collect();
+                (entries, sessions_snapshot)
+            };
+            (shared.plugin_revision, patch_entries, sessions_snapshot)
         };
 
-        let mut patch = serde_json::Map::with_capacity(patch_entries.len());
+        let mut patch = serde_json::Map::with_capacity(
+            patch_entries.len() + usize::from(sessions_snapshot.is_some()),
+        );
         for (key, val) in patch_entries {
             patch.insert(key, val.as_ref().clone());
+        }
+        if let Some(machines) = sessions_snapshot {
+            patch.insert(
+                "sessions_data".to_owned(),
+                Value::Array(machines.iter().map(|m| m.as_ref().clone()).collect()),
+            );
         }
         json!({
             "revision": rev,
@@ -1543,7 +1614,7 @@ impl Bridge {
             .collect()
     }
 
-    fn snapshot_sessions_data_cached(&self, cx: &App) -> Option<Value> {
+    fn snapshot_sessions_data_delta(&self, cx: &App) -> Option<SessionsDataUpdate> {
         let host = api::host(cx);
         let machines = host.machines(cx);
         let mut meta = Vec::with_capacity(machines.len());
@@ -1565,16 +1636,24 @@ impl Bridge {
             if cache.initialized && cache.last_keys == keys {
                 return None;
             }
-            let mut entries = Vec::with_capacity(keys.len());
+            let full_required = !cache.initialized;
+            let mut all_machines = Vec::with_capacity(keys.len());
+            let mut order = Vec::with_capacity(keys.len());
+            let mut changed = Vec::new();
             let mut next_machines = BTreeMap::new();
             for (key, revs, style) in &keys {
+                order.push(machine_value(key));
                 let entry = match cache.machines.get(key) {
                     Some(cached) if cached.revisions == *revs && cached.path_style == *style => {
                         Arc::clone(&cached.entry)
                     }
-                    _ => Arc::new(build_machine_sessions_json(&*host, key, *style, cx)),
+                    _ => {
+                        let built = Arc::new(build_machine_sessions_json(&*host, key, *style, cx));
+                        changed.push(Arc::clone(&built));
+                        built
+                    }
                 };
-                entries.push(entry.as_ref().clone());
+                all_machines.push(Arc::clone(&entry));
                 next_machines.insert(
                     key.clone(),
                     CachedMachineSessions {
@@ -1587,14 +1666,41 @@ impl Bridge {
             cache.initialized = true;
             cache.last_keys = keys;
             cache.machines = next_machines;
-            return Some(Value::Array(entries));
+            return Some(SessionsDataUpdate {
+                all_machines,
+                order,
+                changed,
+                full_required,
+            });
         }
 
-        let entries = meta
-            .into_iter()
-            .map(|(key, _, style)| build_machine_sessions_json(&*host, key, style, cx))
-            .collect();
-        Some(Value::Array(entries))
+        let mut all_machines = Vec::with_capacity(meta.len());
+        let mut order = Vec::with_capacity(meta.len());
+        for (key, _, style) in meta {
+            order.push(machine_value(key));
+            all_machines.push(Arc::new(build_machine_sessions_json(
+                &*host, key, style, cx,
+            )));
+        }
+        Some(SessionsDataUpdate {
+            changed: all_machines.clone(),
+            all_machines,
+            order,
+            full_required: true,
+        })
+    }
+
+    #[cfg(test)]
+    fn snapshot_sessions_data_cached(&self, cx: &App) -> Option<Value> {
+        self.snapshot_sessions_data_delta(cx).map(|update| {
+            Value::Array(
+                update
+                    .all_machines
+                    .iter()
+                    .map(|m| m.as_ref().clone())
+                    .collect(),
+            )
+        })
     }
 
     /// 按 `dirty` 掩码增量计算发生变化的宿主状态切片，只把真正变了的切片推给订阅它的插件。
@@ -1615,12 +1721,13 @@ impl Bridge {
         let js_views = dirty
             .intersects(SliceMask::JS_VIEWS)
             .then(|| self.js_views_json());
-        let sessions_data = dirty
+        let sessions_update = dirty
             .contains(SliceMask::SESSIONS_DATA)
-            .then(|| self.snapshot_sessions_data_cached(cx))
+            .then(|| self.snapshot_sessions_data_delta(cx))
             .flatten();
-        let updates = snapshot_slices(dirty, rem, js_views, safe_areas, sessions_data, cx);
-        let (shell_send, deliveries) = self.apply_delta_split(updates, shell, false);
+        let updates = snapshot_slices(dirty, rem, js_views, safe_areas, None, cx);
+        let (shell_send, deliveries) =
+            self.apply_delta_split(updates, shell, sessions_update, false);
         if let Some(next) = shell_send {
             plugins.send_to_shell(STATE, next);
         }
@@ -1642,6 +1749,7 @@ impl Bridge {
         &self,
         mut updates: serde_json::Map<String, Value>,
         shell: Option<Value>,
+        sessions_update: Option<SessionsDataUpdate>,
         replace_plugin_map: bool,
     ) -> (Option<Value>, Vec<(String, Value)>) {
         updates.remove("revision");
@@ -1709,6 +1817,9 @@ impl Bridge {
         }
 
         // 3. 短锁仅写入变化了的 Arc 指针、递增版本号并抽取投递清单。
+        let sessions_delivery = sessions_update
+            .as_ref()
+            .map(SessionsDataUpdate::to_delivery_entry);
         let (delivery_recipes, shell_recipe) = {
             let mut shared = self.lock();
             if replace_plugin_map {
@@ -1728,9 +1839,16 @@ impl Bridge {
                     shared.plugin_state.insert(key.clone(), Arc::clone(arc_val));
                 }
             }
+            let sessions_changed = if let Some(update) = sessions_update {
+                shared.sessions_machines = update.all_machines;
+                shared.plugin_state.remove("sessions_data");
+                true
+            } else {
+                false
+            };
 
-            let delivery_recipes: Vec<(String, u64, Vec<(String, Option<Arc<Value>>)>)> =
-                if changed_plugin_keys.is_empty() {
+            let delivery_recipes: Vec<(String, u64, Vec<(String, Option<Arc<Value>>)>, bool)> =
+                if changed_plugin_keys.is_empty() && !sessions_changed {
                     Vec::new()
                 } else {
                     shared.plugin_revision += 1;
@@ -1746,7 +1864,14 @@ impl Bridge {
                                         .push((key.clone(), shared.plugin_state.get(key).cloned()));
                                 }
                             }
-                            (!entries.is_empty()).then_some((plugin.clone(), rev, entries))
+                            let wants_sessions = sessions_changed
+                                && (sub.all || sub.slices.contains("sessions_data"));
+                            (!entries.is_empty() || wants_sessions).then_some((
+                                plugin.clone(),
+                                rev,
+                                entries,
+                                wants_sessions,
+                            ))
                         })
                         .collect()
                 };
@@ -1779,14 +1904,33 @@ impl Bridge {
             (delivery_recipes, shell_recipe)
         };
 
-        // 4. 锁外组装每个订阅方的增量 JSON 对象。
+        // 4. 锁外组装每个订阅方的增量 JSON 对象；单订阅方（常见 `__builtins__`）直接转移
+        // `sessions_delivery` 所有权，零额外深拷贝。
+        let sessions_subscribers = delivery_recipes
+            .iter()
+            .filter(|(_, _, _, wants_sessions)| *wants_sessions)
+            .count();
+        let mut sessions_delivery_owned = sessions_delivery;
+        let mut remaining_sessions = sessions_subscribers;
         let deliveries = delivery_recipes
             .into_iter()
-            .map(|(plugin, rev, entries)| {
-                let mut patch = serde_json::Map::with_capacity(entries.len() + 1);
+            .map(|(plugin, rev, entries, wants_sessions)| {
+                let mut patch =
+                    serde_json::Map::with_capacity(entries.len() + 1 + usize::from(wants_sessions));
                 patch.insert("revision".into(), Value::from(rev));
                 for (key, val) in entries {
                     patch.insert(key, val.map(|v| v.as_ref().clone()).unwrap_or(Value::Null));
+                }
+                if wants_sessions {
+                    remaining_sessions -= 1;
+                    let entry = if remaining_sessions == 0 {
+                        sessions_delivery_owned.take()
+                    } else {
+                        sessions_delivery_owned.clone()
+                    };
+                    if let Some((key, val)) = entry {
+                        patch.insert(key.to_owned(), val);
+                    }
                 }
                 (plugin, Value::Object(patch))
             })
@@ -1814,7 +1958,7 @@ impl Bridge {
             Value::Object(map) => map,
             _ => serde_json::Map::new(),
         };
-        self.apply_delta_split(updates, Some(shell), true)
+        self.apply_delta_split(updates, Some(shell), None, true)
     }
 
     #[cfg(test)]
@@ -2829,12 +2973,10 @@ pub(crate) fn dirty_slices_for_event(event: &HostEvent) -> SliceMask {
         HostEvent::ActiveContextChanged => SliceMask::ACTIVE_CONTEXT,
         HostEvent::WindowActivated => SliceMask::WINDOW_ACTIVE,
         HostEvent::NotificationPermissionChanged => SliceMask::NOTIFICATION_PERMISSION,
-        HostEvent::ViewsChanged
-        | HostEvent::LaidOutViewsChanged
-        | HostEvent::ShownViewsChanged
-        | HostEvent::ViewBadgesChanged => {
+        HostEvent::ViewsChanged | HostEvent::LaidOutViewsChanged | HostEvent::ShownViewsChanged => {
             SliceMask::VIEWS | SliceMask::SHELL | SliceMask::SAFE_AREAS
         }
+        HostEvent::ViewBadgesChanged => SliceMask::VIEWS,
         HostEvent::PagesChanged => SliceMask::PAGES | SliceMask::SHELL,
         HostEvent::LayoutsChanged => SliceMask::SHELL | SliceMask::SAFE_AREAS,
         HostEvent::SafeAreaChanged => SliceMask::SAFE_AREAS,

@@ -311,57 +311,94 @@ export function SmeltConversation(props: SmeltConversationProps) {
     latestSnapshot = merged;
     if (permissionSubmitting()) permissionSubmitting.set(false);
 
-    // 合并条目窗口（规则和手机端同一份，见 SDK `mergeEntryWindow`）
+    // 热路径快判：流式阶段绝大多数帧只更新最后一条活跃 Assistant 正文；
+    // 先在 JS 侧确认单条尾部补丁，直接跳过 `mergeEntryWindow` 同步 FFI 与 `spliceEntries` 整表拷贝。
     const prevEs = entriesState();
-    const plan = mergeEntryWindow(prevEs.window, entryWindowOf(merged));
-    const nextEs = {
-      entries: spliceEntries(prevEs.entries, plan, merged.entries ?? []),
-      window: plan.window,
-      dirtyFrom: plan.changed_from,
-    };
-
-    // 热路径优化：若仅最后一条活跃 Assistant 正文增长，只写细粒度 `streamingText` 信号，
-    // 跳过无变化的 `snapshot.set(merged)`，不触发 `layout` / `displayRows` 重建。
+    const prevLen = prevEs.entries.length;
+    const prevWin = prevEs.window;
+    const incomingEntries = merged.entries ?? [];
+    const incWin = entryWindowOf(merged);
     const active = isTurnActive(String(merged.phase ?? ""));
-    const prevLast = prevEs.entries[prevEs.entries.length - 1];
-    const nextLast = nextEs.entries[nextEs.entries.length - 1];
-    const sameShapeTailOnly =
+    const prevLast = prevLen > 0 ? prevEs.entries[prevLen - 1] : null;
+    const incLast = incomingEntries.length > 0 ? incomingEntries[incomingEntries.length - 1] : null;
+    const tailGlobalIndex = prevWin.offset + prevLen - 1;
+    const fastTailOnly =
       !initial &&
       active &&
-      nextEs.window.offset === prevEs.window.offset &&
-      nextEs.entries.length === prevEs.entries.length &&
-      nextEs.entries.length > 0 &&
-      nextEs.dirtyFrom === nextEs.entries.length - 1 &&
+      prevLen > 0 &&
+      incWin.history_session_id === prevWin.history_session_id &&
+      incWin.acp_session_id === prevWin.acp_session_id &&
+      incWin.revision >= prevWin.revision &&
+      incomingEntries.length === 1 &&
+      incWin.offset === tailGlobalIndex &&
+      incWin.total === prevWin.offset + prevLen &&
       Boolean(prevLast?.Assistant) &&
-      Boolean(nextLast?.Assistant) &&
-      Boolean(prevLast.Assistant.thought) === Boolean(nextLast.Assistant.thought);
+      Boolean(incLast?.Assistant) &&
+      Boolean(prevLast.Assistant.thought) === Boolean(incLast.Assistant.thought);
 
-    if (sameShapeTailOnly) {
-      const globalIx = nextEs.window.offset + nextEs.entries.length - 1;
-      prevEs.entries[prevEs.entries.length - 1] = nextLast;
-      prevEs.window = nextEs.window;
-      streamingGlobalIndex.set(globalIx);
-      streamingText.set(String(nextLast.Assistant.text ?? ""));
+    let nextEs: { entries: any[]; window: any; dirtyFrom: number | null };
+    if (fastTailOnly) {
+      prevEs.entries[prevLen - 1] = incLast;
+      prevEs.window = {
+        ...prevWin,
+        total: incWin.total,
+        revision: incWin.revision,
+      };
+      nextEs = { entries: prevEs.entries, window: prevEs.window, dirtyFrom: prevLen - 1 };
+      streamingGlobalIndex.set(tailGlobalIndex);
+      streamingText.set(String(incLast.Assistant.text ?? ""));
       if (!(rawSnap?.envelope_omitted && isStreamingMetaUnchanged(prevSnap, merged))) {
         snapshot.set(merged);
       }
     } else {
-      snapshot.set(merged);
-      const nextTimings = merged.turn_timings ?? [];
-      if (!turnTimingsEqual(turnTimings(), nextTimings)) {
-        turnTimings.set(nextTimings);
-      }
-      if (nextEs.dirtyFrom !== null || initial) {
-        entriesState.set({ entries: nextEs.entries, window: nextEs.window });
-        if (active && nextLast?.Assistant) {
-          streamingGlobalIndex.set(nextEs.window.offset + nextEs.entries.length - 1);
-          streamingText.set(String(nextLast.Assistant.text ?? ""));
-        } else {
-          streamingGlobalIndex.set(null);
+      // 合并条目窗口（规则和手机端同一份，见 SDK `mergeEntryWindow`）
+      const plan = mergeEntryWindow(prevEs.window, incWin);
+      nextEs = {
+        entries: spliceEntries(prevEs.entries, plan, incomingEntries),
+        window: plan.window,
+        dirtyFrom: plan.changed_from,
+      };
+
+      // 兜底热路径：整窗重推但仅最后一条活跃 Assistant 正文增长时同样只写 `streamingText`。
+      const nextLast = nextEs.entries[nextEs.entries.length - 1];
+      const sameShapeTailOnly =
+        !initial &&
+        active &&
+        nextEs.window.offset === prevEs.window.offset &&
+        nextEs.entries.length === prevEs.entries.length &&
+        nextEs.entries.length > 0 &&
+        nextEs.dirtyFrom === nextEs.entries.length - 1 &&
+        Boolean(prevLast?.Assistant) &&
+        Boolean(nextLast?.Assistant) &&
+        Boolean(prevLast.Assistant.thought) === Boolean(nextLast.Assistant.thought);
+
+      if (sameShapeTailOnly) {
+        const globalIx = nextEs.window.offset + nextEs.entries.length - 1;
+        prevEs.entries[prevEs.entries.length - 1] = nextLast;
+        prevEs.window = nextEs.window;
+        streamingGlobalIndex.set(globalIx);
+        streamingText.set(String(nextLast.Assistant.text ?? ""));
+        if (!(rawSnap?.envelope_omitted && isStreamingMetaUnchanged(prevSnap, merged))) {
+          snapshot.set(merged);
         }
       } else {
-        // 条目没变：总数、修订号照样要记，下一帧和翻页按它合并；不触发重画。
-        prevEs.window = nextEs.window;
+        snapshot.set(merged);
+        const nextTimings = merged.turn_timings ?? [];
+        if (!turnTimingsEqual(turnTimings(), nextTimings)) {
+          turnTimings.set(nextTimings);
+        }
+        if (nextEs.dirtyFrom !== null || initial) {
+          entriesState.set({ entries: nextEs.entries, window: nextEs.window });
+          if (active && nextLast?.Assistant) {
+            streamingGlobalIndex.set(nextEs.window.offset + nextEs.entries.length - 1);
+            streamingText.set(String(nextLast.Assistant.text ?? ""));
+          } else {
+            streamingGlobalIndex.set(null);
+          }
+        } else {
+          // 条目没变：总数、修订号照样要记，下一帧和翻页按它合并；不触发重画。
+          prevEs.window = nextEs.window;
+        }
       }
     }
 

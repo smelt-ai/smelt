@@ -230,7 +230,16 @@ const branchCache = new Map<string, { value: BranchList; stale: boolean; fetched
 const branchGeneration = new Map<string, number>();
 const branchInflight = new Set<string>();
 
-const commitMessages = new Map<string, string>();
+const commitMessages = new Map<string, ReturnType<typeof signal<string>>>();
+
+function commitMessageSignal(repoKey: string) {
+  let sig = commitMessages.get(repoKey);
+  if (!sig) {
+    sig = signal<string>("");
+    commitMessages.set(repoKey, sig);
+  }
+  return sig;
+}
 const commitErrors = new Map<string, string>();
 const gitWrites = new Map<string, string>();
 const indexPending = new Map<string, { completed: boolean }>();
@@ -650,7 +659,7 @@ function runPushOnly(repo: ProjectRef) {
 
 function runCommit(repo: ProjectRef, push: boolean) {
   const k = projectKey(repo.machine, repo.root);
-  const message = (commitMessages.get(k) ?? "").trim();
+  const message = commitMessageSignal(k)().trim();
   if (!message) return;
   const branch = statusCache.get(k)?.value.branch ?? "";
   const op = push ? "commit_and_push" : "commit";
@@ -667,7 +676,7 @@ function runCommit(repo: ProjectRef, push: boolean) {
       ),
     (err) => {
       if (!err) {
-        commitMessages.set(k, "");
+        commitMessageSignal(k).set("");
         invalidateRepo(repo);
       } else {
         commitErrors.set(k, err);
@@ -1797,15 +1806,12 @@ export function Main() {
       if (showHeaders && collapsed) continue;
 
       if (hasChanges || isActive) {
-        const msg = commitMessages.get(rk) ?? "";
         rows.push({
           kind: "commit_box",
           key: `commit:${repo.root}`,
           repo: repoRef,
           repoKey: rk,
           branch: st?.branch ?? "",
-          text: msg,
-          hasText: msg.trim().length > 0,
           hasStaged: staged.length > 0,
           writeOp: gitWrites.get(rk) ?? null,
           ahead: st?.ahead ?? 0,
@@ -3467,15 +3473,14 @@ export function Main() {
                                   >
                                     <Input
                                       multiline={true}
-                                      value={row().text}
+                                      value={commitMessageSignal(row().repoKey)()}
                                       placeholder={
                                         row().branch
                                           ? t("commit.placeholder_branch", { branch: row().branch })
                                           : t("commit.placeholder")
                                       }
                                       onChange={({ value }: { value: string }) => {
-                                        commitMessages.set(row().repoKey, value);
-                                        bump();
+                                        commitMessageSignal(row().repoKey).set(value);
                                       }}
                                       class="rounded-(--radius) border border-input bg-card p-2 text-foreground"
                                       style={{
@@ -3491,7 +3496,11 @@ export function Main() {
                                         small={true}
                                         fill={true}
                                         disabled={
-                                          !(row().hasText && row().hasStaged && !row().writeOp)
+                                          !(
+                                            commitMessageSignal(row().repoKey)().trim().length > 0 &&
+                                            row().hasStaged &&
+                                            !row().writeOp
+                                          )
                                         }
                                         label={t(commitButtonBusyKey(row().writeOp))}
                                         onPress={() => {
@@ -3503,7 +3512,11 @@ export function Main() {
                                         quiet={true}
                                         small={true}
                                         disabled={
-                                          !(row().hasText && row().hasStaged && !row().writeOp)
+                                          !(
+                                            commitMessageSignal(row().repoKey)().trim().length > 0 &&
+                                            row().hasStaged &&
+                                            !row().writeOp
+                                          )
                                         }
                                         label={t("commit.commit_only")}
                                         onPress={() => {
@@ -3522,7 +3535,12 @@ export function Main() {
                                         }}
                                       />
                                     </View>
-                                    <If when={row().hasText && !row().hasStaged}>
+                                    <If
+                                      when={
+                                        commitMessageSignal(row().repoKey)().trim().length > 0 &&
+                                        !row().hasStaged
+                                      }
+                                    >
                                       <Text
                                         style={{
                                           fontSize: look().type.text_xsmall.size,

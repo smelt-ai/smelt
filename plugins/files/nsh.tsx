@@ -1592,7 +1592,17 @@ export function Main() {
     return of != null && of.preview && isMarkdownPath(of.path);
   });
 
-  const openFileDirty = computed(() => isDirty(openFile()));
+  // 编辑正文与脏标记独立成细粒度信号：按键期间原地更新 `cur.content`，不替换 `openFile`
+  // 引用，避免每次击键重算面包屑、工具栏显隐与文件树。
+  const editorContent = signal<string>("");
+  const editorDirtyTick = signal<number>(0);
+  effect(() => {
+    editorContent.set(openFile()?.content ?? "");
+  });
+  const openFileDirty = computed(() => {
+    editorDirtyTick();
+    return isDirty(openFile());
+  });
 
   const isShown = computed(() => viewShown(VIEW_ID));
   effect(() => {
@@ -1867,7 +1877,7 @@ export function Main() {
                                   patchOpenFileById(cur.id, (of) => ({ ...of, pendingGotoLine: null }));
                                 }
                               }}
-                              value={openFile()?.content ?? ""}
+                              value={editorContent()}
                               language={openFile() ? editorLanguageForPath(openFile()!.path) : "text"}
                               readOnly={!openFile()?.readable || isReadOnly(openFile()!)}
                               lineNumbers={true}
@@ -1877,8 +1887,15 @@ export function Main() {
                                 const cur = openFile();
                                 if (!cur || !cur.readable || isReadOnly(cur)) return;
                                 if (cur.content === value) return;
-                                // 改过就算解锁：之后移走根目录也不会把没存的改动锁住。
-                                openFile.set({ ...cur, content: value, unlocked: true });
+                                const wasDirty = isDirty(cur);
+                                cur.content = value;
+                                editorContent.set(value);
+                                // 改过就算解锁：仅首次编辑时翻 `unlocked`；后续击键不换 `openFile` 引用。
+                                if (!cur.unlocked) {
+                                  openFile.set({ ...cur, unlocked: true });
+                                } else if (isDirty(cur) !== wasDirty) {
+                                  editorDirtyTick.set(editorDirtyTick() + 1);
+                                }
                                 schedulePreviewRefresh();
                               }}
                               onContextMenu={handleEditorContextMenu}

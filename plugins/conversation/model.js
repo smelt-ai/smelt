@@ -207,6 +207,16 @@ export function buildConversationLayout(
     processGroup: null,
   }));
 
+  let turnTimingByUserIndex = null;
+  if (Array.isArray(turnTimings) && turnTimings.length > 0) {
+    turnTimingByUserIndex = new Map();
+    for (const item of turnTimings) {
+      if (item && item.user_index != null) {
+        turnTimingByUserIndex.set(item.user_index, item);
+      }
+    }
+  }
+
   let start = 0;
   while (start < entries.length) {
     if (isUserEntry(entries[start]) || isDividerEntry(entries[start])) {
@@ -243,7 +253,7 @@ export function buildConversationLayout(
     }
 
     let turnElapsedMs = null;
-    if (closed && Array.isArray(turnTimings) && turnTimings.length > 0) {
+    if (closed && turnTimingByUserIndex !== null) {
       let userIndex = null;
       for (let i = start - 1; i >= 0; i--) {
         if (isUserEntry(entries[i])) {
@@ -253,7 +263,7 @@ export function buildConversationLayout(
       }
       if (userIndex !== null) {
         const globalIx = entriesOffset + userIndex;
-        const timing = turnTimings.find((item) => item?.user_index === globalIx);
+        const timing = turnTimingByUserIndex.get(globalIx);
         const endedAt = timing?.ended_at_ms ?? timing?.finished_at_ms;
         if (timing && timing.started_at_ms != null && endedAt != null) {
           turnElapsedMs = Math.max(0, endedAt - timing.started_at_ms);
@@ -558,9 +568,10 @@ export function buildCompletionCandidates(trigger, files, commands, builtinDescr
     }
     return list
       .filter(([name]) => !needle || name.toLowerCase().includes(needle))
-      .sort((a, b) => compareTuples(matchRank(a[0], needle), matchRank(b[0], needle)))
+      .map((item) => ({ item, rank: matchRank(item[0], needle) }))
+      .sort((a, b) => compareTuples(a.rank, b.rank))
       .slice(0, MAX_COMPLETION_ITEMS)
-      .map(([name, desc]) => ({
+      .map(({ item: [name, desc] }) => ({
         label: `/${name}`,
         insert: `/${name} `,
         hint: meaningfulHint(desc),
@@ -569,10 +580,10 @@ export function buildCompletionCandidates(trigger, files, commands, builtinDescr
 
   return (files ?? [])
     .filter((p) => !needle || p.toLowerCase().includes(needle))
-    .slice()
-    .sort((a, b) => compareTuples(fileRank(a, needle), fileRank(b, needle)))
+    .map((p) => ({ p, rank: fileRank(p, needle) }))
+    .sort((a, b) => compareTuples(a.rank, b.rank))
     .slice(0, MAX_COMPLETION_ITEMS)
-    .map((p) => ({
+    .map(({ p }) => ({
       label: `@${p}`,
       insert: p.endsWith("/") ? `@${p}` : `@${p} `,
       hint: "",

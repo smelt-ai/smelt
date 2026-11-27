@@ -712,6 +712,26 @@ function applyState(next: any, explicitRev?: number) {
     sessionsDataSlice.set(val);
     merged.sessions_data = val;
     changedKeys.push("sessions_data");
+  } else if ("sessions_data_delta" in next && canAcceptSlice("sessions_data", rev)) {
+    const delta = next.sessions_data_delta;
+    const keyOf = (m: any) => (m == null ? "" : String(m));
+    const prevList = Array.isArray(sessionsDataSlice()) ? sessionsDataSlice() : [];
+    const byMachine = new Map<string, any>();
+    for (const item of prevList) {
+      byMachine.set(keyOf(item?.machine), item);
+    }
+    for (const item of delta?.upserted ?? []) {
+      byMachine.set(keyOf(item?.machine), item);
+    }
+    const order = Array.isArray(delta?.order) ? delta.order : [];
+    const val: any[] = [];
+    for (const m of order) {
+      const found = byMachine.get(keyOf(m));
+      if (found !== undefined) val.push(found);
+    }
+    sessionsDataSlice.set(val);
+    merged.sessions_data = val;
+    changedKeys.push("sessions_data");
   }
   if ("connections" in next && canAcceptSlice("connections", rev)) {
     const val = next.connections ?? { remotes: [], load_error: null };
@@ -2113,7 +2133,11 @@ export function SmeltWindowBar(props: { view: string }) {
     }
     return lastVisibleArea ?? next;
   });
-  return <SmeltNativeWindowBar safeArea={area()} style={{ width: "100%", flexShrink: 0 }} />;
+  return (
+    <If when={area().title_bar}>
+      <SmeltNativeWindowBar safeArea={area()} style={{ width: "100%", flexShrink: 0 }} />
+    </If>
+  );
 }
 
 const MERMAID_EXTENSIONS = [{ name: "mermaid", language: "mermaid" }];
@@ -2145,20 +2169,28 @@ function MermaidDiagramBlock(props: { source: string }) {
       return;
     }
     let stale = false;
-    renderMermaidSvg(src)
-      .then((res) => {
-        if (mermaidClientCache.size >= 128) {
-          const oldest = mermaidClientCache.keys().next().value;
-          if (oldest !== undefined) mermaidClientCache.delete(oldest);
-        }
-        mermaidClientCache.set(cacheKey, res);
-        if (!stale) result.set(res);
-      })
-      .catch((err: any) => {
-        if (!stale) result.set({ ok: false, error: err?.message ?? String(err) });
-      });
+    // 流式输出 Mermaid 代码块时每来几个字符就重跑：加 180ms 防抖避免反复调 Rust 渲染残缺图；
+    // 且仅缓存成功结果，防止半截源码挤掉 128 项缓存里的有效图。
+    const timer = setTimeout(() => {
+      if (stale) return;
+      renderMermaidSvg(src)
+        .then((res) => {
+          if (res.ok) {
+            if (mermaidClientCache.size >= 128) {
+              const oldest = mermaidClientCache.keys().next().value;
+              if (oldest !== undefined) mermaidClientCache.delete(oldest);
+            }
+            mermaidClientCache.set(cacheKey, res);
+          }
+          if (!stale) result.set(res);
+        })
+        .catch((err: any) => {
+          if (!stale) result.set({ ok: false, error: err?.message ?? String(err) });
+        });
+    }, 180);
     cleanup(() => {
       stale = true;
+      clearTimeout(timer);
     });
   });
 
