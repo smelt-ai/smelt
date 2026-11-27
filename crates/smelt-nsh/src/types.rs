@@ -500,6 +500,21 @@ mod tests {
         assert!(host.contains("export declare const Vector:"), "{host}");
         assert!(host.contains("export declare const Smelt:"), "{host}");
 
+        // 生成的声明必须能被 tsc 读懂：宿主模块的参数名原样进 .d.ts，`new` 这类保留字会让
+        // 整个插件工程的类型检查在语法阶段就失败。
+        for (path, body) in &defs {
+            if !path.ends_with(".d.ts") {
+                continue;
+            }
+            let allocator = Allocator::default();
+            let parsed = Parser::new(&allocator, body, SourceType::d_ts()).parse();
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "{path} 解析出错：{:?}",
+                parsed.diagnostics
+            );
+        }
+
         // 带上仓库 plugins/ 作为共享模块源时，必须产出 smelt/conversation.d.ts，
         // 且所有相对 import 与 /// <reference 均解析到实际生成文件。
         let repo_plugins = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins");

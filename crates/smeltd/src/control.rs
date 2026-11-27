@@ -213,6 +213,10 @@ fn dispatch_control(
             Ok(result) => success_value(control_version, &request_id, result),
             Err(error) => error_value(control_version, request_id, error),
         },
+        ControlMethod::ProcessRun => match process_run(params) {
+            Ok(result) => success_value(control_version, &request_id, result),
+            Err(error) => error_value(control_version, request_id, error),
+        },
         history @ (ControlMethod::HistoryList
         | ControlMethod::HistoryDetail
         | ControlMethod::HistoryHandoff
@@ -1855,6 +1859,24 @@ pub(crate) fn handle_control<C: ClientSocket + crate::protocol::PeerSource>(
         Err(failure) => error_value(failure.response_version, failure.request_id, failure.error),
     };
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
+}
+
+/// `process.run`：程序跑在控制连接这条线程上，等它退出再回包（每条连接一个线程，不堵别的调用）。
+fn process_run(params: serde_json::Value) -> Result<serde_json::Value, ControlError> {
+    use smelt_core::process_run::{self, ProcessRunError};
+    use smelt_runtime_client::protocol::process::ProcessRunParams;
+    let params = decode_params::<ProcessRunParams>(params)?;
+    let result = process_run::run(&params).map_err(|error| {
+        let code = match error {
+            ProcessRunError::Invalid(_) => ControlErrorCode::InvalidParams,
+            ProcessRunError::NotFound(_) => ControlErrorCode::NotFound,
+            ProcessRunError::PermissionDenied(_) => ControlErrorCode::PermissionDenied,
+            ProcessRunError::Io(_) => ControlErrorCode::OperationFailed,
+        };
+        ControlError::new(code, error.to_string())
+    })?;
+    serde_json::to_value(result)
+        .map_err(|error| ControlError::new(ControlErrorCode::Internal, error.to_string()))
 }
 
 /// 对端节点之间的对话消息（`node.peer_*`），只收对端节点：调用方是哪台机器取自连接。

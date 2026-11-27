@@ -404,6 +404,41 @@ fn fs_write_then_read_round_trips_and_create_refuses_an_existing_file() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `process.run` 跑完交回退出码和输出；程序不存在报 `not_found`。
+#[cfg(unix)]
+#[test]
+fn process_run_returns_exit_code_and_output() {
+    use smelt_runtime_client::protocol::process::{ProcessRunCall, ProcessRunParams};
+    let runtime = in_process_runtime();
+    let result = runtime
+        .call::<ProcessRunCall>(
+            &ProcessRunParams {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "printf hi; printf no >&2; exit 4".into()],
+                ..Default::default()
+            },
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+        .unwrap();
+    assert_eq!(result.code, Some(4));
+    assert_eq!(result.stdout, "hi");
+    assert_eq!(result.stderr, "no");
+
+    let error = runtime
+        .call::<ProcessRunCall>(
+            &ProcessRunParams {
+                program: "/no/such/smelt-program".into(),
+                ..Default::default()
+            },
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+        .unwrap_err();
+    let ControlClientError::Protocol(error) = error else {
+        panic!("expected a protocol error, got {error}");
+    };
+    assert_eq!(error.code, ControlErrorCode::NotFound);
+}
+
 #[test]
 fn fs_usage_scan_rolls_up_sizes_and_is_released() {
     use smelt_runtime_client::protocol::control::EmptyParams;

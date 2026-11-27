@@ -185,6 +185,14 @@ onEvent((event) => {
 
 路径都是那台机器上的绝对路径。统计按实际占的块算，硬链接只算一次，不跟符号链接，不跨卷。进度经话题 `fs.usage.progress` 推，见上面。
 
+要在那台机器上跑一个命令行程序（比如插件配套的 CLI），用 `process.run`：
+
+| 方法 | 做什么 |
+| --- | --- |
+| `process.run` | `{ program, args?, cwd?, env?, timeout_ms? }` → `{ code, stdout, stderr, timed_out, truncated }`。按那台机器登录 shell 的环境（`PATH` 等）找程序并跑到退出，`env` 叠在上面。默认最多等 30 秒，`timeout_ms` 最多 30 分钟，超时整棵进程树被杀掉、`code` 为 `null`。stdout、stderr 各最多 8 MB，多的丢掉、`truncated` 为真。程序或 `cwd` 不存在报 `not_found`。没有 stdin、不推中间输出 |
+
+`call` 的超时（第 4 个参数）要比 `timeout_ms` 长一点，不然宿主先放弃等待，程序还在跑。
+
 ## 对话
 
 `acpSubscribe`、`acpAction`、`acpHistory` 这组函数直接连运行时里的 ACP 对话流，是内置对话模块 `smelt/conversation` 用的底层接口，事件形状跟着 ACP 协议走，变得多。
