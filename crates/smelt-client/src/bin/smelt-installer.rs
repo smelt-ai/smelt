@@ -1,7 +1,8 @@
-//! macOS App 安装 helper，两种入口共用同一条提交顺序（等 GUI 退出 → 停守护 → 交换 App）：
+//! macOS App 安装 helper，两种入口共用同一条换包的路（等 GUI 退出 → 停守护 → 交换 App）：
 //!
-//! - 在线更新：GUI 派生一次性副本，命令行只带不透明事务凭据；候选和目标路径都由
-//!   updater core 从客户端库读取并校验。
+//! - `--install <下好的.app> --target <App> --replacing <版本> [--relaunch]`：在线更新。GUI
+//!   把自己拷到下好的包旁边再拉起它，换包前再校验一遍签名身份；`target` 已经不是 `--replacing`
+//!   这个版本（被别的途径换掉了）就不装。
 //! - `--local-app <Smelt.app> [--target <路径>]`：`make install` 装本地构建的包。前台复制
 //!   好副本，再把提交交给新会话里的 `--commit-local-app <id> --target <路径>`，等它结束。
 
@@ -21,16 +22,34 @@ fn argument(args: &[String], name: &str) -> anyhow::Result<String> {
 fn run() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("--local-app") => return run_local(&args),
-        Some("--commit-local-app") => return run_commit_local(&args),
-        _ => {}
+        Some("--install") => run_install(&args),
+        Some("--local-app") => run_local(&args),
+        Some("--commit-local-app") => run_commit_local(&args),
+        _ => anyhow::bail!(
+            "usage: smelt-installer --install <Smelt.app> --target <Smelt.app> --replacing <version> [--relaunch]"
+        ),
     }
-    let update_id = argument(&args, "--update-id")?;
-    let attempt_id = argument(&args, "--attempt-id")?;
-    if args.len() != 4 {
-        anyhow::bail!("usage: smelt-installer --update-id <id> --attempt-id <id>");
+}
+
+#[cfg(target_os = "macos")]
+fn run_install(args: &[String]) -> anyhow::Result<()> {
+    use std::path::Path;
+
+    let staged = argument(args, "--install")?;
+    let target = argument(args, "--target")?;
+    let replacing = argument(args, "--replacing")?;
+    let relaunch = args.iter().any(|arg| arg == "--relaunch");
+    if args.len() != if relaunch { 7 } else { 6 } {
+        anyhow::bail!(
+            "usage: smelt-installer --install <Smelt.app> --target <Smelt.app> --replacing <version> [--relaunch]"
+        );
     }
-    smelt_client::updater::run_installer(&update_id, &attempt_id)
+    smelt_client::updater::install_update(
+        Path::new(&staged),
+        Path::new(&target),
+        &replacing,
+        relaunch,
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -113,15 +132,20 @@ mod tests {
     use super::argument;
 
     #[test]
-    fn only_reads_named_opaque_arguments() {
-        let args = vec![
-            "--attempt-id".to_string(),
-            "attempt-1".to_string(),
-            "--update-id".to_string(),
-            "update-1".to_string(),
-        ];
-        assert_eq!(argument(&args, "--update-id").unwrap(), "update-1");
-        assert_eq!(argument(&args, "--attempt-id").unwrap(), "attempt-1");
-        assert!(argument(&args, "--target-app").is_err());
+    fn only_reads_named_arguments_with_values() {
+        let args: Vec<String> = [
+            "--install",
+            "/cache/a/Smelt.app",
+            "--target",
+            "--relaunch",
+            "--replacing",
+            "2026.1102.0",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(argument(&args, "--install").unwrap(), "/cache/a/Smelt.app");
+        assert_eq!(argument(&args, "--replacing").unwrap(), "2026.1102.0");
+        assert!(argument(&args, "--target").is_err(), "值不能是下一个参数");
+        assert!(argument(&args, "--local-app").is_err());
     }
 }

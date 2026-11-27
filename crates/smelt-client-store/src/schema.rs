@@ -10,7 +10,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, Transaction};
 
-pub(crate) const SCHEMA_VERSION: u32 = 16;
+pub(crate) const SCHEMA_VERSION: u32 = 17;
 
 pub(crate) const CREATE_SCHEMA: &str = "
 CREATE TABLE appearance (
@@ -26,11 +26,6 @@ CREATE TABLE appearance (
   font_family TEXT NOT NULL,
   layout_id TEXT
 );
-CREATE TABLE update_settings (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  channel TEXT NOT NULL,
-  auto_install INTEGER NOT NULL CHECK (auto_install IN (0, 1))
-);
 CREATE TABLE workspace_ui (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   outlet TEXT NOT NULL
@@ -39,29 +34,6 @@ CREATE TABLE workspace_layout_state (
   layout_id TEXT PRIMARY KEY,
   state TEXT NOT NULL CHECK (json_valid(state))
 ) WITHOUT ROWID;
-CREATE TABLE update_state (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  current_url TEXT,
-  cleanup_app BLOB
-);
-CREATE TABLE staged_update (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  update_id TEXT NOT NULL,
-  version TEXT NOT NULL,
-  url TEXT NOT NULL,
-  staged_app BLOB NOT NULL,
-  fingerprint TEXT NOT NULL,
-  phase TEXT NOT NULL,
-  swap_app BLOB,
-  installer_failed INTEGER NOT NULL CHECK (installer_failed IN (0, 1))
-);
-CREATE TABLE installer_attempt (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  attempt_id TEXT NOT NULL,
-  target_app BLOB NOT NULL,
-  relaunch INTEGER NOT NULL CHECK (relaunch IN (0, 1)),
-  helper_dir BLOB NOT NULL
-);
 CREATE TABLE runtime_migration (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   migrated_at_ms INTEGER NOT NULL
@@ -351,6 +323,16 @@ DELETE FROM key_binding
     'smelt.sessions/new-session', 'smelt.sessions/open-project');
 ";
 
+/// v17：macOS 自更新不再记任何状态（装的是哪版看 App 自己的版本号，下好的包只在这次运行
+/// 里等着装），更新的四张表都删掉。`update_settings` 早就没人读写了。只删表，不搬数据。
+/// 迁移测试的旧版夹具从当前表结构倒推，可能本来就没有这几张表。
+const MIGRATE_V16_TO_V17: &str = "
+DROP TABLE IF EXISTS update_settings;
+DROP TABLE IF EXISTS update_state;
+DROP TABLE IF EXISTS staged_update;
+DROP TABLE IF EXISTS installer_attempt;
+";
+
 /// 打开时把库带到当前版本。从旧版本迁移前先留一份备份，见 [`backup_before_migration`]。
 pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), String> {
     let observed: u32 = connection
@@ -404,7 +386,7 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
         6 => transaction
             .execute_batch(MIGRATE_V6_TO_V7)
             .map_err(|error| error.to_string())?,
-        7..=15 => {}
+        7..=16 => {}
         newer => return Err(format!("client database version {newer} is newer than this app and isn't recognized")),
     }
     if (1..=7).contains(&version) {
@@ -450,6 +432,11 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<(), St
     if (1..=15).contains(&version) {
         transaction
             .execute_batch(MIGRATE_V15_TO_V16)
+            .map_err(|error| error.to_string())?;
+    }
+    if (1..=16).contains(&version) {
+        transaction
+            .execute_batch(MIGRATE_V16_TO_V17)
             .map_err(|error| error.to_string())?;
     }
     transaction
@@ -502,15 +489,13 @@ fn has_table(connection: &Connection, name: &str) -> Result<bool, String> {
 
 /// 第一版客户端库是一张「作用域 + 键 → JSON 值」的偏好表。打开时一次性搬进正式的表，
 /// 然后删掉它。字段缺省按当时的出厂值补；某一项解析不了就丢掉这一项，用出厂值重来。通知
-/// 偏好、终端字号和侧栏状态不搬：它们归了各自的插件。
+/// 偏好、终端字号和侧栏状态不搬：它们归了各自的插件。更新偏好和更新状态也不搬：偏好归了
+/// 更新插件，状态不再记。
 mod legacy {
     use serde::Deserialize;
 
     use super::Transaction;
-    use crate::{
-        AppearanceRecord, InstallerAttemptRecord, StagedUpdateRecord, UpdateSettingsRecord,
-        UpdateStateRecord, WorkspaceUiRecord,
-    };
+    use crate::{AppearanceRecord, WorkspaceUiRecord};
 
     #[derive(Deserialize)]
     struct Appearance {
@@ -541,22 +526,6 @@ mod legacy {
     fn default_ui_font_px() -> u32 {
         16
     }
-    fn default_true() -> bool {
-        true
-    }
-
-    #[derive(Deserialize)]
-    struct UpdateSettings {
-        #[serde(default = "default_channel")]
-        channel: String,
-        #[serde(default = "default_true")]
-        auto_install: bool,
-    }
-
-    fn default_channel() -> String {
-        "prod".to_string()
-    }
-
     #[derive(Deserialize)]
     struct WorkspaceUi {
         #[serde(default = "default_route")]
@@ -565,47 +534,6 @@ mod legacy {
 
     fn default_route() -> String {
         "session".to_string()
-    }
-
-    #[derive(Deserialize)]
-    struct UpdateState {
-        #[serde(default)]
-        current_url: Option<String>,
-        #[serde(default)]
-        staged: Option<StagedUpdate>,
-        #[serde(default)]
-        cleanup_app: Option<std::path::PathBuf>,
-    }
-
-    #[derive(Deserialize)]
-    struct StagedUpdate {
-        #[serde(default)]
-        id: String,
-        version: String,
-        url: String,
-        staged_app: std::path::PathBuf,
-        #[serde(default)]
-        fingerprint: String,
-        #[serde(default = "default_phase")]
-        phase: String,
-        #[serde(default)]
-        swap_app: Option<std::path::PathBuf>,
-        #[serde(default)]
-        installer_attempt: Option<InstallerAttempt>,
-        #[serde(default)]
-        installer_failed: bool,
-    }
-
-    fn default_phase() -> String {
-        "ready".to_string()
-    }
-
-    #[derive(Deserialize)]
-    struct InstallerAttempt {
-        id: String,
-        target_app: std::path::PathBuf,
-        relaunch: bool,
-        helper_dir: std::path::PathBuf,
     }
 
     fn value<T: serde::de::DeserializeOwned>(
@@ -646,47 +574,11 @@ mod legacy {
                 },
             )?;
         }
-        if let Some(old) = value::<UpdateSettings>(transaction, "update", "settings")? {
-            crate::write_update_settings(
-                transaction,
-                &UpdateSettingsRecord {
-                    channel: old.channel,
-                    auto_install: old.auto_install,
-                },
-            )?;
-        }
         if let Some(old) = value::<WorkspaceUi>(transaction, "workspace", "ui")? {
             crate::write_workspace_ui(transaction, &WorkspaceUiRecord { outlet: old.route })?;
         }
         if value::<bool>(transaction, "meta", "runtime_migrated")? == Some(true) {
             crate::write_runtime_migrated(transaction)?;
-        }
-        if let Some(old) = value::<UpdateState>(transaction, "update", "state")? {
-            crate::write_update_state(
-                transaction,
-                &UpdateStateRecord {
-                    current_url: old.current_url,
-                    cleanup_app: old.cleanup_app,
-                    staged: old.staged.map(|staged| StagedUpdateRecord {
-                        update_id: staged.id,
-                        version: staged.version,
-                        url: staged.url,
-                        staged_app: staged.staged_app,
-                        fingerprint: staged.fingerprint,
-                        phase: staged.phase,
-                        swap_app: staged.swap_app,
-                        installer_attempt: staged.installer_attempt.map(|attempt| {
-                            InstallerAttemptRecord {
-                                attempt_id: attempt.id,
-                                target_app: attempt.target_app,
-                                relaunch: attempt.relaunch,
-                                helper_dir: attempt.helper_dir,
-                            }
-                        }),
-                        installer_failed: staged.installer_failed,
-                    }),
-                },
-            )?;
         }
         Ok(())
     }
