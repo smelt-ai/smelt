@@ -368,6 +368,58 @@ fn v15_moves_the_list_to_its_own_plugin() {
     cleanup(&path);
 }
 
+/// v16 → v17：更新的四张表删掉，里面卡着的事务（比如交换到一半的作业）跟着没了，别的
+/// 数据不动。
+#[test]
+fn v16_drops_the_update_tables() {
+    let (store, path) = temp_store();
+    store.put_appearance(&appearance()).unwrap();
+    drop(store);
+    let v16 = Connection::open(&path).unwrap();
+    v16.execute_batch(
+        "CREATE TABLE update_settings (
+           id INTEGER PRIMARY KEY CHECK (id = 1),
+           channel TEXT NOT NULL,
+           auto_install INTEGER NOT NULL CHECK (auto_install IN (0, 1)));
+         CREATE TABLE update_state (
+           id INTEGER PRIMARY KEY CHECK (id = 1), current_url TEXT, cleanup_app BLOB);
+         CREATE TABLE staged_update (
+           id INTEGER PRIMARY KEY CHECK (id = 1), update_id TEXT NOT NULL,
+           version TEXT NOT NULL, url TEXT NOT NULL, staged_app BLOB NOT NULL,
+           fingerprint TEXT NOT NULL, phase TEXT NOT NULL, swap_app BLOB,
+           installer_failed INTEGER NOT NULL CHECK (installer_failed IN (0, 1)));
+         CREATE TABLE installer_attempt (
+           id INTEGER PRIMARY KEY CHECK (id = 1), attempt_id TEXT NOT NULL,
+           target_app BLOB NOT NULL, relaunch INTEGER NOT NULL CHECK (relaunch IN (0, 1)),
+           helper_dir BLOB NOT NULL);
+         INSERT INTO update_state VALUES (1, 'https://example.test/a.zip', NULL);
+         INSERT INTO staged_update VALUES (1, 'job', '0.9.1', 'https://example.test/b.zip',
+           X'2F63616368652F536D656C742E617070', 'abc', 'applying', NULL, 0);
+         PRAGMA user_version = 16;",
+    )
+    .unwrap();
+    drop(v16);
+
+    let store = ClientStore::open(&path).unwrap();
+    assert_eq!(store.appearance().unwrap(), Some(appearance()));
+    drop(store);
+    let connection = Connection::open(&path).unwrap();
+    for table in [
+        "update_settings",
+        "update_state",
+        "staged_update",
+        "installer_attempt",
+    ] {
+        assert!(!has_table(&connection, table), "{table} 应已删掉");
+    }
+    let version: u32 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, schema::SCHEMA_VERSION);
+    drop(connection);
+    cleanup(&path);
+}
+
 /// v14 → v15：会话列表、分屏的界面状态和终端字号归了插件，那些表和列删掉；外观里没人读的
 /// 三列删掉、`glass_style` 改名 `material`，路由列改名 `outlet`，远程机器的 `smelt_home` 删掉；
 /// 值、远程机器和布局存档留着。分屏的
@@ -650,18 +702,10 @@ fn records_round_trip_and_start_empty() {
     let (store, path) = temp_store();
     assert_eq!(store.appearance().unwrap(), None);
     assert_eq!(store.workspace_ui().unwrap(), None);
-    assert_eq!(store.update_state().unwrap(), UpdateStateRecord::default());
     assert!(!store.runtime_migrated().unwrap());
 
     store.put_appearance(&appearance()).unwrap();
     assert_eq!(store.appearance().unwrap(), Some(appearance()));
-
-    let settings = UpdateSettingsRecord {
-        channel: "dev".to_string(),
-        auto_install: false,
-    };
-    store.put_update_settings(&settings).unwrap();
-    assert_eq!(store.update_settings().unwrap(), Some(settings));
 
     store.put_workspace_ui(&workspace_ui()).unwrap();
     assert_eq!(store.workspace_ui().unwrap(), Some(workspace_ui()));
@@ -768,41 +812,6 @@ fn a_new_or_current_store_leaves_no_backup() {
         .filter(|entry| entry.file_name().to_string_lossy().contains(".bak-v"))
         .collect();
     assert!(backups.is_empty());
-    cleanup(&path);
-}
-
-#[test]
-fn update_state_keeps_the_staged_job_and_its_attempt() {
-    let (store, path) = temp_store();
-    let state = UpdateStateRecord {
-        current_url: Some("https://example.test/a.zip".to_string()),
-        cleanup_app: Some(PathBuf::from("/Applications/.Smelt.old.app")),
-        staged: Some(StagedUpdateRecord {
-            update_id: "job".to_string(),
-            version: "0.9.1".to_string(),
-            url: "https://example.test/b.zip".to_string(),
-            staged_app: PathBuf::from("/cache/Smelt-0.9.1.app"),
-            fingerprint: "abc".to_string(),
-            phase: "applying".to_string(),
-            swap_app: Some(PathBuf::from("/Applications/.Smelt.swap.app")),
-            installer_attempt: Some(InstallerAttemptRecord {
-                attempt_id: "attempt".to_string(),
-                target_app: PathBuf::from("/Applications/Smelt.app"),
-                relaunch: true,
-                helper_dir: PathBuf::from("/cache/helper"),
-            }),
-            installer_failed: false,
-        }),
-    };
-    store.put_update_state(&state).unwrap();
-    assert_eq!(store.update_state().unwrap(), state);
-
-    let finished = UpdateStateRecord {
-        staged: None,
-        ..state
-    };
-    store.put_update_state(&finished).unwrap();
-    assert_eq!(store.update_state().unwrap(), finished);
     cleanup(&path);
 }
 

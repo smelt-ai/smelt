@@ -11789,7 +11789,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
- "smelt-client-store",
  "smelt-event-protocol",
  "smelt-model",
  "smelt-paths",

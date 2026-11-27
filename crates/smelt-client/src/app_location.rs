@@ -177,7 +177,7 @@ fn clear_quarantine(bundle: &Path) -> anyhow::Result<()> {
 }
 
 /// 系统的「移到废纸篓」：和访达里删除一样能「放回原处」。
-pub(crate) fn move_to_trash(path: &Path) -> anyhow::Result<()> {
+fn move_to_trash(path: &Path) -> anyhow::Result<()> {
     let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
     NSFileManager::defaultManager()
         .trashItemAtURL_resultingItemURL_error(&url, None)
