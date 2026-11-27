@@ -33,6 +33,9 @@ import {
   transcriptWindowOf,
   turnTimingsEqual,
   usagePercent,
+  RECONNECT_ATTEMPTS,
+  RECONNECT_STABLE_AFTER_MS,
+  reconnectAttempt,
 } from "../model.js";
 
 describe("entryWindowOf / spliceEntries", () => {
@@ -633,5 +636,27 @@ describe("createBottomStickController", () => {
 
     h.ctrl.onViewableAtLatest(false);
     expect(h.atLatestEvents[h.atLatestEvents.length - 1]).toBe(false);
+  });
+});
+
+describe("reconnectAttempt", () => {
+  const transport = { phase: "dead", end_kind: "transport_disconnected" };
+
+  test("只是连接断了就重连，次数照上次累计", () => {
+    expect(reconnectAttempt(transport, 0, null, 0)).toBe(0);
+    expect(reconnectAttempt(transport, 2, null, 0)).toBe(2);
+    expect(reconnectAttempt({ phase: "idle" }, 1, null, 0)).toBe(1);
+    expect(reconnectAttempt(null, 0, null, 0)).toBe(0);
+  });
+
+  test("会话真结束了不重连", () => {
+    expect(reconnectAttempt({ phase: "dead", end_kind: "provider_failed" }, 0, null, 0)).toBeNull();
+    expect(reconnectAttempt({ phase: "dead", end_kind: "session_terminated" }, 0, null, 0)).toBeNull();
+  });
+
+  test("连续失败用完就停，连上撑过稳定期再断才回满", () => {
+    expect(reconnectAttempt(transport, RECONNECT_ATTEMPTS, null, 0)).toBeNull();
+    expect(reconnectAttempt(transport, RECONNECT_ATTEMPTS, 0, RECONNECT_STABLE_AFTER_MS - 1)).toBeNull();
+    expect(reconnectAttempt(transport, RECONNECT_ATTEMPTS, 0, RECONNECT_STABLE_AFTER_MS)).toBe(0);
   });
 });

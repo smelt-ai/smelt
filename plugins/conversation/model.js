@@ -8,6 +8,27 @@ export function isNewConversationCommand(text) {
   return typeof text === "string" && text.trim().toLowerCase() === "/clear";
 }
 
+/** 对话流断了自动重连的次数预算，规则同 smeltd 重连 provider：最多连续 6 次，连上撑过 30 秒再断才回满。 */
+export const RECONNECT_ATTEMPTS = 6;
+export const RECONNECT_STABLE_AFTER_MS = 30_000;
+
+/** 只是连接断了（本端读到 EOF、没连上运行时）：会话本身可能还活着，该重新订阅，不该杀进程重启。 */
+export function isTransportEnd(snapshot) {
+  return snapshot?.phase === "dead" && snapshot.end_kind === "transport_disconnected";
+}
+
+/**
+ * 对话流关了，这次要不要自动重连。要就返回这次之前已连续失败几次（交给 `waitOnline` 退避），
+ * 不要返回 `null`：会话真结束了（provider 失败、被终结……），或次数用完。
+ * `usableSince` 是这条流第一次收到活帧的时间，没收到过为 `null`。
+ */
+export function reconnectAttempt(snapshot, failures, usableSince, now) {
+  if (snapshot?.phase === "dead" && !isTransportEnd(snapshot)) return null;
+  const previous =
+    usableSince != null && now - usableSince >= RECONNECT_STABLE_AFTER_MS ? 0 : failures;
+  return previous >= RECONNECT_ATTEMPTS ? null : previous;
+}
+
 /** 回合在跑。`connecting` 是智能体还在启动，不是回合：这时发的提问运行时会排队，连上再送。 */
 export function isTurnActive(phase) {
   return (

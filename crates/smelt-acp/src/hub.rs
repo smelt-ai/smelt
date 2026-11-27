@@ -5,6 +5,7 @@
 //!   相位/审批/提问/配置/模型/记忆/结束态等关键变化零延迟直推；
 //! - 支持同帧分屏重构复用（`reuse_key`）：`unsubscribe` 时将活体连接暂存 [`PARK_GRACE`]，
 //!   同 `owner` 在窗口内带相同 `reuse_key` 重新 `subscribe` 时零断连接管并立即重放最新快照；
+//! - 连接线程退出（流断、打开失败）时给当前订阅推一条 `closed`；已关闭的连接不暂存、不认领；
 //! - 插件热重载/卸载/崩溃时调用 [`AcpHub::remove_owner`]，一次性释放该插件的全部连接。
 
 use std::collections::HashMap;
@@ -94,6 +95,8 @@ struct RouteState {
     latest_snapshot: Option<Value>,
     /// 已经收到过完整信封的订阅：只有它收省略帧时才去掉信封键（它手里有上一份可沿用）。
     envelope_sub_id: Option<String>,
+    /// 连接线程已退出（流断了或打开失败）：不再暂存、不再认领。
+    closed: bool,
 }
 
 struct LiveSession {
@@ -104,6 +107,12 @@ struct LiveSession {
     /// 持有底层连接句柄；Drop 时后台关闭 socket，读线程随之自然退出。
     _handle_guard: Arc<HandleGuard>,
     route: Arc<Mutex<RouteState>>,
+}
+
+impl LiveSession {
+    fn closed(&self) -> bool {
+        self.route.lock().unwrap_or_else(|e| e.into_inner()).closed
+    }
 }
 
 struct HandleGuard {
@@ -193,6 +202,7 @@ impl AcpHub {
             active_sub_id: Some(sub_id.clone()),
             latest_snapshot: None,
             envelope_sub_id: None,
+            closed: false,
         }));
         let guard = Arc::new(HandleGuard {
             _conn: Mutex::new(Some(handle)),
@@ -250,6 +260,10 @@ impl AcpHub {
             return None;
         }
         let parked = state.parked.remove(reuse_key)?;
+        if parked.session.closed() {
+            // 暂存期间断了：丢掉，调用方另开新连接。
+            return None;
+        }
         let latest = {
             let mut route = parked
                 .session
@@ -298,10 +312,12 @@ impl AcpHub {
         let Some(session) = removed else {
             return;
         };
-        if let Ok(mut route) = session.route.lock() {
+        let closed = {
+            let mut route = session.route.lock().unwrap_or_else(|e| e.into_inner());
             route.active_sub_id = None;
-        }
-        let Some(reuse_key) = reuse_key.filter(|k| !k.is_empty()) else {
+            route.closed
+        };
+        let Some(reuse_key) = reuse_key.filter(|k| !k.is_empty() && !closed) else {
             drop(session);
             return;
         };
@@ -462,6 +478,7 @@ async fn run_forwarder(
             if let Some(snap) = pending.take() {
                 emit_snapshot(&route, &images, &sink, &snap);
             }
+            emit_closed(&route, &sink);
             break;
         };
 
@@ -510,6 +527,21 @@ async fn run_forwarder(
                 }
             }
         }
+    }
+}
+
+/// 连接线程退出、事件通道关了：记下，并告诉当前订阅方，由它决定要不要重新订阅。
+fn emit_closed(route: &Arc<Mutex<RouteState>>, sink: &AcpEventSink) {
+    let target = {
+        let mut guard = route.lock().unwrap_or_else(|e| e.into_inner());
+        guard.closed = true;
+        guard
+            .active_sub_id
+            .clone()
+            .map(|sub_id| (guard.owner.clone(), sub_id))
+    };
+    if let Some((owner, sub_id)) = target {
+        sink(&owner, json!({ "sub_id": sub_id, "kind": "closed" }));
     }
 }
 
@@ -744,6 +776,55 @@ mod tests {
         hub.send_action("smelt.sessions", "sub-new", json!("Cancel"), &[])
             .unwrap();
         assert!(matches!(action_rx.try_recv(), Ok(AcpUserAction::Cancel)));
+    }
+
+    /// 流断了（读线程 EOF 后事件通道关闭）：订阅方收到 `closed`；带同一 `reuse_key`
+    /// 退订再订阅时不认领这条死连接，否则「重新连接」永远接回同一个断流。
+    #[test]
+    fn closed_stream_notifies_subscriber_and_is_never_reclaimed() {
+        let (tx, rx) = std::sync::mpsc::channel::<Value>();
+        let tx = Mutex::new(tx);
+        let sink: AcpEventSink = Arc::new(move |_, val| {
+            let _ = tx.lock().unwrap().send(val);
+        });
+        let hub = AcpHub::new(ImageStore::new(), sink);
+        let (handle, _action_rx, event_tx) = ConversationClientHandle::detached();
+        hub.attach_handle(
+            "sub-old".into(),
+            "smelt.sessions".into(),
+            RuntimeKey::Local,
+            "s-1".into(),
+            handle,
+        );
+        event_tx
+            .try_send(ConversationClientEvent::Snapshot(Box::new(
+                fallback_snapshot("disconnected", 0),
+            )))
+            .unwrap();
+        drop(event_tx);
+
+        let closed = loop {
+            let event = rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("流断后订阅方应收到 closed");
+            if event["kind"] == "closed" {
+                break event;
+            }
+        };
+        assert_eq!(closed["sub_id"], "sub-old");
+
+        hub.unsubscribe("smelt.sessions", "sub-old", Some("pane-1".into()));
+        assert!(
+            hub.try_reclaim(
+                "pane-1",
+                "smelt.sessions",
+                &RuntimeKey::Local,
+                "s-1",
+                "sub-new"
+            )
+            .is_none(),
+            "已断的连接不能被认领"
+        );
     }
 
     #[test]
