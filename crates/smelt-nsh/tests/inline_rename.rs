@@ -814,6 +814,10 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
         "未悬停常用行时不应露出星标按钮（即使默认选中第一行）"
     );
     // 核对第一行选中底块与数字键帽的实际像素位置：数字键紧贴行右缘，不留星标占位空洞。
+    // 临时关闭离屏缓存层并重绘，避免入场动画结束后静态面板被 layer_cache 合并成纹理层而绕开
+    // `window.painted_quads()` 校验（同 `session_wash.rs`）。
+    cx.update(|window, _| window.set_scroll_layers(false));
+    cx.run_until_parked();
     let (row_center, right_gap) = cx.update(|window, _| {
         let scale = window.scale_factor();
         let quads: Vec<(f32, f32, f32, f32)> = window
@@ -853,6 +857,8 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
             row_right - keycap_right,
         )
     });
+    cx.update(|window, _| window.set_scroll_layers(true));
+    cx.run_until_parked();
     assert!(
         (6. ..=14.).contains(&right_gap),
         "未悬停时数字键右缘应贴近行右缘（~9-10pt），不应留出星标空洞，实际 right_gap={right_gap}"
@@ -883,10 +889,10 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
     );
     cx.simulate_keystrokes("enter");
     assert!(
-        wait_until(cx, Duration::from_secs(2), |_| {
-            !create_calls.lock().unwrap().is_empty()
+        wait_until(cx, Duration::from_secs(2), |cx| {
+            !create_calls.lock().unwrap().is_empty() && !has_a11y_label(cx, "Shell Terminal 1")
         }),
-        "新建会话面板打开后应立即可用键盘 Enter 启动（MenuBody 自动拿焦）"
+        "新建会话面板打开后应立即可用键盘 Enter 启动并关闭面板（MenuBody 自动拿焦）"
     );
 
     // 10. 右侧文件面板搜索框聚焦键入后按 Esc 应通过 onKeyPress 清空搜索词。
@@ -899,6 +905,17 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
     );
     // 文件搜索框位于右侧辅助栏顶部（34px 标签栏下方）。
     cx.simulate_click(point(px(1060.), px(54.)), Modifiers::default());
+    assert!(
+        wait_until(cx, Duration::from_secs(2), |cx| {
+            focused_text_input_label(cx).as_deref() == Some(files_search_label)
+                && cx.update(|window, _| app_focus.is_focused(window))
+        }),
+        "点击文件搜索框后应拿到焦点，当前 focused={:?} app_focused={}",
+        focused_text_input_label(cx),
+        cx.update(|window, _| app_focus.is_focused(window))
+    );
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
     cx.simulate_keystrokes("f o o");
     assert!(
         wait_until(cx, Duration::from_secs(2), |cx| {
