@@ -2105,6 +2105,8 @@ export function SmeltButton(props: SmeltButtonProps) {
           alignItems: "center",
           justifyContent: "center",
           gap: metrics().gap,
+          // NSH 按 RN 默认不收缩：按钮被 maxWidth / 父级压窄时，内容行和文字都得能缩，文字才截断，不撑出底色。
+          flexShrink: 1,
           minWidth: 0,
           overflow: "hidden",
           opacity: props.loading ? 0 : 1,
@@ -2121,6 +2123,7 @@ export function SmeltButton(props: SmeltButtonProps) {
               lineHeight: metrics().textStyle.line_height,
               fontWeight: metrics().textStyle.weight,
               numberOfLines: 1,
+              flexShrink: 1,
             }}
           >
             {props.label ?? ""}
