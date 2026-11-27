@@ -25,6 +25,7 @@ import {
   SmeltIcon,
   SmeltNativeWindowDrag,
   theme,
+  waitOnline,
   workspaceDirectory,
 } from "smelt/sdk";
 import { MemoryChangesCard } from "./cards.tsx";
@@ -44,6 +45,7 @@ import {
   entryWindowOf,
   extractTurnAnswerPreview,
   isStreamingMetaUnchanged,
+  isTransportEnd,
   isTurnActive,
   isUserEntry,
   launchBringsContent,
@@ -51,6 +53,7 @@ import {
   overlayModelState,
   overlaySessionConfigs,
   reconcilePendingConfigValues,
+  reconnectAttempt,
   sessionSkills,
   showsEmptyWelcome,
   spliceEntries,
@@ -202,6 +205,10 @@ export function SmeltConversation(props: SmeltConversationProps) {
   const restoreDraft = signal<{ seq: number; text: string; images: AttachedImage[] } | null>(null);
   const quickInsert = signal<{ seq: number; text: string } | null>(null);
   const reconnectSeq = signal(0);
+  /** 对话流断了，正在等机器上线后自动重新订阅。 */
+  const reconnecting = signal(false);
+  /** 当前这条对话流已经关了：要再连上得重新订阅。 */
+  const streamClosed = signal(false);
 
   let listApi: any = null;
   let lastRestoreRev = 0;
@@ -223,6 +230,9 @@ export function SmeltConversation(props: SmeltConversationProps) {
   let backfilledAt: number | null = null;
   let lastRejectedNoticeId: number | null = null;
   let lastInitialPromptText: string | null = null;
+  /** 自动重连连续失败的次数，和这条流第一次收到活帧的时间（判断撑没撑过稳定期）。 */
+  let reconnectFailures = 0;
+  let usableSince: number | null = null;
 
   const agentId = computed(() => {
     const dir = props.directoryAcp;
@@ -534,6 +544,8 @@ export function SmeltConversation(props: SmeltConversationProps) {
       backfilledAt = null;
       lastRejectedNoticeId = null;
       lastInitialPromptText = null;
+      reconnecting.set(false);
+      reconnectFailures = 0;
     }
     activeSessionKey = sessionKey;
 
@@ -542,12 +554,39 @@ export function SmeltConversation(props: SmeltConversationProps) {
     const currentSubId = `sub-${newSessionId()}`;
     subId.set(currentSubId);
     connectError.set(null);
+    streamClosed.set(false);
+    usableSince = null;
 
     const unsubEvent = onAcpEvent((ev: any) => {
       if (cancelled || !ev || ev.sub_id !== currentSubId) return;
       if (ev.kind === "snapshot" && ev.snapshot) {
         applyIncomingSnapshot(ev.snapshot, firstFrame);
         firstFrame = false;
+        if (latestSnapshot?.phase !== "dead") {
+          usableSince ??= Date.now();
+          reconnecting.set(false);
+        } else if (!isTransportEnd(latestSnapshot)) {
+          reconnecting.set(false);
+        }
+      } else if (ev.kind === "closed") {
+        streamClosed.set(true);
+        const attempt = reconnectAttempt(
+          latestSnapshot,
+          reconnectFailures,
+          usableSince,
+          Date.now(),
+        );
+        if (attempt == null) {
+          reconnecting.set(false);
+          return;
+        }
+        reconnectFailures = attempt + 1;
+        reconnecting.set(true);
+        void waitOnline(machine, attempt).then((online) => {
+          if (cancelled) return;
+          if (online) reconnectSeq.set(reconnectSeq() + 1);
+          else reconnecting.set(false);
+        });
       } else if (ev.kind === "initial_prompt_unsupported" && lastInitialPromptText) {
         const text = lastInitialPromptText;
         lastInitialPromptText = null;
@@ -861,9 +900,22 @@ export function SmeltConversation(props: SmeltConversationProps) {
       LayoutAnimation.configureNext(WELCOME_LAYOUT_TRANSITION);
     }
   });
-  const showEndedEmpty = computed(
-    () => dead() && entriesState().entries.length === 0 && entriesState().window.offset === 0,
+  const noEntries = computed(
+    () => entriesState().entries.length === 0 && entriesState().window.offset === 0,
   );
+  const showEndedEmpty = computed(() => dead() && !reconnecting() && noEntries());
+  /** 结束态的按钮只需重新订阅：流关了且只是连接断了，会话可能还活着，不能杀进程重启。 */
+  const reconnectOnly = computed(() => streamClosed() && isTransportEnd(snapshot()));
+  const restartOrReconnect = () => {
+    if (reconnectOnly()) {
+      reconnectFailures = 0;
+      reconnectSeq.set(reconnectSeq() + 1);
+      return;
+    }
+    acpRestart(props.machine ?? null, props.sessionId)
+      .catch(() => {})
+      .finally(() => reconnectSeq.set(reconnectSeq() + 1));
+  };
 
   return (
     <View
@@ -982,7 +1034,10 @@ export function SmeltConversation(props: SmeltConversationProps) {
         {/* 消息流主体或启动 / 结束 */}
         <If when={!showEmptyWelcome()}>
           <If
-            when={(entriesState().entries.length > 0 || snapshot() != null) && !showEndedEmpty()}
+            when={
+              (entriesState().entries.length > 0 || (snapshot() != null && !reconnecting())) &&
+              !showEndedEmpty()
+            }
             else={
               <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 12, padding: 24 }}>
                 <If
@@ -1015,7 +1070,9 @@ export function SmeltConversation(props: SmeltConversationProps) {
                     >
                       <SmeltIcon spin={visible()} size={16} color={look().palette.muted} />
                       <Text style={{ fontSize: look().type.ui.size, color: look().palette.muted }}>
-                        {props.placeholder || ct("status.opening")}
+                        {reconnecting()
+                          ? ct("status.reconnecting")
+                          : props.placeholder || ct("status.opening")}
                       </Text>
                     </If>
                   }
@@ -1045,12 +1102,14 @@ export function SmeltConversation(props: SmeltConversationProps) {
                     </Text>
                     <SmeltButton
                       primary
-                      label={snapshot()?.history_session_id ? ct("ended.resume") : ct("ended.new")}
-                      onPress={() => {
-                        acpRestart(props.machine ?? null, props.sessionId)
-                          .catch(() => {})
-                          .finally(() => reconnectSeq.set(reconnectSeq() + 1));
-                      }}
+                      label={
+                        reconnectOnly()
+                          ? ct("action.reconnect")
+                          : snapshot()?.history_session_id
+                            ? ct("ended.resume")
+                            : ct("ended.new")
+                      }
+                      onPress={restartOrReconnect}
                     />
                   </View>
                 </If>
@@ -1199,27 +1258,35 @@ export function SmeltConversation(props: SmeltConversationProps) {
           </View>
         </If>
 
-        <If when={dead() && !showEndedEmpty()}>
+        <If when={dead() && !noEntries()}>
           <View style={{ width: "100%", alignItems: "center", paddingHorizontal: 16, paddingBottom: 6 }}>
-            <View
-              class="w-full px-3.5 py-2 rounded-xl bg-bad/12 border border-bad flex-row items-center gap-2.5"
-              style={{ maxWidth: 768 }}
+            <If
+              when={!reconnecting()}
+              else={
+                <View class="w-full px-3.5 py-2 flex-row items-center gap-2.5" style={{ maxWidth: 768 }}>
+                  <SmeltIcon spin={visible()} size={14} color={look().palette.muted} />
+                  <Text style={{ flex: 1, fontSize: look().type.ui.size, color: look().palette.muted }}>
+                    {ct("status.reconnecting")}
+                  </Text>
+                </View>
+              }
             >
-              <SmeltIcon path="icons/circle-x.svg" size={14} color={look().palette.bad} />
-              <Text style={{ flex: 1, fontSize: look().type.ui.size, color: look().palette.text }}>
-                {snapshot()?.end_reason || ct("status.disconnected")}
-              </Text>
-              <SmeltButton
-                primary
-                small
-                label={ct("action.restart")}
-                onPress={() => {
-                  acpRestart(props.machine ?? null, props.sessionId)
-                    .catch(() => {})
-                    .finally(() => reconnectSeq.set(reconnectSeq() + 1));
-                }}
-              />
-            </View>
+              <View
+                class="w-full px-3.5 py-2 rounded-xl bg-bad/12 border border-bad flex-row items-center gap-2.5"
+                style={{ maxWidth: 768 }}
+              >
+                <SmeltIcon path="icons/circle-x.svg" size={14} color={look().palette.bad} />
+                <Text style={{ flex: 1, fontSize: look().type.ui.size, color: look().palette.text }}>
+                  {snapshot()?.end_reason || ct("status.disconnected")}
+                </Text>
+                <SmeltButton
+                  primary
+                  small
+                  label={reconnectOnly() ? ct("action.reconnect") : ct("action.restart")}
+                  onPress={restartOrReconnect}
+                />
+              </View>
+            </If>
           </View>
         </If>
 

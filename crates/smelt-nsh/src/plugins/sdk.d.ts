@@ -420,6 +420,10 @@ export declare function onEvent(
   listener: (event: HostEvent) => void,
   types: readonly EventFilter[],
 ): () => void;
+/**
+ * 对话流事件 `{ sub_id, kind }`：`snapshot`（带 `snapshot`）、`initial_prompt_unsupported`、
+ * `closed`（连接已断，这个 `sub_id` 不会再有事件；要不要重新订阅由调用方定）。
+ */
 export declare function onAcpEvent(listener: (event: any) => void): () => void;
 
 export declare function acpSubscribe(params: {

@@ -4,7 +4,8 @@
 //! 1. 工作区会话（`directoryAcp`）默认 `conversation_binding` 为 `{ "type": "direct" }`（`ConversationBinding::Direct`），
 //!    字符串 `pending_prompt` 正确组装为 `AcpInitialPrompt`，`start.fork.cut` 正确解码为 `AcpForkCut`；
 //! 2. 自动化现场会话（`spec.binding`）正确解码为 `ConversationBinding::Automation { run_id }`；
-//! 3. 宿主 `smelt.state` 推进导致 `directoryAcp` 对象引用刷新但会话 id 未变时，不触发无意义的退订重订。
+//! 3. 宿主 `smelt.state` 推进导致 `directoryAcp` 对象引用刷新但会话 id 未变时，不触发无意义的退订重订；
+//! 4. 对话流断了（兜底快照 `transport_disconnected` + `closed`）时自动重新订阅同一会话，不调 `acp.restart`。
 
 use std::{
     fs,
@@ -124,6 +125,7 @@ fn conversation_subscribe_wire_contract(cx: &mut TestAppContext) {
 
     let subscribes: Arc<Mutex<Vec<SubscribeRecord>>> = Arc::new(Mutex::new(Vec::new()));
     let unsubscribes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let restarts: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let app_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     host.handle("state", |_plugin, call| {
@@ -131,7 +133,7 @@ fn conversation_subscribe_wire_contract(cx: &mut TestAppContext) {
             "revision": 1,
             "locale": "zh-CN",
             "theme": smelt_nsh::testing::theme_state(16.),
-            "machines_meta": [],
+            "machines_meta": [{ "machine": null, "online": true }],
             "sessions_data": [],
         }));
     });
@@ -173,6 +175,14 @@ fn conversation_subscribe_wire_contract(cx: &mut TestAppContext) {
                 .unwrap_or_default()
                 .to_owned();
             unsubscribes.lock().unwrap().push(sub_id);
+            call.resolve(Value::Null);
+        });
+    }
+
+    {
+        let restarts = Arc::clone(&restarts);
+        host.handle("acp.restart", move |_plugin, call| {
+            restarts.lock().unwrap().push(call.data().clone());
             call.resolve(Value::Null);
         });
     }
@@ -378,12 +388,54 @@ fn conversation_subscribe_wire_contract(cx: &mut TestAppContext) {
         "directoryAcp 引用变化不应触发 acp.unsubscribe"
     );
 
+    // 2b. 断流：连接线程读到 EOF，先推兜底快照再推 `closed`。对话应自动重新订阅同一会话，
+    //     不调 `acp.restart`（只是连接断了，远端会话可能还活着）。
+    host.send_to(
+        "probe",
+        "smelt.acp.event",
+        json!({
+            "sub_id": first.sub_id,
+            "kind": "snapshot",
+            "snapshot": {
+                "phase": "dead",
+                "end_kind": "transport_disconnected",
+                "end_reason": "disconnected",
+                "replaying_history": false,
+                "entries": [],
+                "entries_offset": 0,
+                "entries_total": 0,
+                "snapshot_revision": 0,
+                "config_options": [],
+                "model": null,
+            },
+        }),
+    );
+    host.send_to(
+        "probe",
+        "smelt.acp.event",
+        json!({ "sub_id": first.sub_id, "kind": "closed" }),
+    );
+    wait_until(cx, "断流后自动重新订阅", &|| {
+        subscribes.lock().unwrap().len() >= 2
+    });
+    let resubscribed = subscribes.lock().unwrap()[1].clone();
+    assert_ne!(resubscribed.sub_id, first.sub_id);
+    assert_eq!(resubscribed.parsed.as_ref().unwrap().id, "acp-ws-1");
+    assert_eq!(
+        unsubscribes.lock().unwrap().as_slice(),
+        std::slice::from_ref(&first.sub_id)
+    );
+    assert!(
+        restarts.lock().unwrap().is_empty(),
+        "只是连接断了，不能调 acp.restart 杀远端进程"
+    );
+
     // 3. 切到自动化现场会话：spec.binding 应正确反序列化为 Automation { run_id }。
     host.broadcast("test.mode", json!("automation"));
     wait_until(cx, "automation acp.subscribe", &|| {
-        subscribes.lock().unwrap().len() >= 2
+        subscribes.lock().unwrap().len() >= 3
     });
-    let second = subscribes.lock().unwrap()[1].clone();
+    let second = subscribes.lock().unwrap()[2].clone();
     let auto_launch = second.parsed.unwrap_or_else(|err| {
         panic!(
             "automation launch 反序列化失败：{err}\nraw={}",
