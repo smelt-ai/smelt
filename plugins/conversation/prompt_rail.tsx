@@ -15,6 +15,8 @@ const TICK_PITCH = TICK_HEIGHT + TICK_GAP;
 const RAIL_PAD_Y = 6;
 const VIEWPORT_MAX_H = PROMPT_RAIL_MAX_TICKS * TICK_PITCH - TICK_GAP + RAIL_PAD_Y * 2;
 const THUMB_INSET = 8;
+/** 刻度间距仅 12px，直接 1:1 吃触控板位移会一滑飞过十几问；加 0.25 阻尼（约 48pt 一问），鼠标滚轮一格一问。 */
+const TRACKPAD_DAMP = 0.25;
 
 export interface PromptRailItem {
   globalIndex: number;
@@ -110,6 +112,28 @@ export function PromptRail(props: {
     return item ? { item, order: idx + 1, total: total() } : null;
   });
 
+  const handleRailWheel = (e: { delta?: { y?: number }; deltaMode?: "points" | "lines" }) => {
+    const maxS = scrollMetrics().maxScroll;
+    if (maxS <= 1) return;
+    const rawY = Number(e?.delta?.y ?? 0);
+    if (!Number.isFinite(rawY) || rawY === 0) return;
+    const deltaY = e.deltaMode === "lines" ? rawY * TICK_PITCH : rawY * TRACKPAD_DAMP;
+    const curY = scrollY();
+    const nextY = Math.max(0, Math.min(maxS, curY + deltaY));
+    if (Math.abs(nextY - curY) <= 0.05) return;
+    scrollY.set(nextY);
+    scrollRef?.scrollTo?.({ y: nextY, animated: false });
+    if (railHovered()) {
+      const anchorY = pointerYInScroll ?? viewportHeight() / 2;
+      const idx = syncHoveredFromPointer(anchorY, nextY);
+      if (idx != null && idx !== lastScrubbedIndex) {
+        lastScrubbedIndex = idx;
+        const target = props.prompts()[idx];
+        if (target) props.onScrub?.(target);
+      }
+    }
+  };
+
   return (
     <If when={total() >= 2}>
       <View
@@ -180,27 +204,13 @@ export function PromptRail(props: {
                 }
               }}
               scrollbar={false}
-              onScroll={(e: any) => {
-                const nextY = Number(e?.offset?.y ?? e?.y ?? scrollY());
-                if (!Number.isFinite(nextY)) return;
-                const moved = Math.abs(nextY - scrollY()) > 0.5;
-                scrollY.set(nextY);
-                if (railHovered() && moved) {
-                  const anchorY = pointerYInScroll ?? viewportHeight() / 2;
-                  const idx = syncHoveredFromPointer(anchorY, nextY);
-                  if (idx != null && idx !== lastScrubbedIndex) {
-                    lastScrubbedIndex = idx;
-                    const target = props.prompts()[idx];
-                    if (target) props.onScrub?.(target);
-                  }
-                }
-              }}
               style={{
                 width: "100%",
                 height: viewportHeight(),
               }}
             >
               <View
+                onWheel={canScroll() ? handleRailWheel : undefined}
                 style={{
                   width: "100%",
                   paddingLeft: 5,
