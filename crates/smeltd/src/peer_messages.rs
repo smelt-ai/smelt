@@ -2454,7 +2454,12 @@ mod tests {
         }
         *panicked.value.launch_spec.lock() =
             Some(smelt_core::agent_kind::ConversationLaunchSpec::from_command("/bin/true"));
-        let restarted = crate::acp_host::restart_acp_session("acp-panic", &acp_sessions, &hub);
+        let restarted = crate::acp_host::restart_acp_session_from_client(
+            "acp-panic",
+            &panicked,
+            &acp_sessions,
+            &hub,
+        );
         assert!(restarted.is_ok(), "{restarted:?}");
         let current = acp_sessions.get("acp-panic").expect("槽位还在");
         assert!(

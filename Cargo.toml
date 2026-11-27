@@ -126,9 +126,16 @@ strip = "symbols"
 lto = "thin"
 codegen-units = 1
 
+# `smelt-nsh` 的 build script 链接 nsh-bundler（Rolldown + OxC）与 QuickJS：
+# 默认 opt-level = 0 展开出的 `__eh_frame` 超过 macOS ld64 的 16MB 紧凑展开表上限且打包慢；
+# build-override 开 `opt-level = 1` 既消除链接器警告，也加快 `build.rs` 打包。
+[profile.dev.build-override]
+opt-level = 1
+
 # proc-macro 和 build script 只在构建机上用，不发布，不用 strip。
 # rustc 1.97 在 macOS 上用 `rust-objcopy --strip-debug` 实现默认的 strip=debuginfo，处理后的
 # dylib 有时 LINKEDIT 字符串表不对齐（跟产物内容有关），macOS 27 的 dyld 拒绝加载，rustc 就报
 # `can't find crate for rquickjs_macro`（2026-10-19 复现；系统 `strip -S` 处理同一文件没问题）。
 [profile.release.build-override]
+opt-level = 1
 strip = false

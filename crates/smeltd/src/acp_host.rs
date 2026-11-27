@@ -5150,7 +5150,7 @@ pub(crate) fn handle_acp_restart<C: ClientSocket>(
     let _ = smelt_runtime_client::protocol::write_json_line(&mut c, &response);
 }
 
-fn restart_acp_session_from_client(
+pub(crate) fn restart_acp_session_from_client(
     id: &str,
     slot: &Arc<AcpSlot<AcpSession>>,
     acp_sessions: &AcpSessions,
@@ -5167,21 +5167,6 @@ fn restart_acp_session_from_client(
         return Err(error);
     }
     relaunch_recorded_acp_runtime(id, slot, acp_sessions, subscribers)
-}
-
-/// ACP runtime 的进程级重启原语。socket handler 和 daemon Task Runtime 共用，
-/// 否则后台任务只能伪造一条本地状态，真正失联的 provider 永远不会被拉起。
-pub(crate) fn restart_acp_session(
-    id: &str,
-    acp_sessions: &AcpSessions,
-    subscribers: &EventHubHandle,
-) -> Result<(), &'static str> {
-    let slot = acp_sessions.get(id).ok_or("ACP session not found")?;
-    let _lifecycle = slot.lifecycle.lock();
-    if !acp_sessions.is_current(id, &slot) {
-        return Err("ACP session was replaced");
-    }
-    relaunch_recorded_acp_runtime(id, &slot, acp_sessions, subscribers)
 }
 
 /// 按槽位里记录的启动规格重新拉起 runtime，带上自己的历史身份。调用方必须持有

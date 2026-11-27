@@ -56,7 +56,7 @@ objc = "0.2"
 # `bench/` 入口照 `nsh build` 打包、编成字节码给 `examples/bench/`，见 build.rs。
 nsh-bundler = { version = "=0.7.1", features = ["bundle"] }
 nsh-core = "=0.7.1"
-nsh-js = "=0.7.1"
+nsh-js = { version = "=0.7.1", default-features = false }
 nsh-base = { version = "=0.7.1", default-features = false }
 
 [dev-dependencies]
