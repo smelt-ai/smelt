@@ -316,6 +316,14 @@ fn rename_input_node(cx: &mut VisualTestContext) -> Option<Value> {
     text_input_by_label(cx, "Rename")
 }
 
+fn rename_input_value(cx: &mut VisualTestContext) -> Option<String> {
+    rename_input_node(cx).and_then(|n| {
+        n.pointer("/aria/value")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
+}
+
 fn has_rename_input(cx: &mut VisualTestContext) -> bool {
     rename_input_node(cx).is_some()
 }
@@ -535,8 +543,10 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
     assert!(
         wait_until(cx, Duration::from_secs(15), |cx| {
             session_above(cx, "Alpha Chat", "Beta Chat") == Some(true)
+                && has_a11y_label(cx, "New Conversation")
         }),
-        "侧栏会话未渲染"
+        "侧栏会话或顶部启动栏未渲染，labels={:?}",
+        a11y_labels_in_order(cx)
     );
 
     let a_rect = session_avatar(0);
@@ -545,6 +555,10 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
     let row_b = point(b_rect.center().x + px(50.), b_rect.center().y);
     let empty_sidebar = point(px(120.), b_rect.bottom() + px(120.));
     let center_native = point(px(700.), px(400.));
+    let app_focus = shell.read_with(cx, |s, cx| {
+        use gpui::Focusable as _;
+        s.app_view().read(cx).focus_handle(cx)
+    });
 
     let press_escape = |cx: &mut VisualTestContext| {
         cx.simulate_keystrokes("escape");
@@ -571,32 +585,49 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
             click_count: 2,
         });
         assert!(
-            wait_until(cx, Duration::from_secs(3), has_rename_input),
-            "双击会话行后应出现值为 Alpha Chat 的重命名输入框"
+            wait_until(cx, Duration::from_secs(3), |cx| {
+                has_rename_input(cx)
+                    && focused_text_input_label(cx).as_deref() == Some("Rename")
+                    && cx.update(|window, _| app_focus.is_focused(window))
+            }),
+            "双击会话行后应出现并聚焦重命名输入框，当前 node={:?} focused={:?} app_focused={}",
+            rename_input_node(cx),
+            focused_text_input_label(cx),
+            cx.update(|window, _| app_focus.is_focused(window))
         );
+        // 聚焦落位后再刷一帧，确保本帧 paint 已把 PlatformInputHandler 挂到窗口上。
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
     };
 
     // 1. 双击进入重命名 -> 点输入框内部不应关闭 -> 改字后按 Esc 应取消且不调用 workspace.rename。
     open_rename_by_double_click(cx);
+    assert_eq!(
+        rename_input_value(cx).as_deref(),
+        Some("Alpha Chat"),
+        "双击首条会话行应打开 Alpha Chat 的重命名输入框，实际 node={:?}",
+        rename_input_node(cx)
+    );
     cx.simulate_click(row_a, Modifiers::default());
     cx.run_until_parked();
     cx.update(|w, _| w.refresh());
+    cx.run_until_parked();
     assert!(
-        has_rename_input(cx),
-        "点击重命名输入框内部不应触发外部点击关闭"
+        has_rename_input(cx) && focused_text_input_label(cx).as_deref() == Some("Rename"),
+        "点击重命名输入框内部不应触发外部点击关闭，当前 node={:?} focused={:?} app_focused={}",
+        rename_input_node(cx),
+        focused_text_input_label(cx),
+        cx.update(|window, _| app_focus.is_focused(window))
     );
     cx.simulate_keystrokes("x");
     assert!(
         wait_until(cx, Duration::from_secs(2), |cx| {
-            rename_input_node(cx)
-                .and_then(|n| {
-                    n.pointer("/aria/value")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .is_some_and(|v| v.contains('x'))
+            rename_input_value(cx).is_some_and(|v| v.contains('x'))
         }),
-        "重命名输入框应能正常接收编辑输入"
+        "重命名输入框应能正常接收编辑输入，当前 node={:?} focused={:?} app_focused={}",
+        rename_input_node(cx),
+        focused_text_input_label(cx),
+        cx.update(|window, _| app_focus.is_focused(window))
     );
     press_escape(cx);
     assert!(
@@ -623,8 +654,10 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
     cx.simulate_mouse_move(rename_pos, None, Modifiers::default());
     cx.simulate_click(rename_pos, Modifiers::default());
     assert!(
-        wait_until(cx, Duration::from_secs(2), has_rename_input),
-        "点击右键菜单 Rename 后应打开行内重命名输入框"
+        wait_until(cx, Duration::from_secs(2), |cx| {
+            has_rename_input(cx) && focused_text_input_label(cx).as_deref() == Some("Rename")
+        }),
+        "点击右键菜单 Rename 后应打开并聚焦行内重命名输入框"
     );
     press_escape(cx);
     assert!(
@@ -667,28 +700,15 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
     );
 
     // 6. 重命名全选覆盖输入 + 回车应提交新标题并关闭输入框。
-    let app_focus = shell.read_with(cx, |s, cx| {
-        use gpui::Focusable as _;
-        s.app_view().read(cx).focus_handle(cx)
-    });
     open_rename_by_double_click(cx);
     assert!(
-        wait_until(cx, Duration::from_secs(2), |cx| {
-            cx.update(|window, _| app_focus.is_focused(window))
-        }),
+        cx.update(|window, _| app_focus.is_focused(window)),
         "双击进入重命名后主壳 AppView 应拿回 GPUI 窗口焦点"
     );
     cx.simulate_keystrokes("z");
     assert!(
         wait_until(cx, Duration::from_secs(2), |cx| {
-            rename_input_node(cx)
-                .and_then(|n| {
-                    n.pointer("/aria/value")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .as_deref()
-                == Some("z")
+            rename_input_value(cx).as_deref() == Some("z")
         }),
         "进入重命名聚焦后应全选原标题，直接键入应覆盖为 z，实际节点：{:?}",
         rename_input_node(cx)

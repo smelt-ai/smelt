@@ -1744,11 +1744,14 @@ impl Bridge {
         let updates = snapshot_slices(dirty, rem, js_views, safe_areas, None, cx);
         let (shell_send, deliveries) =
             self.apply_delta_split(updates, shell, sessions_update, false);
-        if let Some(next) = shell_send {
-            plugins.send_to_shell(STATE, next);
-        }
+        // 先向 Guest 插件投递 safe_areas / commands 等切片，再向主壳投递 shell 布局树：
+        // 引擎线程按 FIFO 消费时，主壳首次挂载 <Slot>（如 smelt.launcher/nav 的 SmeltWindowBar）
+        // 就能直接读到匹配当前布局的 safe_areas，不会先以 0px 排一帧再跳下 34px。
         for (plugin, delta) in deliveries {
             plugins.send_to(&plugin, STATE, delta);
+        }
+        if let Some(next) = shell_send {
+            plugins.send_to_shell(STATE, next);
         }
         if let (Some(threshold), Some(started)) = (slow, started) {
             let elapsed = started.elapsed();
@@ -1980,11 +1983,14 @@ impl Bridge {
     #[cfg(test)]
     fn push_split(&self, plugins: &PluginHost, plugin_next: Value, shell: Value) {
         let (shell_send, deliveries) = self.compute_push_split(plugin_next, shell);
-        if let Some(next) = shell_send {
-            plugins.send_to_shell(STATE, next);
-        }
+        // 先向 Guest 插件投递 safe_areas / commands 等切片，再向主壳投递 shell 布局树：
+        // 引擎线程按 FIFO 消费时，主壳首次挂载 <Slot>（如 smelt.launcher/nav 的 SmeltWindowBar）
+        // 就能直接读到匹配当前布局的 safe_areas，不会先以 0px 排一帧再跳下 34px。
         for (plugin, delta) in deliveries {
             plugins.send_to(&plugin, STATE, delta);
+        }
+        if let Some(next) = shell_send {
+            plugins.send_to_shell(STATE, next);
         }
     }
 

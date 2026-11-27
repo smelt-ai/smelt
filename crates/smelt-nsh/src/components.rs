@@ -51,13 +51,11 @@ impl WindowBar {
         Box::new(Self {
             cx,
             area: SafeArea::default(),
-            height: None,
+            height: Some(0.),
         })
     }
-}
 
-impl NativeComponent for WindowBar {
-    fn render(&mut self, _: &mut Window, _: &mut App) -> Option<AnyElement> {
+    fn sync_size(&mut self) {
         let height = if self.area.title_bar {
             f32::from(TOP_BAR_HEIGHT)
         } else {
@@ -67,6 +65,12 @@ impl NativeComponent for WindowBar {
             self.height = Some(height);
             self.cx.set_size(0., height);
         }
+    }
+}
+
+impl NativeComponent for WindowBar {
+    fn render(&mut self, _: &mut Window, _: &mut App) -> Option<AnyElement> {
+        self.sync_size();
         self.area.title_bar.then(|| {
             smelt_ui::window_bar::window_bar("nsh-window-bar", &self.area).into_any_element()
         })
@@ -76,10 +80,12 @@ impl NativeComponent for WindowBar {
         match name {
             "safeArea" => {
                 self.area = value.and_then(parse_safe_area).unwrap_or_default();
+                self.sync_size();
                 self.cx.redraw();
             }
             "titleBar" => {
                 self.area.title_bar = value.and_then(Value::as_bool).unwrap_or(false);
+                self.sync_size();
                 self.cx.redraw();
             }
             _ => {}

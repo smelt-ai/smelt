@@ -2155,6 +2155,8 @@ export function SmeltButton(props: SmeltButtonProps) {
   );
 }
 
+const TOP_BAR_HEIGHT = 34;
+
 export function SmeltWindowBar(props: { view: string }) {
   // 停靠区收起期间视图不可见，`safe_areas` 会暂时清空；保留上次可见时的标题带高度，
   // 避免重新展开侧栏时先 0px 压进红绿灯再跳下 34px。
@@ -2169,7 +2171,10 @@ export function SmeltWindowBar(props: { view: string }) {
   });
   return (
     <If when={area().title_bar}>
-      <SmeltNativeWindowBar safeArea={area()} style={{ width: "100%", flexShrink: 0 }} />
+      <SmeltNativeWindowBar
+        safeArea={area()}
+        style={{ width: "100%", height: TOP_BAR_HEIGHT, flexShrink: 0 }}
+      />
     </If>
   );
 }

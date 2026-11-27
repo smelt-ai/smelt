@@ -282,7 +282,12 @@ function OutletPanel(props: { pageKey: string }) {
           );
         }
         if (mode === "empty-bar") {
-          return <SmeltNativeWindowBar safeArea={outletArea()} style={{ width: "100%", flexShrink: 0 }} />;
+          return (
+            <SmeltNativeWindowBar
+              safeArea={outletArea()}
+              style={{ width: "100%", height: TOP_BAR_HEIGHT, flexShrink: 0 }}
+            />
+          );
         }
         return null;
       })()}
