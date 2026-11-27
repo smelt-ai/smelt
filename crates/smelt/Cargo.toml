@@ -47,7 +47,7 @@ smelt-fps = { path = "../smelt-fps" }
 libc = "0.2"
 smol = "2"  # 定时器、channel
 # 盯着 App 里的 smeltd：重编译、覆盖安装后查一次守护是否落后（见 Workspace::start_daemon_outdated_watch）。
-notify = "8"
+notify = "9"
 # 菜单栏图标按颜色重新着色与 SVG 栅格化（见 src/status_item.rs）。
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 resvg = { version = "0.46", default-features = false }
