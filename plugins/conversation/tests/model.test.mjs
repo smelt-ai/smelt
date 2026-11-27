@@ -13,7 +13,10 @@ import {
   showsEmptyWelcome,
   launchBringsContent,
   isTurnActive,
+  computePromptRailScrollMetrics,
   computePromptRailWindow,
+  extractTurnAnswerPreview,
+  promptRailEdgeFactor,
   consumeComposerRestore,
   detectCompletionTrigger,
   entryWindowOf,
@@ -170,11 +173,77 @@ describe("model search, pending config overlay, prompt rail, formatting", () => 
     }));
     const win = computePromptRailWindow(prompts, 28, 11);
     expect(win.items.length).toBe(11);
+    expect(win.start).toBe(9);
     expect(win.clippedTop).toBe(true);
     expect(win.clippedBottom).toBe(true);
     expect(win.items[0].edgeFactor).toBeLessThan(1);
     expect(win.items[5].globalIndex).toBe(28);
     expect(win.items[5].edgeFactor).toBe(1);
+
+    // 手动滚轮滑窗覆盖起点：可滑到顶部/底部并自动钳位。
+    const top = computePromptRailWindow(prompts, 28, 11, -5);
+    expect(top.start).toBe(0);
+    expect(top.clippedTop).toBe(false);
+    expect(top.clippedBottom).toBe(true);
+    expect(top.items[0].globalIndex).toBe(0);
+
+    const bottom = computePromptRailWindow(prompts, 28, 11, 99);
+    expect(bottom.start).toBe(19);
+    expect(bottom.clippedTop).toBe(true);
+    expect(bottom.clippedBottom).toBe(false);
+    expect(bottom.items[10].globalIndex).toBe(58);
+
+    // 连续滚动模式：计算滑块区间、上下可滚状态与边缘缩放因子。
+    const mid = computePromptRailScrollMetrics({
+      total: 30,
+      scrollY: 100,
+      viewportHeight: 142,
+      pitch: 12,
+      tickHeight: 10,
+      padY: 6,
+    });
+    expect(mid.canScroll).toBe(true);
+    expect(mid.canScrollUp).toBe(true);
+    expect(mid.canScrollDown).toBe(true);
+    expect(mid.thumbHeight).toBeGreaterThanOrEqual(16);
+    expect(mid.thumbTop).toBeGreaterThan(6);
+
+    const edgeTop = promptRailEdgeFactor({
+      index: 8,
+      scrollY: 100,
+      viewportHeight: 142,
+      pitch: 12,
+      tickHeight: 10,
+      padY: 6,
+      fadeZone: 24,
+      canScrollUp: true,
+      canScrollDown: true,
+    });
+    const middle = promptRailEdgeFactor({
+      index: 14,
+      scrollY: 100,
+      viewportHeight: 142,
+      pitch: 12,
+      tickHeight: 10,
+      padY: 6,
+      fadeZone: 24,
+      canScrollUp: true,
+      canScrollDown: true,
+    });
+    expect(edgeTop).toBeLessThan(1);
+    expect(middle).toBe(1);
+
+    // 提取回合回答开头：跳过思考段与工具，取最终回答并清理 Markdown 标记。
+    const convEntries = [
+      { User: "第一问" },
+      { Assistant: { text: "先想想", thought: true } },
+      { ToolCall: { title: "read", kind: "read", status: "completed" } },
+      { Assistant: { text: "## 结论\n\n这是**最终回答**内容。", thought: false } },
+      { User: "第二问" },
+      { Assistant: { text: "下一回合", thought: false } },
+    ];
+    expect(extractTurnAnswerPreview(convEntries, 0)).toBe("结论 这是最终回答内容。");
+    expect(extractTurnAnswerPreview(convEntries, 4)).toBe("下一回合");
   });
 
   test("token count, diff stats, composer restore", () => {

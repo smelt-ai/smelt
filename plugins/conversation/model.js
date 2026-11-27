@@ -106,6 +106,29 @@ export function entryUserText(entry) {
   return "";
 }
 
+/** 提取某条用户提问所在回合的回答开头（用于左侧提问导航悬停预览卡，跳过思考段与工具调用，取最终非空回答）。 */
+export function extractTurnAnswerPreview(entries, userLocalIndex, maxChars = 180) {
+  if (!Array.isArray(entries) || userLocalIndex < 0) return "";
+  let answer = "";
+  for (let i = userLocalIndex + 1; i < entries.length; i += 1) {
+    const e = entries[i];
+    if (isUserEntry(e) || isDividerEntry(e)) break;
+    if (e && typeof e === "object" && "Assistant" in e && !e.Assistant?.thought) {
+      const raw = String(e.Assistant?.text ?? "").trim();
+      if (raw) answer = raw;
+    }
+  }
+  if (!answer) return "";
+  const cleaned = answer
+    .replace(/```[\s\S]*?```/g, " [code] ")
+    .replace(/^[#>*\-\s]+/gm, "")
+    .replace(/[*_`~]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (cleaned.length <= maxChars) return cleaned;
+  return `${cleaned.slice(0, maxChars).trimEnd()}…`;
+}
+
 /** 还没收到帧的空窗口。 */
 export const EMPTY_ENTRY_WINDOW = Object.freeze({
   offset: 0,
@@ -804,26 +827,37 @@ export function overlaySessionConfigs(configs, pending) {
 
 // ---- PromptRail 滑动窗口（对齐 prompt_rail.rs） ----
 
-export function computePromptRailWindow(prompts, readingGlobalIndex, maxVisible = PROMPT_RAIL_MAX_TICKS) {
+export function computePromptRailWindow(
+  prompts,
+  readingGlobalIndex,
+  maxVisible = PROMPT_RAIL_MAX_TICKS,
+  windowStartOverride = null,
+) {
   const total = prompts.length;
   if (total === 0 || maxVisible < 2) {
-    return { items: [], clippedTop: false, clippedBottom: false };
+    return { items: [], start: 0, clippedTop: false, clippedBottom: false };
   }
   if (total <= maxVisible) {
     return {
       items: prompts.map((p, slot) => ({ ...p, slot, edgeFactor: 1 })),
+      start: 0,
       clippedTop: false,
       clippedBottom: false,
     };
   }
-  const readingPos = Math.max(
-    0,
-    prompts.findIndex((p) => p.globalIndex === readingGlobalIndex),
-  );
-  const half = Math.floor(maxVisible / 2);
-  let start = Math.max(0, readingPos - half);
-  if (start + maxVisible > total) {
-    start = total - maxVisible;
+  let start;
+  if (windowStartOverride != null && Number.isFinite(windowStartOverride)) {
+    start = Math.max(0, Math.min(total - maxVisible, Math.round(windowStartOverride)));
+  } else {
+    const readingPos = Math.max(
+      0,
+      prompts.findIndex((p) => p.globalIndex === readingGlobalIndex),
+    );
+    const half = Math.floor(maxVisible / 2);
+    start = Math.max(0, readingPos - half);
+    if (start + maxVisible > total) {
+      start = total - maxVisible;
+    }
   }
   const end = start + maxVisible;
   const clippedTop = start > 0;
@@ -839,7 +873,82 @@ export function computePromptRailWindow(prompts, readingGlobalIndex, maxVisible 
     }
     items.push({ ...prompts[i], slot, edgeFactor });
   }
-  return { items, clippedTop, clippedBottom };
+  return { items, start, clippedTop, clippedBottom };
+}
+
+/** 连续滚动模式下，根据当前 `scrollY` 计算刻度边缘缩放、迷你滚动条滑块与当前光标下的提问索引。 */
+export function computePromptRailScrollMetrics({
+  total,
+  scrollY,
+  viewportHeight,
+  pitch,
+  tickHeight,
+  padY,
+  edgeFadeTicks = PROMPT_RAIL_EDGE_FADE,
+  trackInset = 6,
+}) {
+  if (total <= 0) {
+    return {
+      contentHeight: 0,
+      maxScroll: 0,
+      canScroll: false,
+      canScrollUp: false,
+      canScrollDown: false,
+      thumbTop: trackInset,
+      thumbHeight: 0,
+    };
+  }
+  const gap = Math.max(0, pitch - tickHeight);
+  const contentHeight = total * pitch - gap + padY * 2;
+  const maxScroll = Math.max(0, contentHeight - viewportHeight);
+  const clampedY = Math.max(0, Math.min(maxScroll, scrollY));
+  const canScroll = maxScroll > 1;
+  const canScrollUp = canScroll && clampedY > 1;
+  const canScrollDown = canScroll && clampedY < maxScroll - 1;
+  const trackHeight = Math.max(0, viewportHeight - trackInset * 2);
+  const thumbHeight = canScroll
+    ? Math.max(16, Math.min(trackHeight, Math.round((viewportHeight / contentHeight) * trackHeight)))
+    : 0;
+  const progress = maxScroll > 0 ? clampedY / maxScroll : 0;
+  const thumbTop = trackInset + Math.round((trackHeight - thumbHeight) * progress);
+  return {
+    contentHeight,
+    maxScroll,
+    canScroll,
+    canScrollUp,
+    canScrollDown,
+    thumbTop,
+    thumbHeight,
+    fadeZone: edgeFadeTicks * pitch,
+  };
+}
+
+export function promptRailEdgeFactor({
+  index,
+  scrollY,
+  viewportHeight,
+  pitch,
+  tickHeight,
+  padY,
+  fadeZone,
+  canScrollUp,
+  canScrollDown,
+}) {
+  if (!canScrollUp && !canScrollDown) return 1;
+  const centerY = padY + index * pitch + tickHeight / 2;
+  if (canScrollUp) {
+    const distTop = centerY - scrollY;
+    if (distTop < fadeZone) {
+      return Math.max(0.25, Math.min(1, distTop / fadeZone));
+    }
+  }
+  if (canScrollDown) {
+    const distBot = scrollY + viewportHeight - centerY;
+    if (distBot < fadeZone) {
+      return Math.max(0.25, Math.min(1, distBot / fadeZone));
+    }
+  }
+  return 1;
 }
 
 // ---- Diff 提取与统计（对齐 edit_diff.rs） ----

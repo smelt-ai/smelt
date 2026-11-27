@@ -41,6 +41,7 @@ import {
   EMPTY_ENTRY_WINDOW,
   entryUserText,
   entryWindowOf,
+  extractTurnAnswerPreview,
   isStreamingMetaUnchanged,
   isTurnActive,
   isUserEntry,
@@ -273,6 +274,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
   });
 
   const promptItems = computed<PromptRailItem[]>(() => {
+    const es = entriesState();
     const rows = displayRows();
     const out: PromptRailItem[] = [];
     rows.forEach((row: any, rowIndex: number) => {
@@ -283,6 +285,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
         globalIndex: row.globalIndex,
         rowIndex,
         text,
+        answer: extractTurnAnswerPreview(es.entries, row.entryIndex),
       });
     });
     return out;
@@ -1108,7 +1111,12 @@ export function SmeltConversation(props: SmeltConversationProps) {
           prompts={promptItems}
           readingGlobalIndex={readingGlobalIndex}
           onJump={(item) => {
+            readingGlobalIndex.set(item.globalIndex);
             listApi?.scrollToIndex?.({ index: item.rowIndex, animated: true });
+          }}
+          onScrub={(item) => {
+            readingGlobalIndex.set(item.globalIndex);
+            listApi?.scrollToIndex?.({ index: item.rowIndex, animated: false });
           }}
         />
 
