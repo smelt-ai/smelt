@@ -543,7 +543,7 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
     assert!(
         wait_until(cx, Duration::from_secs(15), |cx| {
             session_above(cx, "Alpha Chat", "Beta Chat") == Some(true)
-                && has_a11y_label(cx, "New Conversation")
+                && has_a11y_label(cx, "New conversation")
         }),
         "侧栏会话或顶部启动栏未渲染，labels={:?}",
         a11y_labels_in_order(cx)
