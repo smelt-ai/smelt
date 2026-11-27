@@ -529,13 +529,13 @@ bootTask(async () => {
         );
     });
 
-    // 所有 21 个内置插件（含共享模块 smelt.conversation、smelt.avatar、纯主题 smelt.themes、纯布局 smelt.layouts）都无编译/运行错误。
+    // 所有 22 个内置插件（含共享模块 smelt.conversation、smelt.avatar、纯主题 smelt.themes、纯布局 smelt.layouts）都无编译/运行错误。
     let plugins = shell.read_with(cx, |s, _| s.installed_plugins());
     let builtin_count = plugins
         .iter()
         .filter(|p| p.source == PluginSource::Builtin)
         .count();
-    assert_eq!(builtin_count, 21, "应发现 21 个内置插件：{plugins:?}");
+    assert_eq!(builtin_count, 22, "应发现 22 个内置插件：{plugins:?}");
     for p in &plugins {
         assert!(p.error.is_none(), "插件 {} 报错：{:?}", p.id, p.error);
     }
@@ -555,7 +555,7 @@ bootTask(async () => {
     assert_eq!(
         vm_ids,
         vec!["__builtins__", "test.bg-topic-menu", "test.i18n-reload"],
-        "全部 16 个内置脚本插件应共享 1 个 __builtins__ VM，2 个用户插件各自独立 VM：{vm_ids:?}"
+        "全部 17 个内置脚本插件应共享 1 个 __builtins__ VM，2 个用户插件各自独立 VM：{vm_ids:?}"
     );
 
     // 验证 smelt.ide 登记的项目右键菜单仅本机可见、远程不可见（验证 machine: null 解析为 Some(Local)）。

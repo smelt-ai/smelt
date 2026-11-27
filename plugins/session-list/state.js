@@ -44,6 +44,8 @@ import { message } from "./util.js";
 /** 运行时推「哪些会话有没看过的提醒」的话题。 */
 /** 运行时推「新建会话菜单可用目录变了」的话题。 */
 export const NEW_SESSION_CATALOG_TOPIC = "new_session.catalog_changed";
+/** 运行时推「智能体群组及群专属会话清单变了」的话题。 */
+export const GROUPS_CHANGED_TOPIC = "group.changed";
 
 /**
  * 列表里能挂失败的一行，键同那一行的滑动身份：
@@ -128,6 +130,8 @@ export class SessionList {
     this.failures = new Map();
     /** machine_key → { catalog, fetchedAt }：已缓存的新建会话目录。 */
     this.catalogs = new Map();
+    /** machine_key → Set<string>：由智能体群组持有的 `group_owned` 会话 ID（主侧栏隐藏）。 */
+    this.group_owned_sessions = new Map();
   }
 
   /** 库读回来了：侧栏的置顶、顺序、折叠和行首头像换成库里那份。起来时调一次，在 start 之前。 */
@@ -200,6 +204,7 @@ export class SessionList {
           states: host.session_states(machine),
           facts: host.conversation_facts(machine),
           attention: host.session_attention(machine),
+          hidden_sessions: this.group_owned_sessions.get(machine_key(machine)) ?? null,
         };
       },
       agent_names: this.agent_names,
@@ -379,6 +384,8 @@ export class SessionList {
       case "runtime_topic":
         if (event.topic === NEW_SESSION_CATALOG_TOPIC) {
           this.on_catalog_topic(event.machine, event.message);
+        } else if (event.topic === GROUPS_CHANGED_TOPIC) {
+          this.on_groups_topic(event.machine, event.message);
         }
         return;
       case "open_paths":
@@ -443,6 +450,21 @@ export class SessionList {
     this.apply_catalog(machine, catalog);
   }
 
+  on_groups_topic(machine, message) {
+    if (!message || (message.kind !== "snapshot" && message.kind !== "event")) return;
+    const ids = message.payload?.group_owned_session_ids;
+    if (!Array.isArray(ids)) return;
+    const key = machine_key(machine);
+    const next = new Set(ids.filter((id) => typeof id === "string" && id.length > 0));
+    const prev = this.group_owned_sessions.get(key);
+    if (prev && prev.size === next.size && [...next].every((id) => prev.has(id))) {
+      return;
+    }
+    if (next.size === 0) this.group_owned_sessions.delete(key);
+    else this.group_owned_sessions.set(key, next);
+    this.rebuild();
+  }
+
   on_machines_changed() {
     const current = new Set(this.host.machines().map((machine) => machine_key(machine.machine)));
     for (const key of this.known_machines) {
@@ -452,6 +474,7 @@ export class SessionList {
       this.store.forget_machine(machine);
       this.seen.delete(key);
       this.catalogs.delete(key);
+      this.group_owned_sessions.delete(key);
     }
     this.known_machines = current;
     // 离线、改名也会走到这里：机器行要跟着变。

@@ -404,3 +404,140 @@ pub struct MemoryMetaSnapshot {
     /// 显式记为可信的文件；注入方还要排除无记录的、以及 mtime 晚于 `written_at_ms` 的。
     pub trusted: Vec<MemoryTrustedRecord>,
 }
+
+/// 智能体群组行（`agent_group`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentGroupRecord {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub project_root: Option<String>,
+    pub workset_id: Option<String>,
+    pub mode: String,
+    pub coordinator_member_id: Option<String>,
+    pub allow_worker_cross_talk: bool,
+    pub max_chain_hops: u32,
+    pub max_chain_depth: u32,
+    pub max_pair_ping_pong: u32,
+    pub auto_bridge_mentions: bool,
+    pub paused: bool,
+    pub next_seq: i64,
+    pub archived_at_ms: Option<i64>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+/// 智能体群组成员行（`agent_group_member`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentGroupMemberRecord {
+    pub id: String,
+    pub group_id: String,
+    pub alias: String,
+    pub display_name: String,
+    pub ownership: String,
+    pub session_id: String,
+    pub role_kind: String,
+    pub role_title: String,
+    pub role_prompt: String,
+    pub tool_restriction_profile: String,
+    pub briefing_sent: bool,
+    pub last_delivered_seq: i64,
+    pub last_read_seq: i64,
+    pub muted: bool,
+    pub removed_at_ms: Option<i64>,
+    pub created_at_ms: i64,
+}
+
+/// 智能体群组消息行（`agent_group_message`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentGroupMessageRecord {
+    pub id: String,
+    pub group_id: String,
+    pub seq: i64,
+    pub sender_type: String,
+    pub sender_member_id: Option<String>,
+    pub kind: String,
+    pub content: String,
+    pub reply_to_seq: Option<i64>,
+    pub thread_root_seq: Option<i64>,
+    pub task_status: Option<String>,
+    pub chain_id: Option<String>,
+    pub chain_depth: u32,
+    pub auto_bridged: bool,
+    pub pinned: bool,
+    pub idempotency_key: Option<String>,
+    pub created_at_ms: i64,
+}
+
+/// 群组消息 @ 投递行（`agent_group_message_mention`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentGroupMentionRecord {
+    pub message_id: String,
+    pub target_member_id: String,
+    pub mention_kind: String,
+    pub delivery_status: String,
+    pub delivery_id: String,
+    pub status_reason: Option<String>,
+    pub updated_at_ms: i64,
+}
+
+/// 带上所属群组和序号的待投递 @ 记录（由 `JOIN agent_group_message` 联表查出）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentGroupPendingMentionRecord {
+    pub group_id: String,
+    pub seq: i64,
+    pub mention: AgentGroupMentionRecord,
+}
+
+/// 写一条群组消息时的入参（`seq` 在事务内由 `agent_group.next_seq` 原子分配）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewAgentGroupMessage {
+    pub id: String,
+    pub group_id: String,
+    pub sender_type: String,
+    pub sender_member_id: Option<String>,
+    pub kind: String,
+    pub content: String,
+    pub reply_to_seq: Option<i64>,
+    pub thread_root_seq: Option<i64>,
+    pub task_status: Option<String>,
+    pub chain_id: Option<String>,
+    pub chain_depth: u32,
+    pub auto_bridged: bool,
+    pub pinned: bool,
+    pub idempotency_key: Option<String>,
+    pub created_at_ms: i64,
+}
+
+/// 写一条 @ 投递记录时的入参。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewAgentGroupMention {
+    pub target_member_id: String,
+    pub mention_kind: String,
+    pub delivery_status: String,
+    pub delivery_id: String,
+    pub status_reason: Option<String>,
+    pub updated_at_ms: i64,
+}
+
+/// 一次群组消息查询条件。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentGroupMessageQuery {
+    pub group_id: String,
+    pub since_seq: Option<i64>,
+    pub before_seq: Option<i64>,
+    pub limit: usize,
+    pub pinned_only: bool,
+}
+
+/// 群组列表页所需的轻量统计（由 SQL 聚合得出，不冗余落盘）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentGroupListStats {
+    pub member_count: usize,
+    pub active_member_count: usize,
+    pub pending_approval_count: usize,
+    pub open_task_count: usize,
+    pub last_seq: i64,
+    pub last_message_preview: Option<String>,
+    pub last_message_at_ms: Option<i64>,
+}

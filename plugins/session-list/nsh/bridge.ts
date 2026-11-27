@@ -59,7 +59,7 @@ import {
 } from "../contract.js";
 import { new_sidebar_ui, same_conversation, session_ids } from "../model.js";
 import * as peers from "../peers.js";
-import { NEW_SESSION_CATALOG_TOPIC, SessionList } from "../state.js";
+import { GROUPS_CHANGED_TOPIC, NEW_SESSION_CATALOG_TOPIC, SessionList } from "../state.js";
 import { ListStore } from "../store.js";
 import { message } from "../util.js";
 
@@ -423,7 +423,7 @@ bootTask(async () => {
       },
     ]),
     registerCommands(commands),
-    registerTopics([NEW_SESSION_CATALOG_TOPIC]),
+    registerTopics([NEW_SESSION_CATALOG_TOPIC, GROUPS_CHANGED_TOPIC]),
     (async () => {
       try {
         const style = pathStyle(null);

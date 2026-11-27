@@ -24,6 +24,8 @@ mod config;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod devices;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod groups;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod history;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod launch;
@@ -43,13 +45,15 @@ mod workspace;
 
 pub use snapshots::{
     AcpLiveChange, AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentDefinitionRecord,
+    AgentGroupListStats, AgentGroupMemberRecord, AgentGroupMentionRecord, AgentGroupMessageQuery,
+    AgentGroupMessageRecord, AgentGroupPendingMentionRecord, AgentGroupRecord,
     AgentProfileEnvRecord, AgentProfileRecord, AgentUiSnapshot, HistoryTitleRecord,
     HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot, MemoryMetaSnapshot,
     MemoryProvenanceRecord, MemorySettingsRecord, MemoryTrust, MemoryTrustedRecord,
-    MemoryUsageRecord, PairedDevice, PeerNodeRecord, PublishedSessionRecord,
-    PublishedSessionSnapshot, PushRegistration, QuotaCacheQuota, QuotaCacheStatusRecord,
-    QuotaCacheWindowRecord, QuotaProviderPref, RemoteConfigSnapshot, TerminalThemeSnapshot,
-    WorkspaceAcpRecord, WorkspaceCatalogVersion, WorkspaceDirectoryCommit,
+    MemoryUsageRecord, NewAgentGroupMention, NewAgentGroupMessage, PairedDevice, PeerNodeRecord,
+    PublishedSessionRecord, PublishedSessionSnapshot, PushRegistration, QuotaCacheQuota,
+    QuotaCacheStatusRecord, QuotaCacheWindowRecord, QuotaProviderPref, RemoteConfigSnapshot,
+    TerminalThemeSnapshot, WorkspaceAcpRecord, WorkspaceCatalogVersion, WorkspaceDirectoryCommit,
     WorkspaceProjectRepositoryRecord, WorkspaceSessionRecord, WorkspaceSnapshot,
     WorkspaceTerminalRecord, WorkspaceWorksetRecord, WorkspaceWorksetRepositoryRecord,
 };
@@ -63,7 +67,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 42;
+pub const STORE_SCHEMA_VERSION: u32 = 43;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -822,6 +826,222 @@ impl Store {
 
     pub fn put_auto_model_providers(&self, providers: &[String]) -> Result<(), StoreError> {
         imp::put_auto_model_providers(&self.backend, providers)
+    }
+
+    pub fn list_agent_groups(
+        &self,
+        include_archived: bool,
+    ) -> Result<Vec<AgentGroupRecord>, StoreError> {
+        imp::list_agent_groups(&self.backend, include_archived)
+    }
+
+    pub fn list_agent_group_stats(
+        &self,
+        group_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, AgentGroupListStats>, StoreError> {
+        imp::list_agent_group_stats(&self.backend, group_ids)
+    }
+
+    pub fn get_agent_group(&self, id: &str) -> Result<Option<AgentGroupRecord>, StoreError> {
+        imp::get_agent_group(&self.backend, id)
+    }
+
+    pub fn insert_agent_group(&self, group: &AgentGroupRecord) -> Result<(), StoreError> {
+        imp::insert_agent_group(&self.backend, group)
+    }
+
+    pub fn update_agent_group(&self, group: &AgentGroupRecord) -> Result<(), StoreError> {
+        imp::update_agent_group(&self.backend, group)
+    }
+
+    pub fn delete_agent_group(&self, id: &str) -> Result<bool, StoreError> {
+        imp::delete_agent_group(&self.backend, id)
+    }
+
+    pub fn list_agent_group_members(
+        &self,
+        group_id: &str,
+        include_removed: bool,
+    ) -> Result<Vec<AgentGroupMemberRecord>, StoreError> {
+        imp::list_agent_group_members(&self.backend, group_id, include_removed)
+    }
+
+    pub fn get_agent_group_member(
+        &self,
+        member_id: &str,
+    ) -> Result<Option<AgentGroupMemberRecord>, StoreError> {
+        imp::get_agent_group_member(&self.backend, member_id)
+    }
+
+    pub fn insert_agent_group_member(
+        &self,
+        member: &AgentGroupMemberRecord,
+        group_updated_at_ms: i64,
+    ) -> Result<(), StoreError> {
+        imp::insert_agent_group_member(&self.backend, member, group_updated_at_ms)
+    }
+
+    pub fn update_agent_group_member(
+        &self,
+        member: &AgentGroupMemberRecord,
+        group_updated_at_ms: i64,
+    ) -> Result<(), StoreError> {
+        imp::update_agent_group_member(&self.backend, member, group_updated_at_ms)
+    }
+
+    pub fn mark_agent_group_member_removed(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        removed_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        imp::mark_agent_group_member_removed(&self.backend, group_id, member_id, removed_at_ms)
+    }
+
+    pub fn find_active_agent_group_members_by_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<AgentGroupMemberRecord>, StoreError> {
+        imp::find_active_agent_group_members_by_session(&self.backend, session_id)
+    }
+
+    pub fn list_group_owned_session_ids(&self) -> Result<Vec<String>, StoreError> {
+        imp::list_group_owned_session_ids(&self.backend)
+    }
+
+    pub fn append_agent_group_message_with_mentions(
+        &self,
+        message: &NewAgentGroupMessage,
+        mentions: &[NewAgentGroupMention],
+    ) -> Result<(AgentGroupMessageRecord, Vec<AgentGroupMentionRecord>, bool), StoreError> {
+        imp::append_agent_group_message_with_mentions(&self.backend, message, mentions)
+    }
+
+    pub fn get_agent_group_message_by_id(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<AgentGroupMessageRecord>, StoreError> {
+        imp::get_agent_group_message_by_id(&self.backend, message_id)
+    }
+
+    pub fn get_agent_group_message_by_seq(
+        &self,
+        group_id: &str,
+        seq: i64,
+    ) -> Result<Option<AgentGroupMessageRecord>, StoreError> {
+        imp::get_agent_group_message_by_seq(&self.backend, group_id, seq)
+    }
+
+    pub fn list_agent_group_messages(
+        &self,
+        query: &AgentGroupMessageQuery,
+    ) -> Result<Vec<AgentGroupMessageRecord>, StoreError> {
+        imp::list_agent_group_messages(&self.backend, query)
+    }
+
+    pub fn list_agent_group_mentions_for_message(
+        &self,
+        message_id: &str,
+    ) -> Result<Vec<AgentGroupMentionRecord>, StoreError> {
+        imp::list_agent_group_mentions_for_message(&self.backend, message_id)
+    }
+
+    pub fn list_agent_group_mentions_for_messages(
+        &self,
+        message_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<AgentGroupMentionRecord>>, StoreError> {
+        imp::list_agent_group_mentions_for_messages(&self.backend, message_ids)
+    }
+
+    pub fn get_agent_group_mention(
+        &self,
+        message_id: &str,
+        target_member_id: &str,
+    ) -> Result<Option<AgentGroupPendingMentionRecord>, StoreError> {
+        imp::get_agent_group_mention(&self.backend, message_id, target_member_id)
+    }
+
+    pub fn update_agent_group_mention_status(
+        &self,
+        message_id: &str,
+        target_member_id: &str,
+        delivery_status: &str,
+        status_reason: Option<&str>,
+        updated_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        imp::update_agent_group_mention_status(
+            &self.backend,
+            message_id,
+            target_member_id,
+            delivery_status,
+            status_reason,
+            updated_at_ms,
+        )
+    }
+
+    pub fn settle_agent_group_mention_by_delivery_id(
+        &self,
+        delivery_id: &str,
+        delivery_status: &str,
+        status_reason: Option<&str>,
+        updated_at_ms: i64,
+    ) -> Result<Option<AgentGroupPendingMentionRecord>, StoreError> {
+        imp::settle_agent_group_mention_by_delivery_id(
+            &self.backend,
+            delivery_id,
+            delivery_status,
+            status_reason,
+            updated_at_ms,
+        )
+    }
+
+    pub fn list_agent_group_mentions_by_status(
+        &self,
+        group_id: Option<&str>,
+        status: &str,
+    ) -> Result<Vec<AgentGroupPendingMentionRecord>, StoreError> {
+        imp::list_agent_group_mentions_by_status(&self.backend, group_id, status)
+    }
+
+    pub fn set_agent_group_message_pinned(
+        &self,
+        group_id: &str,
+        seq: i64,
+        pinned: bool,
+        updated_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        imp::set_agent_group_message_pinned(&self.backend, group_id, seq, pinned, updated_at_ms)
+    }
+
+    pub fn update_agent_group_task_status(
+        &self,
+        group_id: &str,
+        seq: i64,
+        task_status: &str,
+        updated_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        imp::update_agent_group_task_status(
+            &self.backend,
+            group_id,
+            seq,
+            task_status,
+            updated_at_ms,
+        )
+    }
+
+    pub fn list_agent_group_open_tasks(
+        &self,
+        group_id: &str,
+    ) -> Result<Vec<AgentGroupMessageRecord>, StoreError> {
+        imp::list_agent_group_open_tasks(&self.backend, group_id)
+    }
+
+    pub fn advance_agent_group_member_read_seq(
+        &self,
+        member_id: &str,
+        seq: i64,
+    ) -> Result<bool, StoreError> {
+        imp::advance_agent_group_member_read_seq(&self.backend, member_id, seq)
     }
 }
 
@@ -1719,6 +1939,280 @@ mod imp {
         })
     }
 
+    pub(super) fn list_agent_groups(
+        backend: &Backend,
+        include_archived: bool,
+    ) -> Result<Vec<super::AgentGroupRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::groups::list_groups(&connection, include_archived)
+    }
+
+    pub(super) fn list_agent_group_stats(
+        backend: &Backend,
+        group_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, super::AgentGroupListStats>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::groups::list_group_stats(&connection, group_ids)
+    }
+
+    pub(super) fn get_agent_group(
+        backend: &Backend,
+        id: &str,
+    ) -> Result<Option<super::AgentGroupRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::groups::get_group(&connection, id)
+    }
+
+    pub(super) fn insert_agent_group(
+        backend: &Backend,
+        group: &super::AgentGroupRecord,
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::groups::insert_group(transaction, group)
+        })
+    }
+
+    pub(super) fn update_agent_group(
+        backend: &Backend,
+        group: &super::AgentGroupRecord,
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::groups::update_group(transaction, group)
+        })
+    }
+
+    pub(super) fn delete_agent_group(backend: &Backend, id: &str) -> Result<bool, StoreError> {
+        write(backend, |transaction| {
+            crate::groups::delete_group(transaction, id)
+        })
+    }
+
+    pub(super) fn list_agent_group_members(
+        backend: &Backend,
+        group_id: &str,
+        include_removed: bool,
+    ) -> Result<Vec<super::AgentGroupMemberRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::groups::list_members(&connection, group_id, include_removed)
+    }
+
+    pub(super) fn get_agent_group_member(
+        backend: &Backend,
+        member_id: &str,
+    ) -> Result<Option<super::AgentGroupMemberRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::groups::get_member(&connection, member_id)
+    }
+
+    pub(super) fn insert_agent_group_member(
+        backend: &Backend,
+        member: &super::AgentGroupMemberRecord,
+        group_updated_at_ms: i64,
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::groups::insert_member(transaction, member, group_updated_at_ms)
+        })
+    }
+
+    pub(super) fn update_agent_group_member(
+        backend: &Backend,
+        member: &super::AgentGroupMemberRecord,
+        group_updated_at_ms: i64,
+    ) -> Result<(), StoreError> {
+        write(backend, |transaction| {
+            crate::groups::update_member(transaction, member, group_updated_at_ms)
+        })
+    }
+
+    pub(super) fn mark_agent_group_member_removed(
+        backend: &Backend,
+        group_id: &str,
+        member_id: &str,
+        removed_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        write(backend, |transaction| {
+            crate::groups::mark_member_removed(transaction, group_id, member_id, removed_at_ms)
+        })
+    }
+
+    pub(super) fn find_active_agent_group_members_by_session(
+        backend: &Backend,
+        session_id: &str,
+    ) -> Result<Vec<super::AgentGroupMemberRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::groups::find_active_members_by_session(&connection, session_id)
+    }
+
+    pub(super) fn list_group_owned_session_ids(
+        backend: &Backend,
+    ) -> Result<Vec<String>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::groups::list_group_owned_session_ids(&connection)
+    }
+
+    pub(super) fn append_agent_group_message_with_mentions(
+        backend: &Backend,
+        message: &super::NewAgentGroupMessage,
+        mentions: &[super::NewAgentGroupMention],
+    ) -> Result<
+        (
+            super::AgentGroupMessageRecord,
+            Vec<super::AgentGroupMentionRecord>,
+            bool,
+        ),
+        StoreError,
+    > {
+        write(backend, |transaction| {
+            crate::groups::append_message_with_mentions(transaction, message, mentions)
+        })
+    }
+
+    pub(super) fn get_agent_group_message_by_id(
+        backend: &Backend,
+        message_id: &str,
+    ) -> Result<Option<super::AgentGroupMessageRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::groups::get_message_by_id(&connection, message_id)
+    }
+
+    pub(super) fn get_agent_group_message_by_seq(
+        backend: &Backend,
+        group_id: &str,
+        seq: i64,
+    ) -> Result<Option<super::AgentGroupMessageRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::groups::get_message_by_seq(&connection, group_id, seq)
+    }
+
+    pub(super) fn list_agent_group_messages(
+        backend: &Backend,
+        query: &super::AgentGroupMessageQuery,
+    ) -> Result<Vec<super::AgentGroupMessageRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::groups::list_messages(&connection, query)
+    }
+
+    pub(super) fn list_agent_group_mentions_for_message(
+        backend: &Backend,
+        message_id: &str,
+    ) -> Result<Vec<super::AgentGroupMentionRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::groups::list_mentions_for_message(&connection, message_id)
+    }
+
+    pub(super) fn list_agent_group_mentions_for_messages(
+        backend: &Backend,
+        message_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<super::AgentGroupMentionRecord>>, StoreError>
+    {
+        let connection = lock_connection(backend)?;
+        crate::groups::list_mentions_for_messages(&connection, message_ids)
+    }
+
+    pub(super) fn get_agent_group_mention(
+        backend: &Backend,
+        message_id: &str,
+        target_member_id: &str,
+    ) -> Result<Option<super::AgentGroupPendingMentionRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::groups::get_mention(&connection, message_id, target_member_id)
+    }
+
+    pub(super) fn update_agent_group_mention_status(
+        backend: &Backend,
+        message_id: &str,
+        target_member_id: &str,
+        delivery_status: &str,
+        status_reason: Option<&str>,
+        updated_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        write(backend, |transaction| {
+            crate::groups::update_mention_status(
+                transaction,
+                message_id,
+                target_member_id,
+                delivery_status,
+                status_reason,
+                updated_at_ms,
+            )
+        })
+    }
+
+    pub(super) fn settle_agent_group_mention_by_delivery_id(
+        backend: &Backend,
+        delivery_id: &str,
+        delivery_status: &str,
+        status_reason: Option<&str>,
+        updated_at_ms: i64,
+    ) -> Result<Option<super::AgentGroupPendingMentionRecord>, StoreError> {
+        write(backend, |transaction| {
+            crate::groups::settle_mention_by_delivery_id(
+                transaction,
+                delivery_id,
+                delivery_status,
+                status_reason,
+                updated_at_ms,
+            )
+        })
+    }
+
+    pub(super) fn list_agent_group_mentions_by_status(
+        backend: &Backend,
+        group_id: Option<&str>,
+        status: &str,
+    ) -> Result<Vec<super::AgentGroupPendingMentionRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::groups::list_mentions_by_status(&connection, group_id, status)
+    }
+
+    pub(super) fn set_agent_group_message_pinned(
+        backend: &Backend,
+        group_id: &str,
+        seq: i64,
+        pinned: bool,
+        updated_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        write(backend, |transaction| {
+            crate::groups::set_message_pinned(transaction, group_id, seq, pinned, updated_at_ms)
+        })
+    }
+
+    pub(super) fn update_agent_group_task_status(
+        backend: &Backend,
+        group_id: &str,
+        seq: i64,
+        task_status: &str,
+        updated_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        write(backend, |transaction| {
+            crate::groups::update_task_status(
+                transaction,
+                group_id,
+                seq,
+                task_status,
+                updated_at_ms,
+            )
+        })
+    }
+
+    pub(super) fn list_agent_group_open_tasks(
+        backend: &Backend,
+        group_id: &str,
+    ) -> Result<Vec<super::AgentGroupMessageRecord>, StoreError> {
+        let connection = lock_connection(backend)?;
+        crate::groups::list_open_tasks(&connection, group_id)
+    }
+
+    pub(super) fn advance_agent_group_member_read_seq(
+        backend: &Backend,
+        member_id: &str,
+        seq: i64,
+    ) -> Result<bool, StoreError> {
+        write(backend, |transaction| {
+            crate::groups::advance_member_read_seq(transaction, member_id, seq)
+        })
+    }
+
     pub(super) fn touch_paired_device(
         backend: &Backend,
         endpoint_id: &str,
@@ -2181,6 +2675,15 @@ mod imp {
                 }
             }
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 42 {
+            apply_v43(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
             transaction.commit()?;
             return Ok(());
         }
@@ -2991,6 +3494,18 @@ mod imp {
             .any(|table| table == "peer_node")
         {
             transaction.execute_batch(crate::schema::MIGRATE_V41_TO_V42)?;
+        }
+        apply_v43(transaction)
+    }
+
+    /// v43：新增本地智能体群组四张规范化表（`schema::MIGRATE_V42_TO_V43`）。已存在则跳过
+    /// （供以当前结构造旧版本夹具的测试复用）。
+    fn apply_v43(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        if !table_names(transaction)?
+            .iter()
+            .any(|table| table == "agent_group")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V42_TO_V43)?;
         }
         Ok(())
     }
@@ -4557,6 +5072,195 @@ mod imp {
     pub(super) fn delete_peer_node(
         _backend: &Backend,
         _runtime_id: &str,
+    ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn list_agent_groups(
+        _backend: &Backend,
+        _include_archived: bool,
+    ) -> Result<Vec<super::AgentGroupRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn list_agent_group_stats(
+        _backend: &Backend,
+        _group_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, super::AgentGroupListStats>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn get_agent_group(
+        _backend: &Backend,
+        _id: &str,
+    ) -> Result<Option<super::AgentGroupRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn insert_agent_group(
+        _backend: &Backend,
+        _group: &super::AgentGroupRecord,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn update_agent_group(
+        _backend: &Backend,
+        _group: &super::AgentGroupRecord,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn delete_agent_group(_backend: &Backend, _id: &str) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn list_agent_group_members(
+        _backend: &Backend,
+        _group_id: &str,
+        _include_removed: bool,
+    ) -> Result<Vec<super::AgentGroupMemberRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn get_agent_group_member(
+        _backend: &Backend,
+        _member_id: &str,
+    ) -> Result<Option<super::AgentGroupMemberRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn insert_agent_group_member(
+        _backend: &Backend,
+        _member: &super::AgentGroupMemberRecord,
+        _group_updated_at_ms: i64,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn update_agent_group_member(
+        _backend: &Backend,
+        _member: &super::AgentGroupMemberRecord,
+        _group_updated_at_ms: i64,
+    ) -> Result<(), StoreError> {
+        unsupported()
+    }
+    pub(super) fn mark_agent_group_member_removed(
+        _backend: &Backend,
+        _group_id: &str,
+        _member_id: &str,
+        _removed_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn find_active_agent_group_members_by_session(
+        _backend: &Backend,
+        _session_id: &str,
+    ) -> Result<Vec<super::AgentGroupMemberRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn list_group_owned_session_ids(
+        _backend: &Backend,
+    ) -> Result<Vec<String>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn append_agent_group_message_with_mentions(
+        _backend: &Backend,
+        _message: &super::NewAgentGroupMessage,
+        _mentions: &[super::NewAgentGroupMention],
+    ) -> Result<
+        (
+            super::AgentGroupMessageRecord,
+            Vec<super::AgentGroupMentionRecord>,
+            bool,
+        ),
+        StoreError,
+    > {
+        unsupported()
+    }
+    pub(super) fn get_agent_group_message_by_id(
+        _backend: &Backend,
+        _message_id: &str,
+    ) -> Result<Option<super::AgentGroupMessageRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn get_agent_group_message_by_seq(
+        _backend: &Backend,
+        _group_id: &str,
+        _seq: i64,
+    ) -> Result<Option<super::AgentGroupMessageRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn list_agent_group_messages(
+        _backend: &Backend,
+        _query: &super::AgentGroupMessageQuery,
+    ) -> Result<Vec<super::AgentGroupMessageRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn list_agent_group_mentions_for_message(
+        _backend: &Backend,
+        _message_id: &str,
+    ) -> Result<Vec<super::AgentGroupMentionRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn list_agent_group_mentions_for_messages(
+        _backend: &Backend,
+        _message_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<super::AgentGroupMentionRecord>>, StoreError>
+    {
+        unsupported()
+    }
+    pub(super) fn get_agent_group_mention(
+        _backend: &Backend,
+        _message_id: &str,
+        _target_member_id: &str,
+    ) -> Result<Option<super::AgentGroupPendingMentionRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn update_agent_group_mention_status(
+        _backend: &Backend,
+        _message_id: &str,
+        _target_member_id: &str,
+        _delivery_status: &str,
+        _status_reason: Option<&str>,
+        _updated_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn settle_agent_group_mention_by_delivery_id(
+        _backend: &Backend,
+        _delivery_id: &str,
+        _delivery_status: &str,
+        _status_reason: Option<&str>,
+        _updated_at_ms: i64,
+    ) -> Result<Option<super::AgentGroupPendingMentionRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn list_agent_group_mentions_by_status(
+        _backend: &Backend,
+        _group_id: Option<&str>,
+        _status: &str,
+    ) -> Result<Vec<super::AgentGroupPendingMentionRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn set_agent_group_message_pinned(
+        _backend: &Backend,
+        _group_id: &str,
+        _seq: i64,
+        _pinned: bool,
+        _updated_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn update_agent_group_task_status(
+        _backend: &Backend,
+        _group_id: &str,
+        _seq: i64,
+        _task_status: &str,
+        _updated_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        unsupported()
+    }
+    pub(super) fn list_agent_group_open_tasks(
+        _backend: &Backend,
+        _group_id: &str,
+    ) -> Result<Vec<super::AgentGroupMessageRecord>, StoreError> {
+        unsupported()
+    }
+    pub(super) fn advance_agent_group_member_read_seq(
+        _backend: &Backend,
+        _member_id: &str,
+        _seq: i64,
     ) -> Result<bool, StoreError> {
         unsupported()
     }
@@ -8630,6 +9334,226 @@ CREATE TABLE published_session (
             normalized_schema(&fresh),
             "从 main 的 v40 升上来的库要和新建的库一个形状"
         );
+    }
+
+    #[test]
+    fn migrates_v42_adding_agent_groups() {
+        let dir = temp_dir("migrate-v42-agent-groups");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "{}
+                 {}
+                 DROP TABLE agent_group_message_mention;
+                 DROP TABLE agent_group_message;
+                 DROP TABLE agent_group_member;
+                 DROP TABLE agent_group;
+                 PRAGMA user_version = 42;",
+                crate::schema::CREATE_SCHEMA,
+                crate::schema::ENSURE_WORKSPACE_EPOCH
+            ))
+            .unwrap();
+        drop(connection);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        assert!(store.list_agent_groups(true).unwrap().is_empty());
+        drop(store);
+
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        assert_eq!(
+            normalized_schema(&path),
+            normalized_schema(&fresh),
+            "从 v42 升上来的库要和新建的库一个形状"
+        );
+    }
+
+    #[test]
+    fn agent_groups_crud_batch_mentions_and_settle() {
+        let dir = temp_dir("agent-groups-crud");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let store = Store::open_or_create(&path).unwrap();
+
+        let group = AgentGroupRecord {
+            id: "grp-1".into(),
+            title: "Design Review".into(),
+            description: "API design".into(),
+            project_root: Some("/tmp/repo".into()),
+            workset_id: None,
+            mode: "mention".into(),
+            coordinator_member_id: None,
+            allow_worker_cross_talk: true,
+            max_chain_hops: 10,
+            max_chain_depth: 6,
+            max_pair_ping_pong: 3,
+            auto_bridge_mentions: false,
+            paused: false,
+            next_seq: 1,
+            archived_at_ms: None,
+            created_at_ms: 100,
+            updated_at_ms: 100,
+        };
+        store.insert_agent_group(&group).unwrap();
+
+        let member_a = AgentGroupMemberRecord {
+            id: "mem-a".into(),
+            group_id: "grp-1".into(),
+            alias: "coder".into(),
+            display_name: "Coder".into(),
+            ownership: "group_owned".into(),
+            session_id: "acp-coder".into(),
+            role_kind: "worker".into(),
+            role_title: "Backend".into(),
+            role_prompt: String::new(),
+            tool_restriction_profile: "default".into(),
+            briefing_sent: false,
+            last_delivered_seq: 0,
+            last_read_seq: 0,
+            muted: false,
+            removed_at_ms: None,
+            created_at_ms: 101,
+        };
+        let member_b = AgentGroupMemberRecord {
+            id: "mem-b".into(),
+            group_id: "grp-1".into(),
+            alias: "reviewer".into(),
+            display_name: "Reviewer".into(),
+            ownership: "linked".into(),
+            session_id: "acp-rev".into(),
+            role_kind: "reviewer".into(),
+            role_title: "Security".into(),
+            role_prompt: String::new(),
+            tool_restriction_profile: "read_only".into(),
+            briefing_sent: false,
+            last_delivered_seq: 0,
+            last_read_seq: 0,
+            muted: false,
+            removed_at_ms: None,
+            created_at_ms: 102,
+        };
+        store.insert_agent_group_member(&member_a, 101).unwrap();
+        store.insert_agent_group_member(&member_b, 102).unwrap();
+
+        assert_eq!(
+            store.list_group_owned_session_ids().unwrap(),
+            vec!["acp-coder".to_string()]
+        );
+
+        let (m1, mn1, inserted1) = store
+            .append_agent_group_message_with_mentions(
+                &NewAgentGroupMessage {
+                    id: "msg-1".into(),
+                    group_id: "grp-1".into(),
+                    sender_type: "user".into(),
+                    sender_member_id: None,
+                    kind: "task".into(),
+                    content: "@coder implement auth".into(),
+                    reply_to_seq: None,
+                    thread_root_seq: None,
+                    task_status: Some("open".into()),
+                    chain_id: Some("chain-1".into()),
+                    chain_depth: 0,
+                    auto_bridged: false,
+                    pinned: false,
+                    idempotency_key: Some("idem-1".into()),
+                    created_at_ms: 200,
+                },
+                &[NewAgentGroupMention {
+                    target_member_id: "mem-a".into(),
+                    mention_kind: "direct".into(),
+                    delivery_status: "queued".into(),
+                    delivery_id: "pm-grp-msg-1-mem-a".into(),
+                    status_reason: None,
+                    updated_at_ms: 200,
+                }],
+            )
+            .unwrap();
+        assert!(inserted1);
+        assert_eq!(m1.seq, 1);
+        assert_eq!(mn1.len(), 1);
+
+        // Idempotency key returns existing message without incrementing seq.
+        let (m1_dup, _, inserted_dup) = store
+            .append_agent_group_message_with_mentions(
+                &NewAgentGroupMessage {
+                    id: "msg-dup".into(),
+                    group_id: "grp-1".into(),
+                    sender_type: "user".into(),
+                    sender_member_id: None,
+                    kind: "task".into(),
+                    content: "ignored".into(),
+                    reply_to_seq: None,
+                    thread_root_seq: None,
+                    task_status: Some("open".into()),
+                    chain_id: None,
+                    chain_depth: 0,
+                    auto_bridged: false,
+                    pinned: false,
+                    idempotency_key: Some("idem-1".into()),
+                    created_at_ms: 201,
+                },
+                &[],
+            )
+            .unwrap();
+        assert!(!inserted_dup);
+        assert_eq!(m1_dup.id, "msg-1");
+        assert_eq!(m1_dup.seq, 1);
+
+        // Second queued mention for mem-a; settling msg-2 coalesces msg-1 and advances cursor.
+        let (m2, _, _) = store
+            .append_agent_group_message_with_mentions(
+                &NewAgentGroupMessage {
+                    id: "msg-2".into(),
+                    group_id: "grp-1".into(),
+                    sender_type: "user".into(),
+                    sender_member_id: None,
+                    kind: "chat".into(),
+                    content: "@coder also add tests".into(),
+                    reply_to_seq: Some(1),
+                    thread_root_seq: Some(1),
+                    task_status: None,
+                    chain_id: Some("chain-2".into()),
+                    chain_depth: 0,
+                    auto_bridged: false,
+                    pinned: false,
+                    idempotency_key: None,
+                    created_at_ms: 210,
+                },
+                &[NewAgentGroupMention {
+                    target_member_id: "mem-a".into(),
+                    mention_kind: "direct".into(),
+                    delivery_status: "queued".into(),
+                    delivery_id: "pm-grp-msg-2-mem-a".into(),
+                    status_reason: None,
+                    updated_at_ms: 210,
+                }],
+            )
+            .unwrap();
+        assert_eq!(m2.seq, 2);
+
+        let settled = store
+            .settle_agent_group_mention_by_delivery_id("pm-grp-msg-2-mem-a", "delivered", None, 220)
+            .unwrap()
+            .expect("should settle msg-2");
+        assert_eq!(settled.group_id, "grp-1");
+        assert_eq!(settled.seq, 2);
+
+        let refreshed_a = store.get_agent_group_member("mem-a").unwrap().unwrap();
+        assert!(refreshed_a.briefing_sent);
+        assert_eq!(refreshed_a.last_delivered_seq, 2);
+
+        let mentions = store
+            .list_agent_group_mentions_for_messages(&["msg-1".into(), "msg-2".into()])
+            .unwrap();
+        assert_eq!(mentions["msg-1"][0].delivery_status, "coalesced");
+        assert_eq!(mentions["msg-2"][0].delivery_status, "delivered");
+
+        let stats = store.list_agent_group_stats(&["grp-1".into()]).unwrap();
+        assert_eq!(stats["grp-1"].active_member_count, 2);
+        assert_eq!(stats["grp-1"].open_task_count, 1);
+        assert_eq!(stats["grp-1"].last_seq, 2);
     }
 
     /// v38 及更早还在、v39 删掉的四列。用当前结构的库退回 v26 及更早做夹具时补上：v26 → v27

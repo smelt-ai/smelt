@@ -10,9 +10,11 @@ import { SMELT_BACKGROUND_TASK_SOCK_ENV, callBackgroundHost } from "./background
  */
 export const SMELT_SESSION_PEERS_EXTENSION_NAME = "smelt-session-peers";
 export const SMELT_SESSION_PEERS_EXTENSION_PATH = `<inline:${SMELT_SESSION_PEERS_EXTENSION_NAME}>`;
-/** 只读的两个，免审批按名字和来源认（`smelt-permission.ts`）。 */
+/** 只读工具，免审批按名字和来源认（`smelt-permission.ts`）。 */
 export const SMELT_SESSION_LIST_TOOL_NAME = "session_list";
 export const SMELT_SESSION_READ_TOOL_NAME = "session_read";
+export const SMELT_GROUP_READ_TOOL_NAME = "group_read";
+export const SMELT_GROUP_MEMBERS_TOOL_NAME = "group_members";
 
 type PeerToolDefinition = Pick<ToolDefinition, "name" | "label" | "description" | "promptSnippet" | "promptGuidelines"> & {
 	parameters: Record<string, unknown>;

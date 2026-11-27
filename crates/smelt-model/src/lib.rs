@@ -12,6 +12,7 @@ pub mod acp_wire;
 pub mod agent_definition;
 pub mod agent_definition_store;
 pub mod agent_event;
+pub mod agent_group;
 pub mod agent_hooks;
 pub mod agent_host;
 pub mod agent_kind;

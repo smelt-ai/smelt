@@ -10,6 +10,8 @@ import {
 } from "./memory-extension.ts";
 import { SMELT_NOTIFY_EXTENSION_PATH, SMELT_NOTIFY_TOOL_NAME } from "./notify-user.ts";
 import {
+	SMELT_GROUP_MEMBERS_TOOL_NAME,
+	SMELT_GROUP_READ_TOOL_NAME,
 	SMELT_SESSION_LIST_TOOL_NAME,
 	SMELT_SESSION_PEERS_EXTENSION_PATH,
 	SMELT_SESSION_READ_TOOL_NAME,
@@ -41,13 +43,21 @@ function isSmeltMemorySearchTool(tool: ToolIdentity): boolean {
 	);
 }
 
+const SMELT_PEER_READ_TOOLS = new Set([
+	SMELT_SESSION_LIST_TOOL_NAME,
+	SMELT_SESSION_READ_TOOL_NAME,
+	SMELT_GROUP_READ_TOOL_NAME,
+	SMELT_GROUP_MEMBERS_TOOL_NAME,
+]);
+
 /**
- * 列出别的对话、读它们最近的回复：只读，不改任何东西，免审批。发消息（`session_send`）照常审批。
+ * 列出别的对话、读它们最近的回复、读所属群消息和成员：只读，不改任何东西，免审批。
+ * 发消息（`session_send` / `group_post` / `group_yield` / `group_task_update`）照常审批。
  * 按身份认，同名的用户扩展工具不算。
  */
 function isSmeltSessionPeerReadTool(tool: ToolIdentity): boolean {
 	return (
-		(tool.name === SMELT_SESSION_LIST_TOOL_NAME || tool.name === SMELT_SESSION_READ_TOOL_NAME) &&
+		SMELT_PEER_READ_TOOLS.has(tool.name) &&
 		tool.sourceInfo.source === "inline" &&
 		tool.sourceInfo.path === SMELT_SESSION_PEERS_EXTENSION_PATH
 	);

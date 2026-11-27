@@ -12,6 +12,7 @@ pub mod acp_terminal;
 pub use smelt_model::agent_definition;
 pub mod agent_definition_store;
 pub mod agent_event;
+pub use smelt_model::agent_group;
 pub mod agent_hooks;
 pub mod agent_host;
 pub mod agent_kind;

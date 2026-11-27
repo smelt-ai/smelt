@@ -104,7 +104,10 @@ pub(crate) fn handle_jsonrpc_line(
             ))
         }
         "ping" => Some(ok_response(id, json!({}))),
-        "tools/list" => Some(ok_response(id, json!({ "tools": tool_definitions() }))),
+        "tools/list" => Some(ok_response(
+            id,
+            json!({ "tools": tool_definitions_for_socket(&call_socket) }),
+        )),
         "tools/call" => Some(handle_tool_call(id, &params, call_socket)),
         other => Some(error_response(
             id,
@@ -198,8 +201,8 @@ fn tool_annotations(name: &str, title: &str) -> Value {
 }
 
 /// MCP 没有 Pi 那样的「用法提示」位置：接在每个工具的说明后面。
-fn tool_definitions() -> Value {
-    let tools = peer_tools::definitions()
+fn tool_definitions_from(raw: &Value) -> Value {
+    let tools = raw
         .as_array()
         .into_iter()
         .flatten()
@@ -222,6 +225,21 @@ fn tool_definitions() -> Value {
         })
         .collect();
     Value::Array(tools)
+}
+
+fn tool_definitions_for_socket(call_socket: &impl Fn(&Value) -> Result<Value, String>) -> Value {
+    if let Ok(reply) = call_socket(&json!({ "op": peer_tools::SESSION_TOOLS_OP }))
+        && reply.get("ok").and_then(Value::as_bool) == Some(true)
+        && let Some(tools) = reply.get("tools")
+        && tools.is_array()
+    {
+        return tool_definitions_from(tools);
+    }
+    tool_definitions()
+}
+
+fn tool_definitions() -> Value {
+    tool_definitions_from(&peer_tools::definitions())
 }
 
 #[cfg(test)]
@@ -400,5 +418,39 @@ mod tests {
         let details: Value =
             serde_json::from_str(reply["result"]["content"][1]["text"].as_str().unwrap()).unwrap();
         assert_eq!(details["to"]["id"], "acp-b");
+    }
+
+    #[test]
+    fn tools_list_includes_group_tools_when_socket_advertises_them() {
+        let resp = handle_jsonrpc_line(
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/list","params":{}}"#,
+            |req| {
+                assert_eq!(req["op"], peer_tools::SESSION_TOOLS_OP);
+                Ok(json!({
+                    "ok": true,
+                    "tools": peer_tools::definitions_for(true),
+                }))
+            },
+        )
+        .expect("tools/list response");
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"group_post"));
+        assert!(names.contains(&"group_yield"));
+        assert!(names.contains(&"group_read"));
+        assert!(names.contains(&"group_members"));
+        assert!(names.contains(&"group_task_update"));
+        let by_name = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap();
+        assert_eq!(by_name("group_read")["annotations"]["readOnlyHint"], true);
+        assert_eq!(
+            by_name("group_members")["annotations"]["readOnlyHint"],
+            true
+        );
+        assert_eq!(by_name("group_post")["annotations"]["readOnlyHint"], false);
+        assert_eq!(by_name("group_yield")["annotations"]["readOnlyHint"], false);
+        assert_eq!(
+            by_name("group_task_update")["annotations"]["readOnlyHint"],
+            false
+        );
     }
 }

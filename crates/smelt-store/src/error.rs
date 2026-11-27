@@ -89,6 +89,12 @@ pub enum StoreError {
     #[error("The conversation is archived; restore it first: {id}")]
     ConversationArchived { id: String },
 
+    #[error("Agent group not found: {id}")]
+    AgentGroupNotFound { id: String },
+
+    #[error("Agent group member not found: {id}")]
+    AgentGroupMemberNotFound { id: String },
+
     #[error("ACP conversation {id} has no session id")]
     AcpConversationMissingSid { id: String },
 

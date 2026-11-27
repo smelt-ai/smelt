@@ -16,13 +16,17 @@
 //! 不要再引入通用的 key/value 或 JSON 文档表。v17 及更早版本的形状以冻结的
 //! `V17_SCHEMA` 为准，旧版本的迁移和形状校验都从它推导。
 
-pub const TABLES: [&str; 43] = [
+pub const TABLES: [&str; 47] = [
     "acp_config_value",
     "acp_detail",
     "acp_launch_env",
     "agent_acp_config_memory",
     "agent_acp_env",
     "agent_definition",
+    "agent_group",
+    "agent_group_member",
+    "agent_group_message",
+    "agent_group_message_mention",
     "agent_host_pref",
     "agent_memory_provenance",
     "agent_memory_usage",
@@ -580,6 +584,91 @@ CREATE TABLE quota_provider_pref (
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
   keychain_denied INTEGER NOT NULL DEFAULT 0 CHECK (keychain_denied IN (0, 1))
 ) WITHOUT ROWID;
+CREATE TABLE agent_group (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  project_root TEXT,
+  workset_id TEXT,
+  mode TEXT NOT NULL CHECK (mode IN ('mention', 'coordinator')),
+  coordinator_member_id TEXT,
+  allow_worker_cross_talk INTEGER NOT NULL DEFAULT 1 CHECK (allow_worker_cross_talk IN (0, 1)),
+  max_chain_hops INTEGER NOT NULL DEFAULT 10 CHECK (max_chain_hops >= 0),
+  max_chain_depth INTEGER NOT NULL DEFAULT 6 CHECK (max_chain_depth >= 0),
+  max_pair_ping_pong INTEGER NOT NULL DEFAULT 3 CHECK (max_pair_ping_pong >= 0),
+  auto_bridge_mentions INTEGER NOT NULL DEFAULT 0 CHECK (auto_bridge_mentions IN (0, 1)),
+  paused INTEGER NOT NULL DEFAULT 0 CHECK (paused IN (0, 1)),
+  next_seq INTEGER NOT NULL DEFAULT 1 CHECK (next_seq >= 1),
+  archived_at_ms INTEGER,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+CREATE TABLE agent_group_member (
+  id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL REFERENCES agent_group(id) ON DELETE CASCADE,
+  alias TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  ownership TEXT NOT NULL CHECK (ownership IN ('group_owned', 'linked')),
+  session_id TEXT NOT NULL,
+  role_kind TEXT NOT NULL CHECK (role_kind IN ('coordinator', 'worker', 'reviewer', 'observer')),
+  role_title TEXT NOT NULL DEFAULT '',
+  role_prompt TEXT NOT NULL DEFAULT '',
+  tool_restriction_profile TEXT NOT NULL DEFAULT 'default',
+  briefing_sent INTEGER NOT NULL DEFAULT 0 CHECK (briefing_sent IN (0, 1)),
+  last_delivered_seq INTEGER NOT NULL DEFAULT 0,
+  last_read_seq INTEGER NOT NULL DEFAULT 0,
+  muted INTEGER NOT NULL DEFAULT 0 CHECK (muted IN (0, 1)),
+  removed_at_ms INTEGER,
+  created_at_ms INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX agent_group_member_alias_active_idx
+  ON agent_group_member(group_id, alias)
+  WHERE removed_at_ms IS NULL;
+CREATE UNIQUE INDEX agent_group_member_session_active_idx
+  ON agent_group_member(group_id, session_id)
+  WHERE removed_at_ms IS NULL;
+CREATE INDEX agent_group_member_session_idx
+  ON agent_group_member(session_id)
+  WHERE removed_at_ms IS NULL;
+CREATE TABLE agent_group_message (
+  id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL REFERENCES agent_group(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL CHECK (seq >= 1),
+  sender_type TEXT NOT NULL CHECK (sender_type IN ('user', 'member', 'system')),
+  sender_member_id TEXT REFERENCES agent_group_member(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('chat', 'task', 'decision', 'system')),
+  content TEXT NOT NULL,
+  reply_to_seq INTEGER,
+  thread_root_seq INTEGER,
+  task_status TEXT CHECK (task_status IS NULL OR task_status IN ('open', 'in_progress', 'done', 'blocked')),
+  chain_id TEXT,
+  chain_depth INTEGER NOT NULL DEFAULT 0,
+  auto_bridged INTEGER NOT NULL DEFAULT 0 CHECK (auto_bridged IN (0, 1)),
+  pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+  idempotency_key TEXT,
+  created_at_ms INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX agent_group_message_group_seq_idx
+  ON agent_group_message(group_id, seq);
+CREATE UNIQUE INDEX agent_group_message_idempotency_idx
+  ON agent_group_message(group_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+CREATE TABLE agent_group_message_mention (
+  message_id TEXT NOT NULL REFERENCES agent_group_message(id) ON DELETE CASCADE,
+  target_member_id TEXT NOT NULL REFERENCES agent_group_member(id) ON DELETE CASCADE,
+  mention_kind TEXT NOT NULL CHECK (mention_kind IN ('direct', 'all', 'coordinator_default')),
+  delivery_status TEXT NOT NULL CHECK (
+    delivery_status IN ('queued', 'pending_approval', 'delivered', 'coalesced', 'skipped', 'rejected', 'failed')
+  ),
+  delivery_id TEXT NOT NULL,
+  status_reason TEXT,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (message_id, target_member_id)
+) WITHOUT ROWID;
+CREATE INDEX agent_group_message_mention_delivery_id_idx
+  ON agent_group_message_mention(delivery_id);
+CREATE INDEX agent_group_message_mention_status_idx
+  ON agent_group_message_mention(delivery_status, updated_at_ms);
 ";
 
 /// v17 的完整结构，冻结不再改。v17 之前各版本的迁移和形状校验都以它为准：
@@ -1937,6 +2026,95 @@ CREATE TABLE peer_node (
   inbound INTEGER NOT NULL DEFAULT 0 CHECK (inbound IN (0, 1)),
   added_at_ms INTEGER NOT NULL
 );
+";
+
+/// v43：本地智能体群组（见 `docs/agent-groups.md`）。四张规范化表：群组、成员、消息与 @ 投递记录。
+pub const MIGRATE_V42_TO_V43: &str = "
+CREATE TABLE agent_group (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  project_root TEXT,
+  workset_id TEXT,
+  mode TEXT NOT NULL CHECK (mode IN ('mention', 'coordinator')),
+  coordinator_member_id TEXT,
+  allow_worker_cross_talk INTEGER NOT NULL DEFAULT 1 CHECK (allow_worker_cross_talk IN (0, 1)),
+  max_chain_hops INTEGER NOT NULL DEFAULT 10 CHECK (max_chain_hops >= 0),
+  max_chain_depth INTEGER NOT NULL DEFAULT 6 CHECK (max_chain_depth >= 0),
+  max_pair_ping_pong INTEGER NOT NULL DEFAULT 3 CHECK (max_pair_ping_pong >= 0),
+  auto_bridge_mentions INTEGER NOT NULL DEFAULT 0 CHECK (auto_bridge_mentions IN (0, 1)),
+  paused INTEGER NOT NULL DEFAULT 0 CHECK (paused IN (0, 1)),
+  next_seq INTEGER NOT NULL DEFAULT 1 CHECK (next_seq >= 1),
+  archived_at_ms INTEGER,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+CREATE TABLE agent_group_member (
+  id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL REFERENCES agent_group(id) ON DELETE CASCADE,
+  alias TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  ownership TEXT NOT NULL CHECK (ownership IN ('group_owned', 'linked')),
+  session_id TEXT NOT NULL,
+  role_kind TEXT NOT NULL CHECK (role_kind IN ('coordinator', 'worker', 'reviewer', 'observer')),
+  role_title TEXT NOT NULL DEFAULT '',
+  role_prompt TEXT NOT NULL DEFAULT '',
+  tool_restriction_profile TEXT NOT NULL DEFAULT 'default',
+  briefing_sent INTEGER NOT NULL DEFAULT 0 CHECK (briefing_sent IN (0, 1)),
+  last_delivered_seq INTEGER NOT NULL DEFAULT 0,
+  last_read_seq INTEGER NOT NULL DEFAULT 0,
+  muted INTEGER NOT NULL DEFAULT 0 CHECK (muted IN (0, 1)),
+  removed_at_ms INTEGER,
+  created_at_ms INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX agent_group_member_alias_active_idx
+  ON agent_group_member(group_id, alias)
+  WHERE removed_at_ms IS NULL;
+CREATE UNIQUE INDEX agent_group_member_session_active_idx
+  ON agent_group_member(group_id, session_id)
+  WHERE removed_at_ms IS NULL;
+CREATE INDEX agent_group_member_session_idx
+  ON agent_group_member(session_id)
+  WHERE removed_at_ms IS NULL;
+CREATE TABLE agent_group_message (
+  id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL REFERENCES agent_group(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL CHECK (seq >= 1),
+  sender_type TEXT NOT NULL CHECK (sender_type IN ('user', 'member', 'system')),
+  sender_member_id TEXT REFERENCES agent_group_member(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('chat', 'task', 'decision', 'system')),
+  content TEXT NOT NULL,
+  reply_to_seq INTEGER,
+  thread_root_seq INTEGER,
+  task_status TEXT CHECK (task_status IS NULL OR task_status IN ('open', 'in_progress', 'done', 'blocked')),
+  chain_id TEXT,
+  chain_depth INTEGER NOT NULL DEFAULT 0,
+  auto_bridged INTEGER NOT NULL DEFAULT 0 CHECK (auto_bridged IN (0, 1)),
+  pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+  idempotency_key TEXT,
+  created_at_ms INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX agent_group_message_group_seq_idx
+  ON agent_group_message(group_id, seq);
+CREATE UNIQUE INDEX agent_group_message_idempotency_idx
+  ON agent_group_message(group_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+CREATE TABLE agent_group_message_mention (
+  message_id TEXT NOT NULL REFERENCES agent_group_message(id) ON DELETE CASCADE,
+  target_member_id TEXT NOT NULL REFERENCES agent_group_member(id) ON DELETE CASCADE,
+  mention_kind TEXT NOT NULL CHECK (mention_kind IN ('direct', 'all', 'coordinator_default')),
+  delivery_status TEXT NOT NULL CHECK (
+    delivery_status IN ('queued', 'pending_approval', 'delivered', 'coalesced', 'skipped', 'rejected', 'failed')
+  ),
+  delivery_id TEXT NOT NULL,
+  status_reason TEXT,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (message_id, target_member_id)
+) WITHOUT ROWID;
+CREATE INDEX agent_group_message_mention_delivery_id_idx
+  ON agent_group_message_mention(delivery_id);
+CREATE INDEX agent_group_message_mention_status_idx
+  ON agent_group_message_mention(delivery_status, updated_at_ms);
 ";
 
 /// v30：已配对设备的手机推送登记。一台设备至多一行，撤销设备时跟着删。
