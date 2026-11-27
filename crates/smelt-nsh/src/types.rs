@@ -439,6 +439,17 @@ mod tests {
         ] {
             assert!(defs.contains_key(required), "缺少 {required}");
         }
+        // 有一个声明解析不了，tsc 只报语法错、整个插件都不做类型检查（`host.d.ts` 曾生成过参数名
+        // `new`）。
+        for (name, source) in &defs {
+            let allocator = Allocator::default();
+            let parsed = Parser::new(&allocator, source, SourceType::d_ts()).parse();
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "{name} 解析出错：{:?}",
+                parsed.diagnostics
+            );
+        }
         for forbidden in [
             "nsh/mobile.d.ts",
             "nsh/web.d.ts",

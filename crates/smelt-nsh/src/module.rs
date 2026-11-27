@@ -311,9 +311,10 @@ impl Smelt {
         is_interrupt_marker(&text)
     }
 
-    /// 一处改动的增删行数 `[added, removed]`，和 `<SmeltDiffView>` 同一份按行比对。新建文件 `old` 传空串。
-    pub fn diff_line_stats(old: String, new: String) -> Vec<usize> {
-        let (added, removed) = diff_line_stats(&old, &new);
+    /// 一处改动的增删行数 `[added, removed]`，和 `<SmeltDiffView>` 同一份按行比对。新建文件
+    /// `old_text` 传空串。参数名进生成的 `host.d.ts`，别用 `new` 这类 TS 保留字。
+    pub fn diff_line_stats(old_text: String, new_text: String) -> Vec<usize> {
+        let (added, removed) = diff_line_stats(&old_text, &new_text);
         vec![added, removed]
     }
 
