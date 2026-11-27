@@ -16,6 +16,7 @@ import {
   SmeltIcon,
   SmeltMenu,
   SmeltWindowBar,
+  viewShown,
 } from "smelt/sdk";
 import { Avatar } from "smelt/avatar";
 
@@ -641,6 +642,7 @@ function DragPreviewCard(props: { drag: () => DragState | null }) {
 interface SharedRowProps {
   sidebar: () => any;
   showAvatar: () => boolean;
+  visible: () => boolean;
   rename: () => RenameState | null;
   startRename: (target: RenameState["target"], original: string) => void;
   updateRename: (value: string) => void;
@@ -876,6 +878,7 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
                 seed={actor().seed}
                 act={actor().act}
                 since={actor().since}
+                active={props.visible()}
                 opacity={iconAlpha()}
                 size={AVATAR}
                 eye={row().icon?.kind === "provider" ? row().icon.path : undefined}
@@ -1165,6 +1168,7 @@ function ProjectSection(props: SharedRowProps & { project: () => any; byMachine:
   };
 
   const areaLevel = () => (props.byMachine ? 1 : 0);
+  const projectVisible = computed(() => props.visible() && !collapsed());
   const baseFolderIcon = () =>
     icon(collapsible() && !project().collapsed ? "folder-open" : "folder");
   const iconAlpha = () => (isDragged() ? 0.4 : 1);
@@ -1192,6 +1196,7 @@ function ProjectSection(props: SharedRowProps & { project: () => any; byMachine:
                   level={areaLevel() + 1}
                   sidebar={props.sidebar}
                   showAvatar={props.showAvatar}
+                  visible={projectVisible}
                   rename={props.rename}
                   startRename={props.startRename}
                   updateRename={props.updateRename}
@@ -1213,6 +1218,7 @@ function ProjectSection(props: SharedRowProps & { project: () => any; byMachine:
                   level={areaLevel() + 1}
                   sidebar={props.sidebar}
                   showAvatar={props.showAvatar}
+                  visible={projectVisible}
                   rename={props.rename}
                   startRename={props.startRename}
                   updateRename={props.updateRename}
@@ -1530,6 +1536,7 @@ function WorksetSection(props: SharedRowProps & { workset: () => any; level: num
   const key = () => workset_flip(workset().machine, workset().id);
   const collapsible = () => workset().sessions.length > 0;
   const collapsed = computed(() => workset().collapsed);
+  const worksetVisible = computed(() => props.visible() && !collapsed());
   const popoverOpen = signal(false);
   const renaming = () =>
     isRenamingTarget(props.rename(), {
@@ -1554,6 +1561,7 @@ function WorksetSection(props: SharedRowProps & { workset: () => any; level: num
                 level={props.level + 1}
                 sidebar={props.sidebar}
                 showAvatar={props.showAvatar}
+                visible={worksetVisible}
                 rename={props.rename}
                 startRename={props.startRename}
                 updateRename={props.updateRename}
@@ -2473,9 +2481,11 @@ export function main() {
   const dragSessionPending = computed(() => drag()?.kind === "session");
   const dragProjectPending = computed(() => drag()?.kind === "project");
 
+  const listVisible = computed(() => viewShown(LIST));
   const sharedRowProps: SharedRowProps = {
     sidebar,
     showAvatar,
+    visible: listVisible,
     rename,
     startRename,
     updateRename,
@@ -2734,7 +2744,12 @@ export function main() {
                         key={(row: any) => session_flip(row.key)}
                       >
                         {(row: () => any) => (
-                          <SessionRow row={row} level={0} {...sharedRowProps} />
+                          <SessionRow
+                            row={row}
+                            level={0}
+                            {...sharedRowProps}
+                            visible={() => listVisible() && !conversationsCollapsed()}
+                          />
                         )}
                       </Each>
                     </View>
@@ -2815,6 +2830,9 @@ export function main() {
                     ? null
                     : sidebar().machines.find((m: any) => m.machine === area().machine) ?? null;
                 const areaCollapsed = computed(() => area().collapsed);
+                const areaVisible = computed(
+                  () => listVisible() && (machineInfo() == null || !areaCollapsed()),
+                );
                 const bucketLevel = () => (sidebar().by_machine ? 1 : 0);
 
                 const areaBody = (
@@ -2827,6 +2845,9 @@ export function main() {
                             {(group: () => any) => {
                               const bKey = () => bucket_flip(group().key);
                               const bucketCollapsed = computed(() => group().collapsed);
+                              const bucketVisible = computed(
+                                () => areaVisible() && !bucketCollapsed(),
+                              );
                               return (
                                 <SmeltDisclosure
                                   open={!bucketCollapsed()}
@@ -2842,6 +2863,7 @@ export function main() {
                                             row={row}
                                             level={bucketLevel() + 1}
                                             {...sharedRowProps}
+                                            visible={bucketVisible}
                                           />
                                         )}
                                       </Each>
@@ -2918,6 +2940,7 @@ export function main() {
                               project={project}
                               byMachine={sidebar().by_machine}
                               {...sharedRowProps}
+                              visible={areaVisible}
                             />
                           )}
                         </Each>

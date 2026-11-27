@@ -48,6 +48,15 @@ impl Output {
     }
 }
 
+/// [`Subprocess::run_limited`] 的结果。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Limited {
+    /// stdout 没超上限：完整输出。
+    Done(Output),
+    /// stdout 超过上限：没读完，子进程已被杀掉。
+    OverLimit,
+}
+
 /// 子进程执行能力。实现者负责把命令路由到自己的执行世界。
 ///
 /// 错误一律用 [`io::Error`]：本地实现直接透传，远程实现把协议错误翻译过来，
@@ -78,6 +87,19 @@ pub trait Subprocess: Send + Sync {
         env: &[(&str, &str)],
         stdin: &[u8],
     ) -> io::Result<Output>;
+
+    /// 运行命令，stdout 最多收 `limit` 字节；再多就杀掉子进程，返回 [`Limited::OverLimit`]。
+    ///
+    /// 给输出大小取决于用户数据的命令用（几百 MB 日志文件的 diff）：先全收进内存再判断，
+    /// 判断之前就已经撑爆了。
+    fn run_limited(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        cwd: Option<&Path>,
+        env: &[(&str, &str)],
+        limit: usize,
+    ) -> io::Result<Limited>;
 }
 
 // ===================== Provider：本机子进程 =====================
@@ -149,7 +171,68 @@ impl Subprocess for LocalSubprocess {
             stderr: out.stderr,
         })
     }
+
+    fn run_limited(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        cwd: Option<&Path>,
+        env: &[(&str, &str)],
+        limit: usize,
+    ) -> io::Result<Limited> {
+        use std::io::Read;
+        use std::process::Stdio;
+
+        let mut command = std::process::Command::new(cmd);
+        command.args(args);
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        }
+        crate::login_env::apply_login_environment(&mut command, env.iter().copied());
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = command.spawn()?;
+        // stderr 另起线程读：子进程写满 stderr 管道就会停下，这边的 stdout 永远等不到头。
+        // 只留前 64 KiB，其余读掉丢弃。
+        let stderr = child.stderr.take();
+        let stderr = std::thread::spawn(move || {
+            let mut kept = Vec::new();
+            if let Some(mut pipe) = stderr {
+                let _ = (&mut pipe).take(STDERR_KEPT).read_to_end(&mut kept);
+                let _ = io::copy(&mut pipe, &mut io::sink());
+            }
+            kept
+        });
+        let mut stdout = Vec::new();
+        let read = match child.stdout.take() {
+            Some(pipe) => pipe
+                .take(limit as u64 + 1)
+                .read_to_end(&mut stdout)
+                .map(drop),
+            None => Ok(()),
+        };
+        if read.is_err() || stdout.len() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stderr.join();
+            read?;
+            return Ok(Limited::OverLimit);
+        }
+        let status = child.wait()?;
+        let stderr = stderr.join().unwrap_or_default();
+        Ok(Limited::Done(Output {
+            code: status.code(),
+            stdout,
+            stderr,
+        }))
+    }
 }
+
+/// [`LocalSubprocess::run_limited`] 留下的 stderr 字节数：够看清报错，又不会被刷屏的子进程撑爆。
+const STDERR_KEPT: u64 = 64 << 10;
 
 // ===================== Provider：Mock（测试用） =====================
 
@@ -230,6 +313,22 @@ impl Subprocess for MockSubprocess {
         // Mock 不区分有无 stdin，统一查表
         Ok(self.lookup(cmd, args))
     }
+
+    fn run_limited(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        _cwd: Option<&Path>,
+        _env: &[(&str, &str)],
+        limit: usize,
+    ) -> io::Result<Limited> {
+        let out = self.lookup(cmd, args);
+        Ok(if out.stdout.len() > limit {
+            Limited::OverLimit
+        } else {
+            Limited::Done(out)
+        })
+    }
 }
 
 // ===================== Consumer：只依赖 trait 的纯逻辑 =====================
@@ -243,6 +342,22 @@ impl Subprocess for MockSubprocess {
 /// 这是 Consumer 的样板——**只认 [`Subprocess`]，不认 `std::process`**，所以
 /// 本地面板和远程运行时用的是同一份 git 调用逻辑，不会各自漂移。
 pub fn run_git(sp: &dyn Subprocess, root: &Path, args: &[&str]) -> io::Result<Output> {
+    sp.run("git", &git_args(root, args), None, GIT_ENV)
+}
+
+/// [`run_git`]，stdout 最多收 `limit` 字节（[`Subprocess::run_limited`]）。
+pub fn run_git_limited(
+    sp: &dyn Subprocess,
+    root: &Path,
+    args: &[&str],
+    limit: usize,
+) -> io::Result<Limited> {
+    sp.run_limited("git", &git_args(root, args), None, GIT_ENV, limit)
+}
+
+const GIT_ENV: &[(&str, &str)] = &[("GIT_OPTIONAL_LOCKS", "0")];
+
+fn git_args<'a>(root: &'a Path, args: &[&'a str]) -> Vec<&'a str> {
     let mut full_args = vec![
         "-C",
         root.to_str().unwrap_or("."),
@@ -250,7 +365,7 @@ pub fn run_git(sp: &dyn Subprocess, root: &Path, args: &[&str]) -> io::Result<Ou
         "core.quotePath=false",
     ];
     full_args.extend(args);
-    sp.run("git", &full_args, None, &[("GIT_OPTIONAL_LOCKS", "0")])
+    full_args
 }
 
 /// 跑一条从 stdin 读输入的 git 子命令（`git apply` 收 patch 用）。
@@ -260,18 +375,11 @@ pub fn run_git_stdin(
     args: &[&str],
     input: &str,
 ) -> io::Result<Output> {
-    let mut full_args = vec![
-        "-C",
-        root.to_str().unwrap_or("."),
-        "-c",
-        "core.quotePath=false",
-    ];
-    full_args.extend(args);
     sp.run_with_stdin(
         "git",
-        &full_args,
+        &git_args(root, args),
         None,
-        &[("GIT_OPTIONAL_LOCKS", "0")],
+        GIT_ENV,
         input.as_bytes(),
     )
 }
@@ -365,6 +473,50 @@ mod tests {
                 .unwrap();
             assert!(out.stdout_str().contains("TEST_VAR=test_value"));
         }
+    }
+
+    /// 输出超过上限就不读完：不能先把几百 MB 收进内存再说「太大」。
+    #[cfg(unix)]
+    #[test]
+    fn run_limited_stops_at_the_limit() {
+        let sp = LocalSubprocess;
+        let small = sp
+            .run_limited(
+                "/bin/sh",
+                &["-c", "printf abc; printf err >&2"],
+                None,
+                &[],
+                3,
+            )
+            .unwrap();
+        assert_eq!(
+            small,
+            Limited::Done(Output {
+                code: Some(0),
+                stdout: b"abc".to_vec(),
+                stderr: b"err".to_vec(),
+            })
+        );
+        // `yes` 不会自己停：只有被杀掉这条调用才会返回。
+        let endless = sp.run_limited("yes", &[], None, &[], 1 << 20).unwrap();
+        assert_eq!(endless, Limited::OverLimit);
+    }
+
+    #[test]
+    fn mock_run_limited_reports_over_limit() {
+        let sp = MockSubprocess::new().default_output(Output {
+            code: Some(0),
+            stdout: b"abcd".to_vec(),
+            stderr: Vec::new(),
+        });
+        assert_eq!(
+            sp.run_limited("git", &[], None, &[], 3).unwrap(),
+            Limited::OverLimit
+        );
+        assert!(matches!(
+            sp.run_limited("git", &[], None, &[], 4).unwrap(),
+            Limited::Done(_)
+        ));
     }
 
     #[cfg(unix)]

@@ -13,8 +13,12 @@ import {
   showsEmptyWelcome,
   launchBringsContent,
   isTurnActive,
+  computePromptRailScrollMetrics,
   computePromptRailWindow,
+  extractTurnAnswerPreview,
+  promptRailEdgeFactor,
   consumeComposerRestore,
+  createBottomStickController,
   detectCompletionTrigger,
   entryWindowOf,
   isStreamingMetaUnchanged,
@@ -26,8 +30,12 @@ import {
   selectedConfigIndex,
   spliceEntries,
   subsequenceScore,
+  transcriptWindowOf,
   turnTimingsEqual,
   usagePercent,
+  RECONNECT_ATTEMPTS,
+  RECONNECT_STABLE_AFTER_MS,
+  reconnectAttempt,
 } from "../model.js";
 
 describe("entryWindowOf / spliceEntries", () => {
@@ -54,6 +62,18 @@ describe("entryWindowOf / spliceEntries", () => {
     const current = ["a", "b"];
     spliceEntries(current, { keep: 1, take_next: true, resume: 2, window: { len: 2 } }, ["B"]);
     expect(current).toEqual(["a", "b"]);
+  });
+
+  test("子会话的一页拿读到的字节数当修订号，老运行时没有就记 0", () => {
+    expect(transcriptWindowOf({ entries: [1, 2], offset: 3, total: 5, cursor: 900 })).toEqual({
+      offset: 3,
+      len: 2,
+      total: 5,
+      revision: 900,
+      history_session_id: null,
+      acp_session_id: null,
+    });
+    expect(transcriptWindowOf({ entries: [1], offset: 0, total: 1 }).revision).toBe(0);
   });
 });
 
@@ -170,11 +190,77 @@ describe("model search, pending config overlay, prompt rail, formatting", () => 
     }));
     const win = computePromptRailWindow(prompts, 28, 11);
     expect(win.items.length).toBe(11);
+    expect(win.start).toBe(9);
     expect(win.clippedTop).toBe(true);
     expect(win.clippedBottom).toBe(true);
     expect(win.items[0].edgeFactor).toBeLessThan(1);
     expect(win.items[5].globalIndex).toBe(28);
     expect(win.items[5].edgeFactor).toBe(1);
+
+    // 手动滚轮滑窗覆盖起点：可滑到顶部/底部并自动钳位。
+    const top = computePromptRailWindow(prompts, 28, 11, -5);
+    expect(top.start).toBe(0);
+    expect(top.clippedTop).toBe(false);
+    expect(top.clippedBottom).toBe(true);
+    expect(top.items[0].globalIndex).toBe(0);
+
+    const bottom = computePromptRailWindow(prompts, 28, 11, 99);
+    expect(bottom.start).toBe(19);
+    expect(bottom.clippedTop).toBe(true);
+    expect(bottom.clippedBottom).toBe(false);
+    expect(bottom.items[10].globalIndex).toBe(58);
+
+    // 连续滚动模式：计算滑块区间、上下可滚状态与边缘缩放因子。
+    const mid = computePromptRailScrollMetrics({
+      total: 30,
+      scrollY: 100,
+      viewportHeight: 142,
+      pitch: 12,
+      tickHeight: 10,
+      padY: 6,
+    });
+    expect(mid.canScroll).toBe(true);
+    expect(mid.canScrollUp).toBe(true);
+    expect(mid.canScrollDown).toBe(true);
+    expect(mid.thumbHeight).toBeGreaterThanOrEqual(16);
+    expect(mid.thumbTop).toBeGreaterThan(6);
+
+    const edgeTop = promptRailEdgeFactor({
+      index: 8,
+      scrollY: 100,
+      viewportHeight: 142,
+      pitch: 12,
+      tickHeight: 10,
+      padY: 6,
+      fadeZone: 24,
+      canScrollUp: true,
+      canScrollDown: true,
+    });
+    const middle = promptRailEdgeFactor({
+      index: 14,
+      scrollY: 100,
+      viewportHeight: 142,
+      pitch: 12,
+      tickHeight: 10,
+      padY: 6,
+      fadeZone: 24,
+      canScrollUp: true,
+      canScrollDown: true,
+    });
+    expect(edgeTop).toBeLessThan(1);
+    expect(middle).toBe(1);
+
+    // 提取回合回答开头：跳过思考段与工具，取最终回答并清理 Markdown 标记。
+    const convEntries = [
+      { User: "第一问" },
+      { Assistant: { text: "先想想", thought: true } },
+      { ToolCall: { title: "read", kind: "read", status: "completed" } },
+      { Assistant: { text: "## 结论\n\n这是**最终回答**内容。", thought: false } },
+      { User: "第二问" },
+      { Assistant: { text: "下一回合", thought: false } },
+    ];
+    expect(extractTurnAnswerPreview(convEntries, 0)).toBe("结论 这是最终回答内容。");
+    expect(extractTurnAnswerPreview(convEntries, 4)).toBe("下一回合");
   });
 
   test("token count, diff stats, composer restore", () => {
@@ -443,5 +529,134 @@ describe("sessionSkills", () => {
     ).toEqual([{ command: "skill:deploy", name: "deploy", description: "把构建推上去" }]);
     expect(sessionSkills([["review", "Review"]])).toEqual([]);
     expect(sessionSkills(undefined)).toEqual([]);
+  });
+});
+
+describe("createBottomStickController", () => {
+  function makeHarness(windowMs = 3000) {
+    const scrollCalls = [];
+    const atLatestEvents = [];
+    const frames = new Map();
+    const timers = new Map();
+    let nextFrame = 1;
+    let nextTimer = 1;
+    const ctrl = createBottomStickController({
+      scrollToEnd: (opts) => scrollCalls.push(opts),
+      setAtLatest: (v) => atLatestEvents.push(v),
+      requestFrame: (fn) => {
+        const id = nextFrame++;
+        frames.set(id, fn);
+        return id;
+      },
+      cancelFrame: (id) => frames.delete(id),
+      setTimer: (fn, ms) => {
+        const id = nextTimer++;
+        timers.set(id, { fn, ms });
+        return id;
+      },
+      clearTimer: (id) => timers.delete(id),
+      windowMs,
+    });
+    const flushFrames = () => {
+      const pending = [...frames.entries()];
+      frames.clear();
+      for (const [, fn] of pending) fn();
+    };
+    const flushTimers = () => {
+      const pending = [...timers.entries()];
+      timers.clear();
+      for (const [, t] of pending) t.fn();
+    };
+    return { ctrl, scrollCalls, atLatestEvents, frames, timers, flushFrames, flushTimers };
+  }
+
+  test("scrolls immediately non-animated on send and keeps re-sticking across multiple appended rows", () => {
+    const h = makeHarness();
+    h.ctrl.trigger();
+    expect(h.scrollCalls).toEqual([{ animated: false }]);
+    expect(h.atLatestEvents).toEqual([true]);
+    expect(h.ctrl.isActive()).toBe(true);
+
+    // Post-layout follow-up after composer shrinks / initial jump settles.
+    h.flushFrames();
+    expect(h.scrollCalls).toEqual([{ animated: false }, { animated: false }]);
+
+    // Row 1 (user bubble) and row 2 (tool card) arrive in the same frame -> coalesced to 1 rAF.
+    h.ctrl.onContentGrew();
+    h.ctrl.onContentGrew();
+    expect(h.frames.size).toBe(1);
+    h.flushFrames();
+    expect(h.scrollCalls).toHaveLength(3);
+
+    // Row 3 (assistant streaming text) arrives -> still sticks (does not drop after row 1).
+    h.ctrl.onContentGrew();
+    h.flushFrames();
+    expect(h.scrollCalls).toHaveLength(4);
+  });
+
+  test("suppresses stale nearEnd=false flicker during sticky window and re-sticks", () => {
+    const h = makeHarness();
+    h.ctrl.trigger();
+    h.flushFrames();
+    h.scrollCalls.length = 0;
+    h.atLatestEvents.length = 0;
+
+    // New row pushed content down before rAF ran -> onViewableItemsChange reports nearEnd=false.
+    h.ctrl.onViewableAtLatest(false);
+    expect(h.atLatestEvents).toEqual([]);
+    expect(h.frames.size).toBe(1);
+    h.flushFrames();
+    expect(h.scrollCalls).toEqual([{ animated: false }]);
+    expect(h.atLatestEvents).toEqual([true]);
+  });
+
+  test("immediately yields control when user scrolls manually or switches sessions", () => {
+    const h = makeHarness();
+    h.ctrl.trigger();
+    expect(h.frames.size).toBe(1);
+
+    h.ctrl.cancel();
+    expect(h.ctrl.isActive()).toBe(false);
+    expect(h.frames.size).toBe(0);
+    expect(h.timers.size).toBe(0);
+
+    h.ctrl.onContentGrew();
+    expect(h.frames.size).toBe(0);
+
+    h.ctrl.onViewableAtLatest(false);
+    expect(h.atLatestEvents[h.atLatestEvents.length - 1]).toBe(false);
+  });
+
+  test("deactivates cleanly after window expires", () => {
+    const h = makeHarness(2500);
+    h.ctrl.trigger();
+    h.flushFrames();
+    h.flushTimers();
+    expect(h.ctrl.isActive()).toBe(false);
+
+    h.ctrl.onViewableAtLatest(false);
+    expect(h.atLatestEvents[h.atLatestEvents.length - 1]).toBe(false);
+  });
+});
+
+describe("reconnectAttempt", () => {
+  const transport = { phase: "dead", end_kind: "transport_disconnected" };
+
+  test("只是连接断了就重连，次数照上次累计", () => {
+    expect(reconnectAttempt(transport, 0, null, 0)).toBe(0);
+    expect(reconnectAttempt(transport, 2, null, 0)).toBe(2);
+    expect(reconnectAttempt({ phase: "idle" }, 1, null, 0)).toBe(1);
+    expect(reconnectAttempt(null, 0, null, 0)).toBe(0);
+  });
+
+  test("会话真结束了不重连", () => {
+    expect(reconnectAttempt({ phase: "dead", end_kind: "provider_failed" }, 0, null, 0)).toBeNull();
+    expect(reconnectAttempt({ phase: "dead", end_kind: "session_terminated" }, 0, null, 0)).toBeNull();
+  });
+
+  test("连续失败用完就停，连上撑过稳定期再断才回满", () => {
+    expect(reconnectAttempt(transport, RECONNECT_ATTEMPTS, null, 0)).toBeNull();
+    expect(reconnectAttempt(transport, RECONNECT_ATTEMPTS, 0, RECONNECT_STABLE_AFTER_MS - 1)).toBeNull();
+    expect(reconnectAttempt(transport, RECONNECT_ATTEMPTS, 0, RECONNECT_STABLE_AFTER_MS)).toBe(0);
   });
 });

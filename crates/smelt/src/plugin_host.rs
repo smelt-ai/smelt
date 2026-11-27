@@ -583,20 +583,30 @@ impl Workspace {
                     this.reload_layout(window, cx);
                     this.sync_outlet(window, cx);
                     this.sync_nsh_settings_page(cx);
+                    this.sync_host_settings(cx);
                     cx.notify();
+                }
+                HostEvent::ViewBadgesChanged => {
+                    this.sync_host_settings(cx);
                 }
                 HostEvent::LocaleChanged => {
                     this.sync_nsh_chrome(cx);
                     this.sync_nsh_settings_page(cx);
                     this.sync_host_dialogs(cx);
+                    this.sync_host_settings(cx);
                 }
-                HostEvent::LayoutsChanged | HostEvent::PagesChanged => this.sync_pages(window, cx),
+                HostEvent::LayoutsChanged | HostEvent::PagesChanged => {
+                    this.sync_pages(window, cx);
+                    this.sync_host_settings(cx);
+                }
                 HostEvent::ThemesChanged => {
                     if let Some(appearance) = cx.try_global::<crate::settings::Appearance>() {
                         let selected = appearance.theme_name.clone();
                         crate::settings::apply_named_theme(&selected, cx);
                         cx.refresh_windows();
                     }
+                    this.host_settings.invalidate_themes();
+                    this.sync_host_settings(cx);
                     cx.notify();
                 }
                 _ => {}
@@ -607,7 +617,7 @@ impl Workspace {
     /// 遮罩层开了或关了就告诉插件：画着原生网页视图的插件要让开。插件视图在面板里是缓存着
     /// 画的，工作台重画不会带着它重画，只能靠事件。
     pub(crate) fn note_overlay(&mut self, cx: &mut Context<Self>) {
-        set_overlay_open(cx.entity_id(), self.main_overlay_open(), cx);
+        set_overlay_open(cx.entity_id(), self.main_overlay_open(cx), cx);
     }
 }
 

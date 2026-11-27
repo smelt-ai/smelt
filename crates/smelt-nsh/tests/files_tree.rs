@@ -3,7 +3,8 @@
 //! 1. 冷启动时 `fs.read_dir` 晚于首帧返回，`Loading…` 必须响应式切到文件树而不是永远卡住；
 //! 2. `ContextMenu` 必须通过 `trigger={...}` 挂载文件行/目录行，而不是丢进 `children` 导致列表全空；
 //! 3. 点击目录行可展开子目录、点击文件行可打开文件；
-//! 4. Git 改动树（同样使用 `ContextMenu`）能渲染改动文件行。
+//! 4. Git 改动树（同样使用 `ContextMenu`）能渲染改动文件行；
+//! 5. 打开的正文以 Blob 交给编辑器，存盘时宿主收到的就是编辑器里的正文。
 
 use std::{
     io::{BufRead as _, BufReader, Write as _},
@@ -40,6 +41,7 @@ struct FilesTestHost {
     local_online: Arc<AtomicBool>,
     tree_calls: Arc<Mutex<Vec<String>>>,
     opened_files: Arc<Mutex<Vec<String>>>,
+    saved_texts: Arc<Mutex<Vec<Value>>>,
 }
 
 impl Host for FilesTestHost {
@@ -57,10 +59,12 @@ impl Host for FilesTestHost {
         }
         let tree_calls = self.tree_calls.clone();
         let opened_files = self.opened_files.clone();
+        let saved_texts = self.saved_texts.clone();
         Some(RuntimeClient::new(move || {
             let (client, server) = RuntimeStream::pair()?;
             let tree_calls = tree_calls.clone();
             let opened_files = opened_files.clone();
+            let saved_texts = saved_texts.clone();
             std::thread::spawn(move || {
                 let mut line = String::new();
                 if BufReader::new(server.try_clone().unwrap())
@@ -104,6 +108,10 @@ impl Host for FilesTestHost {
                                 "version": "v1"
                             }
                         })
+                    }
+                    "file.save" => {
+                        saved_texts.lock().unwrap().push(params["text"].clone());
+                        json!({ "version": "v2" })
                     }
                     "git.discover" => json!({
                         "repos": [{
@@ -288,6 +296,7 @@ fn files_tree_renders_and_interacts_after_async_load(cx: &mut TestAppContext) {
     let local_online = Arc::new(AtomicBool::new(false));
     let tree_calls = Arc::new(Mutex::new(Vec::<String>::new()));
     let opened_files = Arc::new(Mutex::new(Vec::<String>::new()));
+    let saved_texts = Arc::new(Mutex::new(Vec::<Value>::new()));
 
     cx.executor().allow_parking();
     cx.update(|cx| {
@@ -298,6 +307,7 @@ fn files_tree_renders_and_interacts_after_async_load(cx: &mut TestAppContext) {
                 local_online: local_online.clone(),
                 tree_calls: tree_calls.clone(),
                 opened_files: opened_files.clone(),
+                saved_texts: saved_texts.clone(),
             },
             cx,
         );
@@ -448,6 +458,19 @@ fn files_tree_renders_and_interacts_after_async_load(cx: &mut TestAppContext) {
                 .any(|p| p == "/work/smelt/Cargo.toml")
                 && has_a11y_text(cx, "Hide File Tree")
         },
+    );
+
+    // 正文以 Blob 交给编辑器：编辑器里是读到的正文；存盘时宿主收到的也是它（Blob 按文本送出）。
+    wait_for(cx, "编辑器显示读到的正文", |cx| {
+        a11y_texts(cx).iter().any(|t| t.contains("members = []"))
+    });
+    cx.update(|_, cx| api::run("smelt.files/save", json!({}), cx).detach());
+    wait_for(cx, "存盘送出编辑器里的正文", |_| {
+        !saved_texts.lock().unwrap().is_empty()
+    });
+    assert_eq!(
+        saved_texts.lock().unwrap().as_slice(),
+        [json!("[workspace]\nmembers = []\n")],
     );
 
     // 5. 打开文件后顶部多出面包屑栏（约 39px），右键文件行应弹出包含 Copy File Path 与 Delete File 的上下文菜单。

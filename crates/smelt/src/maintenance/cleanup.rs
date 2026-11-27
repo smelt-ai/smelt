@@ -1,19 +1,16 @@
-//! 设置「系统 → 清理残留」：列出 `~/.smelt` 下没登记的条目（[`super::residue`]），确认后删掉。
+//! 设置「系统 → 清理残留」：列出 `~/.smelt` 下没登记的条目（[`super::residue`]），确认后删掉；
+//! 渲染与确认框由 NSH 主壳承担。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::rc::Rc;
 
-use gpui::{
-    App, AppContext as _, Context, IntoElement, ParentElement as _, Render, SharedString,
-    Styled as _, Window, div, rgb,
-};
+use gpui::{Context, SharedString};
 use rust_i18n::t;
-use smelt_plugin_api::{
-    self as api, PluginView, SettingsEntry, SettingsGroup, ViewHandle, ViewSpec, text,
-};
-use smelt_ui::kit::{TYPE, TypeStyled as _};
-use smelt_ui::{Button, IconName, SettingsPage, SettingsRow, SettingsSection, ui_theme};
+use serde_json::{Value, json};
+use smelt_plugin_api::{SettingsEntry, SettingsGroup, ViewSpec, text};
+use smelt_ui::IconName;
+
+use crate::Workspace;
 
 use super::residue::{self, Residue};
 
@@ -32,7 +29,7 @@ pub(crate) fn spec() -> ViewSpec {
             keywords: keywords.into_iter().map(SharedString::from).collect(),
         }),
         fills: Vec::new(),
-        build: Rc::new(|_, cx| Rc::new(cx.new(|_| CleanupPage::default())) as Rc<dyn ViewHandle>),
+        build: crate::host_views::nsh_managed_view_builder(),
     }
 }
 
@@ -45,29 +42,94 @@ enum Scan {
 }
 
 #[derive(Default)]
-struct CleanupPage {
+pub(crate) struct CleanupState {
     scan: Scan,
     cleaning: bool,
     failures: HashMap<PathBuf, String>,
 }
 
-impl CleanupPage {
-    fn rescan(cx: &mut Context<Self>) {
+impl CleanupState {
+    pub(crate) fn snapshot(&self) -> Value {
+        let items: &[Residue] = match &self.scan {
+            Scan::Done(items) => items,
+            _ => &[],
+        };
+        let total_bytes: u64 = items.iter().map(|item| item.bytes).sum();
+        let summary = match &self.scan {
+            Scan::Running => t!("maintenance.cleanup.scanning").into_owned(),
+            Scan::Failed(error) => {
+                t!("maintenance.cleanup.scan_failed", error = error).into_owned()
+            }
+            Scan::Done(items) if items.is_empty() => t!("maintenance.cleanup.empty").into_owned(),
+            Scan::Done(items) => t!(
+                "maintenance.cleanup.summary",
+                count = items.len(),
+                size = format_bytes(total_bytes)
+            )
+            .into_owned(),
+        };
+        let rows: Vec<Value> = items
+            .iter()
+            .map(|item| {
+                let error = self.failures.get(&item.path).map(|error| {
+                    t!("maintenance.cleanup.remove_failed", error = error).into_owned()
+                });
+                json!({
+                    "path": item.path.display().to_string(),
+                    "label": item.label,
+                    "size": format_bytes(item.bytes),
+                    "error": error,
+                })
+            })
+            .collect();
+        json!({
+            "kind": "cleanup",
+            "row_title": t!("maintenance.cleanup.row").into_owned(),
+            "summary": summary,
+            "action_label": t!("maintenance.cleanup.action").into_owned(),
+            "cleaning": self.cleaning,
+            "can_clean": !self.cleaning && !items.is_empty(),
+            "confirm": {
+                "title": t!("maintenance.cleanup.confirm.title", count = items.len()).into_owned(),
+                "description": t!(
+                    "maintenance.cleanup.confirm.description",
+                    size = format_bytes(total_bytes)
+                )
+                .into_owned(),
+                "action": t!("maintenance.cleanup.confirm.action").into_owned(),
+                "cancel": t!("action.cancel").into_owned(),
+            },
+            "items": rows,
+        })
+    }
+
+    pub(crate) fn rescan(
+        &self,
+        mut accessor: impl FnMut(&mut Workspace) -> &mut Self + 'static,
+        cx: &mut Context<Workspace>,
+    ) {
+        if self.cleaning {
+            return;
+        }
         let scan = cx.background_executor().spawn(async { residue::scan() });
         cx.spawn(async move |this, cx| {
             let scan = scan.await;
-            let _ = this.update(cx, |page, cx| {
-                page.scan = match scan {
+            let _ = this.update(cx, |workspace, cx| {
+                accessor(workspace).scan = match scan {
                     Ok(items) => Scan::Done(items),
                     Err(error) => Scan::Failed(error.to_string()),
                 };
-                cx.notify();
+                workspace.sync_host_settings(cx);
             });
         })
         .detach();
     }
 
-    fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn clean(
+        &mut self,
+        mut accessor: impl FnMut(&mut Workspace) -> &mut Self + 'static,
+        cx: &mut Context<Workspace>,
+    ) {
         let Scan::Done(items) = &self.scan else {
             return;
         };
@@ -75,109 +137,29 @@ impl CleanupPage {
             return;
         }
         let paths: Vec<PathBuf> = items.iter().map(|item| item.path.clone()).collect();
-        let bytes = items.iter().map(|item| item.bytes).sum();
-        let page = cx.entity();
-        smelt_ui::dialog::Confirm::new(
-            t!("maintenance.cleanup.confirm.title", count = paths.len()),
-            t!("maintenance.cleanup.confirm.action"),
-            move |_, cx| {
-                let paths = paths.clone();
-                page.update(cx, |page, cx| page.clean(paths, cx));
-                true
-            },
-        )
-        .danger()
-        .description(t!(
-            "maintenance.cleanup.confirm.description",
-            size = format_bytes(bytes)
-        ))
-        .open(window, cx);
-    }
-
-    fn clean(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        if self.cleaning {
-            return;
-        }
         self.cleaning = true;
         self.failures.clear();
-        cx.notify();
         let work = cx.background_executor().spawn(async move {
             let failures = residue::remove(&paths);
             (failures, residue::scan())
         });
         cx.spawn(async move |this, cx| {
             let (failures, scan) = work.await;
-            let _ = this.update(cx, |page, cx| {
+            let _ = this.update(cx, |workspace, cx| {
+                let state = accessor(workspace);
                 for (path, error) in &failures {
                     eprintln!("[maintenance] 删 {} 失败：{error}", path.display());
                 }
-                page.failures = failures.into_iter().collect();
-                page.scan = match scan {
+                state.failures = failures.into_iter().collect();
+                state.scan = match scan {
                     Ok(items) => Scan::Done(items),
                     Err(error) => Scan::Failed(error.to_string()),
                 };
-                page.cleaning = false;
-                cx.notify();
+                state.cleaning = false;
+                workspace.sync_host_settings(cx);
             });
         })
         .detach();
-    }
-}
-
-impl PluginView for CleanupPage {
-    fn open(&mut self, _: &api::serde_json::Value, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.cleaning {
-            Self::rescan(cx);
-        }
-    }
-}
-
-impl Render for CleanupPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let items: &[Residue] = match &self.scan {
-            Scan::Done(items) => items,
-            _ => &[],
-        };
-        let summary: SharedString = match &self.scan {
-            Scan::Running => t!("maintenance.cleanup.scanning").into(),
-            Scan::Failed(error) => t!("maintenance.cleanup.scan_failed", error = error).into(),
-            Scan::Done(items) if items.is_empty() => t!("maintenance.cleanup.empty").into(),
-            Scan::Done(items) => t!(
-                "maintenance.cleanup.summary",
-                count = items.len(),
-                size = format_bytes(items.iter().map(|item| item.bytes).sum())
-            )
-            .into(),
-        };
-        let page = cx.entity();
-        let header = SettingsRow::new(t!("maintenance.cleanup.row"))
-            .description(summary)
-            .child(
-                Button::new("clean-residue")
-                    .small()
-                    .label(t!("maintenance.cleanup.action"))
-                    .loading(self.cleaning)
-                    .disabled(self.cleaning || items.is_empty())
-                    .on_click(move |_, window, cx: &mut App| {
-                        page.update(cx, |page, cx| page.confirm(window, cx));
-                    }),
-            );
-        let rows = items.iter().map(|item| {
-            let row = SettingsRow::new(item.label.clone()).child(
-                div()
-                    .type_style(TYPE.ui)
-                    .text_color(rgb(ui_theme::muted()))
-                    .child(format_bytes(item.bytes)),
-            );
-            match self.failures.get(&item.path) {
-                Some(error) => {
-                    row.description(t!("maintenance.cleanup.remove_failed", error = error))
-                }
-                None => row,
-            }
-        });
-        SettingsPage::new("maintenance-cleanup")
-            .child(SettingsSection::new().child(header).children(rows))
     }
 }
 

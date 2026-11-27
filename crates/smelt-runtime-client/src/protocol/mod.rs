@@ -8,6 +8,7 @@ pub mod fs;
 pub mod forward;
 pub mod git;
 pub mod history;
+pub mod process;
 pub mod reason;
 pub mod runtime_upgrade;
 pub mod skills;

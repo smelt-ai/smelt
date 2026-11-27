@@ -230,6 +230,7 @@ function RingsCanvas(props: { rings: any[]; palette: any }) {
 export function bar() {
   const popoverOpen = signal(false);
   const look = theme;
+  const barVisible = computed(() => viewShown(BAR));
   const insets = computed(() => safeArea(BAR).bar_insets);
   const data = computed(() => {
     version();
@@ -340,7 +341,7 @@ export function bar() {
                             </If>
                             <SmeltIcon
                               path={chip().refreshing ? undefined : chip().icon}
-                              spin={chip().refreshing}
+                              spin={barVisible() && chip().refreshing}
                               size={chip().refreshing ? 12 : iconSize()}
                               color={chip().refreshing ? p()[chip().tone] : p().text}
                             />
@@ -508,7 +509,7 @@ export function bar() {
                       }}
                     >
                       {row().refreshing ? (
-                        <SmeltIcon spin={true} size={12} color={row().color} />
+                        <SmeltIcon spin={barVisible() && popoverOpen()} size={12} color={row().color} />
                       ) : (
                         <Text
                           style={{

@@ -1007,6 +1007,8 @@ struct SnapshotLinkInner {
     snapshots_sent: AtomicU64,
     /// 这张连接已经写出去的工具参数代表。没变就不再把整表放进下一帧。
     tool_debug_generation_sent: AtomicU64,
+    /// 连接是否订阅了调试 sidecar（`include_debug`）。为 false 时丢弃完整调试体且不绕过 16ms 合并。
+    include_debug: bool,
 }
 
 pub(crate) struct AcpSnapshotLink {
@@ -1033,6 +1035,11 @@ impl AcpSnapshotLink {
         include_envelope: bool,
         runtime_debug: Option<Arc<smelt_core::acp_session::RuntimeDebug>>,
     ) {
+        let (include_runtime_debug, runtime_debug) = if self.inner.include_debug {
+            (include_runtime_debug, runtime_debug)
+        } else {
+            (false, None)
+        };
         let mut mailbox = self.inner.mailbox.lock().unwrap();
         match mailbox.dirty.as_mut() {
             Some(existing) => {
@@ -1153,6 +1160,7 @@ pub(crate) fn spawn_acp_snapshot_link<C: ClientSocket>(
     initial: Vec<u8>,
     mirror: FrameMirror,
     tool_debug_generation_sent: u64,
+    include_debug: bool,
     id: &str,
     kind: &'static str,
     encode: SnapshotEncode,
@@ -1173,6 +1181,7 @@ pub(crate) fn spawn_acp_snapshot_link<C: ClientSocket>(
         flush_done: AtomicBool::new(false),
         snapshots_sent: AtomicU64::new(0),
         tool_debug_generation_sent: AtomicU64::new(tool_debug_generation_sent),
+        include_debug,
     });
     let writer_inner = Arc::clone(&inner);
     let writer_id = id.to_string();
@@ -1275,6 +1284,7 @@ pub(crate) fn acp_snapshot_link_for_slot<C: ClientSocket>(
         initial,
         mirror,
         tool_debug_generation_sent,
+        projection.debug,
         id,
         kind,
         Arc::new(
@@ -1853,6 +1863,9 @@ pub(crate) fn start_acp_event_drain(
                     let mut offsets = Vec::with_capacity(batch.len());
                     let mut should_persist = false;
                     let mut runtime_debug_changed = false;
+                    let mut pending_runtime_debug: Option<
+                        Arc<smelt_core::acp_session::RuntimeDebug>,
+                    > = None;
                     let mut envelope_changed = false;
                     let mut turn_ended = false;
                     let mut ready = false;
@@ -1960,6 +1973,16 @@ pub(crate) fn start_acp_event_drain(
                         {
                             resend = Some((text.clone(), images.clone()));
                         }
+                        // 父镜像里只留裁剪后的账本（`RuntimeDebug::ledger()`），避免把多 MB 原始
+                        // systemPrompt / tools / modelCalls 常驻留在 `smeltd` 堆上；完整调试体仅随本帧
+                        // 一次性发给订阅了 `include_debug` 的调试窗口，写完即释放。
+                        if let smelt_core::acp_conn::ConversationEvent::RuntimeDebug(debug) =
+                            &mut ev
+                        {
+                            let full = std::mem::take(debug.as_mut());
+                            *debug.as_mut() = full.ledger();
+                            pending_runtime_debug = Some(Arc::new(full));
+                        }
                         let (outcome, owner_ids) = {
                             let mut st = sess.reduced.lock();
                             let outcome = smelt_core::acp_session::apply_event(&mut st, ev);
@@ -2012,7 +2035,7 @@ pub(crate) fn start_acp_event_drain(
                             coalesce_snapshot_offset(offsets.iter().copied()),
                             runtime_debug_changed,
                             envelope_changed,
-                            None,
+                            pending_runtime_debug.take(),
                         );
                         update_acp_daemon_state(sess, &subscribers);
                         if let Some((text, images)) = resend.take() {

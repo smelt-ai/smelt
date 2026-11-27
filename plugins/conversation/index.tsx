@@ -10,6 +10,7 @@ import {
   acpUnsubscribe,
   agentCatalog,
   call,
+  clipboardWriteImage,
   DIALOG_SURFACE_CLASS,
   type EntryWindow,
   isInterruptMarker,
@@ -24,6 +25,7 @@ import {
   SmeltIcon,
   SmeltNativeWindowDrag,
   theme,
+  waitOnline,
   workspaceDirectory,
 } from "smelt/sdk";
 import { MemoryChangesCard } from "./cards.tsx";
@@ -37,10 +39,13 @@ import {
   buildDisplayRows,
   confirmedConfigValue,
   consumeComposerRestore,
+  createBottomStickController,
   EMPTY_ENTRY_WINDOW,
   entryUserText,
   entryWindowOf,
+  extractTurnAnswerPreview,
   isStreamingMetaUnchanged,
+  isTransportEnd,
   isTurnActive,
   isUserEntry,
   launchBringsContent,
@@ -48,6 +53,7 @@ import {
   overlayModelState,
   overlaySessionConfigs,
   reconcilePendingConfigValues,
+  reconnectAttempt,
   sessionSkills,
   showsEmptyWelcome,
   spliceEntries,
@@ -86,6 +92,8 @@ export interface SmeltConversationProps {
   placeholder?: string | null;
   /** 嵌入模式（如自动化运行页）：隐藏浮动标题胶囊。 */
   embedded?: boolean;
+  /** 是否可见（在 `display: none` 隐藏会话或非活动页时传 false，暂停所有旋转动画）。 */
+  active?: boolean;
   /** 浮动标题胶囊显示的会话名（非嵌入模式使用）。 */
   title?: string | null;
   /** 顶栏安全区信息（非嵌入模式避让窗口按钮/拖曳区）。 */
@@ -161,6 +169,7 @@ const WELCOME_LAYOUT_TRANSITION = {
 
 export function SmeltConversation(props: SmeltConversationProps) {
   const look = theme;
+  const visible = computed(() => props.active !== false);
 
   const subId = signal<string | null>(null);
   const connectError = signal<string | null>(null);
@@ -190,10 +199,16 @@ export function SmeltConversation(props: SmeltConversationProps) {
   const loadedMcpServers = computed<string[]>(() => snapshot()?.mcp_servers ?? []);
   const diffDialog = signal<EditDiffDialogState | null>(null);
   const inspectedSubagent = signal<{ id: string; title: string } | null>(null);
-  const imagePreview = signal<{ uri: string; loading: boolean } | null>(null);
+  const imagePreview = signal<{ uri: string; loading: boolean; img: any } | null>(null);
+  const imagePreviewCopied = signal(false);
+  let imagePreviewCopyTimer: ReturnType<typeof setTimeout> | null = null;
   const restoreDraft = signal<{ seq: number; text: string; images: AttachedImage[] } | null>(null);
   const quickInsert = signal<{ seq: number; text: string } | null>(null);
   const reconnectSeq = signal(0);
+  /** 对话流断了，正在等机器上线后自动重新订阅。 */
+  const reconnecting = signal(false);
+  /** 当前这条对话流已经关了：要再连上得重新订阅。 */
+  const streamClosed = signal(false);
 
   let listApi: any = null;
   let lastRestoreRev = 0;
@@ -215,6 +230,9 @@ export function SmeltConversation(props: SmeltConversationProps) {
   let backfilledAt: number | null = null;
   let lastRejectedNoticeId: number | null = null;
   let lastInitialPromptText: string | null = null;
+  /** 自动重连连续失败的次数，和这条流第一次收到活帧的时间（判断撑没撑过稳定期）。 */
+  let reconnectFailures = 0;
+  let usableSince: number | null = null;
 
   const agentId = computed(() => {
     const dir = props.directoryAcp;
@@ -267,6 +285,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
   });
 
   const promptItems = computed<PromptRailItem[]>(() => {
+    const es = entriesState();
     const rows = displayRows();
     const out: PromptRailItem[] = [];
     rows.forEach((row: any, rowIndex: number) => {
@@ -277,6 +296,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
         globalIndex: row.globalIndex,
         rowIndex,
         text,
+        answer: extractTurnAnswerPreview(es.entries, row.entryIndex),
       });
     });
     return out;
@@ -305,57 +325,94 @@ export function SmeltConversation(props: SmeltConversationProps) {
     latestSnapshot = merged;
     if (permissionSubmitting()) permissionSubmitting.set(false);
 
-    // 合并条目窗口（规则和手机端同一份，见 SDK `mergeEntryWindow`）
+    // 热路径快判：流式阶段绝大多数帧只更新最后一条活跃 Assistant 正文；
+    // 先在 JS 侧确认单条尾部补丁，直接跳过 `mergeEntryWindow` 同步 FFI 与 `spliceEntries` 整表拷贝。
     const prevEs = entriesState();
-    const plan = mergeEntryWindow(prevEs.window, entryWindowOf(merged));
-    const nextEs = {
-      entries: spliceEntries(prevEs.entries, plan, merged.entries ?? []),
-      window: plan.window,
-      dirtyFrom: plan.changed_from,
-    };
-
-    // 热路径优化：若仅最后一条活跃 Assistant 正文增长，只写细粒度 `streamingText` 信号，
-    // 跳过无变化的 `snapshot.set(merged)`，不触发 `layout` / `displayRows` 重建。
+    const prevLen = prevEs.entries.length;
+    const prevWin = prevEs.window;
+    const incomingEntries = merged.entries ?? [];
+    const incWin = entryWindowOf(merged);
     const active = isTurnActive(String(merged.phase ?? ""));
-    const prevLast = prevEs.entries[prevEs.entries.length - 1];
-    const nextLast = nextEs.entries[nextEs.entries.length - 1];
-    const sameShapeTailOnly =
+    const prevLast = prevLen > 0 ? prevEs.entries[prevLen - 1] : null;
+    const incLast = incomingEntries.length > 0 ? incomingEntries[incomingEntries.length - 1] : null;
+    const tailGlobalIndex = prevWin.offset + prevLen - 1;
+    const fastTailOnly =
       !initial &&
       active &&
-      nextEs.window.offset === prevEs.window.offset &&
-      nextEs.entries.length === prevEs.entries.length &&
-      nextEs.entries.length > 0 &&
-      nextEs.dirtyFrom === nextEs.entries.length - 1 &&
+      prevLen > 0 &&
+      incWin.history_session_id === prevWin.history_session_id &&
+      incWin.acp_session_id === prevWin.acp_session_id &&
+      incWin.revision >= prevWin.revision &&
+      incomingEntries.length === 1 &&
+      incWin.offset === tailGlobalIndex &&
+      incWin.total === prevWin.offset + prevLen &&
       Boolean(prevLast?.Assistant) &&
-      Boolean(nextLast?.Assistant) &&
-      Boolean(prevLast.Assistant.thought) === Boolean(nextLast.Assistant.thought);
+      Boolean(incLast?.Assistant) &&
+      Boolean(prevLast.Assistant.thought) === Boolean(incLast.Assistant.thought);
 
-    if (sameShapeTailOnly) {
-      const globalIx = nextEs.window.offset + nextEs.entries.length - 1;
-      prevEs.entries[prevEs.entries.length - 1] = nextLast;
-      prevEs.window = nextEs.window;
-      streamingGlobalIndex.set(globalIx);
-      streamingText.set(String(nextLast.Assistant.text ?? ""));
+    let nextEs: { entries: any[]; window: any; dirtyFrom: number | null };
+    if (fastTailOnly) {
+      prevEs.entries[prevLen - 1] = incLast;
+      prevEs.window = {
+        ...prevWin,
+        total: incWin.total,
+        revision: incWin.revision,
+      };
+      nextEs = { entries: prevEs.entries, window: prevEs.window, dirtyFrom: prevLen - 1 };
+      streamingGlobalIndex.set(tailGlobalIndex);
+      streamingText.set(String(incLast.Assistant.text ?? ""));
       if (!(rawSnap?.envelope_omitted && isStreamingMetaUnchanged(prevSnap, merged))) {
         snapshot.set(merged);
       }
     } else {
-      snapshot.set(merged);
-      const nextTimings = merged.turn_timings ?? [];
-      if (!turnTimingsEqual(turnTimings(), nextTimings)) {
-        turnTimings.set(nextTimings);
-      }
-      if (nextEs.dirtyFrom !== null || initial) {
-        entriesState.set({ entries: nextEs.entries, window: nextEs.window });
-        if (active && nextLast?.Assistant) {
-          streamingGlobalIndex.set(nextEs.window.offset + nextEs.entries.length - 1);
-          streamingText.set(String(nextLast.Assistant.text ?? ""));
-        } else {
-          streamingGlobalIndex.set(null);
+      // 合并条目窗口（规则和手机端同一份，见 SDK `mergeEntryWindow`）
+      const plan = mergeEntryWindow(prevEs.window, incWin);
+      nextEs = {
+        entries: spliceEntries(prevEs.entries, plan, incomingEntries),
+        window: plan.window,
+        dirtyFrom: plan.changed_from,
+      };
+
+      // 兜底热路径：整窗重推但仅最后一条活跃 Assistant 正文增长时同样只写 `streamingText`。
+      const nextLast = nextEs.entries[nextEs.entries.length - 1];
+      const sameShapeTailOnly =
+        !initial &&
+        active &&
+        nextEs.window.offset === prevEs.window.offset &&
+        nextEs.entries.length === prevEs.entries.length &&
+        nextEs.entries.length > 0 &&
+        nextEs.dirtyFrom === nextEs.entries.length - 1 &&
+        Boolean(prevLast?.Assistant) &&
+        Boolean(nextLast?.Assistant) &&
+        Boolean(prevLast.Assistant.thought) === Boolean(nextLast.Assistant.thought);
+
+      if (sameShapeTailOnly) {
+        const globalIx = nextEs.window.offset + nextEs.entries.length - 1;
+        prevEs.entries[prevEs.entries.length - 1] = nextLast;
+        prevEs.window = nextEs.window;
+        streamingGlobalIndex.set(globalIx);
+        streamingText.set(String(nextLast.Assistant.text ?? ""));
+        if (!(rawSnap?.envelope_omitted && isStreamingMetaUnchanged(prevSnap, merged))) {
+          snapshot.set(merged);
         }
       } else {
-        // 条目没变：总数、修订号照样要记，下一帧和翻页按它合并；不触发重画。
-        prevEs.window = nextEs.window;
+        snapshot.set(merged);
+        const nextTimings = merged.turn_timings ?? [];
+        if (!turnTimingsEqual(turnTimings(), nextTimings)) {
+          turnTimings.set(nextTimings);
+        }
+        if (nextEs.dirtyFrom !== null || initial) {
+          entriesState.set({ entries: nextEs.entries, window: nextEs.window });
+          if (active && nextLast?.Assistant) {
+            streamingGlobalIndex.set(nextEs.window.offset + nextEs.entries.length - 1);
+            streamingText.set(String(nextLast.Assistant.text ?? ""));
+          } else {
+            streamingGlobalIndex.set(null);
+          }
+        } else {
+          // 条目没变：总数、修订号照样要记，下一帧和翻页按它合并；不触发重画。
+          prevEs.window = nextEs.window;
+        }
       }
     }
 
@@ -477,14 +534,18 @@ export function SmeltConversation(props: SmeltConversationProps) {
       inspectedSubagent.set(null);
       diffDialog.set(null);
       imagePreview.set(null);
+      imagePreviewCopied.set(false);
       pinnedPrompt.set(null);
       readingGlobalIndex.set(null);
+      bottomStick.cancel();
       atLatest.set(true);
       loadingOlder.set(false);
       lastRestoreRev = 0;
       backfilledAt = null;
       lastRejectedNoticeId = null;
       lastInitialPromptText = null;
+      reconnecting.set(false);
+      reconnectFailures = 0;
     }
     activeSessionKey = sessionKey;
 
@@ -493,12 +554,39 @@ export function SmeltConversation(props: SmeltConversationProps) {
     const currentSubId = `sub-${newSessionId()}`;
     subId.set(currentSubId);
     connectError.set(null);
+    streamClosed.set(false);
+    usableSince = null;
 
     const unsubEvent = onAcpEvent((ev: any) => {
       if (cancelled || !ev || ev.sub_id !== currentSubId) return;
       if (ev.kind === "snapshot" && ev.snapshot) {
         applyIncomingSnapshot(ev.snapshot, firstFrame);
         firstFrame = false;
+        if (latestSnapshot?.phase !== "dead") {
+          usableSince ??= Date.now();
+          reconnecting.set(false);
+        } else if (!isTransportEnd(latestSnapshot)) {
+          reconnecting.set(false);
+        }
+      } else if (ev.kind === "closed") {
+        streamClosed.set(true);
+        const attempt = reconnectAttempt(
+          latestSnapshot,
+          reconnectFailures,
+          usableSince,
+          Date.now(),
+        );
+        if (attempt == null) {
+          reconnecting.set(false);
+          return;
+        }
+        reconnectFailures = attempt + 1;
+        reconnecting.set(true);
+        void waitOnline(machine, attempt).then((online) => {
+          if (cancelled) return;
+          if (online) reconnectSeq.set(reconnectSeq() + 1);
+          else reconnecting.set(false);
+        });
       } else if (ev.kind === "initial_prompt_unsupported" && lastInitialPromptText) {
         const text = lastInitialPromptText;
         lastInitialPromptText = null;
@@ -628,6 +716,44 @@ export function SmeltConversation(props: SmeltConversationProps) {
     }
   };
 
+  const clearImagePreviewCopyTimer = () => {
+    if (imagePreviewCopyTimer != null) {
+      clearTimeout(imagePreviewCopyTimer);
+      imagePreviewCopyTimer = null;
+    }
+    imagePreviewCopied.set(false);
+  };
+
+  cleanup(clearImagePreviewCopyTimer);
+
+  const closeImagePreview = () => {
+    clearImagePreviewCopyTimer();
+    imagePreview.set(null);
+  };
+
+  const handleCopyPreviewImage = () => {
+    const preview = imagePreview();
+    if (!preview) return;
+    const img = preview.img;
+    const payload = {
+      ref_id: typeof img?.ref_id === "string" && img.ref_id.length > 0 ? img.ref_id : null,
+      data_b64: typeof img?.data_b64 === "string" && img.data_b64.length > 0 ? img.data_b64 : null,
+      mime: typeof img?.mime === "string" && img.mime.length > 0 ? img.mime : null,
+      data_uri: typeof preview.uri === "string" && preview.uri.length > 0 ? preview.uri : null,
+    };
+    if (!payload.ref_id && !payload.data_b64 && !payload.data_uri) return;
+    void clipboardWriteImage(payload)
+      .then(() => {
+        imagePreviewCopied.set(true);
+        if (imagePreviewCopyTimer != null) clearTimeout(imagePreviewCopyTimer);
+        imagePreviewCopyTimer = setTimeout(() => {
+          imagePreviewCopied.set(false);
+          imagePreviewCopyTimer = null;
+        }, 1500);
+      })
+      .catch(() => {});
+  };
+
   const handlePreviewImage = (img: any) => {
     const quick =
       typeof img?.preview_uri === "string" && img.preview_uri.length > 0
@@ -636,18 +762,22 @@ export function SmeltConversation(props: SmeltConversationProps) {
           ? `data:${img.mime || "image/png"};base64,${img.data_b64}`
           : "";
     if (!quick && !img?.ref_id) return;
-    imagePreview.set({ uri: quick, loading: Boolean(img?.ref_id) });
+    clearImagePreviewCopyTimer();
+    imagePreview.set({ uri: quick, loading: Boolean(img?.ref_id), img });
     if (img?.ref_id) {
       acpImageUri(img.ref_id)
         .then((fullUri) => {
-          if (fullUri && imagePreview() != null) {
-            imagePreview.set({ uri: fullUri, loading: false });
-          } else if (imagePreview() != null) {
-            imagePreview.set({ uri: quick, loading: false });
+          const cur = imagePreview();
+          if (cur == null || cur.img !== img) return;
+          if (fullUri) {
+            imagePreview.set({ uri: fullUri, loading: false, img });
+          } else {
+            imagePreview.set({ uri: quick, loading: false, img });
           }
         })
         .catch(() => {
-          if (imagePreview() != null) imagePreview.set({ uri: quick, loading: false });
+          const cur = imagePreview();
+          if (cur != null && cur.img === img) imagePreview.set({ uri: quick, loading: false, img });
         });
     }
   };
@@ -676,6 +806,24 @@ export function SmeltConversation(props: SmeltConversationProps) {
       props.onAtLatestChange?.(next);
     }
   };
+
+  const bottomStick = createBottomStickController({
+    scrollToEnd: (opts: { animated?: boolean }) => listApi?.scrollToEnd?.(opts),
+    setAtLatest: updateAtLatest,
+  });
+  cleanup(bottomStick.cancel);
+
+  /** 用户主动发消息后立刻无动画跳到底，并在新气泡/回复落地后的布局帧持续补贴底。 */
+  const scrollToBottomAfterSend = () => {
+    bottomStick.trigger({ animated: false });
+  };
+
+  effect(() => {
+    // 订阅行数与流式文本变化：仅在发送后贴底窗口激活时经 rAF 合并补贴底。
+    displayRows().length;
+    streamingText().length;
+    bottomStick.onContentGrew();
+  });
 
   const handleViewableRange = (firstRowIdx: number, _lastRowIdx: number) => {
     const rows = displayRows();
@@ -752,9 +900,22 @@ export function SmeltConversation(props: SmeltConversationProps) {
       LayoutAnimation.configureNext(WELCOME_LAYOUT_TRANSITION);
     }
   });
-  const showEndedEmpty = computed(
-    () => dead() && entriesState().entries.length === 0 && entriesState().window.offset === 0,
+  const noEntries = computed(
+    () => entriesState().entries.length === 0 && entriesState().window.offset === 0,
   );
+  const showEndedEmpty = computed(() => dead() && !reconnecting() && noEntries());
+  /** 结束态的按钮只需重新订阅：流关了且只是连接断了，会话可能还活着，不能杀进程重启。 */
+  const reconnectOnly = computed(() => streamClosed() && isTransportEnd(snapshot()));
+  const restartOrReconnect = () => {
+    if (reconnectOnly()) {
+      reconnectFailures = 0;
+      reconnectSeq.set(reconnectSeq() + 1);
+      return;
+    }
+    acpRestart(props.machine ?? null, props.sessionId)
+      .catch(() => {})
+      .finally(() => reconnectSeq.set(reconnectSeq() + 1));
+  };
 
   return (
     <View
@@ -873,7 +1034,10 @@ export function SmeltConversation(props: SmeltConversationProps) {
         {/* 消息流主体或启动 / 结束 */}
         <If when={!showEmptyWelcome()}>
           <If
-            when={(entriesState().entries.length > 0 || snapshot() != null) && !showEndedEmpty()}
+            when={
+              (entriesState().entries.length > 0 || (snapshot() != null && !reconnecting())) &&
+              !showEndedEmpty()
+            }
             else={
               <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 12, padding: 24 }}>
                 <If
@@ -904,9 +1068,11 @@ export function SmeltConversation(props: SmeltConversationProps) {
                         </View>
                       }
                     >
-                      <SmeltIcon spin size={16} color={look().palette.muted} />
+                      <SmeltIcon spin={visible()} size={16} color={look().palette.muted} />
                       <Text style={{ fontSize: look().type.ui.size, color: look().palette.muted }}>
-                        {props.placeholder || ct("status.opening")}
+                        {reconnecting()
+                          ? ct("status.reconnecting")
+                          : props.placeholder || ct("status.opening")}
                       </Text>
                     </If>
                   }
@@ -936,12 +1102,14 @@ export function SmeltConversation(props: SmeltConversationProps) {
                     </Text>
                     <SmeltButton
                       primary
-                      label={snapshot()?.history_session_id ? ct("ended.resume") : ct("ended.new")}
-                      onPress={() => {
-                        acpRestart(props.machine ?? null, props.sessionId)
-                          .catch(() => {})
-                          .finally(() => reconnectSeq.set(reconnectSeq() + 1));
-                      }}
+                      label={
+                        reconnectOnly()
+                          ? ct("action.reconnect")
+                          : snapshot()?.history_session_id
+                            ? ct("ended.resume")
+                            : ct("ended.new")
+                      }
+                      onPress={restartOrReconnect}
                     />
                   </View>
                 </If>
@@ -951,6 +1119,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
             <View style={{ position: "relative", flex: 1, width: "100%", minHeight: 0 }}>
               <MessageList
                 rows={displayRows}
+                visible={visible}
                 machine={() => props.machine ?? null}
                 sessionId={() => props.sessionId}
                 cwd={cwd}
@@ -971,7 +1140,9 @@ export function SmeltConversation(props: SmeltConversationProps) {
                 }}
                 onLoadOlder={() => void handleLoadOlder()}
                 onViewableRange={handleViewableRange}
-                onScrollAtLatestChange={updateAtLatest}
+                onScrollAtLatestChange={(nearEnd) => bottomStick.onViewableAtLatest(nearEnd)}
+                onUserScroll={() => bottomStick.cancel()}
+                onJumpToLatest={() => bottomStick.trigger({ animated: !turnActive() })}
                 onToggleTurnFold={(key) => {
                   const next = new Set(expandedTurnFolds());
                   if (!next.delete(key)) next.add(key);
@@ -1008,7 +1179,10 @@ export function SmeltConversation(props: SmeltConversationProps) {
                 onEditResendAt={(globalIndex, _text) => {
                   sendAction({ RewindToMessage: { entry_index: globalIndex } });
                 }}
-                onRetryTurn={() => sendAction("RetryLastTurn")}
+                onRetryTurn={() => {
+                  sendAction("RetryLastTurn");
+                  scrollToBottomAfterSend();
+                }}
                 onInspectSubagent={(sub) => inspectedSubagent.set(sub)}
                 onOpenConversation={props.onOpenConversation}
               />
@@ -1021,7 +1195,14 @@ export function SmeltConversation(props: SmeltConversationProps) {
           prompts={promptItems}
           readingGlobalIndex={readingGlobalIndex}
           onJump={(item) => {
+            bottomStick.cancel();
+            readingGlobalIndex.set(item.globalIndex);
             listApi?.scrollToIndex?.({ index: item.rowIndex, animated: true });
+          }}
+          onScrub={(item) => {
+            bottomStick.cancel();
+            readingGlobalIndex.set(item.globalIndex);
+            listApi?.scrollToIndex?.({ index: item.rowIndex, animated: false });
           }}
         />
 
@@ -1029,7 +1210,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
         <If when={Boolean(snapshot()?.status_line) && (connecting() || turnActive())}>
           <View style={{ width: "100%", alignItems: "center", paddingHorizontal: 16, paddingBottom: 6 }}>
             <View style={{ width: "100%", maxWidth: 768, paddingHorizontal: 6, flexDirection: "row", alignItems: "center", gap: 6 }}>
-              <SmeltIcon spin size={12} color={look().palette.muted} />
+              <SmeltIcon spin={visible()} size={12} color={look().palette.muted} />
               <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.muted }}>
                 {snapshot()?.status_line ?? ""}
               </Text>
@@ -1043,7 +1224,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
               class="w-full px-3 py-2 rounded-[10px] bg-soft border border-border flex-row items-center gap-2"
               style={{ maxWidth: 768 }}
             >
-              <SmeltIcon spin size={12} color={look().palette.muted} />
+              <SmeltIcon spin={visible()} size={12} color={look().palette.muted} />
               <Text style={{ flex: 1, fontSize: look().type.text_xsmall.size, color: look().palette.text }}>
                 {ct("status.retrying", {
                   attempt: retryInfo()?.attempt ?? 1,
@@ -1077,27 +1258,35 @@ export function SmeltConversation(props: SmeltConversationProps) {
           </View>
         </If>
 
-        <If when={dead() && !showEndedEmpty()}>
+        <If when={dead() && !noEntries()}>
           <View style={{ width: "100%", alignItems: "center", paddingHorizontal: 16, paddingBottom: 6 }}>
-            <View
-              class="w-full px-3.5 py-2 rounded-xl bg-bad/12 border border-bad flex-row items-center gap-2.5"
-              style={{ maxWidth: 768 }}
+            <If
+              when={!reconnecting()}
+              else={
+                <View class="w-full px-3.5 py-2 flex-row items-center gap-2.5" style={{ maxWidth: 768 }}>
+                  <SmeltIcon spin={visible()} size={14} color={look().palette.muted} />
+                  <Text style={{ flex: 1, fontSize: look().type.ui.size, color: look().palette.muted }}>
+                    {ct("status.reconnecting")}
+                  </Text>
+                </View>
+              }
             >
-              <SmeltIcon path="icons/circle-x.svg" size={14} color={look().palette.bad} />
-              <Text style={{ flex: 1, fontSize: look().type.ui.size, color: look().palette.text }}>
-                {snapshot()?.end_reason || ct("status.disconnected")}
-              </Text>
-              <SmeltButton
-                primary
-                small
-                label={ct("action.restart")}
-                onPress={() => {
-                  acpRestart(props.machine ?? null, props.sessionId)
-                    .catch(() => {})
-                    .finally(() => reconnectSeq.set(reconnectSeq() + 1));
-                }}
-              />
-            </View>
+              <View
+                class="w-full px-3.5 py-2 rounded-xl bg-bad/12 border border-bad flex-row items-center gap-2.5"
+                style={{ maxWidth: 768 }}
+              >
+                <SmeltIcon path="icons/circle-x.svg" size={14} color={look().palette.bad} />
+                <Text style={{ flex: 1, fontSize: look().type.ui.size, color: look().palette.text }}>
+                  {snapshot()?.end_reason || ct("status.disconnected")}
+                </Text>
+                <SmeltButton
+                  primary
+                  small
+                  label={reconnectOnly() ? ct("action.reconnect") : ct("action.restart")}
+                  onPress={restartOrReconnect}
+                />
+              </View>
+            </If>
           </View>
         </If>
 
@@ -1112,6 +1301,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
         <Composer
           machine={() => props.machine ?? null}
           cwd={cwd}
+          visible={visible}
           readOnly={() => Boolean(props.readOnly)}
           turnActive={turnActive}
           dead={dead}
@@ -1146,6 +1336,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
               ? { FollowUp: { text, images: [], delivery_id: null } }
               : { Prompt: { text, images: [], delivery_id: null } };
             sendAction(payload, imageRefs);
+            scrollToBottomAfterSend();
           }}
           onCancel={() => sendAction("Cancel")}
           onForceRestart={() => {
@@ -1168,7 +1359,10 @@ export function SmeltConversation(props: SmeltConversationProps) {
           }
           onElicitSubmit={() => sendAction("ElicitationSubmit")}
           onElicitDismiss={() => sendAction("ElicitationDismiss")}
-          onDeliverQueuedNow={(text) => sendAction({ DeliverQueuedNow: { text } })}
+          onDeliverQueuedNow={(text) => {
+            sendAction({ DeliverQueuedNow: { text } });
+            scrollToBottomAfterSend();
+          }}
           onWithdrawPendingPrompt={(id) => sendAction({ WithdrawPendingPrompt: { id } })}
           onClearQueue={() => sendAction("ClearQueue")}
           onStopSubagent={(id) => sendAction({ StopSubagent: { id } })}
@@ -1206,7 +1400,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
       <SmeltDialog
         open={imagePreview() != null}
         onOpenChange={({ open }: any) => {
-          if (!open) imagePreview.set(null);
+          if (!open) closeImagePreview();
         }}
         class="m-auto"
       >
@@ -1224,7 +1418,16 @@ export function SmeltConversation(props: SmeltConversationProps) {
               <Text style={{ fontSize: look().type.small.size, color: look().palette.muted }}>
                 {ct("image.preview")}
               </Text>
-              <SmeltButton quiet small icon="icons/close.svg" onPress={() => imagePreview.set(null)} />
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                <SmeltButton
+                  quiet
+                  small
+                  icon={imagePreviewCopied() ? "icons/check.svg" : "icons/copy.svg"}
+                  label={imagePreviewCopied() ? ct("action.copied") : ct("action.copy_image")}
+                  onPress={handleCopyPreviewImage}
+                />
+                <SmeltButton quiet small icon="icons/close.svg" onPress={closeImagePreview} />
+              </View>
             </View>
             <View style={{ flex: 1, minHeight: 0, alignItems: "center", justifyContent: "center" }}>
               <If when={Boolean(imagePreview()?.uri)}>

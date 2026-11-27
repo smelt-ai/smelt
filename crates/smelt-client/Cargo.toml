@@ -12,15 +12,13 @@ workspace = true
 # 的守护操作。只走协议，不依赖 smelt-core 和运行时的库（设计文档 P1）。
 
 [dependencies]
-smelt-client-store = { path = "../smelt-client-store" }
 smelt-sys = { path = "../smelt-sys" }
 anyhow = "1"
 dirs.workspace = true
 reqwest = { version = "0.13", features = ["json"] }
-# 更新器按发版号比新旧（Windows 认编进程序的发版号）。
+# 更新器拿编进程序的发版号（smelt-version）和更新源的版本号比新旧。
 semver = "1"
-sha2.workspace = true
-hex = "0.4"
+smelt-version = { path = "../smelt-version" }
 url = "2"
 smelt-event-protocol = { path = "../smelt-event-protocol" }
 smelt-model = { path = "../smelt-model" }
@@ -36,9 +34,10 @@ libc = "0.2"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSFileManager", "NSString", "NSURL"] }
 
-# Windows 的更新认编进程序的发版号，对着发版的 SHA256SUMS 校验安装程序。
+# Windows 的更新对着发版的 SHA256SUMS 校验安装程序。
 [target.'cfg(windows)'.dependencies]
-smelt-version = { path = "../smelt-version" }
+sha2.workspace = true
+hex = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

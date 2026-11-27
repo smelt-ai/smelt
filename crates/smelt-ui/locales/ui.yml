@@ -1,30 +1,4 @@
 _version: 2
-action:
-  cancel:
-    en: "Cancel"
-    zh-CN: "取消"
-  clear:
-    en: "Clear"
-    zh-CN: "清空"
-  copy:
-    en: "Copy"
-    zh-CN: "复制"
-  cut:
-    en: "Cut"
-    zh-CN: "剪切"
-  paste:
-    en: "Paste"
-    zh-CN: "粘贴"
-  select_all:
-    en: "Select All"
-    zh-CN: "全选"
-combobox:
-  no_matches:
-    en: "No matches"
-    zh-CN: "没有匹配的结果"
-  search:
-    en: "Search"
-    zh-CN: "搜索"
 mermaid:
   no_diagram:
     en: "The source has no mermaid diagram"
@@ -35,14 +9,3 @@ mermaid:
   panicked:
     en: "Rendering was interrupted"
     zh-CN: "渲染中断"
-scrollbar:
-  horizontal:
-    en: "Horizontal scroll bar"
-    zh-CN: "水平滚动条"
-  vertical:
-    en: "Vertical scroll bar"
-    zh-CN: "垂直滚动条"
-select:
-  placeholder:
-    en: "Select"
-    zh-CN: "请选择"

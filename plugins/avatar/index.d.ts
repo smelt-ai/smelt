@@ -13,6 +13,8 @@ export interface AvatarProps {
   opacity?: number;
   /** 眼睛用的图标路径（比如智能体图标）：两只眼都画成它，和圆点眼同色；不给就是圆点眼。 */
   eye?: string;
+  /** 是否可见（折叠分组、隐藏侧栏或非活动页时传 false，暂停动画）。 */
+  active?: boolean;
 }
 
 /** 演一遍就停的那几出演多久（毫秒）：过了这么久头像自己站好。 */

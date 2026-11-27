@@ -30,7 +30,7 @@
 
 - 模块：`nsh`、`nsh/base`、`nsh/desktop`、`nsh/i18n`、`smelt/sdk`、共享模块（如 `smelt/conversation`、`smelt/avatar`，先列进清单 `requires`）、同目录相对文件。`smelt/host` 是底层绑定，用 `smelt/sdk`。`smelt/slots` 不对插件开放。
 - 全局只有 Web 标准的：`fetch`、`setTimeout`、`requestAnimationFrame`、`console`、`crypto`、`URL`、`TextEncoder` 等。**没有** Node 的 `fs`、`path`、`process`、`Buffer`、`require`。
-- 插件**没有文件系统接口**。数据存 `store`（SQLite）；远程或本机项目文件经运行时（`call(machine, "file.open" …)`）。插件目录里的图片宿主不加载，图形用自带图标或 `SmeltVector`。
+- 插件**没有文件系统接口**。数据存 `store`（SQLite）；远程或本机项目文件经运行时（`call(machine, "file.open" …)`）。要跑命令行程序用 `call(machine, "process.run", { program, args?, cwd?, env?, timeout_ms? })`，拿回 `{ code, stdout, stderr, timed_out, truncated }`。插件目录里的图片宿主不加载，图形用自带图标或 `SmeltVector`。
 - 不按权限隔离：任何插件都能调运行时、发通知、启动本机应用。只装可信的。
 
 ## 3. NSH 写法红线

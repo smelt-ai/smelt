@@ -422,7 +422,14 @@ pub fn setup_real_conv(
     let plugin_dir = root.join("sources/probe");
     fs::create_dir_all(&plugin_dir).unwrap();
     fs::write(plugin_dir.join("main.tsx"), CONV_PLUGIN).unwrap();
-    plugins.install("probe", &plugin_dir).unwrap();
+    plugins
+        .install_entry(
+            "probe",
+            &plugin_dir,
+            "main.tsx",
+            &["smelt/conversation".to_owned()],
+        )
+        .unwrap();
 
     let start = plugins.start();
     app.update(cx, |view, _| host.apply(view, start));
@@ -536,7 +543,7 @@ pub fn run_boot_compile_probe() -> BootCompileResult {
 
 #[derive(Default)]
 pub struct BenchRpcCounters {
-    pub git_diff_all_served: AtomicBool,
+    pub git_diff_files_served: AtomicBool,
     pub file_open_served: AtomicBool,
     pub project_tree_served: AtomicBool,
 }
@@ -709,20 +716,21 @@ impl Host for BenchHost {
                         "local": ["js-plugins", "main"],
                         "remote": ["origin/js-plugins", "origin/main"]
                     }),
-                    "git.diff.all" => {
-                        counters.git_diff_all_served.store(true, Ordering::Release);
-                        json!({
-                            "text": generate_diff_all(40),
-                        })
+                    "git.diff.files" => {
+                        counters
+                            .git_diff_files_served
+                            .store(true, Ordering::Release);
+                        generate_diff_files(40)
                     }
                     "git.diff.file" => {
                         let path = params["path"]
                             .as_str()
                             .unwrap_or("crates/smelt-nsh/src/mod_00.rs");
                         json!({
-                            "text": generate_diff_file(path, 0),
+                            "diff": { "kind": "text", "text": generate_diff_file(path, 0) },
                             "has_staged": false,
                             "is_gitlink": false,
+                            "worktree_file": null,
                         })
                     }
                     "fs.read_dir" => {
@@ -888,13 +896,23 @@ fn generate_diff_file(path: &str, seed: usize) -> String {
     out
 }
 
-fn generate_diff_all(file_count: usize) -> String {
-    let mut out = String::with_capacity(file_count * 4096);
+/// `git.diff.files` 的回复：`file_count` 个文件都在汇总补丁里。
+fn generate_diff_files(file_count: usize) -> Value {
+    let mut patch = String::with_capacity(file_count * 4096);
+    let mut files = Vec::with_capacity(file_count);
     for i in 0..file_count {
         let path = format!("crates/smelt-nsh/src/mod_{i:02}.rs");
-        out.push_str(&generate_diff_file(&path, i));
+        let diff = generate_diff_file(&path, i);
+        files.push(json!({
+            "path": path,
+            "status": "modified",
+            "size": diff.len(),
+            "body": { "kind": "text", "lines": null },
+            "in_patch": true,
+        }));
+        patch.push_str(&diff);
     }
-    out
+    json!({ "files": files, "patch": patch })
 }
 
 fn generate_project_tree(dir: &str) -> Vec<Value> {

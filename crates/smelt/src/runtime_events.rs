@@ -66,12 +66,13 @@ impl WantedTopics {
 /// 一条订阅线程这一轮开着的话题订阅；不在一轮里（离线、版本对不上、断开后退避中）是 `None`。
 type RoundTopics = Arc<Mutex<Option<OpenTopics>>>;
 
-/// 一轮里开着的话题订阅，每个话题一条：后加的话题旧运行时不认，会拒掉整条订阅，不能连累
-/// 别的。各记着订上时的序号。
+/// 一轮里开着的话题订阅：同一台运行时上所有插件话题复用到单条 [`TopicSubscription`] 连接与单条
+/// 读线程，大幅削减客户端与 `smeltd` 两侧的 socket 与 OS 线程数。记录每个已订话题的序号。
 struct OpenTopics {
     runtime: Runtime,
     sender: smol::channel::Sender<RuntimeTopicEvent>,
-    open: BTreeMap<String, (u64, SeparateSubscription)>,
+    opened: BTreeMap<String, u64>,
+    subscription: Option<SeparateSubscription>,
 }
 
 impl OpenTopics {
@@ -79,62 +80,74 @@ impl OpenTopics {
         Self {
             runtime: runtime.clone(),
             sender: sender.clone(),
-            open: BTreeMap::new(),
+            opened: BTreeMap::new(),
+            subscription: None,
         }
     }
 
-    /// 关掉不要了的，订上新要的；开着的话题又有插件新要了（序号变大）就重订，新来的也拿到
-    /// 快照（见 `smelt_plugin_api` 的 topic 模块文档）。阻塞（连运行时），不在主线程调。上一次
-    /// 没连上的、没重订成的，这次再试。
+    /// 对齐 `wanted` 集合：有新增、移除或序号更新时，单次切换整条复用订阅（先开新连再关旧连），
+    /// 避免每话题独开连接与线程。阻塞（连运行时），不在主线程调。
     fn reconcile(&mut self, wanted: &BTreeMap<String, u64>) {
-        let opened = self
-            .open
-            .iter()
-            .map(|(topic, (requested, _))| (topic, *requested));
-        for (topic, change) in topic_changes(opened, wanted) {
-            match change {
-                TopicChange::Close => {
-                    if let Some((_, subscription)) = self.open.remove(&topic) {
-                        subscription.close();
-                    }
-                }
-                TopicChange::Renew(requested) => {
-                    // 先告诉原来订着的插件按积压处理（带快照的等重订上的那份，没有的重读），
-                    // 再开新的；开上了才关旧的。开不上旧的照常推，序号不动，下次再试。
-                    let _ = self.sender.try_send((
-                        self.runtime.key().clone(),
-                        topic.clone(),
-                        TopicMessage::Lagged,
-                    ));
-                    if let Some(renewed) = self.subscribe(&topic)
-                        && let Some((_, old)) = self.open.insert(topic, (requested, renewed))
-                    {
-                        old.close();
-                    }
-                }
-                TopicChange::Open(requested) => {
-                    if let Some(subscription) = self.subscribe(&topic) {
-                        self.open.insert(topic, (requested, subscription));
-                    }
-                }
+        let changes = topic_changes(self.opened.iter().map(|(t, seq)| (t, *seq)), wanted);
+        if changes.is_empty() {
+            return;
+        }
+        if wanted.is_empty() {
+            if let Some(old) = self.subscription.take() {
+                old.close();
+            }
+            self.opened.clear();
+            return;
+        }
+        for (topic, change) in &changes {
+            if matches!(change, TopicChange::Renew(_)) {
+                let _ = self.sender.try_send((
+                    self.runtime.key().clone(),
+                    topic.clone(),
+                    TopicMessage::Lagged,
+                ));
+            }
+        }
+        let topics: Vec<String> = wanted.keys().cloned().collect();
+        if let Some(renewed) = self.subscribe(topics) {
+            let old = self.subscription.replace(renewed);
+            self.opened = wanted.clone();
+            if let Some(old) = old {
+                old.close();
             }
         }
     }
 
-    /// 向这台机器单独订一个话题，推来的转进 `sender`。连不上是 `None`（已记日志）。
-    fn subscribe(&self, topic: &str) -> Option<SeparateSubscription> {
+    /// 向这台机器复用订阅一批话题，按消息里的 `topic` 路由到 `sender`。连不上是 `None`（已记日志）。
+    fn subscribe(&self, topics: Vec<String>) -> Option<SeparateSubscription> {
         let key = self.runtime.key().clone();
         let sender = self.sender.clone();
-        let name = topic.to_string();
-        SeparateSubscription::open(&self.runtime, topic.to_string(), move |message| {
-            sender
-                .try_send((key.clone(), name.clone(), message))
-                .is_ok()
+        let all_topics = topics.clone();
+        SeparateSubscription::open(&self.runtime, topics, move |message| match message {
+            TopicMessage::Event { ref topic, .. } | TopicMessage::Snapshot { ref topic, .. } => {
+                sender
+                    .try_send((key.clone(), topic.clone(), message))
+                    .is_ok()
+            }
+            TopicMessage::Lagged => all_topics.iter().all(|t| {
+                sender
+                    .try_send((key.clone(), t.clone(), TopicMessage::Lagged))
+                    .is_ok()
+            }),
+            TopicMessage::Unavailable(reason) => all_topics.iter().all(|t| {
+                sender
+                    .try_send((
+                        key.clone(),
+                        t.clone(),
+                        TopicMessage::Unavailable(reason.clone()),
+                    ))
+                    .is_ok()
+            }),
         })
     }
 
     fn close(self) {
-        for (_, (_, subscription)) in self.open {
+        if let Some(subscription) = self.subscription {
             subscription.close();
         }
     }
@@ -222,6 +235,9 @@ pub(crate) struct SubscriptionHandle {
     wake: std::sync::mpsc::Sender<Wake>,
     /// 这条线程眼下这一轮开着的话题订阅。
     round: RoundTopics,
+    /// 合并启动期连续的 `sync_topics` 调用：同一运行时最多只跑一条同步线程。
+    sync_running: Arc<AtomicBool>,
+    sync_dirty: Arc<AtomicBool>,
 }
 
 impl SubscriptionHandle {
@@ -504,12 +520,13 @@ impl SeparateShared {
     }
 }
 
-/// 连上一条单独订阅，连同关它的把手。
-fn open_topic(
+/// 连上一条多话题复用订阅，连同关它的把手。
+fn open_topics(
     client: &smelt_runtime_client::RuntimeClient,
-    topic: &str,
+    topics: &[String],
 ) -> Result<(TopicSubscriptionCloser, TopicSubscription), String> {
-    TopicSubscription::open(client, vec![topic])
+    let refs: Vec<&str> = topics.iter().map(String::as_str).collect();
+    TopicSubscription::open(client, refs)
         .and_then(|subscription| Ok((subscription.closer()?, subscription)))
 }
 
@@ -517,15 +534,15 @@ impl SeparateSubscription {
     /// 第一次连不上、起不了线程就不订，记日志；下一轮核心订阅再试。
     fn open(
         runtime: &Runtime,
-        topic: String,
+        topics: Vec<String>,
         mut emit: impl FnMut(TopicMessage) -> bool + Send + 'static,
     ) -> Option<Self> {
         let key = runtime.key().clone();
         let client = runtime.client().clone();
-        let (closer, first) = match open_topic(&client, &topic) {
+        let (closer, first) = match open_topics(&client, &topics) {
             Ok(opened) => opened,
             Err(error) => {
-                eprintln!("[runtime-events] {key:?} 单独订阅连不上：{error}");
+                eprintln!("[runtime-events] {key:?} 话题订阅连不上：{error}");
                 return None;
             }
         };
@@ -579,7 +596,7 @@ impl SeparateSubscription {
                         return;
                     }
                     drop(state);
-                    match open_topic(&client, &topic) {
+                    match open_topics(&client, &topics) {
                         Ok((closer, subscription)) => {
                             let mut state = shared.lock();
                             if state.closed {
@@ -639,6 +656,8 @@ pub(crate) fn spawn_subscription(
         stop: Arc::clone(&stop),
         wake,
         round: Arc::clone(&round),
+        sync_running: Arc::new(AtomicBool::new(false)),
+        sync_dirty: Arc::new(AtomicBool::new(false)),
     };
     std::thread::Builder::new()
         .name(format!("smelt-events-{key:?}"))
@@ -715,53 +734,54 @@ pub(crate) fn spawn_subscription(
                             topics.reconcile(&wanted.get());
                             *current = Some(topics);
                         }
-                        // 外观只由本机桌面处理。
-                        let appearance = if runtime.is_local() {
-                            let appearance_key = key.clone();
+                        // 本机宿主专属核心话题（外观回执、App 命令、对端节点变化）复用到同一条连接与线程。
+                        let local_core = if runtime.is_local() {
+                            crate::runtimes::peers_changed();
+                            let core_key = key.clone();
                             let state_sender = sender.states.clone();
-                            SeparateSubscription::open(
-                                &runtime,
-                                smelt_event_protocol::CORE_TOPIC_APPEARANCE_APPLY_REQUESTED
-                                    .to_string(),
-                                move |message| match appearance_event(message) {
-                                    Some(event) => state_sender
-                                        .try_send((appearance_key.clone(), event))
-                                        .is_ok(),
-                                    None => true,
-                                },
-                            )
-                        } else {
-                            None
-                        };
-                        // 命令登记在桌面里，只接本机运行时转来的。
-                        let commands = if runtime.is_local() {
                             let command_sender = sender.commands.clone();
                             SeparateSubscription::open(
                                 &runtime,
-                                smelt_event_protocol::CORE_TOPIC_APP_COMMAND_REQUESTED.to_string(),
-                                move |message| match app_command_event(message) {
-                                    Some(request) => command_sender.try_send(request).is_ok(),
-                                    None => true,
-                                },
-                            )
-                        } else {
-                            None
-                        };
-                        // 本机运行时的对端节点（远程机器列表）变了就重读；刚连上也读一次：
-                        // 启动时它可能还没起来、或是还不认对端节点的旧版本。
-                        let peers = if runtime.is_local() {
-                            crate::runtimes::peers_changed();
-                            SeparateSubscription::open(
-                                &runtime,
-                                smelt_event_protocol::CORE_TOPIC_PEERS_CHANGED.to_string(),
-                                |message| {
-                                    if matches!(
-                                        message,
-                                        TopicMessage::Event { .. } | TopicMessage::Lagged
-                                    ) {
+                                vec![
+                                    smelt_event_protocol::CORE_TOPIC_APPEARANCE_APPLY_REQUESTED
+                                        .to_string(),
+                                    smelt_event_protocol::CORE_TOPIC_APP_COMMAND_REQUESTED
+                                        .to_string(),
+                                    smelt_event_protocol::CORE_TOPIC_PEERS_CHANGED.to_string(),
+                                ],
+                                move |message| match &message {
+                                    TopicMessage::Lagged => {
                                         crate::runtimes::peers_changed();
+                                        true
                                     }
-                                    true
+                                    TopicMessage::Event { topic, .. }
+                                        if topic
+                                            == smelt_event_protocol::CORE_TOPIC_PEERS_CHANGED =>
+                                    {
+                                        crate::runtimes::peers_changed();
+                                        true
+                                    }
+                                    TopicMessage::Event { topic, .. }
+                                        if topic
+                                            == smelt_event_protocol::CORE_TOPIC_APPEARANCE_APPLY_REQUESTED =>
+                                    {
+                                        match appearance_event(message) {
+                                            Some(event) => state_sender
+                                                .try_send((core_key.clone(), event))
+                                                .is_ok(),
+                                            None => true,
+                                        }
+                                    }
+                                    TopicMessage::Event { topic, .. }
+                                        if topic
+                                            == smelt_event_protocol::CORE_TOPIC_APP_COMMAND_REQUESTED =>
+                                    {
+                                        match app_command_event(message) {
+                                            Some(request) => command_sender.try_send(request).is_ok(),
+                                            None => true,
+                                        }
+                                    }
+                                    _ => true,
                                 },
                             )
                         } else {
@@ -781,14 +801,8 @@ pub(crate) fn spawn_subscription(
                         if let Some(topics) = topics {
                             topics.close();
                         }
-                        if let Some(appearance) = appearance {
-                            appearance.close();
-                        }
-                        if let Some(commands) = commands {
-                            commands.close();
-                        }
-                        if let Some(peers) = peers {
-                            peers.close();
+                        if let Some(local_core) = local_core {
+                            local_core.close();
                         }
                         if stop.load(Ordering::Acquire) {
                             return;
@@ -952,23 +966,46 @@ fn sync_topics(cx: &mut App) {
         .wanted
         .set(smelt_plugin_api::subscribed_topics(cx));
     let wanted = subscriptions.wanted.clone();
-    let rounds: Vec<RoundTopics> = std::iter::once(&subscriptions.local)
-        .chain(subscriptions.remotes.values())
-        .map(|handle| Arc::clone(&handle.round))
-        .collect();
-    // 订阅要连运行时、会阻塞（远程机器可能很慢），不占后台执行器的线程；每台机器一条
-    // 线程，慢的不拖累别的。话题变化只在插件装上、卸下时有，线程起得不多。
-    for round in rounds {
+    let targets: Vec<(RoundTopics, Arc<AtomicBool>, Arc<AtomicBool>)> =
+        std::iter::once(&subscriptions.local)
+            .chain(subscriptions.remotes.values())
+            .map(|handle| {
+                (
+                    Arc::clone(&handle.round),
+                    Arc::clone(&handle.sync_running),
+                    Arc::clone(&handle.sync_dirty),
+                )
+            })
+            .collect();
+    // 订阅要连运行时、会阻塞（远程机器可能很慢），不占后台执行器的线程；每台机器最多一条
+    // 同步线程，启动期连续登记多个插件话题时合并到同一条线程里循环收敛。
+    for (round, running, dirty) in targets {
+        dirty.store(true, Ordering::Release);
+        if running.swap(true, Ordering::AcqRel) {
+            continue;
+        }
         let wanted = wanted.clone();
+        let thread_running = Arc::clone(&running);
         let spawned = std::thread::Builder::new()
             .name("smelt-topics".into())
             .spawn(move || {
-                // 先拿这一轮的锁再读并集：几次变化挤在一起时，后跑的按最新的增减。
-                if let Some(topics) = lock(&round).as_mut() {
-                    topics.reconcile(&wanted.get());
+                loop {
+                    dirty.store(false, Ordering::Release);
+                    if let Some(topics) = lock(&round).as_mut() {
+                        topics.reconcile(&wanted.get());
+                    }
+                    if !dirty.load(Ordering::Acquire) {
+                        thread_running.store(false, Ordering::Release);
+                        if !dirty.load(Ordering::Acquire)
+                            || thread_running.swap(true, Ordering::AcqRel)
+                        {
+                            break;
+                        }
+                    }
                 }
             });
         if let Err(error) = spawned {
+            running.store(false, Ordering::Release);
             eprintln!("[runtime] 起不了同步话题订阅的线程：{error}");
         }
     }

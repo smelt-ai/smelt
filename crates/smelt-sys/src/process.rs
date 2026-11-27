@@ -97,6 +97,16 @@ impl ProcessTree {
         self.pid()
     }
 
+    /// 取走子进程的 stdout、stderr 管道（拉起时要设成 `Stdio::piped()`，否则是 `None`）。
+    pub fn take_output(
+        &mut self,
+    ) -> (
+        Option<std::process::ChildStdout>,
+        Option<std::process::ChildStderr>,
+    ) {
+        (self.child.stdout.take(), self.child.stderr.take())
+    }
+
     /// 请这棵树自己收尾。Unix 向进程组发 `SIGTERM`。Windows 没有对应的信号，
     /// 这里直接结束整棵树。
     pub fn terminate(&self) -> io::Result<()> {

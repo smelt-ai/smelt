@@ -74,13 +74,17 @@ pub(crate) fn dispatch(
         ControlMethod::GitStashPop => {
             call::<GitStashPopCall>(params, |p| smelt_git::stash_pop(&p.root).map(done))
         }
-        ControlMethod::GitFileDiff => call::<GitFileDiffCall>(params, |p| {
-            Ok(smelt_git::file_diff(&p.root, &p.path, p.untracked, p.scope))
+        ControlMethod::GitDiffFiles => call::<GitDiffFilesCall>(params, |p| {
+            smelt_git::diff_files(&p.root, p.scope, &p.untracked_paths)
         }),
-        ControlMethod::GitAllDiff => call::<GitAllDiffCall>(params, |p| {
-            Ok(GitTextResult {
-                text: smelt_git::all_diff(&p.root, p.scope, &p.untracked_paths),
-            })
+        ControlMethod::GitFileDiff => call::<GitFileDiffCall>(params, |p| {
+            smelt_git::file_diff(
+                &p.root,
+                &p.path,
+                p.old_path.as_deref(),
+                p.untracked,
+                p.scope,
+            )
         }),
         ControlMethod::GitLog => call::<GitLogCall>(params, |p| {
             Ok(GitLogResult {
@@ -93,9 +97,7 @@ pub(crate) fn dispatch(
             })
         }),
         ControlMethod::GitCommitFileDiff => call::<GitCommitFileDiffCall>(params, |p| {
-            Ok(GitTextResult {
-                text: smelt_git::commit_file_diff(&p.root, &p.hash, &p.path),
-            })
+            smelt_git::commit_file_diff(&p.root, &p.hash, &p.path)
         }),
         other => Err(ControlError::new(
             ControlErrorCode::Internal,

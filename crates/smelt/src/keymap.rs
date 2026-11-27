@@ -21,7 +21,6 @@ use gpui::{
     App, Global, KeyBinding, KeyBindingContextPredicate, KeyBindingMetaIndex, Keystroke, Menu,
     MenuItem, NoAction, OperatingSystem, SharedString, Subscription, Window,
 };
-use gpui_base::input::{DeleteToBeginningOfLine, DeleteToEndOfLine, DeleteToPreviousWordStart};
 use smelt_client_store::KeyBindingRecord;
 use smelt_plugin_api::{self as api, CommandInfo, HostEvent, RunCommand};
 
@@ -132,28 +131,11 @@ pub(crate) fn bind_commands(
 /// 应用键位：改不了的固定键，加上每条命令生效的键。
 /// 键是运行时的字符串，只能走 `KeyBinding::load`，它要 App 给键盘映射。
 pub(crate) fn app_key_bindings(bound: &[Bound], cx: &App) -> Vec<KeyBinding> {
-    let mut bindings = vec![
-        KeyBinding::new("escape", DismissWorkspace, Some("Workspace")),
-        // readline / Grok TUI 行编辑：Ctrl+U 删到行首、Ctrl+K 删到行尾、
-        // Ctrl+W 删词。绑在 Input context，所有输入框（对话输入框等）生效。
-        KeyBinding::new("ctrl-u", DeleteToBeginningOfLine, Some("Input")),
-        KeyBinding::new("ctrl-k", DeleteToEndOfLine, Some("Input")),
-        KeyBinding::new("ctrl-w", DeleteToPreviousWordStart, Some("Input")),
-    ];
-    // cmux：Ctrl+Backspace / Ctrl+Delete 也是删行（^U / ^K），不是删词。
-    #[cfg(target_os = "macos")]
-    {
-        bindings.push(KeyBinding::new(
-            "ctrl-backspace",
-            DeleteToBeginningOfLine,
-            Some("Input"),
-        ));
-        bindings.push(KeyBinding::new(
-            "ctrl-delete",
-            DeleteToEndOfLine,
-            Some("Input"),
-        ));
-    }
+    let mut bindings = vec![KeyBinding::new(
+        "escape",
+        DismissWorkspace,
+        Some("Workspace"),
+    )];
     for command in bound {
         let Some(keystroke) = &command.key else {
             continue;

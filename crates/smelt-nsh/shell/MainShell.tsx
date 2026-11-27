@@ -5,6 +5,7 @@
 import { cleanup, computed, effect, host, Scroll, signal, Text, View } from "nsh";
 import { Button as BaseButton, DockArea } from "nsh/base";
 import { Slot } from "smelt/slots";
+import { HostSettingsPage, isHostSettingsPage, SettingsNavPanel } from "./HostSettings.tsx";
 import {
   DIALOG_SURFACE_CLASS,
   initHost,
@@ -146,9 +147,21 @@ interface DirPickerDialogSnapshot {
   list_rev: number;
 }
 
+interface ConfirmDialogSnapshot {
+  title: string;
+  description: string;
+  note: string | null;
+  note_bad: boolean;
+  cancel_label: string;
+  confirm_label: string;
+  danger: boolean;
+  busy: boolean;
+}
+
 interface HostDialogsSnapshot {
   quit: QuitDialogSnapshot | null;
   dir_picker: DirPickerDialogSnapshot | null;
+  confirm: ConfirmDialogSnapshot | null;
 }
 
 interface ShellSnapshot {
@@ -341,7 +354,12 @@ function SettingsContentPanel() {
             </View>
           }
         >
-          <HostView view={settingsId()} style={{ flex: 1, width: "100%", height: "100%" }} />
+          <If
+            when={isHostSettingsPage(settingsId())}
+            else={<HostView view={settingsId()} style={{ flex: 1, width: "100%", height: "100%" }} />}
+          >
+            <HostSettingsPage pageId={settingsId()} />
+          </If>
         </If>
       </View>
     </View>
@@ -365,6 +383,7 @@ function PanelBody(props: { pageKey: string; panelId: string }) {
         if (spec.kind === "stack") return <StackView node={spec.stack} />;
         if (spec.view === "smelt/outlet") return <OutletPanel pageKey={props.pageKey} />;
         if (spec.view === "smelt/settings") return <SettingsContentPanel />;
+        if (spec.view === "smelt/settings-nav") return <SettingsNavPanel />;
         return <HostView view={spec.view} style={{ flex: 1, width: "100%", height: "100%" }} />;
       })()}
     </View>
@@ -393,12 +412,27 @@ function TabBarLeading(props: { pageKey: string; groupId: string }) {
 
 function TabItem(props: { pageKey: string; panelId: string; active: boolean }) {
   const theme = currentTheme;
-  const tabMeta = stableMemo(() => {
+  const tabSpec = stableMemo(() => {
     const pages = (shellState() as ShellSnapshot | undefined)?.pages ?? [];
-    const meta = pages.find((p) => p.key === props.pageKey)?.meta?.[props.panelId];
+    const page = pages.find((p) => p.key === props.pageKey);
+    const meta = page?.meta?.[props.panelId];
     const title = typeof meta?.title === "string" && meta.title.length > 0 ? meta.title : props.panelId;
-    const badge = typeof meta?.badge === "string" && meta.badge.length > 0 ? meta.badge : null;
-    return { title, badge };
+    const rawView = typeof meta?.view === "string" ? meta.view : null;
+    const viewId = rawView === "smelt/outlet" ? (page?.outlet?.id ?? null) : rawView;
+    const fallbackBadge = typeof meta?.badge === "string" && meta.badge.length > 0 ? meta.badge : null;
+    return { title, viewId, fallbackBadge };
+  });
+  // 角标直接读 `views` 切片，避免 `ViewBadgesChanged` 触发整份 `shell` 快照重建与全页 memo 重算。
+  const badge = computed(() => {
+    const spec = tabSpec();
+    if (spec.viewId) {
+      const list = views() ?? [];
+      const found = list.find((v: any) => v?.id === spec.viewId);
+      if (found) {
+        return typeof found.badge === "string" && found.badge.length > 0 ? found.badge : null;
+      }
+    }
+    return spec.fallbackBadge;
   });
   const tStyle = computed(() => (props.active ? theme().type.ui_medium : theme().type.ui));
 
@@ -427,9 +461,9 @@ function TabItem(props: { pageKey: string; panelId: string; active: boolean }) {
           numberOfLines: 1,
         }}
       >
-        {tabMeta().title}
+        {tabSpec().title}
       </Text>
-      <If when={tabMeta().badge !== null}>
+      <If when={badge() !== null}>
         <View
           style={{
             paddingLeft: 5,
@@ -448,7 +482,7 @@ function TabItem(props: { pageKey: string; panelId: string; active: boolean }) {
               color: theme().palette.text,
             }}
           >
-            {tabMeta().badge ?? ""}
+            {badge() ?? ""}
           </Text>
         </View>
       </If>
@@ -567,6 +601,7 @@ function PageWorkspace(props: { pageKey: string }) {
   const theme = currentTheme;
   const labels = stableMemo(() => (shellState() as ShellSnapshot | undefined)?.labels);
   const padding = computed(() => (shellState() as ShellSnapshot | undefined)?.padding ?? 0);
+  const hasBackdrop = computed(() => Boolean((shellState() as any)?.has_backdrop));
 
   const reportLayout = (event: { layout?: any } | any) => {
     const nextLayout = event?.layout ?? event;
@@ -626,12 +661,16 @@ function PageWorkspace(props: { pageKey: string }) {
               borderColor: theme().palette.focus,
               borderRadius: theme().radius.md,
             }}
-            renderRegionBackdrop={(placement: string) => (
-              <SmeltBackdropRegion
-                placement={placement}
-                style={{ width: "100%", height: "100%", pointerEvents: "none" }}
-              />
-            )}
+            renderRegionBackdrop={
+              hasBackdrop()
+                ? (placement: string) => (
+                    <SmeltBackdropRegion
+                      placement={placement}
+                      style={{ width: "100%", height: "100%", pointerEvents: "none" }}
+                    />
+                  )
+                : undefined
+            }
             renderTabBarLeading={(group: any) => (
               <TabBarLeading pageKey={props.pageKey} groupId={String(group.id)} />
             )}
@@ -729,6 +768,7 @@ function HostDialogs() {
   const dialogs = computed(() => (shellState() as ShellSnapshot | undefined)?.host_dialogs);
   const quit = computed(() => dialogs()?.quit ?? null);
   const picker = computed(() => dialogs()?.dir_picker ?? null);
+  const confirm = computed(() => dialogs()?.confirm ?? null);
 
   let dirScrollRef: any = null;
   effect(() => {
@@ -1026,6 +1066,71 @@ function HostDialogs() {
               disabled={!picker()?.can_confirm}
               label={picker()?.confirm_label ?? ""}
               onPress={() => sendHostDialogAction("dir_picker_confirm")}
+            />
+          </View>
+        </If>
+      </SmeltDialog>
+
+      <SmeltDialog
+        open={confirm() != null}
+        role="alertdialog"
+        closeOnBackdropPress={false}
+        closeOnEscape={!confirm()?.busy}
+        accessibilityLabel={confirm()?.title ?? ""}
+        accessibilityDescription={confirm()?.description ?? ""}
+        onOpenChange={({ open }: { open: boolean }) => {
+          if (!open && !confirm()?.busy) sendHostDialogAction("confirm_cancel");
+        }}
+        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
+        style={{ width: 440, gap: 12 }}
+      >
+        <If when={confirm() != null}>
+          <Text
+            style={{
+              fontSize: theme().type.ui_medium.size,
+              lineHeight: theme().type.ui_medium.line_height,
+              fontWeight: theme().type.ui_medium.weight,
+              color: theme().palette.text,
+            }}
+          >
+            {confirm()?.title ?? ""}
+          </Text>
+          <Text
+            style={{
+              fontSize: theme().type.ui.size,
+              lineHeight: theme().type.ui.line_height,
+              color: theme().palette.muted,
+            }}
+          >
+            {confirm()?.description ?? ""}
+          </Text>
+          <If when={Boolean(confirm()?.note)}>
+            <Text
+              style={{
+                fontSize: theme().type.ui.size,
+                lineHeight: theme().type.ui.line_height,
+                color: confirm()?.note_bad ? theme().palette.bad : theme().palette.muted,
+              }}
+            >
+              {confirm()?.note ?? ""}
+            </Text>
+          </If>
+          <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
+            <SmeltButton
+              quiet={true}
+              small={true}
+              disabled={Boolean(confirm()?.busy)}
+              label={confirm()?.cancel_label ?? ""}
+              onPress={() => sendHostDialogAction("confirm_cancel")}
+            />
+            <SmeltButton
+              primary={!confirm()?.danger}
+              danger={Boolean(confirm()?.danger)}
+              small={true}
+              loading={Boolean(confirm()?.busy)}
+              disabled={Boolean(confirm()?.busy)}
+              label={confirm()?.confirm_label ?? ""}
+              onPress={() => sendHostDialogAction("confirm_accept")}
             />
           </View>
         </If>

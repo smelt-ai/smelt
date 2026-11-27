@@ -129,11 +129,25 @@ pub struct DirPickerDialogState {
     pub list_rev: u64,
 }
 
-/// 宿主对话框快照（退出确认、远程目录选择器）。
+/// 宿主通用确认对话框状态（如在线更新重启/退出/移动应用确认）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ConfirmDialogState {
+    pub title: String,
+    pub description: String,
+    pub note: Option<String>,
+    pub note_bad: bool,
+    pub cancel_label: String,
+    pub confirm_label: String,
+    pub danger: bool,
+    pub busy: bool,
+}
+
+/// 宿主对话框快照（退出确认、远程目录选择器、通用确认）。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct HostDialogsState {
     pub quit: Option<QuitDialogState>,
     pub dir_picker: Option<DirPickerDialogState>,
+    pub confirm: Option<ConfirmDialogState>,
 }
 
 /// 主壳向宿主回报的对话框操作。
@@ -147,6 +161,8 @@ pub enum HostDialogAction {
     DirPickerToggle(String),
     DirPickerConfirm,
     DirPickerCancel,
+    ConfirmAccept,
+    ConfirmCancel,
 }
 
 /// 主壳向 `Workspace` 汇报的事件。
@@ -162,6 +178,8 @@ pub enum MainShellEvent {
     InitialReady,
     /// 用户在宿主对话框里触发的操作。
     HostDialogAction(HostDialogAction),
+    /// 用户在宿主设置导航或宿主设置页里触发的操作。
+    HostSettingsAction(Value),
 }
 
 struct PageEntry {
@@ -183,6 +201,7 @@ enum ShellInput {
         group: Option<u64>,
     },
     HostDialog(HostDialogAction),
+    HostSettings(Value),
     Lifecycle(PluginLifecycle),
 }
 
@@ -195,6 +214,7 @@ pub struct MainShell {
     active_page: String,
     settings_page: Option<(String, String)>,
     host_dialogs: HostDialogsState,
+    host_settings: Value,
     corners: WindowCorners,
     padding: f32,
     labels: ShellLabels,
@@ -319,12 +339,24 @@ impl MainShell {
                     },
                     "dir_picker_confirm" => HostDialogAction::DirPickerConfirm,
                     "dir_picker_cancel" => HostDialogAction::DirPickerCancel,
+                    "confirm_accept" => HostDialogAction::ConfirmAccept,
+                    "confirm_cancel" => HostDialogAction::ConfirmCancel,
                     other => {
                         let message = format!("shell.host_dialog_action：未知 kind {other}");
                         return call.reject(message);
                     }
                 };
                 let _ = tx.send(ShellInput::HostDialog(action));
+                call.resolve(Value::Null);
+            });
+        }
+        {
+            let tx = shell_tx.clone();
+            plugins.handle("shell.host_settings_action", move |plugin, mut call| {
+                if plugin != crate::plugins::SHELL_OWNER {
+                    return call.reject("shell.host_settings_action：仅允许主壳调用");
+                }
+                let _ = tx.send(ShellInput::HostSettings(call.take_data()));
                 call.resolve(Value::Null);
             });
         }
@@ -451,6 +483,7 @@ impl MainShell {
             active_page: String::new(),
             settings_page: None,
             host_dialogs: HostDialogsState::default(),
+            host_settings: Value::Null,
             corners: config.corners,
             padding: config.padding,
             labels: config.labels,
@@ -525,6 +558,7 @@ impl MainShell {
         self.active_page.clear();
         self.settings_page = None;
         self.host_dialogs = HostDialogsState::default();
+        self.host_settings = Value::Null;
         self.recompute_shell_view(cx);
         self.publish_dirty(host::SliceMask::SHELL | host::SliceMask::SAFE_AREAS, cx);
     }
@@ -743,6 +777,9 @@ impl MainShell {
             ShellInput::HostDialog(action) => {
                 cx.emit(MainShellEvent::HostDialogAction(action));
             }
+            ShellInput::HostSettings(action) => {
+                cx.emit(MainShellEvent::HostSettingsAction(action));
+            }
             ShellInput::Lifecycle(PluginLifecycle::Ready { plugin, views }) => {
                 let cleared_error = self.runtime_errors.remove(&plugin).is_some();
                 let has_root = views.iter().any(|v| v == "root");
@@ -903,6 +940,15 @@ impl MainShell {
             return;
         }
         self.host_dialogs = dialogs;
+        self.schedule_publish_slices(host::SliceMask::SHELL, cx);
+    }
+
+    /// 更新宿主设置导航与当前宿主设置页快照。状态未变时直接返回。
+    pub fn set_host_settings(&mut self, settings: Value, cx: &mut Context<Self>) {
+        if self.host_settings == settings {
+            return;
+        }
+        self.host_settings = settings;
         self.schedule_publish_slices(host::SliceMask::SHELL, cx);
     }
 
@@ -1154,12 +1200,14 @@ impl MainShell {
                 .collect();
             json!({
                 "padding": self.padding,
+                "has_backdrop": self.backdrop_hooks.borrow().record.is_some(),
                 "pages": pages_json,
                 "settings_page": self.settings_page.as_ref().map(|(id, title)| json!({
                     "id": id,
                     "title": title,
                 })),
                 "host_dialogs": self.host_dialogs,
+                "host_settings": self.host_settings,
                 "plugin_roots": self.plugin_roots.iter().cloned().collect::<Vec<_>>(),
                 "labels": {
                     "collapse_left": self.labels.collapse_left,

@@ -3,6 +3,7 @@
 //! 所有命令消费者都有 provider-aware 变体，调用方可以换一个 `Subprocess` 实现
 //! 把同一套逻辑跑到别的执行世界（远程 / 沙箱）里；便捷包装让本地调用点保持简短。
 
+mod diff;
 pub mod discovery;
 pub mod project_repository;
 pub mod worktree;
@@ -17,6 +18,8 @@ pub use smelt_runtime_client::protocol::git::{
 use smelt_runtime_client::protocol::reason::ControlReason;
 use std::fmt;
 use std::path::Path;
+
+pub use diff::{AGGREGATE_FILE_LIMIT, DIFF_LIMIT, commit_file_diff, diff_files, file_diff};
 
 pub type GitOutput = Output;
 
@@ -674,16 +677,6 @@ pub fn apply_patch(root: &str, args: &[&str], patch: &str) -> Result<(), String>
     checked(run_git_stdin(root, args, patch), "git apply failed")
 }
 
-/// 未跟踪目录 / 嵌套 git 仓库没法走 `diff --no-index`（对目录会失败），
-/// 合成一个 `diff --git` 头，让全部改动列表至少能看见这条路径。
-pub fn untracked_entry_diff(path: &str) -> String {
-    let path = path.trim_end_matches('/');
-    if path.is_empty() {
-        return String::new();
-    }
-    format!("diff --git a/{path} b/{path}\nnew file mode 000000\n--- /dev/null\n+++ b/{path}\n")
-}
-
 /// `git add -- <paths>`。`paths` 相对 `root` 这个仓库；调用方拿到文件时就知道它属于
 /// 哪个仓库，这里不再按路径反推——反推正是暂存落到子仓、提交却回到父仓的根源。
 /// 批量一条命令：几十个文件逐个跑就是几十个进程。
@@ -744,61 +737,6 @@ pub fn apply_patch_action(root: &str, action: GitPatchAction, patch: &str) -> Re
     apply_patch(root, action.args(), patch)
 }
 
-/// 单个文件的 diff。git 跑不起来时把原因当正文返回，界面照样显示。
-pub fn file_diff(root: &str, path: &str, untracked: bool, scope: DiffScope) -> GitFileDiffResult {
-    let has_staged = !untracked
-        && run_git(root, &["diff", "--staged", "--quiet", "--", path])
-            .map(|o| !o.success())
-            .unwrap_or(false);
-    let text = if untracked {
-        match run_git(root, &["diff", "--no-index", "--", "/dev/null", path]) {
-            Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
-            Err(err) => format!("couldn't run git diff: {err}"),
-        }
-    } else {
-        let mut args: Vec<&str> = scope.args().to_vec();
-        args.push(path);
-        match run_git(root, &args) {
-            Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
-            Err(err) => format!("couldn't run git diff: {err}"),
-        }
-    };
-    let is_gitlink = text.lines().any(|l| l.starts_with("Submodule "));
-    let worktree_file = Some(Path::new(root).join(path))
-        .filter(|full| smelt_core::fs::is_regular_file(&smelt_core::fs::LocalFs, full));
-    GitFileDiffResult {
-        text,
-        has_staged,
-        is_gitlink,
-        worktree_file: worktree_file.map(|full| full.to_string_lossy().into_owned()),
-    }
-}
-
-/// 一个仓库在 `scope` 里的全部改动，`untracked_paths` 逐个拼在后面。
-///
-/// 不把子仓的文件 diff 拼进父仓：子仓有自己的分组和自己的提交入口。父仓这边只展示
-/// gitlink 指针变化（它确实是父仓待提交的改动）。
-pub fn all_diff(root: &str, scope: DiffScope, untracked_paths: &[String]) -> String {
-    let mut text = run_git(root, scope.args())
-        .map(|out| String::from_utf8_lossy(&out.stdout).to_string())
-        .unwrap_or_else(|err| format!("couldn't run git diff: {err}"));
-    for path in untracked_paths {
-        let chunk = run_git(root, &["diff", "--no-index", "--", "/dev/null", path])
-            .ok()
-            .filter(|out| !out.stdout.is_empty())
-            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
-            .unwrap_or_else(|| untracked_entry_diff(path));
-        if chunk.is_empty() {
-            continue;
-        }
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
-        }
-        text.push_str(&chunk);
-    }
-    text
-}
-
 pub fn log_args(scope: &LogScope, limit: usize) -> Vec<String> {
     let mut a = vec![
         "log".to_string(),
@@ -839,28 +777,6 @@ pub fn commit_files(root: &str, hash: &str) -> Result<Vec<(String, String)>, Str
     )
     .map_err(|error| error.to_string())?;
     Ok(parse_name_status(&String::from_utf8_lossy(&out.stdout)))
-}
-
-/// 单个文件在某个提交里的改动。`--format=` 去掉提交头，只留 diff 本体。
-pub fn commit_file_diff(root: &str, hash: &str, path: &str) -> String {
-    match run_git(root, &["show", "--format=", "--no-color", hash, "--", path]) {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-            // `git show` 失败时正文在 stderr，stdout 是空的。空成功才是无差异。
-            if stdout.trim().is_empty() && !out.success() {
-                let err = String::from_utf8_lossy(&out.stderr);
-                let err = err.trim();
-                if err.is_empty() {
-                    stdout
-                } else {
-                    format!("couldn't run git show: {err}")
-                }
-            } else {
-                stdout
-            }
-        }
-        Err(err) => format!("couldn't run git show: {err}"),
-    }
 }
 
 #[cfg(test)]
@@ -1198,8 +1114,8 @@ husky - pre-commit hook exited with code 127 (error)"
         run_git(&nested_root, &["add", "a.txt"]).unwrap();
         run_git(&nested_root, &["commit", "-qm", "move pointer"]).unwrap();
 
-        let mut args = DiffScope::All.args().to_vec();
-        args.pop(); // 去掉结尾的 "--"，这里不限定路径
+        let mut args = vec!["diff"];
+        args.extend(DiffScope::All.revs());
         let out = run_git(&parent, &args).unwrap();
         let diff = String::from_utf8_lossy(&out.stdout);
         assert!(

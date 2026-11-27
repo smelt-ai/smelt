@@ -324,24 +324,6 @@ export declare function launchableProfiles(settings: unknown): Array<{
   launchable: boolean;
   in_history_sources: boolean;
 }>;
-export declare function handoffPrompt(payload: {
-  source_agent: string;
-  source_profile_label?: string | null;
-  source_title: string;
-  cwd?: string | null;
-  target_agent: string;
-  target_profile_label?: string | null;
-  detail: {
-    model?: string | null;
-    turns: Array<{
-      is_user: boolean;
-      timestamp_ms?: number | null;
-      text: string;
-      tools?: string[];
-      tool_paths?: string[];
-    }>;
-  };
-}): string;
 
 export type ResolveResult<T> =
   | ({ ok: true } & T)
@@ -438,6 +420,10 @@ export declare function onEvent(
   listener: (event: HostEvent) => void,
   types: readonly EventFilter[],
 ): () => void;
+/**
+ * 对话流事件 `{ sub_id, kind }`：`snapshot`（带 `snapshot`）、`initial_prompt_unsupported`、
+ * `closed`（连接已断，这个 `sub_id` 不会再有事件；要不要重新订阅由调用方定）。
+ */
 export declare function onAcpEvent(listener: (event: any) => void): () => void;
 
 export declare function acpSubscribe(params: {
@@ -529,15 +515,47 @@ export declare function call<T = any>(
   timeoutMs?: number,
 ): Promise<T>;
 
+/**
+ * 同 `call`，回复里 `blobs` 这些位置（JSON 指针，如 `/patch`、`/diff/text`）上的正文以
+ * `Blob` 交来，不进插件的 JS 堆：用 `URL.createObjectURL` 交给原生组件（`SmeltDiffView` 的
+ * `patchUrl`、`SmeltEditor` 的 `valueUrl`、`<Image>` 的 `src`），换内容时 `URL.revokeObjectURL`。
+ * base64 编码的字节（图片）写成 `{ at, base64: true, mime_at }`，`mime_at` 指回复里类型所在的
+ * 位置。那里没有正文时照原样。反方向不用这个：参数里放 `Blob`，宿主收到的就是它的文本。
+ */
+export declare function callWithBlobs<T = any>(
+  machine: string | null,
+  method: ControlMethodName | (string & {}),
+  params: unknown,
+  blobs: BlobAt[],
+  timeoutMs?: number,
+): Promise<T>;
+
+/**
+ * `callWithBlobs` 的一处正文：文本的 JSON 指针，或 `{ at, … }`。`base64: true` 是 base64 字节，
+ * 类型在 `mime_at`；`each` 是 `at` 那个数组每一项里的位置（一页条目各自的正文），这时
+ * `mime_at` 也相对那一项。
+ */
+export type BlobAt =
+  | string
+  | { at: string; each?: string; base64?: boolean; mime_at?: string };
+
+/**
+ * `blob()` 的 `blob:` 地址，交给原生组件读（编辑器、Markdown、图片）：换了 Blob 才换地址，旧地址
+ * 和组件卸载时 revoke。在组件里调，随组件清理。
+ */
+export declare function blobUrl(blob: () => Blob | null | undefined): () => string | undefined;
+
 export type CallDetailResult<T = any> =
   | { ok: true; value: T }
   | { ok: false; code: string | null; message: string };
 
+/** 同 `call`，失败也作值交来（带运行时的错误码）；`blobs` 同 `callWithBlobs`，位置相对 `value`。 */
 export declare function callDetail<T = any>(
   machine: string | null,
   method: ControlMethodName | (string & {}),
   params?: unknown,
   timeoutMs?: number,
+  blobs?: BlobAt[],
 ): Promise<CallDetailResult<T>>;
 
 export declare function request(
@@ -567,6 +585,13 @@ export declare function contextMenuItems(
   context: unknown,
 ): Promise<any[]>;
 export declare function clipboardWrite(value: string): Promise<void>;
+export interface ClipboardImageInput {
+  ref_id?: string | null;
+  data_b64?: string | null;
+  mime?: string | null;
+  data_uri?: string | null;
+}
+export declare function clipboardWriteImage(image: ClipboardImageInput): Promise<void>;
 export declare function clipboardRead(): Promise<string | null>;
 export declare function revealPath(path: string): Promise<void>;
 
@@ -762,7 +787,9 @@ export declare function SmeltButton(props: SmeltButtonProps): JSX.Element;
 export declare function SmeltWindowBar(props: { view: string }): JSX.Element;
 
 export declare function SmeltMarkdown(props: {
-  markdown: string;
+  /** 二选一：正文，或 blob 里正文的 `blob:` 地址（大文件不进插件的 JS 堆）。 */
+  markdown?: string;
+  markdownUrl?: string;
   cwd?: string | null;
   machine?: string | null;
   selectable?: boolean;
@@ -776,6 +803,10 @@ export declare function SmeltEditor(props: {
   editorRef?: (api: any) => void;
   value?: string;
   defaultValue?: string;
+  /** blob 里正文的 `blob:` 地址，代替 `value`：大文件不进插件的 JS 堆，改后的正文从 `onBlobChange` 拿。 */
+  valueUrl?: string;
+  /** 已保存正文的 `blob:` 地址：`onModifiedChange` 报告当前正文和它是否不同。 */
+  savedValueUrl?: string;
   language?: string;
   placeholder?: string;
   readOnly?: boolean;
@@ -793,6 +824,9 @@ export declare function SmeltEditor(props: {
   styles?: Record<string, any>;
   classes?: Record<string, string>;
   onChange?: (event: { value: string }) => void;
+  /** 每次改动后的正文，以 Blob 交来（代替 `onChange` 的字符串，不进 JS 堆）。 */
+  onBlobChange?: (event: { blob: Blob }) => void;
+  onModifiedChange?: (event: { modified: boolean }) => void;
   onSelectionChange?: (event: any) => void;
   onFocus?: () => void;
   onBlur?: () => void;
@@ -814,6 +848,12 @@ export declare function SmeltVector(props: {
 export declare function SmeltDiffView(props: {
   diffRef?: (api: any) => void;
   patch?: string;
+  /**
+   * `blob:` 地址的补丁（`callWithBlobs` 拿到的 Blob），组件自己读原生字节，正文不进插件的堆。
+   * ref 的 `hunkPatch(gap)` 给出一块单独的补丁（可直接 `git apply`），`fileLine(side, line)`
+   * 给出一行所在的文件和行号。
+   */
+  patchUrl?: string;
   oldValue?: string;
   newValue?: string;
   language?: string;

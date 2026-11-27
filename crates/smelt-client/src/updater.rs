@@ -32,7 +32,8 @@ const RELEASES_PAGE: &str = "https://github.com/smelt-ai/smelt/releases";
 /// 打包时可选指定的更新清单地址，`{channel}` 换成通道名（`dev` / `prod`）。设了就不查
 /// GitHub Releases，改读这份清单：自己分发安装包的打包方用它把更新指向自己的服务器。
 /// 清单格式是 `{"version": "0.9.0", "url": "https://…/Smelt.app.zip"}`，`url` 指向本平台的
-/// 更新包。macOS 和 Windows 各编各的包，打包时各给各的清单地址。
+/// 更新包，`version` 必填，是包里那次发版的版本号（`smelt_version::RELEASE` 的写法）：比装着的
+/// 新才算更新。macOS 和 Windows 各编各的包，打包时各给各的清单地址。
 const UPDATE_MANIFEST_URL: Option<&str> = match option_env!("SMELT_UPDATE_MANIFEST_URL") {
     Some(url) if !url.is_empty() => Some(url),
     _ => None,
@@ -65,7 +66,7 @@ impl UpdateChannel {
     }
 }
 
-/// 更新源给出的候选更新。是不是本机已经装着的那个，由 [`InstalledRelease`] 判断。
+/// 更新源给出的候选更新。`version` 比装着的新（见 [`installed_version`]）才算更新。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateCandidate {
     pub version: String,
@@ -101,7 +102,7 @@ pub enum UpdateStatus {
         version: String,
     },
     ReadyToInstall(StagedUpdate),
-    /// 安装 helper 启动失败；已验证的包和持久化作业仍保留，可直接重试。
+    /// 安装程序没拉起来，App 没退出；下好的包还在，可以直接再装一次。
     InstallFailed(StagedUpdate),
     /// UI 只保存可直接展示的失败类别；底层网络、文件系统和协议错误写入 app.log，
     /// 避免把内部 URL 或 reqwest 文本直接呈现给用户。
@@ -113,12 +114,11 @@ pub enum UpdateStatus {
 pub enum UpdateFailure {
     Check,
     Download,
-    Recovery,
     /// App 被系统转移或放在只读位置，更新装不上；见 `app_location`。先移到「应用程序」，
     /// 不检查、不下载。
     Location,
-    /// Windows 上不是安装程序装的（开发构建、拷出来的 exe）：没有能覆盖的安装，不检查、
-    /// 不下载。
+    /// 不是发布包装好的（开发构建；macOS 不在 `.app` 里跑，Windows 不是安装程序装的）：
+    /// 没有版本号可比、也没有能整个换掉的安装，不检查、不下载。
     NotInstalled,
 }
 
@@ -135,10 +135,6 @@ impl UpdateStatus {
         )
     }
 
-    pub fn can_retry_recovery(&self) -> bool {
-        matches!(self, Self::Failed(UpdateFailure::Recovery))
-    }
-
     /// 自动更新卡住时给的退路：去发布页手动下载安装。位置不对的有自己的「移到应用程序」，
     /// 不给这个。
     pub fn offers_manual_download(&self) -> bool {
@@ -146,22 +142,13 @@ impl UpdateStatus {
             self,
             Self::InstallFailed(_)
                 | Self::Failed(
-                    UpdateFailure::Check
-                        | UpdateFailure::Download
-                        | UpdateFailure::Recovery
-                        | UpdateFailure::NotInstalled
+                    UpdateFailure::Check | UpdateFailure::Download | UpdateFailure::NotInstalled
                 )
         )
     }
 
+    /// 下好、等着装的包。
     pub fn ready_update(&self) -> Option<&StagedUpdate> {
-        match self {
-            Self::ReadyToInstall(update) | Self::InstallFailed(update) => Some(update),
-            _ => None,
-        }
-    }
-
-    pub fn staged_update(&self) -> Option<&StagedUpdate> {
         match self {
             Self::ReadyToInstall(update) | Self::InstallFailed(update) => Some(update),
             _ => None,
@@ -175,32 +162,22 @@ pub enum DownloadProgress {
     Installing,
 }
 
-/// 本机装着的是哪个发布，用来判断更新源给的候选是不是新的。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum InstalledRelease {
-    /// macOS 记的是装上它的那个更新包地址：每个 Release 的下载地址都带 tag，换了发布
-    /// 就换了 URL，同一个版本号重发的内测包也认得出来。
-    Url(String),
-    /// Windows 认编进程序的发版号（`smelt_version::RELEASE`）：安装程序装的就是那次发版，
-    /// 没有另外记录的地方。只有比它新的才算更新：切回生产通道、或者最新的发布还没传完
-    /// 退到上一个时，候选可能比装着的旧，不能装回去（旧版读不了新版升级过的客户端库）。
-    Version(semver::Version),
-    /// 没有可比较的记录：迁移前的旧安装、手工安装的首个包、开发构建。这时让 updater
-    /// 下载一次，装好之后就有记录了，免得同版本内测包永远无法更新。
-    Unknown,
+/// 装着的是哪次发版：编进程序的 `smelt_version::RELEASE`。只认程序自己，不另外记：别处记的
+/// 「装的是哪个」和磁盘上真正的 App 会对不上（比如手动拖装了别的包）。开发构建没有发版号，
+/// 不参与更新（`can_self_update` 为 false）。
+pub fn installed_version() -> anyhow::Result<semver::Version> {
+    let release = smelt_version::RELEASE.ok_or_else(|| {
+        anyhow::anyhow!("development builds have no release number and don't auto-update")
+    })?;
+    semver::Version::parse(release)
+        .with_context(|| format!("the built-in release number isn't semver: {release}"))
 }
 
-impl InstalledRelease {
-    /// 候选不用装：就是装着的这个，或者（按版本号认时）不比它新。
-    fn covers(&self, candidate: &UpdateCandidate) -> bool {
-        match self {
-            Self::Url(url) => url.trim() == candidate.url.trim(),
-            // 认不出版本号的候选也不装：不知道它新还是旧。
-            Self::Version(installed) => semver::Version::parse(candidate.version.trim())
-                .map_or(true, |candidate| candidate <= *installed),
-            Self::Unknown => false,
-        }
-    }
+/// 候选比装着的新才算更新。认不出版本号的不算：不知道它新还是旧。同一个版本号下的不同
+/// 构建（`+g<提交>`）不算新：semver 比先后不看构建信息。
+fn is_newer(candidate: &UpdateCandidate, installed: &semver::Version) -> bool {
+    semver::Version::parse(candidate.version.trim())
+        .is_ok_and(|candidate| candidate.cmp_precedence(installed).is_gt())
 }
 
 /// 检查拿到结果之后该往哪走。
@@ -219,10 +196,10 @@ pub enum CheckOutcome {
 /// ——包已经装好了才发现，所以值得用测试钉死。
 pub fn decide_check_outcome(
     candidate: UpdateCandidate,
-    installed: &InstalledRelease,
+    installed: &semver::Version,
     auto_install: bool,
 ) -> CheckOutcome {
-    if installed.covers(&candidate) {
+    if !is_newer(&candidate, installed) {
         return CheckOutcome::NoUpdate;
     }
     if auto_install {
@@ -230,21 +207,6 @@ pub fn decide_check_outcome(
     } else {
         CheckOutcome::Notify(candidate)
     }
-}
-
-/// 有暂存包（待安装或安装失败）时检查的决策：更新源仍指向同一包时保留已验证的暂存
-/// 作业，避免无意义地重新下载；URL 已变化（更新的版本、或服务端回滚到当前版本）时
-/// 返回作废旧作业后的常规落点。
-pub fn decide_staged_update_check(
-    candidate: UpdateCandidate,
-    installed: &InstalledRelease,
-    staged: &StagedUpdate,
-    auto_install: bool,
-) -> Option<CheckOutcome> {
-    if candidate.url.trim() == staged.url.trim() {
-        return None;
-    }
-    Some(decide_check_outcome(candidate, installed, auto_install))
 }
 
 #[derive(serde::Deserialize)]
@@ -321,56 +283,25 @@ fn manifest_url(template: &str, channel: UpdateChannel) -> String {
 
 #[derive(serde::Deserialize)]
 struct UpdateManifest {
-    #[serde(default)]
-    version: Option<serde_json::Value>,
+    version: String,
     url: String,
 }
 
-/// 读打包时指定的更新清单。清单只维护该通道当前指向的 ZIP。
+/// 读打包时指定的更新清单。清单只维护该通道当前指向的包。版本号认不出来就是清单写错了，
+/// 报检查失败，不当成「已是最新」：那样清单坏了谁也发现不了。
 async fn fetch_manifest(manifest_url: &str) -> anyhow::Result<UpdateCandidate> {
     let body = fetch_metadata(manifest_url, "application/json").await?;
-    let manifest: UpdateManifest = serde_json::from_slice(&body)
-        .with_context(|| format!("{manifest_url} isn't a valid update manifest"))?;
-    let download_url = manifest.url.trim().to_string();
-    if download_url.is_empty() {
-        anyhow::bail!("{manifest_url} has no url");
-    }
-    validate_download_url(&download_url)?;
-
-    let version = manifest
-        .version
-        .as_ref()
-        .and_then(manifest_version_text)
-        .filter(|v| !v.is_empty() && v != "0")
-        .unwrap_or_else(|| release_label_from_url(&download_url));
-    Ok(UpdateCandidate {
-        version,
-        url: download_url,
-    })
+    parse_manifest(&body).with_context(|| format!("{manifest_url} isn't a valid update manifest"))
 }
 
-fn manifest_version_text(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(value) => Some(value.trim().to_string()),
-        serde_json::Value::Number(value) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
-/// 清单没给版本号时，拿下载地址最后一段当展示文本。
-fn release_label_from_url(download_url: &str) -> String {
-    url::Url::parse(download_url)
-        .ok()
-        .and_then(|url| {
-            url.path_segments().and_then(|mut segments| {
-                segments
-                    .rfind(|segment| !segment.is_empty())
-                    .map(str::to_string)
-            })
-        })
-        .map(|value| value.trim_end_matches(".zip").to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "update".to_string())
+fn parse_manifest(body: &[u8]) -> anyhow::Result<UpdateCandidate> {
+    let manifest: UpdateManifest = serde_json::from_slice(body)?;
+    let version = manifest.version.trim().to_string();
+    semver::Version::parse(&version)
+        .with_context(|| format!("the version isn't a release number: {version:?}"))?;
+    let url = manifest.url.trim().to_string();
+    validate_download_url(&url)?;
+    Ok(UpdateCandidate { version, url })
 }
 
 async fn fetch_github_releases(channel: UpdateChannel) -> anyhow::Result<Vec<UpdateCandidate>> {
@@ -507,19 +438,6 @@ fn ensure_package_size(received: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn safe_component(value: &str) -> String {
-    let value: String = value
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-        .collect();
-    let value = value.trim_matches('.');
-    if value.is_empty() {
-        "latest".to_string()
-    } else {
-        value.to_string()
-    }
-}
-
 /// 停掉本机 smeltd，并等到进程退出。安装程序替换文件之前调用。
 ///
 /// 连不上表示没有守护在跑。进程仍活着则返回 false：macOS 的安装器换包前会再停一次；
@@ -531,43 +449,33 @@ pub fn shutdown_local_daemon() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CheckOutcome, GithubAsset, GithubRelease, InstalledRelease, UpdateCandidate, UpdateChannel,
-        UpdateManifest, decide_check_outcome, manifest_url, manifest_version_text, pick_releases,
-        release_label_from_url, validate_download_url,
+        CheckOutcome, GithubAsset, GithubRelease, UpdateCandidate, UpdateChannel,
+        decide_check_outcome, is_newer, manifest_url, parse_manifest, pick_releases,
+        validate_download_url,
     };
 
-    fn candidate(url: &str) -> UpdateCandidate {
+    fn versioned(version: &str) -> UpdateCandidate {
         UpdateCandidate {
-            version: "0.6.15".into(),
-            url: url.into(),
+            version: version.into(),
+            url: format!("https://example.test/{version}/Smelt.app.zip"),
         }
+    }
+
+    fn installed(version: &str) -> semver::Version {
+        semver::Version::parse(version).unwrap()
     }
 
     /// 关掉自动更新后**绝不能**再走下载分支——这是这个开关唯一的实质承诺。
     #[test]
     fn auto_install_off_only_notifies_never_downloads() {
-        let outcome = decide_check_outcome(
-            candidate("https://example.com/new.zip"),
-            &InstalledRelease::Url("https://example.com/old.zip".into()),
-            false,
-        );
-        assert_eq!(
-            outcome,
-            CheckOutcome::Notify(candidate("https://example.com/new.zip"))
-        );
+        let outcome = decide_check_outcome(versioned("0.6.16"), &installed("0.6.15"), false);
+        assert_eq!(outcome, CheckOutcome::Notify(versioned("0.6.16")));
     }
 
     #[test]
     fn auto_install_on_downloads_without_asking() {
-        let outcome = decide_check_outcome(
-            candidate("https://example.com/new.zip"),
-            &InstalledRelease::Url("https://example.com/old.zip".into()),
-            true,
-        );
-        assert_eq!(
-            outcome,
-            CheckOutcome::Download(candidate("https://example.com/new.zip"))
-        );
+        let outcome = decide_check_outcome(versioned("0.6.16"), &installed("0.6.15"), true);
+        assert_eq!(outcome, CheckOutcome::Download(versioned("0.6.16")));
     }
 
     /// 开关只管"发现新版之后怎么办"，没有新版时两边都该是同一个结论：没得更新。
@@ -575,11 +483,8 @@ mod tests {
     #[test]
     fn same_release_is_no_update_regardless_of_switch() {
         for auto_install in [true, false] {
-            let outcome = decide_check_outcome(
-                candidate("https://example.com/same.zip"),
-                &InstalledRelease::Url("https://example.com/same.zip".into()),
-                auto_install,
-            );
+            let outcome =
+                decide_check_outcome(versioned("0.6.15"), &installed("0.6.15"), auto_install);
             assert_eq!(outcome, CheckOutcome::NoUpdate, "auto={auto_install}");
         }
     }
@@ -665,68 +570,83 @@ mod tests {
     }
 
     #[test]
-    fn manifest_accepts_numeric_placeholder_version() {
-        let manifest: UpdateManifest =
-            serde_json::from_str(r#"{"version":0,"url":"https://example.test/releases/35039"}"#)
-                .unwrap();
+    fn manifest_gives_the_version_and_package() {
+        let candidate = parse_manifest(
+            br#"{"version":" 2026.1102.0-rc.1 ","url":" https://example.test/releases/35039 "}"#,
+        )
+        .unwrap();
         assert_eq!(
-            manifest_version_text(manifest.version.as_ref().unwrap()),
-            Some("0".into())
+            candidate,
+            UpdateCandidate {
+                version: "2026.1102.0-rc.1".into(),
+                url: "https://example.test/releases/35039".into(),
+            }
         );
-        assert_eq!(release_label_from_url(&manifest.url), "35039");
     }
 
+    /// 清单少了版本号、写成占位的 0、或者不是发版号，都是清单写错了：报出来，不当成没有更新。
     #[test]
-    fn url_difference_is_the_update_identity() {
-        let installed = InstalledRelease::Url("https://example.test/a".into());
-        assert!(installed.covers(&candidate(" https://example.test/a ")));
-        assert!(!installed.covers(&candidate("https://example.test/b")));
-        assert!(!InstalledRelease::Unknown.covers(&candidate("https://example.test/a")));
-    }
-
-    fn versioned(version: &str) -> UpdateCandidate {
-        UpdateCandidate {
-            version: version.into(),
-            url: format!("https://example.test/{version}/setup.exe"),
+    fn manifest_without_a_release_number_is_rejected() {
+        for body in [
+            r#"{"url":"https://example.test/releases/35039"}"#,
+            r#"{"version":0,"url":"https://example.test/releases/35039"}"#,
+            r#"{"version":"0","url":"https://example.test/releases/35039"}"#,
+            r#"{"version":"latest","url":"https://example.test/releases/35039"}"#,
+            r#"{"version":"0.9.0","url":"http://example.test/releases/35039"}"#,
+        ] {
+            assert!(parse_manifest(body.as_bytes()).is_err(), "{body}");
         }
     }
 
-    fn installed_version(version: &str) -> InstalledRelease {
-        InstalledRelease::Version(semver::Version::parse(version).unwrap())
-    }
-
-    /// Windows 认版本号：同一个版本换了下载地址（比如改走镜像）也不算新版。
+    /// 认版本号：同一个版本换了下载地址（比如改走镜像）也不算新版。
     #[test]
     fn version_identity_ignores_the_download_url() {
-        let installed = installed_version("0.6.15");
-        assert!(installed.covers(&candidate("https://mirror.test/a")));
-        assert!(!installed.covers(&versioned("0.6.16")));
+        let same = UpdateCandidate {
+            version: "0.6.15".into(),
+            url: "https://mirror.test/a".into(),
+        };
+        assert!(!is_newer(&same, &installed("0.6.15")));
+        assert!(is_newer(&versioned("0.6.16"), &installed("0.6.15")));
     }
 
     /// 装着内测版时切回生产通道，生产通道最新的比它旧：不能装回去。
     #[test]
     fn version_older_than_installed_is_not_an_update() {
-        let installed = installed_version("2026.1027.1-rc.1");
-        assert!(installed.covers(&versioned("2026.1026.3")));
-        assert!(installed.covers(&versioned("2026.1027.1-rc.1")));
-        assert!(!installed.covers(&versioned("2026.1027.1-rc.2")));
-        assert!(!installed.covers(&versioned("2026.1027.1")));
+        let current = installed("2026.1027.1-rc.1");
+        assert!(!is_newer(&versioned("2026.1026.3"), &current));
+        assert!(!is_newer(&versioned("2026.1027.1-rc.1"), &current));
+        assert!(is_newer(&versioned("2026.1027.1-rc.2"), &current));
+        assert!(is_newer(&versioned("2026.1027.1"), &current));
         assert_eq!(
-            decide_check_outcome(versioned("2026.1026.3"), &installed, true),
+            decide_check_outcome(versioned("2026.1026.3"), &current, true),
             CheckOutcome::NoUpdate
         );
+    }
+
+    /// 同一个版本号下的另一个构建不算新：semver 比先后不看 `+` 后的构建信息。
+    #[test]
+    fn build_metadata_is_not_newer() {
+        assert!(!is_newer(
+            &versioned("2026.1102.0+g32c3172"),
+            &installed("2026.1102.0")
+        ));
     }
 
     /// 预发布号按数字比：rc.10 比 rc.9 新。
     #[test]
     fn prerelease_numbers_compare_numerically() {
-        let installed = installed_version("2026.1027.0-rc.9");
-        assert!(!installed.covers(&versioned("2026.1027.0-rc.10")));
+        assert!(is_newer(
+            &versioned("2026.1027.0-rc.10"),
+            &installed("2026.1027.0-rc.9")
+        ));
     }
 
     #[test]
     fn unparsable_candidate_version_is_not_an_update() {
-        assert!(installed_version("2026.1027.0").covers(&versioned("Smelt-latest")));
+        assert!(!is_newer(
+            &versioned("Smelt-latest"),
+            &installed("2026.1027.0")
+        ));
     }
 
     #[test]

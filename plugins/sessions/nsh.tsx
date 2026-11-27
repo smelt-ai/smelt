@@ -184,10 +184,46 @@ interface CloseConfirmState {
 
 // ---- 全局状态（跨 root 与 session 视图共享） ----
 
+// 后台常驻的活体会话上限（含当前选中）：防止长时切换会话导致 DOM、订阅与消息数组无限增长。
+const MAX_LIVE_SESSIONS = 4;
+
 const sessionsStore = createSessionsStore(store);
 const selection = signal<SelectionState>({ kind: "none" });
 const liveKeys = signal<string[]>([]);
 const liveSessions = new Map<string, LiveSession>();
+const liveLastUsed = new Map<string, number>();
+let liveUseSeq = 0;
+
+function touchLiveSession(ks: string) {
+  if (liveSessions.has(ks)) {
+    liveLastUsed.set(ks, ++liveUseSeq);
+  }
+}
+
+function evictOverflowLiveSessions(keepKeyStr: string | null) {
+  if (liveSessions.size <= MAX_LIVE_SESSIONS) return false;
+  const sel = selection();
+  const selectedKey =
+    sel.kind === "conversation" ? convKeyStr(sel.machine, sel.conversation_id) : null;
+  let evicted = false;
+  while (liveSessions.size > MAX_LIVE_SESSIONS) {
+    let victim: string | null = null;
+    let oldest = Infinity;
+    for (const ks of liveSessions.keys()) {
+      if (ks === keepKeyStr || ks === selectedKey) continue;
+      const used = liveLastUsed.get(ks) ?? 0;
+      if (used < oldest) {
+        oldest = used;
+        victim = ks;
+      }
+    }
+    if (!victim) break;
+    liveSessions.delete(victim);
+    liveLastUsed.delete(victim);
+    evicted = true;
+  }
+  return evicted;
+}
 const focusPulse = signal<{ keyStr: string; paneId: string; seq: number }>({
   keyStr: "",
   paneId: "",
@@ -353,6 +389,11 @@ function selectConversation(key: ConversationKey) {
     });
     void sessionsStore.saveSelection(key);
   }
+  const ks = convKeyStr(key.machine, key.id);
+  touchLiveSession(ks);
+  if (evictOverflowLiveSessions(ks)) {
+    liveKeys.set([...liveSessions.keys()]);
+  }
   // 即使选中的是同一段会话，也发一次通知（可能项目被折起，列表需展开露出）。
   announceSelection();
   publishContext();
@@ -429,7 +470,10 @@ function setLiveActivePane(live: LiveSession, paneId: string, shouldFocus = fals
 function ensureLiveSession(key: ConversationKey, conv: any): LiveSession {
   const ks = convKeyStr(key.machine, key.id);
   const existing = liveSessions.get(ks);
-  if (existing) return existing;
+  if (existing) {
+    touchLiveSession(ks);
+    return existing;
+  }
 
   const start = pendingStarts.get(ks) ?? null;
   pendingStarts.delete(ks);
@@ -459,6 +503,8 @@ function ensureLiveSession(key: ConversationKey, conv: any): LiveSession {
     },
   };
   liveSessions.set(ks, live);
+  liveLastUsed.set(ks, ++liveUseSeq);
+  evictOverflowLiveSessions(ks);
   liveKeys.set([...liveSessions.keys()]);
 
   // 异步回读 SQLite 存档分屏（若用户还没在内存里手动改过分屏，则恢复上次布局与焦点格）。
@@ -700,6 +746,7 @@ function syncFromHost() {
     const mk = machineKey(live.key.machine);
     if (!currentMachines.has(mk)) {
       liveSessions.delete(ks);
+      liveLastUsed.delete(ks);
       liveListChanged = true;
       continue;
     }
@@ -709,6 +756,7 @@ function syncFromHost() {
     const conv = shownConversation(dir, facts, live.key.id);
     if (!conv) {
       liveSessions.delete(ks);
+      liveLastUsed.delete(ks);
       liveListChanged = true;
     } else {
       syncLiveSession(live, conv);
@@ -1269,6 +1317,7 @@ bootTask(async () => {
 function SplitLeafPane(props: {
   live: LiveSession;
   paneId: string;
+  visible: () => boolean;
   many: () => boolean;
   touches: () => { top: boolean; right: boolean; bottom: boolean; left: boolean };
   parentArea: () => any;
@@ -1376,6 +1425,7 @@ function SplitLeafPane(props: {
           else={
             <ConversationPane
               args={(spec()?.args as any) ?? null}
+              visible={props.visible()}
               many={props.many()}
               safeArea={contentArea()}
               reuseKey={reuseKey()}
@@ -1447,6 +1497,7 @@ function SplitTreeView(props: {
   live: LiveSession;
   node: any;
   path: number[];
+  visible: () => boolean;
   many: () => boolean;
   touchesMap: () => Map<string, { top: boolean; right: boolean; bottom: boolean; left: boolean }>;
   parentArea: () => any;
@@ -1460,6 +1511,7 @@ function SplitTreeView(props: {
       <SplitLeafPane
         live={props.live}
         paneId={paneId}
+        visible={props.visible}
         many={props.many}
         touches={() =>
           props.touchesMap().get(paneId) ?? {
@@ -1494,6 +1546,7 @@ function SplitTreeView(props: {
           live={props.live}
           node={props.node.first}
           path={[...props.path, 0]}
+          visible={props.visible}
           many={props.many}
           touchesMap={props.touchesMap}
           parentArea={props.parentArea}
@@ -1509,6 +1562,7 @@ function SplitTreeView(props: {
           live={props.live}
           node={props.node.second}
           path={[...props.path, 1]}
+          visible={props.visible}
           many={props.many}
           touchesMap={props.touchesMap}
           parentArea={props.parentArea}
@@ -1530,6 +1584,7 @@ function LiveSessionView(props: { keyStr: string }) {
       sel.kind === "conversation" && convKeyStr(sel.machine, sel.conversation_id) === props.keyStr
     );
   });
+  const isVisible = computed(() => isSelected() && viewShown(SESSION_VIEW));
   const conv = computed(() => {
     const dir = workspaceDirectory(live.key.machine);
     return (dir?.conversations ?? []).find((c: any) => c.id === live.key.id) ?? null;
@@ -1604,6 +1659,7 @@ function LiveSessionView(props: { keyStr: string }) {
               live={live}
               node={tree}
               path={[]}
+              visible={isVisible}
               many={many}
               touchesMap={touchesMap}
               parentArea={innerArea}

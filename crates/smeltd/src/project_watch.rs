@@ -10,9 +10,9 @@
 //! 所以别的平台自己遍历，只给非噪音目录逐个加非递归 watch，新建的目录在事件里补上；
 //! `.git` 只看它本身（index、HEAD）和 `refs`。上限用完就只监听已经加上的那部分。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use notify::{RecursiveMode, Watcher as _};
@@ -24,9 +24,31 @@ const DEBOUNCE: Duration = Duration::from_millis(200);
 
 type SharedWatcher = Arc<Mutex<notify::RecommendedWatcher>>;
 
-fn watches() -> &'static Mutex<HashMap<String, SharedWatcher>> {
-    static WATCHES: OnceLock<Mutex<HashMap<String, SharedWatcher>>> = OnceLock::new();
-    WATCHES.get_or_init(|| Mutex::new(HashMap::new()))
+struct RegisteredRoot {
+    raw: PathBuf,
+    canonical: PathBuf,
+}
+
+impl RegisteredRoot {
+    fn matches(&self, path: &Path) -> bool {
+        path.starts_with(&self.raw) || path.starts_with(&self.canonical)
+    }
+}
+
+struct WatchState {
+    roots: HashMap<String, RegisteredRoot>,
+    dirty: HashSet<String>,
+    hub: Option<EventHubHandle>,
+}
+
+struct ProjectWatchManager {
+    watcher: SharedWatcher,
+    state: Arc<(Mutex<WatchState>, Condvar)>,
+}
+
+fn manager() -> &'static Mutex<Option<ProjectWatchManager>> {
+    static MANAGER: OnceLock<Mutex<Option<ProjectWatchManager>>> = OnceLock::new();
+    MANAGER.get_or_init(|| Mutex::new(None))
 }
 
 const NOISE_DIRS: [&str; 6] = ["target", "node_modules", "dist", "build", ".next", ".cache"];
@@ -94,18 +116,18 @@ fn add_watches(watcher: &SharedWatcher, root: &str, targets: Vec<(PathBuf, Recur
     }
 }
 
-pub(crate) fn watch(root: &str, event_hub: &EventHubHandle) -> Result<(), String> {
-    if !Path::new(root).is_dir() {
-        return Err(format!("Not a directory: {root}"));
-    }
-    let mut watches = watches().lock().map_err(|error| error.to_string())?;
-    if watches.contains_key(root) {
-        return Ok(());
-    }
-    // 容量 1：一批事件只需要一次唤醒，保存、构建产生的事件不在队列里堆积。
-    let (dirty_tx, dirty_rx) = std::sync::mpsc::sync_channel::<()>(1);
-    // 新建的目录要补 watch：回调里拿不到 watcher 本身，交给下面的线程去加。
-    let (created_tx, created_rx) = std::sync::mpsc::channel::<PathBuf>();
+fn init_manager(event_hub: &EventHubHandle) -> Result<ProjectWatchManager, String> {
+    let state = Arc::new((
+        Mutex::new(WatchState {
+            roots: HashMap::new(),
+            dirty: HashSet::new(),
+            hub: Some(Arc::clone(event_hub)),
+        }),
+        Condvar::new(),
+    ));
+    // 新建的目录要补 watch（仅非 macOS）：回调里拿不到 watcher 本身，交给共享线程去加。
+    let (created_tx, created_rx) = std::sync::mpsc::channel::<(String, PathBuf)>();
+    let cb_state = Arc::clone(&state);
     let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         let Ok(event) = res else {
             return;
@@ -113,61 +135,135 @@ pub(crate) fn watch(root: &str, event_hub: &EventHubHandle) -> Result<(), String
         if event.paths.iter().any(|path| is_noise_path(path)) {
             return;
         }
-        if !cfg!(target_os = "macos") && matches!(event.kind, notify::EventKind::Create(_)) {
-            for path in &event.paths {
-                if path.is_dir() {
-                    let _ = created_tx.send(path.clone());
+        let (lock, cv) = &*cb_state;
+        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let WatchState { roots, dirty, .. } = &mut *guard;
+        let mut matched_any = false;
+        let mut created_matches: Vec<(String, PathBuf)> = Vec::new();
+        let is_create =
+            !cfg!(target_os = "macos") && matches!(event.kind, notify::EventKind::Create(_));
+        for (root, reg) in roots.iter() {
+            if event.paths.iter().any(|path| reg.matches(path)) {
+                dirty.insert(root.clone());
+                matched_any = true;
+                if is_create {
+                    for path in &event.paths {
+                        if path.is_dir() && reg.matches(path) {
+                            created_matches.push((root.clone(), path.clone()));
+                        }
+                    }
                 }
             }
         }
-        let _ = dirty_tx.try_send(());
+        if matched_any {
+            cv.notify_one();
+        }
+        drop(guard);
+        for item in created_matches {
+            let _ = created_tx.send(item);
+        }
     })
-    .map_err(|error| format!("Couldn't watch {root}: {error}"))?;
+    .map_err(|error| format!("Couldn't start file watcher: {error}"))?;
     let watcher: SharedWatcher = Arc::new(Mutex::new(watcher));
-    if cfg!(target_os = "macos") {
-        watcher
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .watch(Path::new(root), RecursiveMode::Recursive)
-            .map_err(|error| format!("Couldn't watch {root}: {error}"))?;
-    } else {
-        add_watches(&watcher, root, watch_targets(Path::new(root)));
-        let watcher = Arc::clone(&watcher);
-        let root = root.to_string();
+    if !cfg!(target_os = "macos") {
+        let dir_watcher = Arc::clone(&watcher);
         std::thread::Builder::new()
             .name("smeltd-project-watch-dirs".into())
             .spawn(move || {
-                while let Ok(dir) = created_rx.recv() {
-                    add_watches(&watcher, &root, watch_targets(&dir));
+                while let Ok((root, dir)) = created_rx.recv() {
+                    add_watches(&dir_watcher, &root, watch_targets(&dir));
                 }
             })
             .map_err(|error| format!("Couldn't start the watcher thread: {error}"))?;
     }
-    watches.insert(root.to_string(), watcher);
-    spawn_notifier(root, dirty_rx, event_hub)
-}
-
-/// 一批变化攒 [`DEBOUNCE`] 再发一次 `project.changed{root}`。监听器（发送端）在，线程就在。
-fn spawn_notifier(
-    root: &str,
-    dirty_rx: std::sync::mpsc::Receiver<()>,
-    event_hub: &EventHubHandle,
-) -> Result<(), String> {
-    let hub = Arc::clone(event_hub);
-    let root = root.to_string();
+    let notifier_state = Arc::clone(&state);
     std::thread::Builder::new()
         .name("smeltd-project-watch".into())
         .spawn(move || {
-            while dirty_rx.recv().is_ok() {
+            let (lock, cv) = &*notifier_state;
+            loop {
+                let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                guard = cv
+                    .wait_while(guard, |st| st.dirty.is_empty())
+                    .unwrap_or_else(|e| e.into_inner());
+                drop(guard);
                 std::thread::sleep(DEBOUNCE);
-                while dirty_rx.try_recv().is_ok() {}
-                if let Err(error) = hub.publish_project_changed(&root) {
-                    eprintln!("[project-watch] 通知 {root} 变化失败：{error}");
+                let (roots_to_notify, hub) = {
+                    let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    let dirty: Vec<String> = guard.dirty.drain().collect();
+                    (dirty, guard.hub.clone())
+                };
+                if let Some(hub) = hub {
+                    for root in roots_to_notify {
+                        if let Err(error) = hub.publish_project_changed(&root) {
+                            eprintln!("[project-watch] 通知 {root} 变化失败：{error}");
+                        }
+                    }
                 }
             }
         })
         .map_err(|error| format!("Couldn't start the watcher thread: {error}"))?;
+    Ok(ProjectWatchManager { watcher, state })
+}
+
+pub(crate) fn watch(root: &str, event_hub: &EventHubHandle) -> Result<(), String> {
+    let raw = PathBuf::from(root);
+    if !raw.is_dir() {
+        return Err(format!("Not a directory: {root}"));
+    }
+    let canonical = std::fs::canonicalize(&raw).unwrap_or_else(|_| raw.clone());
+    let mut slot = manager().lock().map_err(|error| error.to_string())?;
+    if slot.is_none() {
+        *slot = Some(init_manager(event_hub)?);
+    }
+    let mgr = slot.as_ref().expect("initialized above");
+    {
+        let (lock, _) = &*mgr.state;
+        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        guard.hub = Some(Arc::clone(event_hub));
+        if guard.roots.contains_key(root) {
+            return Ok(());
+        }
+    }
+    if cfg!(target_os = "macos") {
+        mgr.watcher
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .watch(&raw, RecursiveMode::Recursive)
+            .map_err(|error| format!("Couldn't watch {root}: {error}"))?;
+    } else {
+        add_watches(&mgr.watcher, root, watch_targets(&raw));
+    }
+    let (lock, _) = &*mgr.state;
+    lock.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .roots
+        .insert(root.to_string(), RegisteredRoot { raw, canonical });
     Ok(())
+}
+
+/// 注销不再需要的项目目录监听，释放底层 FSEvents / inotify 句柄。
+#[allow(dead_code)]
+pub(crate) fn unwatch(root: &str) {
+    let Ok(slot) = manager().lock() else {
+        return;
+    };
+    let Some(mgr) = slot.as_ref() else {
+        return;
+    };
+    let removed = {
+        let (lock, _) = &*mgr.state;
+        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        guard.dirty.remove(root);
+        guard.roots.remove(root)
+    };
+    if let Some(reg) = removed {
+        let _ = mgr
+            .watcher
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unwatch(&reg.raw);
+    }
 }
 
 #[cfg(test)]

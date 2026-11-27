@@ -32,12 +32,13 @@ use std::collections::HashSet;
 
 use gpui::{
     App, AppContext as _, Context, Div, InteractiveElement as _, ParentElement as _, SharedString,
-    Styled as _, Subscription, Window, WindowControlArea, div, px, rgb,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, WindowControlArea, div, px,
+    rgb, svg,
 };
 use smelt_client_store::WorkspaceLayoutStateRecord;
 use smelt_plugin_api::{self as api, DockAreaState};
 use smelt_ui::{
-    Button, Icon, IconName,
+    IconName,
     kit::{RADIUS, TYPE, TypeStyled as _},
 };
 
@@ -348,7 +349,8 @@ impl Workspace {
                             .items_center()
                             .gap_3()
                             .child(
-                                Icon::new(IconName::AppWindow)
+                                svg()
+                                    .path(IconName::AppWindow.path())
                                     .size(px(28.0))
                                     .text_color(rgb(crate::ui_theme::muted())),
                             )
@@ -370,9 +372,24 @@ impl Workspace {
                             .children(error_box)
                             .child(
                                 div().pt_1().child(
-                                    Button::new("open-panel-plugins")
-                                        .primary()
-                                        .label(t!("layout.open_plugins"))
+                                    div()
+                                        .id("open-panel-plugins")
+                                        .px_3()
+                                        .h(px(28.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(RADIUS.md))
+                                        .bg(crate::ui_theme::palette().button_primary[0])
+                                        .hover(|s| {
+                                            s.bg(crate::ui_theme::palette().button_primary[1])
+                                        })
+                                        .text_color(rgb(
+                                            crate::ui_theme::palette().button_primary_foreground
+                                        ))
+                                        .type_style(TYPE.ui_medium)
+                                        .cursor_pointer()
+                                        .child(t!("layout.open_plugins"))
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.open_settings_page(
                                                 crate::settings::PANEL_PLUGINS_VIEW.into(),
@@ -775,6 +792,7 @@ impl Workspace {
             .cloned()
             .collect();
         self.publish_safe_areas(ids, cx);
+        self.sync_host_settings(cx);
         if self.shell_view == before {
             return;
         }

@@ -19,8 +19,10 @@ use std::{
 };
 
 use gpui::{
-    App, AppContext as _, ClipboardItem, Context, IntoElement, Render, SharedString, Window, div,
+    App, AppContext as _, ClipboardItem, Context, Image, ImageFormat, IntoElement, Render,
+    SharedString, Window, div,
 };
+use nsh_core::host_channel::{HostAnswer, HostBlob};
 use nsh_engine::HostCall;
 use serde_json::{Value, json};
 use smelt_plugin_api::{
@@ -55,8 +57,7 @@ pub(crate) enum Action {
         machine: RuntimeKey,
         method: ControlMethod,
         params: Value,
-        timeout: Duration,
-        detailed: bool,
+        options: CallOptions,
         call: HostCall,
     },
     Request {
@@ -73,6 +74,10 @@ pub(crate) enum Action {
     },
     ClipboardWrite {
         text: String,
+        call: HostCall,
+    },
+    ClipboardWriteImage {
+        image: Image,
         call: HostCall,
     },
     ClipboardRead {
@@ -251,6 +256,8 @@ struct EventSub {
 struct Shared {
     /// 推给 Guest 插件的状态快照（不含仅主壳消费的 `shell` 布局树）。
     plugin_state: BTreeMap<String, Arc<Value>>,
+    /// 按机器独立持有的 `sessions_data` 快照项，避免每次状态变更把全部机器深拷贝拼成整包再全树判等。
+    sessions_machines: Vec<Arc<Value>>,
     plugin_revision: u64,
     /// 推给主壳 VM（`__shell__`）的状态快照（只包含主壳消费的布局与视觉切片）。
     shell_state: BTreeMap<String, Arc<Value>>,
@@ -285,6 +292,37 @@ struct SessionsDataCache {
     last_keys: Vec<(RuntimeKey, (u64, u64), PathStyle)>,
 }
 
+struct SessionsDataUpdate {
+    all_machines: Vec<Arc<Value>>,
+    order: Vec<Value>,
+    changed: Vec<Arc<Value>>,
+    full_required: bool,
+}
+
+impl SessionsDataUpdate {
+    fn to_delivery_entry(&self) -> (&'static str, Value) {
+        if !self.full_required
+            && !self.changed.is_empty()
+            && self.changed.len() < self.all_machines.len()
+        {
+            let upserted: Vec<Value> = self.changed.iter().map(|v| v.as_ref().clone()).collect();
+            (
+                "sessions_data_delta",
+                json!({
+                    "order": self.order,
+                    "upserted": upserted,
+                }),
+            )
+        } else {
+            let all: Vec<Value> = self
+                .all_machines
+                .iter()
+                .map(|v| v.as_ref().clone())
+                .collect();
+            ("sessions_data", Value::Array(all))
+        }
+    }
+}
 #[derive(Default)]
 struct BridgeInner {
     shared: Mutex<Shared>,
@@ -624,7 +662,7 @@ impl Bridge {
             } else {
                 Vec::new()
             };
-            let (rev, entries, single_text, member_texts) = {
+            let (rev, entries, sessions_snapshot, single_text, member_texts) = {
                 let mut shared = bridge.lock();
                 if !is_shell && let Some(keys) = &requested {
                     let sub = shared.state_subs.entry(plugin.to_owned()).or_default();
@@ -637,10 +675,20 @@ impl Bridge {
                 } else {
                     &shared.plugin_state
                 };
+                let mut sessions_snapshot = None;
                 let entries: Vec<(String, Arc<Value>)> = match &requested {
                     Some(keys) => keys
                         .iter()
-                        .filter_map(|key| source.get(key).map(|val| (key.clone(), Arc::clone(val))))
+                        .filter_map(|key| {
+                            if !is_shell
+                                && key == "sessions_data"
+                                && !shared.sessions_machines.is_empty()
+                            {
+                                sessions_snapshot = Some(shared.sessions_machines.clone());
+                                return None;
+                            }
+                            source.get(key).map(|val| (key.clone(), Arc::clone(val)))
+                        })
                         .collect(),
                     None => source
                         .iter()
@@ -665,11 +713,19 @@ impl Bridge {
                 } else {
                     shared.plugin_revision
                 };
-                (rev, entries, single_text, member_texts)
+                (rev, entries, sessions_snapshot, single_text, member_texts)
             };
-            let mut out = serde_json::Map::with_capacity(entries.len() + 3);
+            let mut out = serde_json::Map::with_capacity(
+                entries.len() + 3 + usize::from(sessions_snapshot.is_some()),
+            );
             for (key, val) in entries {
                 out.insert(key, val.as_ref().clone());
+            }
+            if let Some(machines) = sessions_snapshot {
+                out.insert(
+                    "sessions_data".into(),
+                    Value::Array(machines.iter().map(|m| m.as_ref().clone()).collect()),
+                );
             }
             let texts = single_text
                 .map(|table| table.as_ref().clone())
@@ -780,9 +836,26 @@ impl Bridge {
                     .get("detailed")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                const BAD_BLOBS: &str = "call：blobs 要是数组，每项是以 / 开头的 JSON 指针，\
+                     或 { at, base64: true, mime_at } 这样的对象";
+                let blobs = match data.get_mut("blobs").map(Value::take) {
+                    None | Some(Value::Null) => Vec::new(),
+                    Some(Value::Array(list)) => {
+                        match list.iter().map(BlobAt::parse).collect::<Option<Vec<_>>>() {
+                            Some(blobs) => blobs,
+                            None => return call.reject(BAD_BLOBS),
+                        }
+                    }
+                    Some(_) => return call.reject(BAD_BLOBS),
+                };
+                let options = CallOptions {
+                    timeout,
+                    detailed,
+                    blobs,
+                };
                 if let Some(client) = bridge.cached_client(&machine) {
                     api::blocking::spawn_detached(move || {
-                        execute_call_rpc(Some(client), method, params, timeout, detailed, call);
+                        execute_call_rpc(Some(client), method, params, options, call);
                     });
                 } else {
                     send_action(
@@ -791,8 +864,7 @@ impl Bridge {
                             machine,
                             method,
                             params,
-                            timeout,
-                            detailed,
+                            options,
                             call,
                         },
                     );
@@ -830,6 +902,75 @@ impl Bridge {
                     return call.reject("clipboard.write：缺 text 字符串");
                 };
                 send_action(&actions, Action::ClipboardWrite { text, call });
+            });
+        }
+
+        {
+            let actions = actions.clone();
+            let images = acp_hub.images().clone();
+            plugins.handle("clipboard.write_image", move |_plugin, call| {
+                let data = call.data();
+                let ref_id = data
+                    .get("ref_id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let data_b64 = data
+                    .get("data_b64")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let mime = data
+                    .get("mime")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let data_uri = data
+                    .get("data_uri")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                if ref_id.is_none() && data_b64.is_none() && data_uri.is_none() {
+                    return call.reject("clipboard.write_image：缺 ref_id / data_b64 / data_uri");
+                }
+                let actions = actions.clone();
+                let images = images.clone();
+                api::blocking::spawn_detached(move || {
+                    let resolved = ref_id
+                        .as_deref()
+                        .and_then(|id| images.get_bytes(id))
+                        .map(Ok)
+                        .or_else(|| {
+                            data_b64.as_deref().map(|b64| {
+                                smelt_acp::images::decode_image_base64(mime.as_deref(), b64)
+                            })
+                        })
+                        .or_else(|| {
+                            data_uri
+                                .as_deref()
+                                .map(smelt_acp::images::decode_image_data_uri)
+                        });
+                    let (resolved_mime, bytes) = match resolved {
+                        Some(Ok(pair)) => pair,
+                        Some(Err(err)) => {
+                            return call.reject(format!("clipboard.write_image：{err}"));
+                        }
+                        None => {
+                            return call.reject("clipboard.write_image：找不到对应图片");
+                        }
+                    };
+                    let Some(format) = gpui_image_format(&resolved_mime) else {
+                        return call.reject(format!(
+                            "clipboard.write_image：不支持的图片格式 {resolved_mime}"
+                        ));
+                    };
+                    let image = Image::from_bytes(format, bytes);
+                    send_action(&actions, Action::ClipboardWriteImage { image, call });
+                });
             });
         }
 
@@ -1370,7 +1511,7 @@ impl Bridge {
 
     /// 登记插件按需订阅的状态切片与事件类型，并返回新增切片的补齐快照（锁外拼 JSON）。
     fn apply_subscribe(&self, plugin: &str, data: &Value) -> Value {
-        let (rev, patch_entries) = {
+        let (rev, patch_entries, sessions_snapshot) = {
             let mut shared = self.lock();
             if plugin == crate::plugins::SHELL_OWNER {
                 return json!({
@@ -1388,6 +1529,7 @@ impl Bridge {
                 let Shared {
                     state_subs,
                     plugin_state,
+                    sessions_machines,
                     ..
                 } = &mut *shared;
                 let sub = state_subs.entry(plugin.to_owned()).or_default();
@@ -1396,6 +1538,9 @@ impl Bridge {
                         if key != "revision" && !sub.slices.contains(key) {
                             added_keys.insert(key.clone());
                         }
+                    }
+                    if !sessions_machines.is_empty() && !sub.slices.contains("sessions_data") {
+                        added_keys.insert("sessions_data".to_owned());
                     }
                     sub.all = true;
                 }
@@ -1424,21 +1569,37 @@ impl Bridge {
                 }
             }
 
-            let patch_entries: Vec<(String, Arc<Value>)> = added_keys
-                .into_iter()
-                .filter_map(|key| {
-                    shared
-                        .plugin_state
-                        .get(&key)
-                        .map(|val| (key, Arc::clone(val)))
-                })
-                .collect();
-            (shared.plugin_revision, patch_entries)
+            let (patch_entries, sessions_snapshot) = {
+                let mut sessions_snapshot = None;
+                let entries: Vec<(String, Arc<Value>)> = added_keys
+                    .into_iter()
+                    .filter_map(|key| {
+                        if key == "sessions_data" && !shared.sessions_machines.is_empty() {
+                            sessions_snapshot = Some(shared.sessions_machines.clone());
+                            return None;
+                        }
+                        shared
+                            .plugin_state
+                            .get(&key)
+                            .map(|val| (key, Arc::clone(val)))
+                    })
+                    .collect();
+                (entries, sessions_snapshot)
+            };
+            (shared.plugin_revision, patch_entries, sessions_snapshot)
         };
 
-        let mut patch = serde_json::Map::with_capacity(patch_entries.len());
+        let mut patch = serde_json::Map::with_capacity(
+            patch_entries.len() + usize::from(sessions_snapshot.is_some()),
+        );
         for (key, val) in patch_entries {
             patch.insert(key, val.as_ref().clone());
+        }
+        if let Some(machines) = sessions_snapshot {
+            patch.insert(
+                "sessions_data".to_owned(),
+                Value::Array(machines.iter().map(|m| m.as_ref().clone()).collect()),
+            );
         }
         json!({
             "revision": rev,
@@ -1469,7 +1630,7 @@ impl Bridge {
             .collect()
     }
 
-    fn snapshot_sessions_data_cached(&self, cx: &App) -> Option<Value> {
+    fn snapshot_sessions_data_delta(&self, cx: &App) -> Option<SessionsDataUpdate> {
         let host = api::host(cx);
         let machines = host.machines(cx);
         let mut meta = Vec::with_capacity(machines.len());
@@ -1491,16 +1652,24 @@ impl Bridge {
             if cache.initialized && cache.last_keys == keys {
                 return None;
             }
-            let mut entries = Vec::with_capacity(keys.len());
+            let full_required = !cache.initialized;
+            let mut all_machines = Vec::with_capacity(keys.len());
+            let mut order = Vec::with_capacity(keys.len());
+            let mut changed = Vec::new();
             let mut next_machines = BTreeMap::new();
             for (key, revs, style) in &keys {
+                order.push(machine_value(key));
                 let entry = match cache.machines.get(key) {
                     Some(cached) if cached.revisions == *revs && cached.path_style == *style => {
                         Arc::clone(&cached.entry)
                     }
-                    _ => Arc::new(build_machine_sessions_json(&*host, key, *style, cx)),
+                    _ => {
+                        let built = Arc::new(build_machine_sessions_json(&*host, key, *style, cx));
+                        changed.push(Arc::clone(&built));
+                        built
+                    }
                 };
-                entries.push(entry.as_ref().clone());
+                all_machines.push(Arc::clone(&entry));
                 next_machines.insert(
                     key.clone(),
                     CachedMachineSessions {
@@ -1513,14 +1682,41 @@ impl Bridge {
             cache.initialized = true;
             cache.last_keys = keys;
             cache.machines = next_machines;
-            return Some(Value::Array(entries));
+            return Some(SessionsDataUpdate {
+                all_machines,
+                order,
+                changed,
+                full_required,
+            });
         }
 
-        let entries = meta
-            .into_iter()
-            .map(|(key, _, style)| build_machine_sessions_json(&*host, key, style, cx))
-            .collect();
-        Some(Value::Array(entries))
+        let mut all_machines = Vec::with_capacity(meta.len());
+        let mut order = Vec::with_capacity(meta.len());
+        for (key, _, style) in meta {
+            order.push(machine_value(key));
+            all_machines.push(Arc::new(build_machine_sessions_json(
+                &*host, key, style, cx,
+            )));
+        }
+        Some(SessionsDataUpdate {
+            changed: all_machines.clone(),
+            all_machines,
+            order,
+            full_required: true,
+        })
+    }
+
+    #[cfg(test)]
+    fn snapshot_sessions_data_cached(&self, cx: &App) -> Option<Value> {
+        self.snapshot_sessions_data_delta(cx).map(|update| {
+            Value::Array(
+                update
+                    .all_machines
+                    .iter()
+                    .map(|m| m.as_ref().clone())
+                    .collect(),
+            )
+        })
     }
 
     /// 按 `dirty` 掩码增量计算发生变化的宿主状态切片，只把真正变了的切片推给订阅它的插件。
@@ -1541,12 +1737,13 @@ impl Bridge {
         let js_views = dirty
             .intersects(SliceMask::JS_VIEWS)
             .then(|| self.js_views_json());
-        let sessions_data = dirty
+        let sessions_update = dirty
             .contains(SliceMask::SESSIONS_DATA)
-            .then(|| self.snapshot_sessions_data_cached(cx))
+            .then(|| self.snapshot_sessions_data_delta(cx))
             .flatten();
-        let updates = snapshot_slices(dirty, rem, js_views, safe_areas, sessions_data, cx);
-        let (shell_send, deliveries) = self.apply_delta_split(updates, shell, false);
+        let updates = snapshot_slices(dirty, rem, js_views, safe_areas, None, cx);
+        let (shell_send, deliveries) =
+            self.apply_delta_split(updates, shell, sessions_update, false);
         if let Some(next) = shell_send {
             plugins.send_to_shell(STATE, next);
         }
@@ -1568,6 +1765,7 @@ impl Bridge {
         &self,
         mut updates: serde_json::Map<String, Value>,
         shell: Option<Value>,
+        sessions_update: Option<SessionsDataUpdate>,
         replace_plugin_map: bool,
     ) -> (Option<Value>, Vec<(String, Value)>) {
         updates.remove("revision");
@@ -1635,6 +1833,9 @@ impl Bridge {
         }
 
         // 3. 短锁仅写入变化了的 Arc 指针、递增版本号并抽取投递清单。
+        let sessions_delivery = sessions_update
+            .as_ref()
+            .map(SessionsDataUpdate::to_delivery_entry);
         let (delivery_recipes, shell_recipe) = {
             let mut shared = self.lock();
             if replace_plugin_map {
@@ -1654,9 +1855,16 @@ impl Bridge {
                     shared.plugin_state.insert(key.clone(), Arc::clone(arc_val));
                 }
             }
+            let sessions_changed = if let Some(update) = sessions_update {
+                shared.sessions_machines = update.all_machines;
+                shared.plugin_state.remove("sessions_data");
+                true
+            } else {
+                false
+            };
 
-            let delivery_recipes: Vec<(String, u64, Vec<(String, Option<Arc<Value>>)>)> =
-                if changed_plugin_keys.is_empty() {
+            let delivery_recipes: Vec<(String, u64, Vec<(String, Option<Arc<Value>>)>, bool)> =
+                if changed_plugin_keys.is_empty() && !sessions_changed {
                     Vec::new()
                 } else {
                     shared.plugin_revision += 1;
@@ -1672,7 +1880,14 @@ impl Bridge {
                                         .push((key.clone(), shared.plugin_state.get(key).cloned()));
                                 }
                             }
-                            (!entries.is_empty()).then_some((plugin.clone(), rev, entries))
+                            let wants_sessions = sessions_changed
+                                && (sub.all || sub.slices.contains("sessions_data"));
+                            (!entries.is_empty() || wants_sessions).then_some((
+                                plugin.clone(),
+                                rev,
+                                entries,
+                                wants_sessions,
+                            ))
                         })
                         .collect()
                 };
@@ -1705,14 +1920,33 @@ impl Bridge {
             (delivery_recipes, shell_recipe)
         };
 
-        // 4. 锁外组装每个订阅方的增量 JSON 对象。
+        // 4. 锁外组装每个订阅方的增量 JSON 对象；单订阅方（常见 `__builtins__`）直接转移
+        // `sessions_delivery` 所有权，零额外深拷贝。
+        let sessions_subscribers = delivery_recipes
+            .iter()
+            .filter(|(_, _, _, wants_sessions)| *wants_sessions)
+            .count();
+        let mut sessions_delivery_owned = sessions_delivery;
+        let mut remaining_sessions = sessions_subscribers;
         let deliveries = delivery_recipes
             .into_iter()
-            .map(|(plugin, rev, entries)| {
-                let mut patch = serde_json::Map::with_capacity(entries.len() + 1);
+            .map(|(plugin, rev, entries, wants_sessions)| {
+                let mut patch =
+                    serde_json::Map::with_capacity(entries.len() + 1 + usize::from(wants_sessions));
                 patch.insert("revision".into(), Value::from(rev));
                 for (key, val) in entries {
                     patch.insert(key, val.map(|v| v.as_ref().clone()).unwrap_or(Value::Null));
+                }
+                if wants_sessions {
+                    remaining_sessions -= 1;
+                    let entry = if remaining_sessions == 0 {
+                        sessions_delivery_owned.take()
+                    } else {
+                        sessions_delivery_owned.clone()
+                    };
+                    if let Some((key, val)) = entry {
+                        patch.insert(key.to_owned(), val);
+                    }
                 }
                 (plugin, Value::Object(patch))
             })
@@ -1740,7 +1974,7 @@ impl Bridge {
             Value::Object(map) => map,
             _ => serde_json::Map::new(),
         };
-        self.apply_delta_split(updates, Some(shell), true)
+        self.apply_delta_split(updates, Some(shell), None, true)
     }
 
     #[cfg(test)]
@@ -1919,14 +2153,157 @@ impl Bridge {
     }
 }
 
+/// 插件 `call` 的选项。
+pub(crate) struct CallOptions {
+    timeout: Duration,
+    /// 失败也 resolve，带上错误码：`{ ok, value }` / `{ ok: false, code, message }`。
+    detailed: bool,
+    /// 回复里这些位置上的正文换成 Blob 交给插件。
+    blobs: Vec<BlobAt>,
+}
+
+/// 回复里一处换成 Blob 的正文：位置是相对方法返回值的 JSON 指针。
+pub(crate) struct BlobAt {
+    pointer: String,
+    /// `pointer` 指的是数组：它每一项里这个位置都换成 Blob（一页条目各自的正文）。
+    each: Option<String>,
+    /// 那里是 base64 编码的字节（图片），解码后交出；否则是文本。
+    base64: bool,
+    /// Blob 的类型从回复的这个位置读（图片的 `mime`；有 `each` 时相对那一项）；不给就是
+    /// UTF-8 文本。
+    mime_at: Option<String>,
+}
+
+/// 回复里具体的一处：`BlobAt` 按这次回复展开（`each` 按数组长度）。
+struct BlobSite {
+    at: String,
+    base64: bool,
+    mime_at: Option<String>,
+}
+
+impl BlobAt {
+    /// 插件写的一项：`"/diff/text"`，或 `{ at, each, base64, mime_at }`。
+    fn parse(item: &Value) -> Option<BlobAt> {
+        let pointer = |v: Option<&Value>| {
+            v?.as_str()
+                .filter(|s| s.starts_with('/'))
+                .map(str::to_string)
+        };
+        match item {
+            Value::String(_) => Some(BlobAt {
+                pointer: pointer(Some(item))?,
+                each: None,
+                base64: false,
+                mime_at: None,
+            }),
+            Value::Object(object) => Some(BlobAt {
+                pointer: pointer(object.get("at"))?,
+                each: match object.get("each") {
+                    None | Some(Value::Null) => None,
+                    some => Some(pointer(some)?),
+                },
+                base64: match object.get("base64") {
+                    None | Some(Value::Null) => false,
+                    Some(Value::Bool(base64)) => *base64,
+                    Some(_) => return None,
+                },
+                mime_at: match object.get("mime_at") {
+                    None | Some(Value::Null) => None,
+                    some => Some(pointer(some)?),
+                },
+            }),
+            _ => None,
+        }
+    }
+
+    /// 这次回复 `value` 里它指的各处（`prefix` 是方法返回值在回复里的位置）。
+    fn sites(&self, value: &Value, prefix: &str) -> Vec<BlobSite> {
+        let base = format!("{prefix}{}", self.pointer);
+        let Some(each) = &self.each else {
+            return vec![BlobSite {
+                mime_at: self.mime_at.as_ref().map(|at| format!("{prefix}{at}")),
+                at: base,
+                base64: self.base64,
+            }];
+        };
+        let len = value
+            .pointer(&base)
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        (0..len)
+            .map(|ix| BlobSite {
+                at: format!("{base}/{ix}{each}"),
+                base64: self.base64,
+                mime_at: self.mime_at.as_ref().map(|at| format!("{base}/{ix}{at}")),
+            })
+            .collect()
+    }
+}
+
+impl BlobSite {
+    /// 把这一处的正文从 `value` 里取出来做成 Blob，原处只剩 `null`。那里不是字符串（这次回复
+    /// 没有正文）或 base64 解不开就照原样。
+    fn take(self, value: &mut Value) -> Option<HostBlob> {
+        let mime = match &self.mime_at {
+            Some(mime_at) => value
+                .pointer(mime_at)
+                .and_then(Value::as_str)
+                .unwrap_or("application/octet-stream")
+                .to_string(),
+            None => "text/plain;charset=utf-8".to_string(),
+        };
+        let slot = value
+            .pointer_mut(&self.at)
+            .filter(|slot| slot.is_string())?;
+        let bytes = if self.base64 {
+            let decoded =
+                <api::client::protocol::files::Base64Bytes as serde::Deserialize>::deserialize(
+                    &*slot,
+                )
+                .ok()?;
+            *slot = Value::Null;
+            decoded.0
+        } else {
+            let Value::String(text) = slot.take() else {
+                return None;
+            };
+            text.into_bytes()
+        };
+        Some(HostBlob {
+            at: self.at,
+            bytes: nsh_core::ImageData::from(bytes),
+            mime,
+        })
+    }
+}
+
+/// 把 `value` 里 `blobs` 指的（加上 `prefix`）正文取出来做成 Blob：几 MB 的 diff、文件正文、
+/// 图片、一页对话插件只是转交给原生组件（`URL.createObjectURL` 给编辑器、Markdown、`DiffView`、
+/// `<Image>`），不该先进它的 JS 堆。
+fn blob_answer(mut value: Value, blobs: &[BlobAt], prefix: &str) -> HostAnswer {
+    let sites: Vec<BlobSite> = blobs
+        .iter()
+        .flat_map(|blob| blob.sites(&value, prefix))
+        .collect();
+    let blobs = sites
+        .into_iter()
+        .filter_map(|site| site.take(&mut value))
+        .collect();
+    HostAnswer { value, blobs }
+}
+
 fn execute_call_rpc(
     client: Option<api::client::RuntimeClient>,
     method: ControlMethod,
     params: Value,
-    timeout: Duration,
-    detailed: bool,
+    options: CallOptions,
     call: HostCall,
 ) {
+    let CallOptions {
+        timeout,
+        detailed,
+        blobs,
+    } = options;
     if detailed {
         let response = match client {
             Some(client) => match client.call_method(method, params, timeout) {
@@ -1953,7 +2330,7 @@ fn execute_call_rpc(
                 "message": api::machine_removed(),
             }),
         };
-        call.resolve(response);
+        call.answer(blob_answer(response, &blobs, "/value"));
     } else {
         let result = match client {
             Some(client) => client
@@ -1961,7 +2338,10 @@ fn execute_call_rpc(
                 .map_err(api::call_error_text),
             None => Err(api::machine_removed()),
         };
-        call.reply(result);
+        match result {
+            Ok(value) => call.answer(blob_answer(value, &blobs, "")),
+            Err(error) => call.reject(error),
+        }
     }
 }
 
@@ -2034,13 +2414,12 @@ pub(crate) fn handle_action(action: Action, bridge: &Bridge, plugins: &PluginHos
             machine,
             method,
             params,
-            timeout,
-            detailed,
+            options,
             call,
         } => {
             let client = api::host(cx).client(&machine, cx);
             api::blocking::spawn_detached(move || {
-                execute_call_rpc(client, method, params, timeout, detailed, call);
+                execute_call_rpc(client, method, params, options, call);
             });
         }
         Action::Request {
@@ -2068,6 +2447,10 @@ pub(crate) fn handle_action(action: Action, bridge: &Bridge, plugins: &PluginHos
         }
         Action::ClipboardWrite { text, call } => {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
+            call.resolve(Value::Null);
+        }
+        Action::ClipboardWriteImage { image, call } => {
+            cx.write_to_clipboard(ClipboardItem::new_image(&image));
             call.resolve(Value::Null);
         }
         Action::ClipboardRead { call } => {
@@ -2663,6 +3046,7 @@ fn send_action(sender: &mpsc::UnboundedSender<Action>, action: Action) {
             | Action::Request { call, .. }
             | Action::ContextMenuItems { call, .. }
             | Action::ClipboardWrite { call, .. }
+            | Action::ClipboardWriteImage { call, .. }
             | Action::ClipboardRead { call }
             | Action::SetActiveContext { call, .. }
             | Action::OpenFile { call, .. }
@@ -2683,6 +3067,20 @@ fn send_action(sender: &mpsc::UnboundedSender<Action>, action: Action) {
             | Action::AcpClipboardImages { call, .. } => call,
         };
         call.reject("面板已经关了");
+    }
+}
+
+fn gpui_image_format(mime: &str) -> Option<ImageFormat> {
+    match mime.trim().to_ascii_lowercase().as_str() {
+        "image/png" => Some(ImageFormat::Png),
+        "image/jpeg" | "image/jpg" => Some(ImageFormat::Jpeg),
+        "image/webp" => Some(ImageFormat::Webp),
+        "image/gif" => Some(ImageFormat::Gif),
+        "image/bmp" => Some(ImageFormat::Bmp),
+        "image/tiff" => Some(ImageFormat::Tiff),
+        "image/svg+xml" => Some(ImageFormat::Svg),
+        "image/x-icon" | "image/vnd.microsoft.icon" | "image/ico" => Some(ImageFormat::Ico),
+        _ => None,
     }
 }
 
@@ -2736,12 +3134,10 @@ pub(crate) fn dirty_slices_for_event(event: &HostEvent) -> SliceMask {
         HostEvent::ActiveContextChanged => SliceMask::ACTIVE_CONTEXT,
         HostEvent::WindowActivated => SliceMask::WINDOW_ACTIVE,
         HostEvent::NotificationPermissionChanged => SliceMask::NOTIFICATION_PERMISSION,
-        HostEvent::ViewsChanged
-        | HostEvent::LaidOutViewsChanged
-        | HostEvent::ShownViewsChanged
-        | HostEvent::ViewBadgesChanged => {
+        HostEvent::ViewsChanged | HostEvent::LaidOutViewsChanged | HostEvent::ShownViewsChanged => {
             SliceMask::VIEWS | SliceMask::SHELL | SliceMask::SAFE_AREAS
         }
+        HostEvent::ViewBadgesChanged => SliceMask::VIEWS,
         HostEvent::PagesChanged => SliceMask::PAGES | SliceMask::SHELL,
         HostEvent::LayoutsChanged => SliceMask::SHELL | SliceMask::SAFE_AREAS,
         HostEvent::SafeAreaChanged => SliceMask::SAFE_AREAS,
@@ -3051,6 +3447,81 @@ fn reveal_local_path(path: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回复里的文本和 base64 图片取出来做成 Blob：图片解码成字节、类型从回复里读，文本是
+    /// UTF-8；原处只剩 `null`，不在回复里再带一份。`each` 按数组每一项取。没有正文的位置照原样。
+    #[test]
+    fn blob_answer_takes_texts_and_base64_images_out_of_the_reply() {
+        let blobs: Vec<BlobAt> = [
+            json!("/content/text"),
+            json!({ "at": "/content/data", "base64": true, "mime_at": "/content/mime" }),
+            json!("/missing"),
+            json!({ "at": "/turns", "each": "/text" }),
+        ]
+        .iter()
+        .map(|item| BlobAt::parse(item).unwrap())
+        .collect();
+        let reply = json!({
+            "value": {
+                "content": { "text": "h\u{e9}llo", "data": "iVBORw==", "mime": "image/png" },
+                "turns": [{ "text": "a" }, { "tools": [] }, { "text": "c" }]
+            }
+        });
+
+        let answer = blob_answer(reply, &blobs, "/value");
+
+        let got: Vec<_> = answer
+            .blobs
+            .iter()
+            .map(|blob| {
+                (
+                    blob.at.as_str(),
+                    blob.bytes.bytes().to_vec(),
+                    blob.mime.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (
+                    "/value/content/text",
+                    "h\u{e9}llo".as_bytes().to_vec(),
+                    "text/plain;charset=utf-8"
+                ),
+                (
+                    "/value/content/data",
+                    vec![0x89, b'P', b'N', b'G'],
+                    "image/png"
+                ),
+                (
+                    "/value/turns/0/text",
+                    b"a".to_vec(),
+                    "text/plain;charset=utf-8"
+                ),
+                (
+                    "/value/turns/2/text",
+                    b"c".to_vec(),
+                    "text/plain;charset=utf-8"
+                ),
+            ]
+        );
+        assert_eq!(answer.value["value"]["content"]["data"], Value::Null);
+        assert_eq!(answer.value["value"]["content"]["mime"], "image/png");
+    }
+
+    #[test]
+    fn blob_specs_reject_what_is_not_a_pointer() {
+        for bad in [
+            json!("content/text"),
+            json!(3),
+            json!({ "at": "/data", "base64": "yes" }),
+            json!({ "at": "/data", "mime_at": "mime" }),
+            json!({ "at": "/turns", "each": "text" }),
+        ] {
+            assert!(BlobAt::parse(&bad).is_none(), "{bad}");
+        }
+    }
 
     #[test]
     fn push_split_isolates_shell_payload_from_guest_plugins() {

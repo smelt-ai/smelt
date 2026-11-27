@@ -79,7 +79,7 @@ impl AcpIdleState {
     pub(crate) fn touch(&self) {
         self.last_activity_ms
             .store(crate::event_hub::now_ms(), Ordering::SeqCst);
-        REAPER_BELL.ring();
+        REAPER_BELL.ring_activity();
     }
 
     pub(crate) fn is_suspended(&self) -> bool {
@@ -89,7 +89,9 @@ impl AcpIdleState {
     /// 任何一次拉起 runtime 都结束挂起，并重新计时。
     pub(crate) fn mark_running(&self) {
         self.suspended.store(false, Ordering::SeqCst);
-        self.touch();
+        self.last_activity_ms
+            .store(crate::event_hub::now_ms(), Ordering::SeqCst);
+        REAPER_BELL.ring_runtime_started();
     }
 
     fn mark_suspended(&self) {
@@ -142,45 +144,70 @@ struct ReaperBell {
     rung: Condvar,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReaperListenMode {
+    /// 已排定时截止，睡到截止前无需唤醒。
+    Off,
+    /// 活会话未超过保底名额（`live <= keep_warm`）：只有新 runtime 拉起才可能超限，
+    /// 流式 token 的普通 `touch()` 不应每次误唤醒回收线程。
+    RuntimeStartedOnly,
+    /// 已超过保底名额，但所有候选均被忙碌条件挡住（无定时截止）：任意活动或状态变更都唤醒复查。
+    AnyActivity,
+}
+
 struct ReaperBellState {
-    listening: bool,
+    mode: ReaperListenMode,
     rings: u64,
 }
 
 static REAPER_BELL: ReaperBell = ReaperBell {
     state: Mutex::new(ReaperBellState {
-        listening: false,
+        mode: ReaperListenMode::Off,
         rings: 0,
     }),
     rung: Condvar::new(),
 };
 
 impl ReaperBell {
-    fn ring(&self) {
+    fn ring_activity(&self) {
         let mut state = self.state.lock().unwrap();
-        if state.listening {
+        if state.mode == ReaperListenMode::AnyActivity {
             state.rings = state.rings.wrapping_add(1);
             self.rung.notify_one();
         }
     }
 
-    /// 扫描前调用。从这时起的活动都会记下，返回当前的计数。
+    fn ring_runtime_started(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.mode != ReaperListenMode::Off {
+            state.rings = state.rings.wrapping_add(1);
+            self.rung.notify_one();
+        }
+    }
+
+    /// 扫描前调用。扫描期间保守听全部活动，避免扫过之后才发生的拉起或状态变化漏掉。
     fn listen(&self) -> u64 {
         let mut state = self.state.lock().unwrap();
-        state.listening = true;
+        state.mode = ReaperListenMode::AnyActivity;
         state.rings
     }
 
-    /// 有截止就睡到截止，期间的活动只会把截止往后推，不必理会；没有截止就等
-    /// `listen` 之后的第一次活动。
-    fn wait(&self, seen: u64, timeout: Option<Duration>) {
+    /// 有截止就睡到截止，期间的活动只会把截止往后推，不必理会；没有截止时：
+    /// - 活会话未超保底名额：只等下一次新 runtime 拉起（`mark_running`），忽略流式 token `touch`；
+    /// - 活会话已超保底名额但均被阻塞：等下一次活动唤醒复查。
+    fn wait(&self, seen: u64, timeout: Option<Duration>, has_excess: bool) {
         let mut state = self.state.lock().unwrap();
         match timeout {
             Some(timeout) => {
-                state.listening = false;
+                state.mode = ReaperListenMode::Off;
                 drop(self.rung.wait_timeout(state, timeout).unwrap());
             }
             None => {
+                state.mode = if has_excess {
+                    ReaperListenMode::AnyActivity
+                } else {
+                    ReaperListenMode::RuntimeStartedOnly
+                };
                 drop(
                     self.rung
                         .wait_while(state, |state| state.rings == seen)
@@ -333,6 +360,7 @@ pub(crate) fn spawn_acp_idle_reaper(acp_sessions: AcpSessions) {
                 REAPER_BELL.wait(
                     seen,
                     wake_at.map(|at| Duration::from_millis(at.saturating_sub(now))),
+                    sweep.has_excess,
                 );
             }
         });
@@ -350,6 +378,8 @@ pub(crate) struct IdleSweep {
     pub(crate) next_deadline_ms: Option<u64>,
     /// 有会话到点了，却抢不到它的生命周期锁或 spawn 闸门，要过一会儿再试。
     pub(crate) contended: bool,
+    /// 扫描时活会话数是否超过保底名额（`live > keep_warm`）。未超限时回收线程只需等新 runtime 拉起。
+    pub(crate) has_excess: bool,
 }
 
 /// 挂起超出 `keep_warm` 且闲置够久的会话，按最近活动时间从旧到新优先回收。
@@ -375,6 +405,7 @@ pub(crate) fn suspend_idle_acp_sessions(
     if excess == 0 {
         return sweep;
     }
+    sweep.has_excess = true;
     // 最久未活动的排在前面；同一毫秒按 id 稳定排序。
     live.sort_by(|(a_ms, a_id, _), (b_ms, b_id, _)| a_ms.cmp(b_ms).then_with(|| a_id.cmp(b_id)));
 

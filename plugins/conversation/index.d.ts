@@ -22,7 +22,10 @@ export interface SmeltConversationProps {
   start?: SmeltConversationStart | null;
   initialConfig?: Array<[string, string]>;
   placeholder?: string | null;
+  /** 嵌入模式（如自动化运行页）：隐藏浮动标题胶囊。 */
   embedded?: boolean;
+  /** 是否可见（在 `display: none` 隐藏会话或非活动页时传 false，暂停所有旋转动画）。 */
+  active?: boolean;
   title?: string | null;
   safeArea?: {
     title_bar?: boolean;

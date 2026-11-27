@@ -7,8 +7,10 @@ import {
   effect,
   host,
   Image,
+  lifecycle,
   nativeComponent,
   nativeModule,
+  reduceMotion,
   signal,
   Text,
   View,
@@ -333,27 +335,6 @@ export function launchableProfiles(settings: unknown): Array<{
   in_history_sources: boolean;
 }> {
   return JSON.parse(Smelt.launchableProfiles(JSON.stringify(settings)));
-}
-
-export function handoffPrompt(payload: {
-  source_agent: string;
-  source_profile_label?: string | null;
-  source_title: string;
-  cwd?: string | null;
-  target_agent: string;
-  target_profile_label?: string | null;
-  detail: {
-    model?: string | null;
-    turns: Array<{
-      is_user: boolean;
-      timestamp_ms?: number | null;
-      text: string;
-      tools?: string[];
-      tool_paths?: string[];
-    }>;
-  };
-}): string {
-  return Smelt.handoffPrompt(JSON.stringify(payload));
 }
 
 export type ResolveResult<T> =
@@ -707,6 +688,26 @@ function applyState(next: any, explicitRev?: number) {
   }
   if ("sessions_data" in next && canAcceptSlice("sessions_data", rev)) {
     const val = next.sessions_data ?? [];
+    sessionsDataSlice.set(val);
+    merged.sessions_data = val;
+    changedKeys.push("sessions_data");
+  } else if ("sessions_data_delta" in next && canAcceptSlice("sessions_data", rev)) {
+    const delta = next.sessions_data_delta;
+    const keyOf = (m: any) => (m == null ? "" : String(m));
+    const prevList = Array.isArray(sessionsDataSlice()) ? sessionsDataSlice() : [];
+    const byMachine = new Map<string, any>();
+    for (const item of prevList) {
+      byMachine.set(keyOf(item?.machine), item);
+    }
+    for (const item of delta?.upserted ?? []) {
+      byMachine.set(keyOf(item?.machine), item);
+    }
+    const order = Array.isArray(delta?.order) ? delta.order : [];
+    const val: any[] = [];
+    for (const m of order) {
+      const found = byMachine.get(keyOf(m));
+      if (found !== undefined) val.push(found);
+    }
     sessionsDataSlice.set(val);
     merged.sessions_data = val;
     changedKeys.push("sessions_data");
@@ -1184,18 +1185,70 @@ export function call(
   return host.call("call", payload);
 }
 
+/**
+ * `callWithBlobs` 的一处正文：文本的 JSON 指针，或 `{ at, … }`。`base64: true` 是 base64 字节，
+ * 类型在 `mime_at`；`each` 是 `at` 那个数组每一项里的位置（一页条目各自的正文），这时
+ * `mime_at` 也相对那一项。
+ */
+export type BlobAt =
+  | string
+  | { at: string; each?: string; base64?: boolean; mime_at?: string };
+
+/**
+ * `blob()` 的 `blob:` 地址，交给原生组件读（编辑器、Markdown、图片）：换了 Blob 才换地址，旧地址
+ * 和组件卸载时 revoke。在组件里调，随组件清理。
+ */
+export function blobUrl(blob: () => Blob | null | undefined): () => string | undefined {
+  const source = computed(blob);
+  let made: string | undefined;
+  const url = computed(() => {
+    const next = source();
+    const prev = made;
+    made = next ? URL.createObjectURL(next) : undefined;
+    if (prev) URL.revokeObjectURL(prev);
+    return made;
+  });
+  cleanup(() => {
+    if (made) URL.revokeObjectURL(made);
+    made = undefined;
+  });
+  return url;
+}
+
+/**
+ * 同 `call`，回复里 `blobs` 这些位置（JSON 指针，如 `/patch`、`/diff/text`）上的正文以
+ * `Blob` 交来，不进插件的 JS 堆：用 `URL.createObjectURL` 交给原生组件（`SmeltDiffView` 的
+ * `patchUrl`、`SmeltEditor` 的 `valueUrl`、`<Image>` 的 `src`），换内容时 `URL.revokeObjectURL`。
+ * base64 编码的字节（图片）写成 `{ at, base64: true, mime_at }`，`mime_at` 指回复里类型所在的
+ * 位置。那里没有正文时照原样。反方向不用这个：参数里放 `Blob`，宿主收到的就是它的文本。
+ */
+export function callWithBlobs(
+  machine: string | null,
+  method: string,
+  params: unknown,
+  blobs: BlobAt[],
+  timeoutMs?: number,
+): Promise<any> {
+  const payload: Record<string, unknown> = { machine, method, params, blobs };
+  if (timeoutMs != null) payload.timeout_ms = timeoutMs;
+  return host.call("call", payload);
+}
+
 export type CallDetailResult<T = any> =
   | { ok: true; value: T }
   | { ok: false; code: string | null; message: string };
 
+/** 同 `call`，失败也作值交来（带运行时的错误码）；`blobs` 同 `callWithBlobs`，位置相对 `value`。 */
 export function callDetail<T = any>(
   machine: string | null,
   method: string,
   params: unknown = {},
   timeoutMs?: number,
+  blobs?: BlobAt[],
 ): Promise<CallDetailResult<T>> {
   const payload: Record<string, unknown> = { machine, method, params, detailed: true };
   if (timeoutMs != null) payload.timeout_ms = timeoutMs;
+  if (blobs) payload.blobs = blobs;
   return host.call("call", payload);
 }
 
@@ -1260,6 +1313,17 @@ export function contextMenuItems(menu: string, machine: string | null, context: 
 
 export function clipboardWrite(value: string): Promise<void> {
   return host.call("clipboard.write", { text: value });
+}
+
+export interface ClipboardImageInput {
+  ref_id?: string | null;
+  data_b64?: string | null;
+  mime?: string | null;
+  data_uri?: string | null;
+}
+
+export function clipboardWriteImage(image: ClipboardImageInput): Promise<void> {
+  return host.call("clipboard.write_image", image);
 }
 
 export function clipboardRead(): Promise<string | null> {
@@ -1513,7 +1577,8 @@ export function SmeltIcon(props: {
 }) {
   const iconClass = () => {
     const parts: string[] = [];
-    if (props.spin) parts.push("animate-spin");
+    // 窗口失焦或开启系统「减弱动态效果」时暂停旋转动画，避免后台空转 60/120Hz 重绘。
+    if (props.spin && lifecycle() === "active" && !reduceMotion()) parts.push("animate-spin");
     if (props.class) parts.push(props.class);
     return parts.length > 0 ? parts.join(" ") : undefined;
   };
@@ -2040,6 +2105,8 @@ export function SmeltButton(props: SmeltButtonProps) {
           alignItems: "center",
           justifyContent: "center",
           gap: metrics().gap,
+          // NSH 按 RN 默认不收缩：按钮被 maxWidth / 父级压窄时，内容行和文字都得能缩，文字才截断，不撑出底色。
+          flexShrink: 1,
           minWidth: 0,
           overflow: "hidden",
           opacity: props.loading ? 0 : 1,
@@ -2056,6 +2123,7 @@ export function SmeltButton(props: SmeltButtonProps) {
               lineHeight: metrics().textStyle.line_height,
               fontWeight: metrics().textStyle.weight,
               numberOfLines: 1,
+              flexShrink: 1,
             }}
           >
             {props.label ?? ""}
@@ -2099,7 +2167,11 @@ export function SmeltWindowBar(props: { view: string }) {
     }
     return lastVisibleArea ?? next;
   });
-  return <SmeltNativeWindowBar safeArea={area()} style={{ width: "100%", flexShrink: 0 }} />;
+  return (
+    <If when={area().title_bar}>
+      <SmeltNativeWindowBar safeArea={area()} style={{ width: "100%", flexShrink: 0 }} />
+    </If>
+  );
 }
 
 const MERMAID_EXTENSIONS = [{ name: "mermaid", language: "mermaid" }];
@@ -2131,20 +2203,28 @@ function MermaidDiagramBlock(props: { source: string }) {
       return;
     }
     let stale = false;
-    renderMermaidSvg(src)
-      .then((res) => {
-        if (mermaidClientCache.size >= 128) {
-          const oldest = mermaidClientCache.keys().next().value;
-          if (oldest !== undefined) mermaidClientCache.delete(oldest);
-        }
-        mermaidClientCache.set(cacheKey, res);
-        if (!stale) result.set(res);
-      })
-      .catch((err: any) => {
-        if (!stale) result.set({ ok: false, error: err?.message ?? String(err) });
-      });
+    // 流式输出 Mermaid 代码块时每来几个字符就重跑：加 180ms 防抖避免反复调 Rust 渲染残缺图；
+    // 且仅缓存成功结果，防止半截源码挤掉 128 项缓存里的有效图。
+    const timer = setTimeout(() => {
+      if (stale) return;
+      renderMermaidSvg(src)
+        .then((res) => {
+          if (res.ok) {
+            if (mermaidClientCache.size >= 128) {
+              const oldest = mermaidClientCache.keys().next().value;
+              if (oldest !== undefined) mermaidClientCache.delete(oldest);
+            }
+            mermaidClientCache.set(cacheKey, res);
+          }
+          if (!stale) result.set(res);
+        })
+        .catch((err: any) => {
+          if (!stale) result.set({ ok: false, error: err?.message ?? String(err) });
+        });
+    }, 180);
     cleanup(() => {
       stale = true;
+      clearTimeout(timer);
     });
   });
 
@@ -2214,7 +2294,9 @@ const renderMermaidCustom = (node: any) =>
   node?.name === "mermaid" ? <MermaidDiagramBlock source={node.text ?? ""} /> : null;
 
 export function SmeltMarkdown(props: {
-  markdown: string;
+  /** 二选一：正文，或 blob 里正文的 `blob:` 地址（大文件不进插件的 JS 堆）。 */
+  markdown?: string;
+  markdownUrl?: string;
   cwd?: string | null;
   machine?: string | null;
   selectable?: boolean;
@@ -2268,6 +2350,7 @@ export function SmeltMarkdown(props: {
   return (
     <TextView
       markdown={props.markdown}
+      markdownUrl={props.markdownUrl}
       options={props.streaming ? STREAMING_MARKDOWN_OPTIONS : undefined}
       streamingFade={Boolean(props.streaming)}
       selectable={props.selectable ?? true}
@@ -2301,6 +2384,10 @@ export function SmeltEditor(props: {
   editorRef?: (api: any) => void;
   value?: string;
   defaultValue?: string;
+  /** blob 里正文的 `blob:` 地址，代替 `value`：大文件不进插件的 JS 堆，改后的正文从 `onBlobChange` 拿。 */
+  valueUrl?: string;
+  /** 已保存正文的 `blob:` 地址：`onModifiedChange` 报告当前正文和它是否不同。 */
+  savedValueUrl?: string;
   language?: string;
   placeholder?: string;
   readOnly?: boolean;
@@ -2318,6 +2405,9 @@ export function SmeltEditor(props: {
   styles?: Record<string, any>;
   classes?: Record<string, string>;
   onChange?: (event: { value: string }) => void;
+  /** 每次改动后的正文，以 Blob 交来（代替 `onChange` 的字符串，不进 JS 堆）。 */
+  onBlobChange?: (event: { blob: Blob }) => void;
+  onModifiedChange?: (event: { modified: boolean }) => void;
   onSelectionChange?: (event: any) => void;
   onFocus?: () => void;
   onBlur?: () => void;
@@ -2349,6 +2439,8 @@ export function SmeltEditor(props: {
       ref={props.editorRef}
       value={props.value}
       defaultValue={props.defaultValue}
+      valueUrl={props.valueUrl}
+      savedValueUrl={props.savedValueUrl}
       language={props.language}
       placeholder={props.placeholder}
       readOnly={props.readOnly}
@@ -2375,6 +2467,8 @@ export function SmeltEditor(props: {
         ...(props.style ?? {}),
       }}
       onChange={props.onChange}
+      onBlobChange={props.onBlobChange}
+      onModifiedChange={props.onModifiedChange}
       onSelectionChange={props.onSelectionChange}
       onFocus={props.onFocus}
       onBlur={props.onBlur}
@@ -2410,6 +2504,8 @@ export function SmeltVector(props: {
 export function SmeltDiffView(props: {
   diffRef?: (api: any) => void;
   patch?: string;
+  /** `blob:` 地址的补丁（`callWithBlobs` 拿到的 Blob），组件自己读原生字节。 */
+  patchUrl?: string;
   oldValue?: string;
   newValue?: string;
   language?: string;
@@ -2459,6 +2555,7 @@ export function SmeltDiffView(props: {
     <BaseDiffView
       ref={props.diffRef}
       patch={props.patch}
+      patchUrl={props.patchUrl}
       oldValue={props.oldValue}
       newValue={props.newValue}
       language={props.language}

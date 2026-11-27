@@ -4513,7 +4513,7 @@ fn extend_search_path(login: &str, home: Option<&std::path::Path>) -> String {
 ///
 /// Windows 上没有扩展名的名字按 `.exe`、`.cmd`、`.bat`、原名这个顺序找。
 /// `CreateProcess` 只补 `.exe`，`claude` / `npx` 这类实际是 `.cmd`。
-fn resolve_in_path(program: &str, path: &str) -> Option<String> {
+pub(crate) fn resolve_in_path(program: &str, path: &str) -> Option<String> {
     if program.contains('/') || program.contains('\\') {
         return Some(program.to_string());
     }

@@ -195,6 +195,39 @@ pub fn wait_until_exit(pid: i32, timeout: Duration) -> bool {
     wait_until_any_exit(&[pid], timeout).is_some()
 }
 
+/// 等自己拉起的直属子进程退出，最多 `timeout`。退出了返回 `true`。
+///
+/// 不收尸，之后照常 `wait` 拿退出状态。和 [`wait_until_exit`] 不同，这里认得出
+/// 自己没收的僵尸，也不靠 pidfd、kqueue：Unix 由一条线程停在 `waitid(WNOWAIT)`
+/// 上，一退出就醒。超时后那条线程还停着，调用方杀掉进程再 `wait`，它跟着返回。
+/// 起不了这条线程时返回 `false`，调用方照超时处理。Windows 等进程句柄。
+pub fn wait_child_exit(pid: u32, timeout: Duration) -> bool {
+    #[cfg(unix)]
+    {
+        let (tx, rx) = mpsc::channel();
+        let started = thread::Builder::new()
+            .name("smelt-child-exit".to_string())
+            .spawn(move || {
+                loop {
+                    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                    let waited = unsafe {
+                        libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT)
+                    };
+                    if waited == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+                    {
+                        break;
+                    }
+                }
+                let _ = tx.send(());
+            });
+        started.is_ok() && rx.recv_timeout(timeout).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        wait_until_exit(i32::try_from(pid).unwrap_or(i32::MAX), timeout)
+    }
+}
+
 // ---- 等一组 pid 里任意一个退出 ----
 //
 // 不收尸。空列表立刻返回 `None`。已经死掉的 pid 在注册时就会返回，不会空转。
@@ -500,6 +533,27 @@ mod tests {
             "退出后应马上被 wait 收回，实际 {:?}",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn child_exit_is_seen_without_reaping() {
+        let mut child = Command::new("sh")
+            .args(["-c", "exit 3"])
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("spawn");
+        // 已经成了僵尸也要认出来：`kill(pid, 0)` 对僵尸照样成功。
+        std::thread::sleep(Duration::from_millis(100));
+        let started = Instant::now();
+        assert!(wait_child_exit(child.id(), Duration::from_secs(5)));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        // 没被收走：退出码还在自己手里。
+        assert_eq!(child.wait().expect("wait").code(), Some(3));
+
+        let mut sleeper = Command::new("sleep").arg("30").spawn().expect("spawn");
+        assert!(!wait_child_exit(sleeper.id(), Duration::from_millis(100)));
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
     }
 
     #[test]

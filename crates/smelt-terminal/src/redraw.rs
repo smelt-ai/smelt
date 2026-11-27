@@ -73,6 +73,11 @@ impl RedrawReceiver {
         })
         .await
     }
+
+    /// 合并节流窗口结束、真正消费终端状态前清掉期间攒下的待处理标记。
+    pub(crate) fn clear_pending(&self) {
+        self.0.pending.store(false, Ordering::Release);
+    }
 }
 
 #[cfg(test)]

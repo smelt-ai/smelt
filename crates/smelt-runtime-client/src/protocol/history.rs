@@ -27,8 +27,11 @@ history_calls! {
     /// 某家 agent（及 workspace profile）在某个项目下的历史会话，最近活跃的在前。
     /// 用户改过的名字已经贴好。
     HistoryListCall => HistoryList(HistoryListParams) -> HistoryListResult;
-    /// 一份历史会话的对话内容。存档已被删或格式认不出时 `detail` 为 `None`。
+    /// 一份历史会话的对话内容，按轮次分页。存档已被删或格式认不出时 `detail` 为 `None`。
     HistoryDetailCall => HistoryDetail(HistoryDetailParams) -> HistoryDetailResult;
+    /// 把一份历史会话压成交接给另一个 agent 的首条 prompt（规则在 `smelt-model`
+    /// `session_handoff`）。存档已被删或格式认不出时 `prompt` 为 `None`。
+    HistoryHandoffCall => HistoryHandoff(HistoryHandoffParams) -> HistoryHandoffResult;
     /// 删除一份历史存档，连同它的自定义标题。只删这个项目的历史列表里确实有的那一份。
     HistoryDeleteCall => HistoryDelete(HistoryDeleteParams) -> EmptyParams;
 }
@@ -69,22 +72,34 @@ pub struct HistoryListResult {
 pub struct HistoryDetailParams {
     pub agent: String,
     pub path: String,
+    /// 从第几轮起。
+    #[serde(default)]
+    pub offset: usize,
+    /// 最多几轮；不给是到最后。
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistoryTurn {
     pub is_user: bool,
     pub timestamp_ms: Option<i64>,
+    /// 只有空白时是空串。
     pub text: String,
+    /// 用户轮其实是 agent 回显的「用户中断」标记，不是用户打的字。
+    #[serde(default)]
+    pub interrupted: bool,
     /// 这轮 assistant 调用的工具名。
     pub tools: Vec<String>,
-    /// 这轮工具入参里出现的文件路径，会话迁移用。
-    pub tool_paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistoryDetail {
+    /// `offset` 起的这一页。
     pub turns: Vec<HistoryTurn>,
+    /// 整份会话的轮数。
+    #[serde(default)]
+    pub total: usize,
     /// 原会话用的模型（读得到才有）。
     pub model: Option<String>,
 }
@@ -92,6 +107,25 @@ pub struct HistoryDetail {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistoryDetailResult {
     pub detail: Option<HistoryDetail>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HistoryHandoffParams {
+    /// 历史来源（`HistorySourceKind::id`），得是能对话的 agent：交接头部要交代原会话是谁。
+    pub agent: String,
+    pub path: String,
+    /// 列表上显示的标题。
+    pub source_title: String,
+    pub source_profile_label: Option<String>,
+    /// 接手的 agent（`ConversationAgentKind::id`）。
+    pub target_agent: String,
+    pub target_profile_label: Option<String>,
+    pub cwd: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HistoryHandoffResult {
+    pub prompt: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

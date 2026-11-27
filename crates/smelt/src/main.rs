@@ -176,7 +176,7 @@ gpui::actions!(smelt, [DismissWorkspace]);
 /// 还握着 `Workspace`，它仍能 `upgrade`。
 #[derive(Clone)]
 struct MainWindow {
-    window: WindowHandle<gpui_base::Root>,
+    window: WindowHandle<Workspace>,
     workspace: WeakEntity<Workspace>,
 }
 
@@ -285,9 +285,12 @@ struct Workspace {
     /// 各页出口最近一次传入的 `(view_id, args, seq)`。
     nsh_outlet_args: HashMap<String, (String, serde_json::Value, u64)>,
     nsh_outlet_seq: u64,
+    /// 宿主设置导航与 8 个宿主设置页的异步状态与缓存（渲染在 NSH 主壳）。
+    host_settings: settings::HostSettingsState,
     _nsh_shell_sub: Subscription,
     _nsh_shell_observe: Subscription,
     _settings_sel_sub: Subscription,
+    _host_settings_subs: Vec<Subscription>,
 }
 
 impl Workspace {
@@ -387,20 +390,41 @@ impl Workspace {
                         })
                         .collect();
                     plugins::set_installed(user_plugins);
+                    this.sync_host_settings(cx);
                     cx.notify();
                 }
                 smelt_nsh::MainShellEvent::InitialReady => {
                     this.open_home_page(window, cx);
                     this.sync_nsh_settings_page(cx);
+                    this.sync_host_settings(cx);
                 }
                 smelt_nsh::MainShellEvent::HostDialogAction(action) => {
                     this.handle_host_dialog_action(action, cx);
+                }
+                smelt_nsh::MainShellEvent::HostSettingsAction(action) => {
+                    this.handle_host_settings_action(action, window, cx);
                 }
             },
         );
         let settings_sel_sub = settings::observe_selection(window, cx, |this, _, cx| {
             this.sync_nsh_settings_page(cx);
+            this.sync_host_settings(cx);
         });
+        let mut host_settings_subs = vec![
+            cx.observe_global::<keymap::KeymapState>(|this, cx| this.sync_host_settings(cx)),
+            cx.observe_global::<smelt_ui::theme_catalog::ThemeCatalog>(|this, cx| {
+                this.host_settings.invalidate_themes();
+                this.sync_host_settings(cx);
+            }),
+        ];
+        #[cfg(any(target_os = "macos", windows))]
+        if let Some(updater) = updater::updater(cx) {
+            host_settings_subs.push(cx.observe(&updater, |this, _, cx| {
+                this.sync_host_settings(cx);
+                this.sync_host_dialogs(cx);
+                this.note_overlay(cx);
+            }));
+        }
 
         let mut ws = Self {
             pages: Vec::new(),
@@ -439,9 +463,11 @@ impl Workspace {
             nsh_shell: shell,
             nsh_outlet_args: HashMap::new(),
             nsh_outlet_seq: 0,
+            host_settings: settings::HostSettingsState::new(),
             _nsh_shell_sub: nsh_shell_sub,
             _nsh_shell_observe: nsh_shell_observe,
             _settings_sel_sub: settings_sel_sub,
+            _host_settings_subs: host_settings_subs,
         };
         ws._host_events_sub = Some(ws.subscribe_host_events(window, cx));
         // 对话框和遮罩层的开关散在各处（确认框、命令面板），开关时都会通知工作台。
@@ -497,11 +523,13 @@ impl Workspace {
             })
             .detach();
         }));
-        ws._appearance_sub = Some(
-            cx.observe_global_in::<Appearance>(window, |this, _window, cx| {
-                this.schedule_appearance_sync(cx)
-            }),
-        );
+        ws._appearance_sub = Some(cx.observe_global_in::<Appearance>(
+            window,
+            |this, _window, cx| {
+                this.schedule_appearance_sync(cx);
+                this.sync_host_settings(cx);
+            },
+        ));
         // 首帧绘制前就把窗口材质和界面字号对上。观察器只在之后的外观变化时再排一次。
         ws.sync_appearance(window, cx);
         ws
@@ -511,7 +539,6 @@ impl Workspace {
     /// 一次离线的远程机器，再告诉插件。
     pub(crate) fn note_window_activation(&mut self, window: &Window, cx: &mut Context<Self>) {
         let application_active = status_item::is_app_active();
-        smelt_ui::motion::set_ambient_application_active(cx, application_active);
         let main_window_key = window.is_window_active();
         plugin_host::set_main_window_key(cx.entity_id(), main_window_key, cx);
         let active = application_active && main_window_key;
@@ -651,7 +678,12 @@ impl Workspace {
             quitting: self.quit_requested,
         });
         let dir_picker = self.dir_picker_dialog_state(cx);
-        let state = smelt_nsh::HostDialogsState { quit, dir_picker };
+        let confirm = updater::pending_confirm_dialog(cx);
+        let state = smelt_nsh::HostDialogsState {
+            quit,
+            dir_picker,
+            confirm,
+        };
         self.nsh_shell
             .update(cx, |shell, cx| shell.set_host_dialogs(state, cx));
     }
@@ -679,6 +711,8 @@ impl Workspace {
             }
             smelt_nsh::HostDialogAction::DirPickerConfirm => self.dir_picker_confirm(cx),
             smelt_nsh::HostDialogAction::DirPickerCancel => self.cancel_dir_picker(cx),
+            smelt_nsh::HostDialogAction::ConfirmAccept => updater::confirm_pending_dialog(cx),
+            smelt_nsh::HostDialogAction::ConfirmCancel => updater::cancel_pending_dialog(cx),
         }
     }
 }
@@ -787,8 +821,7 @@ fn open_workspace_window(cx: &mut App) -> MainWindow {
             window.set_rem_size(px(ui_font_px as f32));
             let view = cx.new(|cx| Workspace::new(window, cx));
             workspace = Some(view.downgrade());
-            // 顶层视图包一层 Root：smelt-ui 的对话框、菜单这些窗口层都登记在它上面。
-            cx.new(|cx| gpui_base::Root::new(view, window, cx).bg(gpui::transparent_black()))
+            view
         })
         .expect("打开窗口失败");
     MainWindow {
@@ -856,9 +889,7 @@ fn main() {
     }
 
     app.run(move |cx| {
-        // gpui-base：输入框、富文本、滚动条、分栏、窗口根这些行为层和它们的键位。
-        gpui_base::init(cx);
-        // smelt 自己的组件：菜单键位、窗口对话框层（挂在窗口根上，要在开窗口之前装）。
+        // 载入内置界面字体 Inter（要在开窗口之前装）。
         smelt_ui::init(cx);
         // 内嵌终端默认字体 Maple Mono NF（Regular/Bold，v7.9）。Ghostty 同款思路：
         // 默认字体自己带，不赌用户装没装——任何机器上默认字体族都能解析成功，
@@ -883,7 +914,7 @@ fn main() {
         plugins::register_initial_themes(cx);
         let appearance = load_appearance();
         cx.set_global(appearance.clone());
-        smelt_ui::set_code_font(&appearance.font_family, cx);
+        smelt_model::font_config::set_font_family(&appearance.font_family);
         settings::apply_named_theme(&appearance.theme_name, cx);
 
         // 原生通知/菜单栏桥必须先于任何 Attention producer 就绪。daemon 快照可能在

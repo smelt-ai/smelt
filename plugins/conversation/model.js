@@ -8,6 +8,27 @@ export function isNewConversationCommand(text) {
   return typeof text === "string" && text.trim().toLowerCase() === "/clear";
 }
 
+/** 对话流断了自动重连的次数预算，规则同 smeltd 重连 provider：最多连续 6 次，连上撑过 30 秒再断才回满。 */
+export const RECONNECT_ATTEMPTS = 6;
+export const RECONNECT_STABLE_AFTER_MS = 30_000;
+
+/** 只是连接断了（本端读到 EOF、没连上运行时）：会话本身可能还活着，该重新订阅，不该杀进程重启。 */
+export function isTransportEnd(snapshot) {
+  return snapshot?.phase === "dead" && snapshot.end_kind === "transport_disconnected";
+}
+
+/**
+ * 对话流关了，这次要不要自动重连。要就返回这次之前已连续失败几次（交给 `waitOnline` 退避），
+ * 不要返回 `null`：会话真结束了（provider 失败、被终结……），或次数用完。
+ * `usableSince` 是这条流第一次收到活帧的时间，没收到过为 `null`。
+ */
+export function reconnectAttempt(snapshot, failures, usableSince, now) {
+  if (snapshot?.phase === "dead" && !isTransportEnd(snapshot)) return null;
+  const previous =
+    usableSince != null && now - usableSince >= RECONNECT_STABLE_AFTER_MS ? 0 : failures;
+  return previous >= RECONNECT_ATTEMPTS ? null : previous;
+}
+
 /** 回合在跑。`connecting` 是智能体还在启动，不是回合：这时发的提问运行时会排队，连上再送。 */
 export function isTurnActive(phase) {
   return (
@@ -106,6 +127,29 @@ export function entryUserText(entry) {
   return "";
 }
 
+/** 提取某条用户提问所在回合的回答开头（用于左侧提问导航悬停预览卡，跳过思考段与工具调用，取最终非空回答）。 */
+export function extractTurnAnswerPreview(entries, userLocalIndex, maxChars = 180) {
+  if (!Array.isArray(entries) || userLocalIndex < 0) return "";
+  let answer = "";
+  for (let i = userLocalIndex + 1; i < entries.length; i += 1) {
+    const e = entries[i];
+    if (isUserEntry(e) || isDividerEntry(e)) break;
+    if (e && typeof e === "object" && "Assistant" in e && !e.Assistant?.thought) {
+      const raw = String(e.Assistant?.text ?? "").trim();
+      if (raw) answer = raw;
+    }
+  }
+  if (!answer) return "";
+  const cleaned = answer
+    .replace(/```[\s\S]*?```/g, " [code] ")
+    .replace(/^[#>*\-\s]+/gm, "")
+    .replace(/[*_`~]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (cleaned.length <= maxChars) return cleaned;
+  return `${cleaned.slice(0, maxChars).trimEnd()}…`;
+}
+
 /** 还没收到帧的空窗口。 */
 export const EMPTY_ENTRY_WINDOW = Object.freeze({
   offset: 0,
@@ -125,6 +169,22 @@ export function entryWindowOf(snap) {
     revision: snap?.snapshot_revision ?? 0,
     history_session_id: snap?.history_session_id ?? null,
     acp_session_id: snap?.acp_session_id ?? null,
+  };
+}
+
+/**
+ * `subagent.transcript` 的一页的条目窗口。子会话文件只往后追加，读到的字节数 `cursor` 越大
+ * 越新，拿它当修订号：晚到的旧页不会盖掉较新的总数。老运行时不给 `cursor`，记 0。
+ */
+export function transcriptWindowOf(page) {
+  const len = Array.isArray(page?.entries) ? page.entries.length : 0;
+  return {
+    offset: typeof page?.offset === "number" ? page.offset : 0,
+    len,
+    total: typeof page?.total === "number" ? page.total : len,
+    revision: typeof page?.cursor === "number" ? page.cursor : 0,
+    history_session_id: null,
+    acp_session_id: null,
   };
 }
 
@@ -207,6 +267,16 @@ export function buildConversationLayout(
     processGroup: null,
   }));
 
+  let turnTimingByUserIndex = null;
+  if (Array.isArray(turnTimings) && turnTimings.length > 0) {
+    turnTimingByUserIndex = new Map();
+    for (const item of turnTimings) {
+      if (item && item.user_index != null) {
+        turnTimingByUserIndex.set(item.user_index, item);
+      }
+    }
+  }
+
   let start = 0;
   while (start < entries.length) {
     if (isUserEntry(entries[start]) || isDividerEntry(entries[start])) {
@@ -243,7 +313,7 @@ export function buildConversationLayout(
     }
 
     let turnElapsedMs = null;
-    if (closed && Array.isArray(turnTimings) && turnTimings.length > 0) {
+    if (closed && turnTimingByUserIndex !== null) {
       let userIndex = null;
       for (let i = start - 1; i >= 0; i--) {
         if (isUserEntry(entries[i])) {
@@ -253,7 +323,7 @@ export function buildConversationLayout(
       }
       if (userIndex !== null) {
         const globalIx = entriesOffset + userIndex;
-        const timing = turnTimings.find((item) => item?.user_index === globalIx);
+        const timing = turnTimingByUserIndex.get(globalIx);
         const endedAt = timing?.ended_at_ms ?? timing?.finished_at_ms;
         if (timing && timing.started_at_ms != null && endedAt != null) {
           turnElapsedMs = Math.max(0, endedAt - timing.started_at_ms);
@@ -558,9 +628,10 @@ export function buildCompletionCandidates(trigger, files, commands, builtinDescr
     }
     return list
       .filter(([name]) => !needle || name.toLowerCase().includes(needle))
-      .sort((a, b) => compareTuples(matchRank(a[0], needle), matchRank(b[0], needle)))
+      .map((item) => ({ item, rank: matchRank(item[0], needle) }))
+      .sort((a, b) => compareTuples(a.rank, b.rank))
       .slice(0, MAX_COMPLETION_ITEMS)
-      .map(([name, desc]) => ({
+      .map(({ item: [name, desc] }) => ({
         label: `/${name}`,
         insert: `/${name} `,
         hint: meaningfulHint(desc),
@@ -569,10 +640,10 @@ export function buildCompletionCandidates(trigger, files, commands, builtinDescr
 
   return (files ?? [])
     .filter((p) => !needle || p.toLowerCase().includes(needle))
-    .slice()
-    .sort((a, b) => compareTuples(fileRank(a, needle), fileRank(b, needle)))
+    .map((p) => ({ p, rank: fileRank(p, needle) }))
+    .sort((a, b) => compareTuples(a.rank, b.rank))
     .slice(0, MAX_COMPLETION_ITEMS)
-    .map((p) => ({
+    .map(({ p }) => ({
       label: `@${p}`,
       insert: p.endsWith("/") ? `@${p}` : `@${p} `,
       hint: "",
@@ -793,26 +864,37 @@ export function overlaySessionConfigs(configs, pending) {
 
 // ---- PromptRail 滑动窗口（对齐 prompt_rail.rs） ----
 
-export function computePromptRailWindow(prompts, readingGlobalIndex, maxVisible = PROMPT_RAIL_MAX_TICKS) {
+export function computePromptRailWindow(
+  prompts,
+  readingGlobalIndex,
+  maxVisible = PROMPT_RAIL_MAX_TICKS,
+  windowStartOverride = null,
+) {
   const total = prompts.length;
   if (total === 0 || maxVisible < 2) {
-    return { items: [], clippedTop: false, clippedBottom: false };
+    return { items: [], start: 0, clippedTop: false, clippedBottom: false };
   }
   if (total <= maxVisible) {
     return {
       items: prompts.map((p, slot) => ({ ...p, slot, edgeFactor: 1 })),
+      start: 0,
       clippedTop: false,
       clippedBottom: false,
     };
   }
-  const readingPos = Math.max(
-    0,
-    prompts.findIndex((p) => p.globalIndex === readingGlobalIndex),
-  );
-  const half = Math.floor(maxVisible / 2);
-  let start = Math.max(0, readingPos - half);
-  if (start + maxVisible > total) {
-    start = total - maxVisible;
+  let start;
+  if (windowStartOverride != null && Number.isFinite(windowStartOverride)) {
+    start = Math.max(0, Math.min(total - maxVisible, Math.round(windowStartOverride)));
+  } else {
+    const readingPos = Math.max(
+      0,
+      prompts.findIndex((p) => p.globalIndex === readingGlobalIndex),
+    );
+    const half = Math.floor(maxVisible / 2);
+    start = Math.max(0, readingPos - half);
+    if (start + maxVisible > total) {
+      start = total - maxVisible;
+    }
   }
   const end = start + maxVisible;
   const clippedTop = start > 0;
@@ -828,7 +910,82 @@ export function computePromptRailWindow(prompts, readingGlobalIndex, maxVisible 
     }
     items.push({ ...prompts[i], slot, edgeFactor });
   }
-  return { items, clippedTop, clippedBottom };
+  return { items, start, clippedTop, clippedBottom };
+}
+
+/** 连续滚动模式下，根据当前 `scrollY` 计算刻度边缘缩放、迷你滚动条滑块与当前光标下的提问索引。 */
+export function computePromptRailScrollMetrics({
+  total,
+  scrollY,
+  viewportHeight,
+  pitch,
+  tickHeight,
+  padY,
+  edgeFadeTicks = PROMPT_RAIL_EDGE_FADE,
+  trackInset = 6,
+}) {
+  if (total <= 0) {
+    return {
+      contentHeight: 0,
+      maxScroll: 0,
+      canScroll: false,
+      canScrollUp: false,
+      canScrollDown: false,
+      thumbTop: trackInset,
+      thumbHeight: 0,
+    };
+  }
+  const gap = Math.max(0, pitch - tickHeight);
+  const contentHeight = total * pitch - gap + padY * 2;
+  const maxScroll = Math.max(0, contentHeight - viewportHeight);
+  const clampedY = Math.max(0, Math.min(maxScroll, scrollY));
+  const canScroll = maxScroll > 1;
+  const canScrollUp = canScroll && clampedY > 1;
+  const canScrollDown = canScroll && clampedY < maxScroll - 1;
+  const trackHeight = Math.max(0, viewportHeight - trackInset * 2);
+  const thumbHeight = canScroll
+    ? Math.max(16, Math.min(trackHeight, Math.round((viewportHeight / contentHeight) * trackHeight)))
+    : 0;
+  const progress = maxScroll > 0 ? clampedY / maxScroll : 0;
+  const thumbTop = trackInset + Math.round((trackHeight - thumbHeight) * progress);
+  return {
+    contentHeight,
+    maxScroll,
+    canScroll,
+    canScrollUp,
+    canScrollDown,
+    thumbTop,
+    thumbHeight,
+    fadeZone: edgeFadeTicks * pitch,
+  };
+}
+
+export function promptRailEdgeFactor({
+  index,
+  scrollY,
+  viewportHeight,
+  pitch,
+  tickHeight,
+  padY,
+  fadeZone,
+  canScrollUp,
+  canScrollDown,
+}) {
+  if (!canScrollUp && !canScrollDown) return 1;
+  const centerY = padY + index * pitch + tickHeight / 2;
+  if (canScrollUp) {
+    const distTop = centerY - scrollY;
+    if (distTop < fadeZone) {
+      return Math.max(0.25, Math.min(1, distTop / fadeZone));
+    }
+  }
+  if (canScrollDown) {
+    const distBot = scrollY + viewportHeight - centerY;
+    if (distBot < fadeZone) {
+      return Math.max(0.25, Math.min(1, distBot / fadeZone));
+    }
+  }
+  return 1;
 }
 
 // ---- Diff 提取与统计（对齐 edit_diff.rs） ----
@@ -1106,4 +1263,87 @@ export function colorWithAlpha(color, alpha) {
     return `rgba(${rgbMatch[1]}, ${rgbMatch[2]}, ${rgbMatch[3]}, ${a})`;
   }
   return color;
+}
+
+/**
+ * 发送消息或点击「回到最新」后的贴底控制器。
+ *
+ * `nsh-core` 的 `<List>` 在 `splice`（回显用户气泡 / 流式追加行）时会取消飞行中的
+ * 平滑滚动 `pin`，且单次 `queueMicrotask` 跑在布局测量之前。因此：
+ * - 触发时默认立刻 `animated: false` 落到底部（同帧 `jump` 激活原生底部吸附）；
+ * - 在随后的短窗口内，每次新行落地 / 流式增长 / 视口回退都经 `requestAnimationFrame`
+ *   合并到布局测量完成后再贴一次底；
+ * - 用户一旦滚轮滚动、使用左侧刻度条、切会话或超时，立即退出贴底不抢控制权。
+ */
+export function createBottomStickController({
+  scrollToEnd,
+  setAtLatest,
+  requestFrame = (fn) => requestAnimationFrame(fn),
+  cancelFrame = (id) => cancelAnimationFrame(id),
+  setTimer = (fn, ms) => setTimeout(fn, ms),
+  clearTimer = (id) => clearTimeout(id),
+  windowMs = 3000,
+}) {
+  let active = false;
+  let rafId = null;
+  let timerId = null;
+
+  const cancelScheduled = () => {
+    if (rafId != null) {
+      cancelFrame(rafId);
+      rafId = null;
+    }
+    if (timerId != null) {
+      clearTimer(timerId);
+      timerId = null;
+    }
+  };
+
+  const scheduleFollowUp = () => {
+    if (!active || rafId != null) return;
+    rafId = requestFrame(() => {
+      rafId = null;
+      if (!active) return;
+      scrollToEnd({ animated: false });
+      setAtLatest(true);
+    });
+  };
+
+  const cancel = () => {
+    active = false;
+    cancelScheduled();
+  };
+
+  const trigger = ({ animated = false } = {}) => {
+    cancelScheduled();
+    active = true;
+    scrollToEnd({ animated });
+    setAtLatest(true);
+    scheduleFollowUp();
+    timerId = setTimer(() => {
+      timerId = null;
+      active = false;
+    }, windowMs);
+  };
+
+  const onContentGrew = () => {
+    if (!active) return;
+    scheduleFollowUp();
+  };
+
+  const onViewableAtLatest = (nearEnd) => {
+    if (active && !nearEnd) {
+      scheduleFollowUp();
+      return;
+    }
+    setAtLatest(nearEnd);
+  };
+
+  return {
+    trigger,
+    onContentGrew,
+    onViewableAtLatest,
+    cancel,
+    isActive: () => active,
+  };
 }

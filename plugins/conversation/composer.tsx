@@ -55,6 +55,7 @@ const ROOMY_INPUT_LINES = 3;
 export function Composer(props: {
   machine: () => string | null;
   cwd: () => string | null;
+  visible?: () => boolean;
   readOnly: () => boolean;
   turnActive: () => boolean;
   dead: () => boolean;
@@ -356,11 +357,12 @@ export function Composer(props: {
   const hasPendingConfig = computed(() => props.pendingConfigCount() > 0 && props.turnActive());
 
   // 在跑：停止按钮外圈转（和侧栏「在跑＝中性色转圈」同一种表达）；等你时不转，边框换琥珀色。
+  const isVisible = () => (props.visible ? props.visible() : true);
   const ringMode = computed(() =>
     stopRingMode({
       turnActive: props.turnActive(),
       awaitingUser: awaitingUser(),
-      windowActive: windowActive(),
+      windowActive: isVisible() && windowActive(),
       reduceMotion: reduceMotion(),
     }),
   );
@@ -847,6 +849,7 @@ export function Composer(props: {
                 usage={props.usage}
                 breakdown={props.usageBreakdown}
                 compacting={props.compacting}
+                visible={isVisible}
                 supportsCompaction={props.supportsCompaction}
                 onCompact={props.onCompact}
               />

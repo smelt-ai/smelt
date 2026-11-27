@@ -7,8 +7,10 @@ use super::*;
 impl Workspace {
     /// 主窗口里开着宿主的遮罩层（宿主对话框）。原生网页视图会盖住这些层，开着时
     /// 插件里的网页让开。
-    pub(crate) fn main_overlay_open(&self) -> bool {
-        self.show_quit_confirm || self.dir_picker.is_some()
+    pub(crate) fn main_overlay_open(&self, cx: &App) -> bool {
+        self.show_quit_confirm
+            || self.dir_picker.is_some()
+            || crate::updater::pending_confirm_dialog(cx).is_some()
     }
 
     /// 宿主自己的层，叠在主窗口内容上面。
@@ -25,7 +27,7 @@ impl Workspace {
     }
 }
 
-/// 调试 HUD（Cmd+Shift+F）：gpui-fps 的帧耗时、慢帧、掉帧和 GPU/CPU/内存。
+/// 调试 HUD（Cmd+Shift+F）：帧耗时、慢帧、掉帧和 GPU/CPU/内存。
 /// 让出顶部标题栏，免得盖住窗口按钮。
 pub(crate) fn debug_hud(window: &mut Window, cx: &mut App) -> Div {
     div()
@@ -34,5 +36,5 @@ pub(crate) fn debug_hud(window: &mut Window, cx: &mut App) -> Div {
         .left_0()
         .right_0()
         .bottom_0()
-        .child(gpui_fps::fps_monitor(window, cx))
+        .child(smelt_fps::fps_monitor(window, cx))
 }

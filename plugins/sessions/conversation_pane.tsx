@@ -154,6 +154,7 @@ export function ConversationPane(props: {
     start?: { fork?: any; prefill?: string | null } | null;
   } | null;
   many: boolean;
+  visible?: boolean;
   safeArea: any;
   reuseKey?: string;
   focusSeq?: number;
@@ -263,6 +264,7 @@ export function ConversationPane(props: {
         <SmeltConversation
           machine={machine()}
           sessionId={sessionId()}
+          active={props.visible !== false}
           directoryAcp={directoryAcp()}
           start={props.args?.start ?? null}
           initialConfig={initialConfig()}

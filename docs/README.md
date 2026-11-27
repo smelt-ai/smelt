@@ -42,6 +42,7 @@ Each design states its status at the top.
 - [`cross-agent-messaging.md`](cross-agent-messaging.md) — Bidirectional peer messaging across all ACP agents (Pi, Codex, Claude Code, Antigravity, custom profiles) via smeltd bus + ACP `mcpServers` + CLI fallback. Implemented.
 - [`agent-groups.md`](agent-groups.md) — Local heterogeneous multi-agent groups built on `peer_messages`, normalized runtime SQLite tables (v43), and the `plugins/groups/` JS plugin. PR 1 implemented; cross-machine groups and isolated blind-round worktrees are planned as follow-up PRs.
 - [`collaboration.md`](collaboration.md) — Multiplayer around a live session. Not started.
+- [`conversation-history-loading.md`](conversation-history-loading.md) — Conversation data model as turns → items: timeline carries item summaries, full content fetched per item, history paged by turn. Proposal, not started.
 
 ## Product / planning
 

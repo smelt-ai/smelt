@@ -1,17 +1,18 @@
 // 打开过的文件内容的有界内存 LRU：同一台机器的同一个路径再打开时先秒开，再带版本问运行时
-// 变没变（`file.open` 的 `if_none_match`），没变就不重传正文。
+// 变没变（`file.open` 的 `if_none_match`），没变就不重传正文。正文和图片是 Blob，字节在原生侧，
+// 不占插件的 JS 堆。
 
-/** 缓存总量上限（按正文字符数 / base64 长度算，约 32 MB）。超过时淘汰最久没用的。 */
+/** 缓存总量上限（按 Blob 字节数算，32 MB）。超过时淘汰最久没用的。 */
 export const MAX_CACHE_BYTES = 32 * 1024 * 1024;
 
 /**
- * @typedef {{ kind: "text", text: string, version: string }
- *   | { kind: "image", dataUri: string, version: string | null }} CachedFileContent
+ * @typedef {{ kind: "text", blob: Blob, version: string }
+ *   | { kind: "image", blob: Blob, version: string | null }} CachedFileContent
  */
 
 /** @param {CachedFileContent} value */
 function byteLen(value) {
-  return value.kind === "text" ? value.text.length : value.dataUri.length;
+  return value.blob.size;
 }
 
 /** @param {string | null} machine @param {string} path */

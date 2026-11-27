@@ -16,7 +16,6 @@ use std::sync::{Arc, LazyLock, RwLock};
 
 use gpui::{FontFeatures, Pixels, Rgba, px, rgb, rgba};
 
-
 use crate::theme_catalog;
 use crate::theme_config::{Elevation, ThemeColors, ThemeMode};
 
@@ -130,8 +129,6 @@ struct Installed {
     palette: Palette,
     colors: ThemeColors,
     elevation: Arc<Elevation>,
-    /// 窗口底叠出来的颜色，见 [`backdrop`]。
-    backdrop: u32,
 }
 
 static ACTIVE: RwLock<Option<Installed>> = RwLock::new(None);
@@ -213,12 +210,6 @@ pub fn glass_fill() -> Rgba {
         },
         None => Rgba { a: 1.0, ..bg },
     }
-}
-
-/// 窗口底透的地方叠出来的颜色：界面上的字、行底、交给组件库和插件的实色都按它配。和
-/// [`glass_fill`] 是同一份算法，读的是同一时刻装上的主题。实色的地方离字更远，对比只会更足。
-pub(crate) fn backdrop() -> u32 {
-    installed(|installed| installed.backdrop)
 }
 
 /// 正文压在窗口底上至少要的对比（WCAG AAA），和次要字拉开层次。
@@ -344,13 +335,13 @@ pub(crate) fn install_theme(colors: &ThemeColors, elevation: Arc<Elevation>, dar
         palette: palette_from_tokens(colors, backdrop),
         colors: *colors,
         elevation,
-        backdrop,
     };
     install(installed, !dark);
 }
 
 fn install(installed: Installed, light: bool) {
     LIGHT_MODE.store(light, Ordering::Relaxed);
+    publish_fast_slots(&installed.palette);
     *ACTIVE
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(installed);
@@ -370,7 +361,6 @@ fn builtin(light: bool) -> Installed {
         palette: palette_from_tokens(&colors, backdrop),
         colors,
         elevation: config.elevation().clone(),
-        backdrop,
     }
 }
 
@@ -553,11 +543,6 @@ fn over(top: Rgba, bottom: Rgba) -> Rgba {
     }
 }
 
-/// 弹层正文来自主题的正文色，半透明时压到实际弹层底色上。
-pub(crate) fn popover_foreground(surface: u32) -> u32 {
-    flatten(palette().popover_text, surface)
-}
-
 /// 半透明色压在实底上取实色。
 pub(crate) fn flatten(color: Rgba, behind: u32) -> u32 {
     pack(rgb(behind).blend(color))
@@ -626,6 +611,7 @@ fn installed<T>(read: impl Fn(&Installed) -> T) -> T {
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if slot.is_none() {
+        publish_fast_slots(&fallback.palette);
         *slot = Some(fallback);
     }
     value
@@ -646,7 +632,60 @@ pub fn elevation() -> Arc<Elevation> {
     installed(|installed| installed.elevation.clone())
 }
 
-/// 给每个语义位生成一个取当前色板的读取函数——调用点写 `ui_theme::bg()`。
+/// 尚未初始化的高频槽位哨兵值：合法 RGB 颜色高 8 位恒为 0，绝不会等于 `u32::MAX`。
+const UNSET_FAST_SLOT: u32 = u32::MAX;
+
+/// 高频 `u32` 语义色槽位：用无锁 `AtomicU32` 缓存，每次装主题同步写入，避免热路径（如终端渲染）
+/// 逐格获取 `ACTIVE.read()` 并拷贝整份 404B `Palette`。
+macro_rules! fast_u32_slots {
+    ($($name:ident => $atom:ident),* $(,)?) => {
+        $(
+            static $atom: AtomicU32 = AtomicU32::new(UNSET_FAST_SLOT);
+
+            #[inline]
+            pub fn $name() -> u32 {
+                let cached = $atom.load(Ordering::Relaxed);
+                if cached != UNSET_FAST_SLOT {
+                    return cached;
+                }
+                palette().$name
+            }
+        )*
+
+        fn publish_fast_slots(p: &Palette) {
+            $(
+                $atom.store(p.$name, Ordering::Relaxed);
+            )*
+        }
+    };
+}
+
+fast_u32_slots!(
+    bg => FAST_BG,
+    link => FAST_LINK,
+    side => FAST_SIDE,
+    surface => FAST_SURFACE,
+    soft => FAST_SOFT,
+    soft_hover => FAST_SOFT_HOVER,
+    soft_press => FAST_SOFT_PRESS,
+    text => FAST_TEXT,
+    muted => FAST_MUTED,
+    faint => FAST_FAINT,
+    muted_selected => FAST_MUTED_SELECTED,
+    faint_selected => FAST_FAINT_SELECTED,
+    ink => FAST_INK,
+    ink_hover => FAST_INK_HOVER,
+    ink_press => FAST_INK_PRESS,
+    on_ink => FAST_ON_INK,
+    accent => FAST_ACCENT,
+    on_accent => FAST_ON_ACCENT,
+    need => FAST_NEED,
+    ok => FAST_OK,
+    bad => FAST_BAD,
+    on_bad => FAST_ON_BAD,
+);
+
+/// 给每个 `Rgba` 语义位生成一个取当前色板的读取函数。
 macro_rules! slots {
     ($ty:ty => $($name:ident),* $(,)?) => {
         $(
@@ -657,31 +696,6 @@ macro_rules! slots {
         )*
     };
 }
-
-slots!(u32 =>
-    bg,
-    link,
-    side,
-    surface,
-    soft,
-    soft_hover,
-    soft_press,
-    text,
-    muted,
-    faint,
-    muted_selected,
-    faint_selected,
-    ink,
-    ink_hover,
-    ink_press,
-    on_ink,
-    accent,
-    on_accent,
-    need,
-    ok,
-    bad,
-    on_bad,
-);
 
 slots!(Rgba => row_hover, row_selected, hair, hair_strong, focus, selection, scrim);
 

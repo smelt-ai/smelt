@@ -1,18 +1,12 @@
-//! 设置「系统 → 关于」页：版本、在线更新（macOS、Windows）、帮助与反馈。
+//! 设置「系统 → 关于」页：版本、在线更新（macOS、Windows）、帮助与反馈；渲染由 NSH 主壳承担。
 
-use std::rc::Rc;
-
-use gpui::*;
+use gpui::{App, SharedString, Window};
 use rust_i18n::t;
+use serde_json::{Value, json};
 #[cfg(any(target_os = "macos", windows))]
 use smelt_plugin_api::updater::{self, UpdateFailure, UpdateStatus};
-use smelt_plugin_api::{
-    self as api, PluginView, SettingsEntry, SettingsGroup, ViewHandle, ViewSpec, text,
-};
-use smelt_ui::kit::{TYPE, TypeStyled as _};
-use smelt_ui::{Button, IconName, Link, SettingsPage, SettingsRow, SettingsSection, ui_theme};
-#[cfg(any(target_os = "macos", windows))]
-use smelt_ui::{Progress, Segmented, Switch};
+use smelt_plugin_api::{self as api, SettingsEntry, SettingsGroup, ViewSpec, text};
+use smelt_ui::IconName;
 
 #[cfg(any(target_os = "macos", windows))]
 use super::update;
@@ -69,198 +63,202 @@ pub(crate) fn register(cx: &mut App) {
             .collect(),
         }),
         fills: Vec::new(),
-        build: Rc::new(|_, cx| Rc::new(cx.new(AboutPage::new)) as Rc<dyn ViewHandle>),
+        build: crate::host_views::nsh_managed_view_builder(),
     };
     if let Err(error) = api::register_views(OWNER, vec![spec], cx) {
         api::app_log::error("updater", &format!("「关于」页登记失败：{error}"));
     }
 }
 
-struct AboutPage {
-    _observe: Option<Subscription>,
-}
-
-impl AboutPage {
-    fn new(cx: &mut Context<Self>) -> Self {
-        #[cfg(any(target_os = "macos", windows))]
-        let observe =
-            update::updater(cx).map(|updater| cx.observe(&updater, |_, _, cx| cx.notify()));
-        #[cfg(not(any(target_os = "macos", windows)))]
-        let observe = None;
-        Self { _observe: observe }
-    }
-}
-
-impl PluginView for AboutPage {
-    fn open(&mut self, _: &api::serde_json::Value, _: &mut Window, _: &mut Context<Self>) {}
-}
-
-impl Render for AboutPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let page = SettingsPage::new("updater-about");
-        #[cfg(any(target_os = "macos", windows))]
-        let page = match update::updater(cx) {
-            Some(updater) => {
-                let shown = Shown::read(&updater, cx);
-                page.child(header_section(Some(shown.channel)))
-                    .child(update_section(updater, shown))
-            }
-            None => page.child(header_section(None)),
-        };
-        #[cfg(not(any(target_os = "macos", windows)))]
-        let page = {
-            let _ = cx;
-            page.child(header_section())
-        };
-        page.child(help_section())
-    }
-}
-
-#[cfg(any(target_os = "macos", windows))]
-fn header_section(channel: Option<updater::UpdateChannel>) -> SettingsSection {
-    let version = match channel {
-        Some(channel) => format!(
-            "v{} · {}",
-            api::smelt_version::VERSION,
-            channel_label(channel)
-        ),
-        None => format!("v{}", api::smelt_version::VERSION),
+pub(crate) fn snapshot(cx: &App) -> Value {
+    #[cfg(any(target_os = "macos", windows))]
+    let (version, update_json) = match update::updater(cx) {
+        Some(entity) => {
+            let this = entity.read(cx);
+            let channel = this.prefs.channel;
+            let version = format!(
+                "v{} · {}",
+                api::smelt_version::VERSION,
+                channel_label(channel)
+            );
+            let update_json = build_update_json(this);
+            (version, Some(update_json))
+        }
+        None => (format!("v{}", api::smelt_version::VERSION), None),
     };
-    header(version)
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let (version, update_json): (String, Option<Value>) = {
+        let _ = cx;
+        (format!("v{}", api::smelt_version::VERSION), None)
+    };
+
+    json!({
+        "kind": "about",
+        "version": version,
+        "update": update_json,
+        "help": {
+            "section_title": t!("updater.section.help").into_owned(),
+            "docs_row": t!("updater.help.docs_row").into_owned(),
+            "docs_label": format!("{} ↗", t!("updater.docs")),
+            "docs_url": DOCS_URL,
+            "report_row": t!("updater.report_issue").into_owned(),
+            "report_description": t!("updater.help.report_description").into_owned(),
+            "open_log_label": t!("updater.help.open_log").into_owned(),
+            "report_label": format!("{} ↗", t!("updater.report_issue")),
+            "report_url": FEEDBACK_URL,
+            "source_row": t!("updater.help.source").into_owned(),
+            "source_label": "GitHub ↗",
+            "source_url": SOURCE_URL,
+        },
+    })
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
-fn header_section() -> SettingsSection {
-    header(format!("v{}", api::smelt_version::VERSION))
-}
-
-fn header(version: String) -> SettingsSection {
-    SettingsSection::new().child(
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(
-                div()
-                    .text_base()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(ui_theme::text()))
-                    .child("Smelt"),
-            )
-            .child(
-                div()
-                    .type_style(TYPE.ui)
-                    .text_color(rgb(ui_theme::muted()))
-                    .child(version),
-            ),
-    )
-}
-
-#[cfg(any(target_os = "macos", windows))]
-fn channel_label(channel: updater::UpdateChannel) -> SharedString {
-    match channel {
-        updater::UpdateChannel::Dev => t!("updater.channel.dev").into(),
-        updater::UpdateChannel::Prod => t!("updater.channel.prod").into(),
-    }
-}
-
-#[cfg(any(target_os = "macos", windows))]
-fn failure_title(failure: UpdateFailure) -> std::borrow::Cow<'static, str> {
-    match failure {
-        UpdateFailure::Check => t!("updater.failure.check"),
-        UpdateFailure::Download => t!("updater.failure.download"),
-        UpdateFailure::Recovery => t!("updater.failure.recovery"),
-        UpdateFailure::Location => t!("updater.failure.location"),
-        UpdateFailure::NotInstalled => t!("updater.failure.not_installed"),
-    }
-}
-
-#[cfg(any(target_os = "macos", windows))]
-fn failure_detail(failure: UpdateFailure) -> std::borrow::Cow<'static, str> {
-    match failure {
-        UpdateFailure::Check => t!("updater.failure.check_detail"),
-        UpdateFailure::Download => t!("updater.failure.download_detail"),
-        UpdateFailure::Recovery => t!("updater.failure.recovery_detail"),
-        UpdateFailure::Location => t!("updater.failure.location_detail"),
-        UpdateFailure::NotInstalled => t!("updater.failure.not_installed_detail"),
-    }
-}
-
-#[cfg(any(target_os = "macos", windows))]
-#[derive(Clone)]
-struct Shown {
-    status: UpdateStatus,
-    channel: updater::UpdateChannel,
-    auto_install: bool,
-    moving_app: bool,
-    move_app_error: Option<SharedString>,
-}
-
-#[cfg(any(target_os = "macos", windows))]
-impl Shown {
-    fn read(updater: &Entity<update::Updater>, cx: &App) -> Self {
-        let this = updater.read(cx);
-        Self {
-            status: this.status.clone(),
-            channel: this.prefs.channel,
-            auto_install: this.prefs.auto_install,
-            #[cfg(target_os = "macos")]
-            moving_app: this.moving_app,
-            #[cfg(target_os = "macos")]
-            move_app_error: this.move_app_error.clone(),
-            #[cfg(windows)]
-            moving_app: false,
-            #[cfg(windows)]
-            move_app_error: None,
+pub(crate) fn handle_action(action: &Value, window: &mut Window, cx: &mut App) {
+    let Some(kind) = action["kind"].as_str() else {
+        return;
+    };
+    match kind {
+        "open_log" => reveal_app_log(cx),
+        #[cfg(any(target_os = "macos", windows))]
+        "check" => {
+            if let Some(entity) = update::updater(cx) {
+                entity.update(cx, |this, cx| this.request_check(cx));
+            }
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        "download" => {
+            if let Some(entity) = update::updater(cx) {
+                let candidate = match &entity.read(cx).status {
+                    UpdateStatus::Available { version, url } => Some(updater::UpdateCandidate {
+                        version: version.clone(),
+                        url: url.clone(),
+                    }),
+                    _ => None,
+                };
+                if let Some(candidate) = candidate {
+                    entity.update(cx, |this, cx| this.start_download(candidate, cx));
+                }
+            }
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        "restart" => {
+            update::begin_ready_update_install(window, cx);
+        }
+        #[cfg(target_os = "macos")]
+        "move_app" => {
+            if let Some(entity) = update::updater(cx) {
+                entity.update(cx, |this, cx| this.move_app_to_applications(cx));
+            }
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        "set_channel" => {
+            let channel = match action["value"].as_str() {
+                Some("prod") => Some(updater::UpdateChannel::Prod),
+                Some("dev") => Some(updater::UpdateChannel::Dev),
+                _ => None,
+            };
+            if let (Some(channel), Some(entity)) = (channel, update::updater(cx)) {
+                entity.update(cx, |this, cx| this.set_channel(channel, cx));
+            }
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        "set_auto_install" => {
+            if let (Some(checked), Some(entity)) =
+                (action["checked"].as_bool(), update::updater(cx))
+            {
+                entity.update(cx, |this, cx| this.set_auto_install(checked, cx));
+            }
+        }
+        _ => {
+            let _ = window;
         }
     }
 }
 
 #[cfg(any(target_os = "macos", windows))]
-fn update_section(entity: Entity<update::Updater>, shown: Shown) -> SettingsSection {
-    let muted = Hsla::from(rgb(ui_theme::muted()));
-    let Shown {
-        status,
-        channel,
-        auto_install,
-        moving_app,
-        move_app_error,
-    } = shown;
+fn channel_key(channel: updater::UpdateChannel) -> &'static str {
+    match channel {
+        updater::UpdateChannel::Prod => "prod",
+        updater::UpdateChannel::Dev => "dev",
+    }
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn channel_label(channel: updater::UpdateChannel) -> String {
+    match channel {
+        updater::UpdateChannel::Dev => t!("updater.channel.dev").into_owned(),
+        updater::UpdateChannel::Prod => t!("updater.channel.prod").into_owned(),
+    }
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn failure_title(failure: UpdateFailure) -> String {
+    match failure {
+        UpdateFailure::Check => t!("updater.failure.check").into_owned(),
+        UpdateFailure::Download => t!("updater.failure.download").into_owned(),
+        UpdateFailure::Location => t!("updater.failure.location").into_owned(),
+        UpdateFailure::NotInstalled => t!("updater.failure.not_installed").into_owned(),
+    }
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn failure_detail(failure: UpdateFailure) -> String {
+    match failure {
+        UpdateFailure::Check => t!("updater.failure.check_detail").into_owned(),
+        UpdateFailure::Download => t!("updater.failure.download_detail").into_owned(),
+        UpdateFailure::Location => t!("updater.failure.location_detail").into_owned(),
+        UpdateFailure::NotInstalled => t!("updater.failure.not_installed_detail").into_owned(),
+    }
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn build_update_json(this: &update::Updater) -> Value {
+    let status = &this.status;
+    let channel = this.prefs.channel;
+    let auto_install = this.prefs.auto_install;
+    #[cfg(target_os = "macos")]
+    let (moving_app, move_app_error) = (this.moving_app, this.move_app_error.clone());
+    #[cfg(windows)]
+    let (moving_app, move_app_error): (bool, Option<SharedString>) = (false, None);
 
     let mb = |b: u64| b as f64 / 1024.0 / 1024.0;
-    let (status_title, status_detail, status_rgb) = match &status {
+    let (status_title, status_detail, status_tone) = match status {
         UpdateStatus::Idle => (
-            t!("updater.status.idle"),
+            t!("updater.status.idle").into_owned(),
             t!(
                 "updater.status.idle_detail",
                 channel = channel_label(channel)
-            ),
-            None,
+            )
+            .into_owned(),
+            "muted",
         ),
         UpdateStatus::Checking => (
-            t!("updater.status.checking"),
+            t!("updater.status.checking").into_owned(),
             t!(
                 "updater.status.checking_detail",
                 channel = channel_label(channel)
-            ),
-            None,
+            )
+            .into_owned(),
+            "muted",
         ),
         UpdateStatus::UpToDate => (
-            t!("updater.status.up_to_date"),
+            t!("updater.status.up_to_date").into_owned(),
             t!(
                 "updater.status.up_to_date_detail",
                 channel = channel_label(channel)
-            ),
-            Some(ui_theme::ok()),
+            )
+            .into_owned(),
+            "ok",
         ),
         UpdateStatus::Available { version, .. } => (
-            t!("updater.status.available"),
+            t!("updater.status.available").into_owned(),
             t!(
                 "updater.status.available_detail",
                 channel = channel_label(channel),
                 version = version
-            ),
-            None,
+            )
+            .into_owned(),
+            "muted",
         ),
         UpdateStatus::Downloading {
             version,
@@ -274,289 +272,146 @@ fn update_section(entity: Entity<update::Updater>, shown: Shown) -> SettingsSect
                     percent = format!("{:.0}", *received as f64 / *total as f64 * 100.0),
                     received = format!("{:.1}", mb(*received)),
                     total = format!("{:.1}", mb(*total)),
-                ),
+                )
+                .into_owned(),
                 _ => t!(
                     "updater.status.downloading_bytes",
                     version = version,
                     received = format!("{:.1}", mb(*received)),
-                ),
+                )
+                .into_owned(),
             };
             (
-                t!("updater.status.downloading"),
+                t!("updater.status.downloading").into_owned(),
                 detail,
-                None,
+                "muted",
             )
         }
         UpdateStatus::Installing { version } => (
-            t!("updater.status.installing"),
-            t!("updater.status.installing_detail", version = version),
-            None,
+            t!("updater.status.installing").into_owned(),
+            t!("updater.status.installing_detail", version = version).into_owned(),
+            "muted",
         ),
         UpdateStatus::Applying { version } => (
-            t!("updater.status.applying"),
-            t!("updater.status.applying_detail", version = version),
-            None,
+            t!("updater.status.applying").into_owned(),
+            t!("updater.status.applying_detail", version = version).into_owned(),
+            "muted",
         ),
         UpdateStatus::ReadyToInstall(update) => (
-            t!("updater.status.ready"),
-            t!("updater.status.ready_detail", version = update.version),
-            Some(ui_theme::ok()),
+            t!("updater.status.ready").into_owned(),
+            t!("updater.status.ready_detail", version = update.version).into_owned(),
+            "ok",
         ),
         UpdateStatus::InstallFailed(update) => (
-            t!("updater.status.install_failed"),
+            t!("updater.status.install_failed").into_owned(),
             t!(
                 "updater.status.install_failed_detail",
                 version = update.version
-            ),
-            Some(ui_theme::bad()),
+            )
+            .into_owned(),
+            "bad",
         ),
         UpdateStatus::Failed(failure) => (
             failure_title(*failure),
             match (failure, &move_app_error) {
-                (UpdateFailure::Location, Some(error)) => error.to_string().into(),
+                (UpdateFailure::Location, Some(error)) => error.to_string(),
                 _ => failure_detail(*failure),
             },
-            Some(ui_theme::bad()),
+            "bad",
         ),
     };
-    let status_color = status_rgb
-        .map(|color| Hsla::from(rgb(color)))
-        .unwrap_or(muted);
 
-    let progress_bar = match &status {
+    let progress = match status {
         UpdateStatus::Downloading {
             received,
             total: Some(total),
             ..
-        } if *total > 0 => {
-            Some(Progress::new("update-progress").value(*received as f32 / *total as f32 * 100.0))
-        }
+        } if *total > 0 => Some(json!({
+            "value": *received as f32 / *total as f32 * 100.0,
+            "indeterminate": false,
+        })),
         UpdateStatus::Downloading { .. }
         | UpdateStatus::Installing { .. }
-        | UpdateStatus::Applying { .. } => {
-            Some(Progress::new("update-progress").indeterminate(true))
-        }
+        | UpdateStatus::Applying { .. } => Some(json!({
+            "value": null,
+            "indeterminate": true,
+        })),
         _ => None,
     };
+
     let can_check = status.can_check();
-    let can_request_check = can_check || status.can_retry_recovery();
-    let ready = status.ready_update().is_some();
-
-    let check_label = match &status {
-        UpdateStatus::Checking => t!("updater.check.checking"),
-        UpdateStatus::Downloading { .. } => t!("updater.check.downloading"),
-        UpdateStatus::Installing { .. } => t!("updater.check.installing"),
-        UpdateStatus::Applying { .. } => t!("updater.check.quitting"),
+    let check_label = match status {
+        UpdateStatus::Checking => t!("updater.check.checking").into_owned(),
+        UpdateStatus::Downloading { .. } => t!("updater.check.downloading").into_owned(),
+        UpdateStatus::Installing { .. } => t!("updater.check.installing").into_owned(),
+        UpdateStatus::Applying { .. } => t!("updater.check.quitting").into_owned(),
         UpdateStatus::ReadyToInstall(_) | UpdateStatus::InstallFailed(_) => {
-            t!("updater.check.again")
+            t!("updater.check.again").into_owned()
         }
-        UpdateStatus::Failed(UpdateFailure::Recovery) => t!("updater.check.retry_recovery"),
-        _ => t!("updater.check.idle"),
+        _ => t!("updater.check.idle").into_owned(),
     };
 
-    let channel_entity = entity.clone();
-    let channel_selector = Segmented::new("update-channel")
-        .segments(updater::UpdateChannel::ALL.map(channel_label))
-        .selected(
-            updater::UpdateChannel::ALL
-                .iter()
-                .position(|option| *option == channel),
-        )
-        .disabled(!can_check)
-        .on_select(move |ix, _, cx| {
-            if let Some(option) = updater::UpdateChannel::ALL.get(ix).copied() {
-                channel_entity.update(cx, |this, cx| this.set_channel(option, cx));
-            }
-        });
-
-    let check_entity = entity.clone();
-    let check_btn = Button::new("check-update")
-        .small()
-        .label(check_label)
-        .disabled(!can_request_check)
-        .on_click(move |_, _, cx: &mut App| {
-            check_entity.update(cx, |this, cx| this.request_check(cx));
-        });
-
-    let download_btn = match &status {
-        UpdateStatus::Available { version, url } => {
-            let download_entity = entity.clone();
-            let candidate = updater::UpdateCandidate {
-                version: version.clone(),
-                url: url.clone(),
-            };
-            Some(
-                Button::new("download-update")
-                    .primary()
-                    .small()
-                    .label(t!("updater.action.download"))
-                    .on_click(move |_, _, cx: &mut App| {
-                        let candidate = candidate.clone();
-                        download_entity.update(cx, |this, cx| {
-                            this.start_download(candidate, cx);
-                        });
-                    }),
-            )
+    let download_label = matches!(status, UpdateStatus::Available { .. })
+        .then(|| t!("updater.action.download").into_owned());
+    let restart_label = status.ready_update().map(|_| {
+        if matches!(status, UpdateStatus::InstallFailed(_)) {
+            t!("updater.action.retry_restart").into_owned()
+        } else {
+            t!("updater.action.restart").into_owned()
         }
-        _ => None,
-    };
-
-    let restart_btn = ready.then(|| {
-        Button::new("restart-update")
-            .primary()
-            .small()
-            .label(if matches!(&status, UpdateStatus::InstallFailed(_)) {
-                t!("updater.action.retry_restart")
-            } else {
-                t!("updater.action.restart")
-            })
-            .on_click(|_, window, cx: &mut App| {
-                update::begin_ready_update_install(window, cx);
-            })
     });
-
     #[cfg(target_os = "macos")]
-    let move_btn = matches!(&status, UpdateStatus::Failed(UpdateFailure::Location)).then(|| {
-        let move_entity = entity.clone();
-        Button::new("move-app-to-applications")
-            .primary()
-            .small()
-            .label(if moving_app {
-                t!("updater.move.moving")
-            } else {
-                t!("updater.action.move")
-            })
-            .disabled(moving_app)
-            .on_click(move |_, _, cx: &mut App| {
-                move_entity.update(cx, |this, cx| this.move_app_to_applications(cx));
-            })
+    let move_label = matches!(status, UpdateStatus::Failed(UpdateFailure::Location)).then(|| {
+        if moving_app {
+            t!("updater.move.moving").into_owned()
+        } else {
+            t!("updater.action.move").into_owned()
+        }
     });
     #[cfg(windows)]
-    let move_btn: Option<Button> = {
-        let _ = moving_app;
-        None
-    };
+    let move_label: Option<String> = None;
 
-    let manual_btn = status
+    let manual_download_url = status
         .offers_manual_download()
         .then(|| updater::manual_download_page(channel))
-        .flatten()
-        .map(|page| {
-            Button::new("manual-download-update")
-                .small()
-                .label(t!("updater.action.manual_download"))
-                .on_click(move |_, _, cx: &mut App| cx.open_url(&page))
-        });
+        .flatten();
+    let manual_download_label = manual_download_url
+        .as_ref()
+        .map(|_| t!("updater.action.manual_download").into_owned());
 
-    let auto_entity = entity.clone();
-    let auto_install_switch = Switch::new("auto-install-update")
-        .checked(auto_install)
-        .accessibility_label(t!("updater.auto_install.label"))
-        .on_change(move |checked, _, cx: &mut App| {
-            auto_entity.update(cx, |this, cx| this.set_auto_install(checked, cx));
-        });
+    let channels: Vec<Value> = updater::UpdateChannel::ALL
+        .iter()
+        .map(|option| {
+            json!({
+                "value": channel_key(*option),
+                "label": channel_label(*option),
+            })
+        })
+        .collect();
 
-    let action_row = div()
-        .flex()
-        .gap_2()
-        .items_center()
-        .child(check_btn)
-        .children(move_btn)
-        .children(download_btn)
-        .children(restart_btn)
-        .children(manual_btn);
-
-    let status_cell = div()
-        .flex()
-        .flex_col()
-        .w_full()
-        .gap_1()
-        .child(
-            div()
-                .flex()
-                .w_full()
-                .min_h(px(28.))
-                .gap_2()
-                .items_center()
-                .flex_wrap()
-                .child(
-                    div()
-                        .flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_2()
-                        .items_center()
-                        .child(div().size(px(7.)).rounded_full().bg(status_color))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .type_style(TYPE.ui_medium)
-                                .text_color(status_color)
-                                .child(SharedString::from(status_title)),
-                        ),
-                )
-                .child(action_row),
-        )
-        .child(
-            div()
-                .w_full()
-                .pl(px(15.))
-                .type_style(TYPE.text_xsmall)
-                .text_color(muted)
-                .child(SharedString::from(status_detail)),
-        )
-        .children(progress_bar.map(|progress| div().w_full().pt_1().child(progress)));
-
-    SettingsSection::new()
-        .title(t!("updater.section.update"))
-        .child(status_cell)
-        .child(
-            SettingsRow::new(t!("updater.channel.label"))
-                .description(t!("updater.channel.description"))
-                .child(channel_selector),
-        )
-        .child(
-            SettingsRow::new(t!("updater.auto_install.label"))
-                .description(t!("updater.auto_install.description"))
-                .child(auto_install_switch),
-        )
-}
-
-fn help_section() -> SettingsSection {
-    SettingsSection::new()
-        .title(t!("updater.section.help"))
-        .child(
-            SettingsRow::new(t!("updater.help.docs_row")).child(
-                Link::new("settings-help-link", DOCS_URL)
-                    .type_style(TYPE.ui)
-                    .child(format!("{} ↗", t!("updater.docs"))),
-            ),
-        )
-        .child(
-            SettingsRow::new(t!("updater.report_issue"))
-                .description(t!("updater.help.report_description"))
-                .child(
-                    Button::new("settings-open-log-link")
-                        .quiet()
-                        .small()
-                        .label(t!("updater.help.open_log"))
-                        .on_click(|_, _, cx: &mut App| reveal_app_log(cx)),
-                )
-                .child(
-                    Link::new("settings-report-issue-link", FEEDBACK_URL)
-                        .type_style(TYPE.ui)
-                        .child(format!("{} ↗", t!("updater.report_issue"))),
-                ),
-        )
-        .child(
-            SettingsRow::new(t!("updater.help.source")).child(
-                Link::new("settings-github-link", SOURCE_URL)
-                    .type_style(TYPE.ui)
-                    .child("GitHub ↗"),
-            ),
-        )
+    json!({
+        "section_title": t!("updater.section.update").into_owned(),
+        "status_title": status_title,
+        "status_detail": status_detail,
+        "status_tone": status_tone,
+        "progress": progress,
+        "check_label": check_label,
+        "can_check_request": can_check,
+        "download_label": download_label,
+        "restart_label": restart_label,
+        "move_label": move_label,
+        "moving_app": moving_app,
+        "manual_download_label": manual_download_label,
+        "manual_download_url": manual_download_url,
+        "channel_label": t!("updater.channel.label").into_owned(),
+        "channel_description": t!("updater.channel.description").into_owned(),
+        "channels": channels,
+        "selected_channel": channel_key(channel),
+        "can_change_channel": can_check,
+        "auto_install_label": t!("updater.auto_install.label").into_owned(),
+        "auto_install_description": t!("updater.auto_install.description").into_owned(),
+        "auto_install": auto_install,
+    })
 }
 
 fn reveal_app_log(cx: &mut App) {
@@ -582,7 +437,7 @@ fn reveal_app_log(cx: &mut App) {
             },
             cx,
         );
-        cx.spawn(async move |_: &mut AsyncApp| {
+        cx.spawn(async move |_: &mut gpui::AsyncApp| {
             if let Err(error) = opened.await {
                 api::app_log::error("updater", &format!("打开日志所在目录失败：{error}"));
             }

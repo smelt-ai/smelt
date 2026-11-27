@@ -10,6 +10,10 @@ mod residue;
 
 use gpui::App;
 
+pub(crate) use cleanup::CleanupState;
+#[cfg(target_os = "macos")]
+pub(crate) use page::CliState;
+
 const OWNER: &str = "smelt.maintenance";
 
 pub(crate) fn register(cx: &mut App) {

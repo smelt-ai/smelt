@@ -1,8 +1,8 @@
-# 共享 GPUI UI 基建：主 GUI 与宿主能力层共用的一批组件/工具
-# （语义色板、纯 Rust Mermaid SVG 渲染、主题目录、基础弹窗与控件）。
+# 共享 GPUI UI 基建：主 GUI 与 NSH 外壳共用的一批非控件基建
+# （语义色板、主题目录与配置、内置图标与字体、纯 Rust Mermaid SVG 渲染、图片解码、窗口安全区、键帽格式化）。
 # 允许引 GPUI（跟 smelt-core 的边界不同）——这里不是 GUI 无关的纯逻辑，而是
 # 「不属于哪个具体页面、被多处复用」的 UI 层基建。
-# 只放界面：不依赖客户端库和运行时客户端，跨功能共享的状态在 smelt-app-state。
+# 只放界面基建：不依赖 gpui-base、客户端库或运行时客户端。
 [package]
 name = "smelt-ui"
 version.workspace = true
@@ -15,13 +15,8 @@ workspace = true
 
 [dependencies]
 smelt-model = { path = "../smelt-model" }
-# 异步里等全局状态到位（global_wait）。
-smol = "2"
 serde_json = "1"
 gpui = { package = "gpui-fast", version = "=0.1.19" }
-# 组件的行为（焦点、键盘、无障碍、对话框层、输入框、富文本）都取 gpui-base，外观自己画。
-# 不依赖 gpui-component：它的外观读它自己的 `Theme`，和 smelt 的主题是两个权威。
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "82f1c1dc1f2970d93f1adfe10cbd772516c21ce7", features = ["gpui-fast"] }
 # mermaid 代码块画图，见 markdown_mermaid.rs。版本锁死。
 # 不开 layout-elk：它带进 EPL-2.0 的 merman-elk-layered，分发二进制要随附源码和声明；
 # 默认布局也会从 dagre 换成 ELK（见 markdown_mermaid.rs 文件头）。不走默认 features /
@@ -46,8 +41,3 @@ rust-i18n.workspace = true
 
 [dev-dependencies]
 gpui = { package = "gpui-fast", version = "=0.1.19", features = ["test-support"] }
-# 截断宽度的问题只在真实字形下才有，测试默认的 Noop 字体系统是等宽假字。特性与
-# crates/smelt 里 gpui_platform 开的一致：同一套字体后端，且免装 Metal 工具链。
-# test-support 打开离屏 Metal 渲染（MetalHeadlessRenderer），组件快照用它出图。
-[target.'cfg(target_os = "macos")'.dev-dependencies]
-gpui_apple = { package = "gpui-fast-apple", version = "=0.1.19", features = ["font-kit", "runtime_shaders", "test-support"] }

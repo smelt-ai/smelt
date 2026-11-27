@@ -953,9 +953,6 @@ updater:
     again:
       en: Check for Newer Version
       zh-CN: 检查新版本
-    retry_recovery:
-      en: Retry Recovery
-      zh-CN: 重试恢复
   status:
     idle:
       en: Not checked yet
@@ -1027,12 +1024,6 @@ updater:
     download_detail:
       en: Downloading or preparing the update failed. Check your network and free storage, then try again.
       zh-CN: 更新包下载或准备失败，请检查网络和可用存储空间后重试。
-    recovery:
-      en: Couldn't recover the update
-      zh-CN: 恢复更新失败
-    recovery_detail:
-      en: The last update hasn't been recovered yet. Try again; the current installation won't be overwritten.
-      zh-CN: 上次更新事务尚未恢复，请重试；现有安装不会被覆盖。
     location:
       en: Move to Applications first
       zh-CN: 需要先移到「应用程序」
@@ -1043,8 +1034,8 @@ updater:
       en: This Smelt can't update itself
       zh-CN: 这个 Smelt 不能自动更新
     not_installed_detail:
-      en: It wasn't installed by the installer (a development build, for example). Download and run the installer from the download page, then you can update here.
-      zh-CN: 它不是安装程序装的（比如开发构建）。去下载页下载安装程序装好后，就能在这里更新。
+      en: This copy wasn't installed from a release (a development build, for example). Download and install Smelt from the download page, then you can update here.
+      zh-CN: 这一份不是从发布包装好的（比如开发构建）。去下载页下载安装后，就能在这里更新。
   action:
     download:
       en: Download and Update

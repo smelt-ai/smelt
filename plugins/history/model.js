@@ -84,22 +84,19 @@ export function summaryFromWire(wire) {
 }
 
 /**
- * 运行时返回的一份对话内容 → 展示形状。
+ * 运行时返回的一页对话内容 → 展示形状。每轮正文是 Blob（`callWithBlobs` 交来），空正文算没有。
  * @param {any} wire
  */
 export function detailFromWire(wire) {
-  return {
-    model: wire?.model ?? null,
-    turns: Array.isArray(wire?.turns)
-      ? wire.turns.map((turn) => ({
-          is_user: Boolean(turn.is_user),
-          timestamp_ms: typeof turn.timestamp_ms === "number" ? turn.timestamp_ms : null,
-          text: String(turn.text ?? ""),
-          tools: Array.isArray(turn.tools) ? turn.tools.map(String) : [],
-          tool_paths: Array.isArray(turn.tool_paths) ? turn.tool_paths.map(String) : [],
-        }))
-      : [],
-  };
+  const turns = Array.isArray(wire?.turns)
+    ? wire.turns.map((turn) => ({
+        is_user: Boolean(turn.is_user),
+        interrupted: Boolean(turn.interrupted),
+        text: turn.text instanceof Blob && turn.text.size > 0 ? turn.text : null,
+        tools: Array.isArray(turn.tools) ? turn.tools.map(String) : [],
+      }))
+    : [];
+  return { turns, total: typeof wire?.total === "number" ? wire.total : turns.length };
 }
 
 /**

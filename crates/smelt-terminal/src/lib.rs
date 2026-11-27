@@ -327,7 +327,10 @@ impl Render for TerminalCanvas {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let root = div().size_full().track_focus(&self.focus_handle);
         match &self.state {
-            State::Live(view) => root.child(view.clone()),
+            State::Live(view) => root.child(
+                view.clone()
+                    .cached(gpui::StyleRefinement::default().size_full()),
+            ),
             State::Idle | State::Connecting | State::Failed(_) => root.on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, window, cx| {

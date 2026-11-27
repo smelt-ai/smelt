@@ -42,12 +42,11 @@ Smelt 自有的结构化状态分两份 SQLite，都在 `~/.smelt/`（Windows �
 ~/.smelt/client.sqlite3
 ```
 
-只属于这台桌面，`SCHEMA_VERSION = 16`（完整迁移史见 `crates/smelt-client-store/src/schema.rs`）。
+只属于这台桌面，`SCHEMA_VERSION = 17`（完整迁移史见 `crates/smelt-client-store/src/schema.rs`）。
 
 | 表 | 内容 |
 | --- | --- |
 | `appearance` | 主题、界面字号和字体、终端字体、背景图和它的不透明度、材质，选的布局（`layout_id`，空是没选过，用第一个登记的布局；选的布局暂时没登记时照样留着） |
-| `update_settings` / `update_state` / `staged_update` / `installer_attempt` | 这台 App 的更新 |
 | `key_binding` | 用户改过的快捷键：命令 id（`<来源>/<名字>`）→ 按键，按键为空是用户清掉了。没有行的命令用出厂键位；命令还没登记（插件没加载）的行照样留着 |
 | `workspace_ui` | 主窗口当前出口（停在哪一页） |
 | `workspace_layout_state` | 每份布局被用户拖成的样子：gpui-base 的 `DockAreaState` 原文。版本对得上、摆的视图和摞（`smelt/stack`）跟布局文件一样就用，只是拖动、换组、改大小的照用；布局文件增减了视图或改了摞，存档过时不用；要回到布局文件就删掉这份存档 |

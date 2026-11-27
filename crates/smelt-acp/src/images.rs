@@ -197,6 +197,17 @@ impl ImageStore {
         Some(format!("data:{mime};base64,{data_b64}"))
     }
 
+    /// 取出原图 `(mime, bytes)` 供写入系统剪贴板。只在锁内拷贝轻指针，base64 解码留到锁外。
+    pub fn get_bytes(&self, ref_id: &str) -> Option<(String, Vec<u8>)> {
+        let (mime, data_b64) = {
+            let guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            let stored = guard.by_ref.get(ref_id)?;
+            (stored.meta.mime.clone(), Arc::clone(&stored.data_b64))
+        };
+        let bytes = BASE64.decode(data_b64.as_bytes()).ok()?;
+        Some((mime, bytes))
+    }
+
     /// 递归扫描快照 JSON，将大内联 `AcpImage` 落入缓存并替换为轻量 `ref_id` + `preview_uri`。
     pub fn compact_snapshot_json(&self, snapshot: &mut Value) {
         if let Some(entries) = snapshot.get_mut("entries").and_then(Value::as_array_mut) {
@@ -268,6 +279,47 @@ impl ImageStore {
         obj.insert("width".into(), Value::from(meta.width));
         obj.insert("height".into(), Value::from(meta.height));
     }
+}
+
+/// 解码 base64 图片并校验大小与格式，返回规范化后的 `(mime, bytes)`。
+pub fn decode_image_base64(
+    mime_hint: Option<&str>,
+    data_b64: &str,
+) -> Result<(String, Vec<u8>), String> {
+    let trimmed = data_b64.trim();
+    if trimmed.is_empty() {
+        return Err("image base64 is empty".into());
+    }
+    let bytes = BASE64
+        .decode(trimmed)
+        .map_err(|e| format!("invalid image base64: {e}"))?;
+    if bytes.is_empty() {
+        return Err("image is empty".into());
+    }
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(format!(
+            "image exceeds limit ({} > {} bytes)",
+            bytes.len(),
+            MAX_IMAGE_BYTES
+        ));
+    }
+    let mime = sniff_mime(&bytes, mime_hint)?;
+    Ok((mime, bytes))
+}
+
+/// 解码 `data:<mime>;base64,...` 图片 URI，返回规范化后的 `(mime, bytes)`。
+pub fn decode_image_data_uri(uri: &str) -> Result<(String, Vec<u8>), String> {
+    let Some(rest) = uri.trim().strip_prefix("data:") else {
+        return Err("image data URI must start with data:".into());
+    };
+    let Some((header, payload)) = rest.split_once(',') else {
+        return Err("invalid image data URI: missing comma".into());
+    };
+    let Some(mime_part) = header.strip_suffix(";base64") else {
+        return Err("image data URI must be base64 encoded".into());
+    };
+    let mime_hint = (!mime_part.trim().is_empty()).then_some(mime_part.trim());
+    decode_image_base64(mime_hint, payload)
 }
 
 fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
@@ -450,5 +502,31 @@ mod tests {
                 .starts_with("data:image/png;base64,")
         );
         assert!(store.get_prompt_image(ref_id).is_some());
+    }
+
+    #[test]
+    fn get_bytes_and_decoders_roundtrip_original_image() {
+        let store = ImageStore::new();
+        let raw = make_png(24, 18, [12, 34, 56, 255]);
+        let meta = store.store_bytes(raw.clone(), Some("image/png")).unwrap();
+
+        let (mime, fetched) = store.get_bytes(&meta.ref_id).unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(fetched, raw);
+        assert!(store.get_bytes("missing-ref").is_none());
+
+        let uri = store.get_data_uri(&meta.ref_id).unwrap();
+        let (uri_mime, uri_bytes) = decode_image_data_uri(&uri).unwrap();
+        assert_eq!(uri_mime, "image/png");
+        assert_eq!(uri_bytes, raw);
+
+        let b64 = BASE64.encode(&raw);
+        let (b64_mime, b64_bytes) = decode_image_base64(None, &b64).unwrap();
+        assert_eq!(b64_mime, "image/png");
+        assert_eq!(b64_bytes, raw);
+
+        assert!(decode_image_data_uri("https://example.com/a.png").is_err());
+        assert!(decode_image_data_uri("data:image/png,not-base64").is_err());
+        assert!(decode_image_base64(Some("image/png"), "").is_err());
     }
 }
