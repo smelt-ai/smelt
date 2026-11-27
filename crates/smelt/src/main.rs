@@ -350,6 +350,7 @@ impl Workspace {
         } else {
             let config = smelt_nsh::ShellConfig {
                 sources,
+                cache_dir: smelt_paths::smelt_home().map(|home| home.join("cache").join("plugins")),
                 backdrop,
                 corners,
                 padding,

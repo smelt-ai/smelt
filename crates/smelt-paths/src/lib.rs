@@ -65,7 +65,7 @@ pub const DECLARED_ENTRIES: &[&str] = &[
     "bin",
     // 进程间的运行状态：插件挂载快照、MCP 网关（agent `mcp-gateway-client.ts`）。
     "run",
-    // `smelt-agent x` 的 Bun 下载缓存（agent `pi-mcp-runtime.ts`）。
+    // `smelt-agent x` 的 Bun 下载缓存（`cache/bun-x/`）与用户插件/覆写态字节码缓存（`cache/plugins/`）。
     "cache",
     // 运行时升级下载、解包的临时目录（smeltd `runtime_upgrade`）。
     "staging",

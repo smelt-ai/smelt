@@ -24,9 +24,12 @@ use notify::Watcher as _;
 use nsh_core::element::description::SetDescription;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::plugins::{
-    BUILTINS_VM_ID, BuiltinCompileInput, Change, CompileMode, Compiled, ModulePackage, Plugins,
-    is_ignored_plugin_entry, module_fingerprint, valid_module_specifier,
+use crate::{
+    bytecode_cache::{BuiltinMemberExpectation, BytecodeCache, PluginCacheKey},
+    plugins::{
+        BUILTINS_VM_ID, BuiltinCompileInput, Change, CompileMode, Compiled, ModulePackage, Plugins,
+        is_ignored_plugin_entry, module_fingerprint, valid_module_specifier,
+    },
 };
 
 /// NSH 插件清单文件名。
@@ -1271,6 +1274,7 @@ impl ShellLive {
     pub(crate) fn start(
         sources: Vec<SourceDir>,
         stage: PathBuf,
+        cache_dir: Option<PathBuf>,
         shell: ShellSource,
         ui_sets: Vec<SetDescription>,
         updates: UnboundedSender<ShellUpdate>,
@@ -1287,6 +1291,9 @@ impl ShellLive {
         std::thread::Builder::new()
             .name("smelt-nsh-shell-live".into())
             .spawn(move || {
+                let bytecode_cache = cache_dir.map(|dir| {
+                    BytecodeCache::new(dir, crate::plugins::sdk_fingerprint(), &ui_sets)
+                });
                 let plugins_res = match shell {
                     ShellSource::Bytecode(bytes) => {
                         Plugins::new_with_bytecode(&stage, bytes, ui_sets)
@@ -1298,6 +1305,8 @@ impl ShellLive {
                         sources,
                         links,
                         plugins,
+                        bytecode_cache,
+                        builtins_from_disk_cache: false,
                         updates,
                         builtin_members: BTreeMap::new(),
                         builtin_module_deps: BTreeMap::new(),
@@ -1339,6 +1348,10 @@ struct Worker {
     /// 软链进来的插件的真实目录监听，每批改动处理前对一遍链接。
     links: Option<LinkWatch>,
     plugins: Plugins,
+    /// 宿主私有磁盘字节码缓存（`~/.smelt/cache/plugins/`）；测试未指定时为 `None`。
+    bytecode_cache: Option<BytecodeCache>,
+    /// 当前运行中的 `__builtins__` VM 是否由磁盘字节码缓存产出（用于 `prune` 决策）。
+    builtins_from_disk_cache: bool,
     updates: UnboundedSender<ShellUpdate>,
     /// 共享内置 VM（`__builtins__`）当前装入的成员记录。
     builtin_members: BTreeMap<String, BuiltinMemberRecord>,
@@ -1362,6 +1375,8 @@ struct CompileJob {
     root: PathBuf,
     entry: String,
     requires: Vec<String>,
+    /// 预计算好的源码指纹（用户插件复用扫描期指纹，拆出的内置插件按需在线程内算）。
+    source_fp: Option<String>,
     /// 用户覆写自带插件（数据另存一份，见 [`Compiled::overriding_builtin`]）。
     overrides_builtin: bool,
 }
@@ -1371,19 +1386,46 @@ type CompileJobOutput = Result<(Compiled, BTreeMap<String, String>, Vec<String>)
 fn compile_jobs_parallel(
     plugins: &Plugins,
     modules: &[ModulePackage],
+    active_modules: &BTreeMap<String, ModulePackage>,
     jobs: &[CompileJob],
+    cache: Option<&BytecodeCache>,
 ) -> Vec<CompileJobOutput> {
     if jobs.is_empty() {
         return Vec::new();
     }
     let stage_dir = plugins.stage();
     let plugins_stage = stage_dir.join("plugins");
-    if let Err(err) = fs::create_dir_all(&plugins_stage) {
-        let msg = format!("创建插件暂存目录 {} 失败：{err}", plugins_stage.display());
-        return jobs.iter().map(|_| Err(msg.clone())).collect();
-    }
     let ui_sets = plugins.ui_sets();
     run_parallel(jobs, |job| {
+        let wrap = |compiled_vm: Compiled| {
+            if job.overrides_builtin {
+                compiled_vm.overriding_builtin()
+            } else {
+                compiled_vm
+            }
+        };
+        let cache_fp = cache.and_then(|_| {
+            job.source_fp
+                .clone()
+                .or_else(|| crate::source_fingerprint(&job.root))
+        });
+        if let (Some(cache), Some(source_fp)) = (cache, cache_fp.as_deref()) {
+            let key = PluginCacheKey {
+                id: &job.id,
+                entry: &job.entry,
+                requires: &job.requires,
+                source_fingerprint: source_fp,
+            };
+            if let Some(cached) = cache.load_plugin(&key, active_modules) {
+                return Ok((
+                    wrap(Compiled::from_bytecode(job.id.clone(), cached.bytecode)),
+                    cached.used_modules,
+                    cached.used_module_ids,
+                ));
+            }
+        }
+        fs::create_dir_all(&plugins_stage)
+            .map_err(|err| format!("创建插件暂存目录 {} 失败：{err}", plugins_stage.display()))?;
         let compiled = Plugins::compile_source_to_js(
             stage_dir,
             ui_sets,
@@ -1396,13 +1438,28 @@ fn compile_jobs_parallel(
             false,
         )?;
         crate::plugins::validate_unresolved_references(&job.id, &compiled.code)?;
-        let compiled_vm = Compiled::from_source(job.id.clone(), compiled.code);
+        let compiled_vm = if let (Some(cache), Some(source_fp)) = (cache, cache_fp.as_deref()) {
+            let bytecode =
+                nsh_js::compile_bytecode_with(&compiled.code, nsh_js::Strip::Source, ui_sets)
+                    .map_err(|error| format!("{} QuickJS 编译失败：{}", job.id, error.message))?;
+            let key = PluginCacheKey {
+                id: &job.id,
+                entry: &job.entry,
+                requires: &job.requires,
+                source_fingerprint: source_fp,
+            };
+            cache.store_plugin(
+                &key,
+                &compiled.used_modules,
+                &compiled.used_module_ids,
+                &bytecode,
+            );
+            Compiled::from_bytecode(job.id.clone(), bytecode)
+        } else {
+            Compiled::from_source(job.id.clone(), compiled.code)
+        };
         Ok((
-            if job.overrides_builtin {
-                compiled_vm.overriding_builtin()
-            } else {
-                compiled_vm
-            },
+            wrap(compiled_vm),
             compiled.used_modules,
             compiled.used_module_ids,
         ))
@@ -1617,6 +1674,7 @@ impl Worker {
         let mut active_modules: BTreeMap<String, ModulePackage> = BTreeMap::new();
         let mut claimed_module_specs: BTreeMap<String, PathBuf> = BTreeMap::new();
         let mut seen_module_ids = BTreeSet::new();
+        let mut cached_module_ids = BTreeSet::new();
         let mut app_slots: Vec<(usize, DiscoverySlot)> = Vec::new();
 
         // Phase 1：先解析、校验并确定全部共享 JS 模块插件的生效版本与指纹，
@@ -1686,14 +1744,35 @@ impl Worker {
                                 })
                                 .and_then(|pkg| {
                                     if primary.source == PluginSource::User || primary.watch {
-                                        validate_module_source(
-                                            &self.plugins,
-                                            &id,
-                                            &primary.root,
-                                            &primary.manifest.entry,
-                                            &pkg.specifier,
-                                            &primary.manifest.requires,
-                                        )?;
+                                        let validated =
+                                            self.bytecode_cache.as_ref().is_some_and(|cache| {
+                                                cache.is_module_validated(
+                                                    &id,
+                                                    &pkg.specifier,
+                                                    &primary.manifest.entry,
+                                                    &primary.manifest.requires,
+                                                    &pkg.fingerprint,
+                                                )
+                                            });
+                                        if !validated {
+                                            validate_module_source(
+                                                &self.plugins,
+                                                &id,
+                                                &primary.root,
+                                                &primary.manifest.entry,
+                                                &pkg.specifier,
+                                                &primary.manifest.requires,
+                                            )?;
+                                            if let Some(cache) = &self.bytecode_cache {
+                                                cache.store_module_validated(
+                                                    &id,
+                                                    &pkg.specifier,
+                                                    &primary.manifest.entry,
+                                                    &primary.manifest.requires,
+                                                    &pkg.fingerprint,
+                                                );
+                                            }
+                                        }
                                     }
                                     Ok(pkg)
                                 });
@@ -1735,6 +1814,9 @@ impl Worker {
                                 .insert(pkg.specifier.clone(), primary.root.clone());
                             self.cached_modules
                                 .insert(id.clone(), (primary.root.clone(), pkg.clone()));
+                            if primary.source == PluginSource::User || primary.watch {
+                                cached_module_ids.insert(id.clone());
+                            }
                             active_modules.insert(pkg.specifier.clone(), pkg.clone());
                             stages[slot_ix] = Some(SlotStage::Done {
                                 info: LoadedPluginInfo {
@@ -2162,6 +2244,7 @@ impl Worker {
                         root: primary.root.clone(),
                         entry: primary.manifest.entry.clone(),
                         requires: primary.manifest.requires.clone(),
+                        source_fp: fingerprints.get(&primary.root).cloned(),
                         overrides_builtin: fallback.is_some(),
                     });
                     stages[slot_ix] = Some(SlotStage::WaitingUserCompile {
@@ -2176,8 +2259,13 @@ impl Worker {
         }
 
         if !user_jobs.is_empty() {
-            let compiled_results =
-                compile_jobs_parallel(&self.plugins, &active_module_list, &user_jobs);
+            let compiled_results = compile_jobs_parallel(
+                &self.plugins,
+                &active_module_list,
+                &active_modules,
+                &user_jobs,
+                self.bytecode_cache.as_ref(),
+            );
 
             for (job, res) in user_jobs.into_iter().zip(compiled_results) {
                 let Some(SlotStage::WaitingUserCompile {
@@ -2422,6 +2510,7 @@ impl Worker {
                             root,
                             entry,
                             requires: cand.discovered.manifest.requires.clone(),
+                            source_fp: None,
                             // 拆出来单跑的是自带版本身（它引用的共享模块被覆写了），数据还是它的。
                             overrides_builtin: false,
                         });
@@ -2505,8 +2594,13 @@ impl Worker {
         }
 
         if !split_jobs.is_empty() {
-            let compiled_results =
-                compile_jobs_parallel(&self.plugins, &active_module_list, &split_jobs);
+            let compiled_results = compile_jobs_parallel(
+                &self.plugins,
+                &active_module_list,
+                &active_modules,
+                &split_jobs,
+                self.bytecode_cache.as_ref(),
+            );
 
             for (job, res) in split_jobs.into_iter().zip(compiled_results) {
                 let Some(SlotStage::WaitingSplitCompile { cand, texts }) =
@@ -2583,6 +2677,7 @@ impl Worker {
         if desired_builtins.is_empty() {
             self.builtin_members.clear();
             self.builtin_module_deps.clear();
+            self.builtins_from_disk_cache = false;
             if prev_has_builtins {
                 remove_builtins_vm = true;
             }
@@ -2643,52 +2738,119 @@ impl Worker {
                     });
                 }
             } else {
+                let mut built_from_disk_cache = false;
                 let mut precompiled_or_built =
                     try_load_precompiled_builtins(&desired_builtins, &sdk_fp, &active_modules)
                         .map(Ok);
                 if precompiled_or_built.is_none() {
-                    let stage_dir = self.plugins.stage();
-                    let plugins_stage = stage_dir.join("plugins");
-                    let prep_res = fs::create_dir_all(&plugins_stage).map_err(|err| {
-                        format!("创建插件暂存目录 {} 失败：{err}", plugins_stage.display())
-                    });
-                    let ui_sets = self.plugins.ui_sets();
-                    let inputs: Vec<BuiltinCompileInput<'_>> = desired_builtins
-                        .iter()
-                        .map(|(id, item)| BuiltinCompileInput {
-                            id,
-                            root: &item.root,
-                            entry_rel: &item.entry,
-                            requires: &item.requires,
-                        })
-                        .collect();
                     let member_ids: Vec<String> = desired_builtins.keys().cloned().collect();
-                    precompiled_or_built = Some(prep_res.and_then(|()| {
-                        let compiled = Plugins::compile_builtins_to_js(
-                            stage_dir,
-                            ui_sets,
-                            &active_module_list,
-                            &inputs,
-                            false,
-                        )?;
-                        crate::plugins::validate_unresolved_references(
-                            BUILTINS_VM_ID,
-                            &compiled.code,
-                        )?;
-                        Ok((
-                            Compiled::from_source_multi(
+                    let expectations: Option<Vec<BuiltinMemberExpectation>> =
+                        if self.bytecode_cache.is_some() {
+                            let desired_list: Vec<(&String, &DesiredBuiltin)> =
+                                desired_builtins.iter().collect();
+                            let fps = run_parallel(&desired_list, |(_, item)| {
+                                crate::source_fingerprint(&item.root)
+                            });
+                            desired_list
+                                .iter()
+                                .zip(fps)
+                                .map(|((id, item), fp)| {
+                                    Some(BuiltinMemberExpectation {
+                                        id: (*id).clone(),
+                                        entry: item.entry.clone(),
+                                        requires: item.requires.clone(),
+                                        source_fingerprint: fp?,
+                                    })
+                                })
+                                .collect()
+                        } else {
+                            None
+                        };
+                    if let (Some(cache), Some(expectations)) =
+                        (self.bytecode_cache.as_ref(), expectations.as_deref())
+                        && let Some(cached) = cache.load_builtins(expectations, &active_modules)
+                    {
+                        built_from_disk_cache = true;
+                        precompiled_or_built = Some(Ok((
+                            Compiled::from_bytecode_multi(
                                 BUILTINS_VM_ID.to_owned(),
-                                member_ids,
-                                compiled.code,
+                                member_ids.clone(),
+                                cached.bytecode,
                             ),
-                            compiled.used_modules,
-                            compiled.per_plugin_module_ids,
-                        ))
-                    }));
+                            cached.used_modules,
+                            cached.per_plugin_module_ids,
+                        )));
+                    }
+                    if precompiled_or_built.is_none() {
+                        let stage_dir = self.plugins.stage();
+                        let plugins_stage = stage_dir.join("plugins");
+                        let prep_res = fs::create_dir_all(&plugins_stage).map_err(|err| {
+                            format!("创建插件暂存目录 {} 失败：{err}", plugins_stage.display())
+                        });
+                        let ui_sets = self.plugins.ui_sets();
+                        let inputs: Vec<BuiltinCompileInput<'_>> = desired_builtins
+                            .iter()
+                            .map(|(id, item)| BuiltinCompileInput {
+                                id,
+                                root: &item.root,
+                                entry_rel: &item.entry,
+                                requires: &item.requires,
+                            })
+                            .collect();
+                        precompiled_or_built = Some(prep_res.and_then(|()| {
+                            let compiled = Plugins::compile_builtins_to_js(
+                                stage_dir,
+                                ui_sets,
+                                &active_module_list,
+                                &inputs,
+                                false,
+                            )?;
+                            crate::plugins::validate_unresolved_references(
+                                BUILTINS_VM_ID,
+                                &compiled.code,
+                            )?;
+                            let compiled_vm = if let (Some(cache), Some(expectations)) =
+                                (self.bytecode_cache.as_ref(), expectations.as_deref())
+                            {
+                                let bytecode = nsh_js::compile_bytecode_with(
+                                    &compiled.code,
+                                    nsh_js::Strip::Source,
+                                    ui_sets,
+                                )
+                                .map_err(|error| {
+                                    format!("{BUILTINS_VM_ID} QuickJS 编译失败：{}", error.message)
+                                })?;
+                                cache.store_builtins(
+                                    expectations,
+                                    &compiled.per_plugin_module_ids,
+                                    &compiled.used_modules,
+                                    &bytecode,
+                                );
+                                built_from_disk_cache = true;
+                                Compiled::from_bytecode_multi(
+                                    BUILTINS_VM_ID.to_owned(),
+                                    member_ids,
+                                    bytecode,
+                                )
+                            } else {
+                                Compiled::from_source_multi(
+                                    BUILTINS_VM_ID.to_owned(),
+                                    member_ids,
+                                    compiled.code,
+                                )
+                            };
+                            Ok((
+                                compiled_vm,
+                                compiled.used_modules,
+                                compiled.per_plugin_module_ids,
+                            ))
+                        }));
+                    }
                 }
 
                 match precompiled_or_built.expect("builtins build result") {
                     Ok((compiled, deps, per_plugin_mod_ids)) => {
+                        self.builtins_from_disk_cache = built_from_disk_cache;
                         let mut next_members = BTreeMap::new();
                         for (id, item) in desired_builtins {
                             let used_modules =
@@ -2899,6 +3061,14 @@ impl Worker {
             .collect();
         for id in &removed_ids {
             self.failed_user_overrides.remove(id);
+        }
+
+        if let Some(cache) = &self.bytecode_cache {
+            cache.prune(
+                &active_standalone_ids,
+                &cached_module_ids,
+                self.builtins_from_disk_cache,
+            );
         }
 
         let initial_scripts = if initial {
@@ -3191,6 +3361,7 @@ mod tests {
                 watch: true,
             }],
             root.0.join("stage"),
+            None,
             ShellSource::Source("export function Shell() { return null; }"),
             crate::ui_sets(),
             tx,
@@ -3286,6 +3457,7 @@ export function Main() {
                 },
             ],
             root.0.join("stage"),
+            None,
             ShellSource::Source("export function Shell() { return null; }"),
             crate::ui_sets(),
             tx,
@@ -3416,6 +3588,7 @@ export function Main() { return <Text>{String(SmeltFromTheFuture ?? SmeltIcon)}<
                 },
             ],
             root.0.join("stage"),
+            None,
             ShellSource::Source("export function Shell() { return null; }"),
             crate::ui_sets(),
             tx,
@@ -3485,6 +3658,7 @@ export function Main() { return <Text>user-alpha-v2</Text>; }
                 },
             ],
             root.0.join("stage"),
+            None,
             ShellSource::Source("export function Shell() { return null; }"),
             crate::ui_sets(),
             tx,
@@ -3771,6 +3945,7 @@ export function Main() { return <View><Text>alpha</Text></View>; }
                 },
             ],
             stage_dir.clone(),
+            None,
             ShellSource::Bytecode(crate::shell::MAIN_SHELL_BYTECODE),
             crate::ui_sets(),
             tx,
@@ -3839,6 +4014,7 @@ export function Main() { return <View><Text>alpha</Text></View>; }
                 watch: false,
             }],
             root.0.join("stage-stale"),
+            None,
             ShellSource::Bytecode(crate::shell::MAIN_SHELL_BYTECODE),
             crate::ui_sets(),
             tx2,
@@ -3959,6 +4135,7 @@ export function Main() { return <View><Text>alpha</Text></View>; }
                 },
             ],
             root.0.join("stage"),
+            None,
             ShellSource::Bytecode(crate::shell::MAIN_SHELL_BYTECODE),
             crate::ui_sets(),
             tx,
@@ -4238,6 +4415,7 @@ export function Main() { return <View><Text>alpha</Text></View>; }
                 },
             ],
             root.0.join("stage"),
+            None,
             ShellSource::Bytecode(crate::shell::MAIN_SHELL_BYTECODE),
             crate::ui_sets(),
             tx,
@@ -4281,5 +4459,238 @@ export function Main() { return <View><Text>alpha</Text></View>; }
         });
         assert_eq!(fallback.declarative_layouts.len(), 1);
         assert_eq!(fallback.declarative_layouts[0].0, "demo.layouts");
+    }
+
+    #[test]
+    fn shell_live_disk_bytecode_cache_warms_invalidates_recovers_and_prunes() {
+        let root = TempDir::new("smelt-nsh-disk-cache");
+        let src = root.0.join("src");
+        let staged = root.0.join("staged");
+        let user_dir = root.0.join("user");
+        let cache_dir = root.0.join("cache");
+        fs::create_dir_all(&user_dir).unwrap();
+
+        // 内置共享模块 demo.ui，内置 alpha（将被用户覆写）、beta（消费 demo/ui，将被拆出）、gamma（留在 __builtins__ 子集）。
+        let ui_src = src.join("ui");
+        fs::create_dir_all(&ui_src).unwrap();
+        fs::write(
+            ui_src.join(MANIFEST_FILE),
+            r#"{"id":"demo.ui","name":"Demo UI","version":"1.0.0","module":"demo/ui","entry":"index.tsx"}"#,
+        )
+        .unwrap();
+        fs::write(
+            ui_src.join("index.tsx"),
+            "import { Text } from \"nsh\";\nexport function Widget() { return <Text>builtin-ui</Text>; }\n",
+        )
+        .unwrap();
+        write_plugin(
+            &src.join("alpha"),
+            "com.example.alpha",
+            "main.tsx",
+            "import { Text } from \"nsh\";\nexport function Main() { return <Text>builtin-alpha</Text>; }\n",
+        );
+        write_plugin(
+            &src.join("beta"),
+            "com.example.beta",
+            "main.tsx",
+            "import { View } from \"nsh\";\nimport { Widget } from \"demo/ui\";\nexport function Main() { return <View><Widget /></View>; }\n",
+        );
+        require_modules(&src.join("beta"), &["demo/ui"]);
+        write_plugin(
+            &src.join("gamma"),
+            "com.example.gamma",
+            "main.tsx",
+            "import { Text } from \"nsh\";\nexport function Main() { return <Text>builtin-gamma</Text>; }\n",
+        );
+        stage_builtin_plugins(&src, &staged).expect("预编译内置插件");
+
+        // 用户覆写共享模块 demo.ui + 覆写内置 alpha + 独立用户插件 custom。
+        let user_ui = user_dir.join("demo.ui");
+        fs::create_dir_all(&user_ui).unwrap();
+        fs::write(
+            user_ui.join(MANIFEST_FILE),
+            r#"{"id":"demo.ui","name":"Demo UI","version":"1.0.0","module":"demo/ui","entry":"index.tsx"}"#,
+        )
+        .unwrap();
+        fs::write(
+            user_ui.join("index.tsx"),
+            "import { Text } from \"nsh\";\nexport function Widget() { return <Text>user-ui</Text>; }\n",
+        )
+        .unwrap();
+        write_plugin(
+            &user_dir.join("alpha"),
+            "com.example.alpha",
+            "main.tsx",
+            "import { Text } from \"nsh\";\nexport function Main() { return <Text>user-alpha-v1</Text>; }\n",
+        );
+        write_plugin(
+            &user_dir.join("custom"),
+            "com.example.custom",
+            "main.tsx",
+            "import { Text } from \"nsh\";\nexport function Main() { return <Text>user-custom</Text>; }\n",
+        );
+
+        let boot_once = |stage_name: &str| {
+            let stage_dir = root.0.join(stage_name);
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let (sync_tx, sync_rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                while let Some(update) = rx.blocking_recv() {
+                    if sync_tx.send(update).is_err() {
+                        break;
+                    }
+                }
+            });
+            let live = ShellLive::start(
+                vec![
+                    SourceDir {
+                        path: staged.clone(),
+                        source: PluginSource::Builtin,
+                        watch: false,
+                    },
+                    SourceDir {
+                        path: user_dir.clone(),
+                        source: PluginSource::User,
+                        watch: false,
+                    },
+                ],
+                stage_dir.clone(),
+                Some(cache_dir.clone()),
+                ShellSource::Bytecode(crate::shell::MAIN_SHELL_BYTECODE),
+                crate::ui_sets(),
+                tx,
+            );
+            let initial = wait_update(&sync_rx, stage_name, |u| u.initial_scripts.is_some());
+            (live, stage_dir, initial)
+        };
+
+        // 1. 首次冷启动：编译所有用户/覆写/拆出插件与 __builtins__ 子集为字节码并落盘。
+        let (live1, stage1, cold) = boot_once("stage-cold");
+        assert!(
+            cold.loaded.iter().all(|p| p.error.is_none()),
+            "{:?}",
+            cold.loaded
+        );
+        assert!(stage1.join("plugins").is_dir(), "冷启动需要打包暂存目录");
+        match &cold.changes[0] {
+            Change::Start { plugins, .. } => {
+                let ids: Vec<&str> = plugins.iter().map(|p| p.id()).collect();
+                assert_eq!(
+                    ids,
+                    vec![
+                        BUILTINS_VM_ID,
+                        "com.example.alpha",
+                        "com.example.beta",
+                        "com.example.custom",
+                    ]
+                );
+                assert!(plugins.iter().all(|p| p.is_bytecode()));
+                let builtins = plugins.iter().find(|p| p.id() == BUILTINS_VM_ID).unwrap();
+                assert_eq!(builtins.members(), ["com.example.gamma"]);
+            }
+            other => panic!("期望 Change::Start，收到 {other:?}"),
+        }
+        assert!(cache_dir.join("builtins.nshc").is_file());
+        assert!(cache_dir.join("builtins.meta.json").is_file());
+        assert!(cache_dir.join("plugin-com.example.alpha.nshc").is_file());
+        assert!(cache_dir.join("plugin-com.example.beta.nshc").is_file());
+        assert!(cache_dir.join("plugin-com.example.custom.nshc").is_file());
+        assert!(cache_dir.join("module-demo.ui.meta.json").is_file());
+        drop(live1);
+
+        // 2. 再次冷启动（同一 cache_dir、全新 stage）：全量命中磁盘字节码缓存，完全不落盘 stage 目录！
+        let (live2, stage2, warm) = boot_once("stage-warm");
+        assert!(
+            warm.loaded.iter().all(|p| p.error.is_none()),
+            "{:?}",
+            warm.loaded
+        );
+        assert!(
+            !stage2.exists(),
+            "全命中磁盘缓存时不应创建任何暂存打包目录：{}",
+            stage2.display()
+        );
+        match &warm.changes[0] {
+            Change::Start { plugins, .. } => {
+                assert_eq!(plugins.len(), 4);
+                assert!(plugins.iter().all(|p| p.is_bytecode()));
+            }
+            other => panic!("期望 Change::Start，收到 {other:?}"),
+        }
+        drop(live2);
+
+        // 3. 篡改 custom 的字节码文件 + 改动 alpha 源码：应安全回退重编并自愈缓存。
+        fs::write(
+            cache_dir.join("plugin-com.example.custom.nshc"),
+            b"corrupted",
+        )
+        .unwrap();
+        fs::write(
+            user_dir.join("alpha/main.tsx"),
+            "import { Text } from \"nsh\";\nexport function Main() { return <Text>user-alpha-v2</Text>; }\n",
+        )
+        .unwrap();
+        let (live3, stage3, healed) = boot_once("stage-healed");
+        assert!(
+            healed.loaded.iter().all(|p| p.error.is_none()),
+            "{:?}",
+            healed.loaded
+        );
+        assert!(stage3.join("plugins").is_dir(), "未命中的插件应触发重编");
+        assert_ne!(
+            fs::read(cache_dir.join("plugin-com.example.custom.nshc")).unwrap(),
+            b"corrupted"
+        );
+        match &healed.changes[0] {
+            Change::Start { plugins, .. } => {
+                assert_eq!(plugins.len(), 4);
+                assert!(plugins.iter().all(|p| p.is_bytecode()));
+            }
+            other => panic!("期望 Change::Start，收到 {other:?}"),
+        }
+        drop(live3);
+
+        // 4. 自愈后的下一次启动再次零打包全命中。
+        let (live4, stage4, warm_after_heal) = boot_once("stage-warm-after-heal");
+        assert!(warm_after_heal.loaded.iter().all(|p| p.error.is_none()));
+        assert!(!stage4.exists());
+        drop(live4);
+
+        // 5. 移除全部用户插件：恢复只读 staged/builtins.nshc，自动清理 cache_dir 中的过期文件。
+        fs::remove_dir_all(&user_ui).unwrap();
+        fs::remove_dir_all(user_dir.join("alpha")).unwrap();
+        fs::remove_dir_all(user_dir.join("custom")).unwrap();
+        let (live5, stage5, restored) = boot_once("stage-restored");
+        assert!(restored.loaded.iter().all(|p| p.error.is_none()));
+        assert!(!stage5.exists(), "恢复自带预编译包也不应触发打包");
+        match &restored.changes[0] {
+            Change::Start { plugins, .. } => {
+                assert_eq!(plugins.len(), 1);
+                assert_eq!(plugins[0].id(), BUILTINS_VM_ID);
+                assert!(plugins[0].is_bytecode());
+                assert_eq!(
+                    plugins[0].members(),
+                    ["com.example.alpha", "com.example.beta", "com.example.gamma"]
+                );
+            }
+            other => panic!("期望 Change::Start，收到 {other:?}"),
+        }
+        for stale in [
+            "builtins.nshc",
+            "builtins.meta.json",
+            "plugin-com.example.alpha.nshc",
+            "plugin-com.example.alpha.meta.json",
+            "plugin-com.example.beta.nshc",
+            "plugin-com.example.beta.meta.json",
+            "plugin-com.example.custom.nshc",
+            "plugin-com.example.custom.meta.json",
+            "module-demo.ui.meta.json",
+        ] {
+            assert!(
+                !cache_dir.join(stale).exists(),
+                "过期缓存文件 {stale} 应已自动清理"
+            );
+        }
+        drop(live5);
     }
 }

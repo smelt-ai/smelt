@@ -330,6 +330,7 @@ fn session_wash_fades_out_after_interrupting_sessions_changed(cx: &mut TestAppCo
                     source: PluginSource::Builtin,
                     watch: false,
                 }],
+                cache_dir: None,
                 backdrop: hooks,
                 corners: WindowCorners {
                     lights: px(78.),

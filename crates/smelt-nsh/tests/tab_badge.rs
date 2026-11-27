@@ -422,6 +422,7 @@ fn inactive_tab_badge_and_title_update_without_clicking(cx: &mut TestAppContext)
                     source: PluginSource::Builtin,
                     watch: false,
                 }],
+                cache_dir: None,
                 backdrop: BackdropHooks::default(),
                 corners: WindowCorners {
                     lights: px(78.),

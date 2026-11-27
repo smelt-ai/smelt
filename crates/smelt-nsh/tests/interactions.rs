@@ -412,6 +412,7 @@ fn main_shell_hover_toggle_and_quota_regressions(cx: &mut TestAppContext) {
                     source: PluginSource::Builtin,
                     watch: false,
                 }],
+                cache_dir: None,
                 backdrop: hooks,
                 corners: WindowCorners {
                     lights: px(78.),

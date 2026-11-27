@@ -397,6 +397,7 @@ bootTask(async () => {
                         watch: true,
                     },
                 ],
+                cache_dir: None,
                 backdrop: hooks,
                 corners: WindowCorners {
                     lights: px(78.),

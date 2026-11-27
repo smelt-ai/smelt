@@ -84,6 +84,10 @@ impl Compiled {
         Self::from_source_multi(id.clone(), vec![id], source)
     }
 
+    pub(crate) fn from_bytecode(id: String, bytes: Vec<u8>) -> Self {
+        Self::from_bytecode_multi(id.clone(), vec![id], bytes)
+    }
+
     pub(crate) fn from_bytecode_multi(id: String, members: Vec<String>, bytes: Vec<u8>) -> Self {
         Self {
             id,
@@ -1393,8 +1397,12 @@ fn make_bundle(code: &CompiledCode, policy: Policy) -> Bundle {
     let bundle = match code {
         CompiledCode::Source(src) => Bundle::source(src.as_ref().to_owned()),
         CompiledCode::Bytecode(bytes) => {
-            // SAFETY: 字节码仅来自构建期 `include_bytes!` 主壳产物，或发版前 `stage_builtin_plugins`
-            // 产出的同版本、`sdk_fingerprint` 匹配的只读自带插件 `bundle.nshc`。
+            // SAFETY: 字节码仅来自三类可信来源：
+            // 1. 构建期 `include_bytes!` 主壳产物；
+            // 2. 发版前 `stage_builtin_plugins` 产出的只读自带插件 `builtins.nshc`（已核对版本与 sdk_fingerprint）；
+            // 3. 宿主私有缓存目录（`BytecodeCache`）中由本运行时自己调用 `nsh_js::compile_bytecode_with`
+            //    写入的 `.nshc`（读取前拒绝符号链接，并逐项校验 `BYTECODE_VERSION`、`sdk_fingerprint`、
+            //    `ui_sets_fingerprint`、源码/共享模块指纹与字节码 SHA-256）。
             unsafe { Bundle::bytecode(bytes.as_ref().to_vec()) }
         }
     };

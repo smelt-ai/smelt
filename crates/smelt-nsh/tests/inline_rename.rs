@@ -482,6 +482,7 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
                         source: PluginSource::Builtin,
                         watch: false,
                     }],
+                    cache_dir: None,
                     backdrop: hooks,
                     corners: WindowCorners {
                         lights: px(78.),
@@ -766,7 +767,7 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
         *open_view_calls.lock().unwrap()
     );
 
-    // 9. ⌘N 新建会话面板：未悬停时常用项行尾直接画数字键（不给隐藏星标留空洞），悬停才原位换成星标；
+    // 9. 新建会话面板：未悬停时常用项行尾直接画数字键（不给隐藏星标留空洞），悬停才原位换成星标；
     // 打开后无需先点击，直接按 Enter 即可通过 MenuBody 键盘导航启动。
     create_calls.lock().unwrap().clear();
     cx.simulate_mouse_move(point(px(2.), px(2.)), None, Modifiers::default());
@@ -812,7 +813,7 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
             .iter()
             .copied()
             .find(|&(_, _, w, h)| (w - 352.).abs() <= 4. && (h - 28.).abs() <= 2.)
-            .unwrap_or_else(|| panic!("应画有 ⌘N 第一行高亮底块（352×28），quads={quads:?}"));
+            .unwrap_or_else(|| panic!("应画有新建会话面板第一行高亮底块（352×28），quads={quads:?}"));
         let keycap = quads
             .iter()
             .copied()

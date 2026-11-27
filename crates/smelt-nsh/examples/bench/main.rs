@@ -193,6 +193,7 @@ struct CliArgs {
     list: bool,
     running: usize,
     user_plugins: Option<PathBuf>,
+    cache_dir: Option<PathBuf>,
 }
 
 fn parse_cli() -> Result<CliArgs, String> {
@@ -204,6 +205,7 @@ fn parse_cli() -> Result<CliArgs, String> {
     let mut list = false;
     let mut running = 0;
     let mut user_plugins = None;
+    let mut cache_dir = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -230,6 +232,11 @@ fn parse_cli() -> Result<CliArgs, String> {
             "--user-plugins" => {
                 user_plugins = Some(PathBuf::from(
                     args.next().ok_or("--user-plugins 需要目录参数")?,
+                ));
+            }
+            "--cache-dir" => {
+                cache_dir = Some(PathBuf::from(
+                    args.next().ok_or("--cache-dir 需要目录参数")?,
                 ));
             }
             "--help" | "-h" => {
@@ -264,6 +271,7 @@ fn parse_cli() -> Result<CliArgs, String> {
         list,
         running,
         user_plugins,
+        cache_dir,
     })
 }
 
@@ -513,6 +521,7 @@ impl Bench {
                 let shell_options = ShellOptions {
                     running: cli.running,
                     user_plugins: cli.user_plugins.clone(),
+                    cache_dir: cli.cache_dir.clone(),
                 };
                 let setup = setup_real_shell(staged, connector, shell_options, window, cx);
                 boot_t0 = Some(setup.boot_started);

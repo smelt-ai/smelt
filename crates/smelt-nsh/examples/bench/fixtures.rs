@@ -993,12 +993,14 @@ pub struct RealShellSetup {
 /// 模拟的工作区里有几段对话。
 const BENCH_CONVERSATIONS: usize = 30;
 
-/// 整窗场景的可选项（命令行 `--running`、`--user-plugins`）。
+/// 整窗场景的可选项（命令行 `--running`、`--user-plugins`、`--cache-dir`）。
 pub struct ShellOptions {
     /// 前几个模拟会话处于运行中。
     pub running: usize,
     /// 当用户插件目录一起加载，同 id 覆写自带插件。
     pub user_plugins: Option<PathBuf>,
+    /// 用户插件与覆写态共享内置组合的磁盘字节码缓存目录。
+    pub cache_dir: Option<PathBuf>,
 }
 
 pub fn setup_real_shell(
@@ -1064,6 +1066,7 @@ pub fn setup_real_shell(
                     watch: false,
                 }))
                 .collect(),
+                cache_dir: options.cache_dir,
                 backdrop: BackdropHooks::default(),
                 corners: WindowCorners {
                     lights: px(78.),

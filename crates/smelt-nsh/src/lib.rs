@@ -8,6 +8,7 @@
 //!   原生重组件桥 `smelt.view`（[`view`]）、统一宿主状态/事件/动作桥（[`host`]）、
 //!   原生标题带/毛玻璃坐标（[`components`]）和主题投影（[`theme`]）。
 
+mod bytecode_cache;
 mod components;
 mod desktop;
 mod host;

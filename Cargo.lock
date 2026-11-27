@@ -11985,6 +11985,7 @@ dependencies = [
  "rust-i18n-support",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "smelt-acp",
  "smelt-desktop",
  "smelt-plugin-api",

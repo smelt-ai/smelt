@@ -10,6 +10,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
     rc::Rc,
 };
 
@@ -80,6 +81,8 @@ pub struct OutletTarget {
 /// 构造 [`MainShell`] 所需的宿主配置。
 pub struct ShellConfig {
     pub sources: Vec<SourceDir>,
+    /// 宿主私有插件字节码缓存目录（如 `~/.smelt/cache/plugins/`）；`None` 表示禁用磁盘缓存。
+    pub cache_dir: Option<PathBuf>,
     pub backdrop: BackdropHooks,
     pub corners: WindowCorners,
     pub padding: f32,
@@ -379,6 +382,7 @@ impl MainShell {
         let live = ShellLive::start(
             config.sources,
             stage,
+            config.cache_dir,
             ShellSource::Bytecode(MAIN_SHELL_BYTECODE),
             ui_sets(),
             updates_tx,

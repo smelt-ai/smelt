@@ -350,6 +350,7 @@ fn files_tree_renders_and_interacts_after_async_load(cx: &mut TestAppContext) {
                     source: PluginSource::Builtin,
                     watch: false,
                 }],
+                cache_dir: None,
                 backdrop: BackdropHooks::default(),
                 corners: WindowCorners {
                     lights: px(78.),
