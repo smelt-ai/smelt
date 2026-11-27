@@ -1347,6 +1347,11 @@ pub struct SubagentTranscriptParams {
     /// 一页最多几条。运行时会把它夹到 1..=1000，不给是 200。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// 上次结果的 `cursor`：只要那以后变了的，从第一条不一样的起到末尾。已有的条目也会变
+    /// （工具结果回来、写到一半的那一轮收尾），所以按下标从 `offset` 起整段换掉。变了的多于
+    /// `limit` 条时只给最后 `limit` 条，`offset` 接不上手里的窗口，就整个换成这一页。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1356,4 +1361,7 @@ pub struct SubagentTranscriptResult {
     pub offset: u64,
     /// 整段子会话一共多少条。
     pub total: u64,
+    /// 这次读到哪儿（子会话文件的字节数）。下次作 `since` 带上，只取变了的。
+    #[serde(default)]
+    pub cursor: u64,
 }

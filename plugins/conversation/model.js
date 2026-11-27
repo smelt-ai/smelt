@@ -151,6 +151,22 @@ export function entryWindowOf(snap) {
   };
 }
 
+/**
+ * `subagent.transcript` 的一页的条目窗口。子会话文件只往后追加，读到的字节数 `cursor` 越大
+ * 越新，拿它当修订号：晚到的旧页不会盖掉较新的总数。老运行时不给 `cursor`，记 0。
+ */
+export function transcriptWindowOf(page) {
+  const len = Array.isArray(page?.entries) ? page.entries.length : 0;
+  return {
+    offset: typeof page?.offset === "number" ? page.offset : 0,
+    len,
+    total: typeof page?.total === "number" ? page.total : len,
+    revision: typeof page?.cursor === "number" ? page.cursor : 0,
+    history_session_id: null,
+    acp_session_id: null,
+  };
+}
+
 /** 按 SDK `mergeEntryWindow` 给的拼法拼条目：手里前 `keep` 条 + 新来的 + 手里从 `resume` 起的，截到 `window.len`。 */
 export function spliceEntries(current, plan, incoming) {
   const merged = current.slice(0, plan.keep);

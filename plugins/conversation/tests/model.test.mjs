@@ -30,6 +30,7 @@ import {
   selectedConfigIndex,
   spliceEntries,
   subsequenceScore,
+  transcriptWindowOf,
   turnTimingsEqual,
   usagePercent,
 } from "../model.js";
@@ -58,6 +59,18 @@ describe("entryWindowOf / spliceEntries", () => {
     const current = ["a", "b"];
     spliceEntries(current, { keep: 1, take_next: true, resume: 2, window: { len: 2 } }, ["B"]);
     expect(current).toEqual(["a", "b"]);
+  });
+
+  test("子会话的一页拿读到的字节数当修订号，老运行时没有就记 0", () => {
+    expect(transcriptWindowOf({ entries: [1, 2], offset: 3, total: 5, cursor: 900 })).toEqual({
+      offset: 3,
+      len: 2,
+      total: 5,
+      revision: 900,
+      history_session_id: null,
+      acp_session_id: null,
+    });
+    expect(transcriptWindowOf({ entries: [1], offset: 0, total: 1 }).revision).toBe(0);
   });
 });
 
