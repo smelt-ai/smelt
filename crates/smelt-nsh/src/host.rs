@@ -2165,14 +2165,24 @@ pub(crate) struct CallOptions {
 /// 回复里一处换成 Blob 的正文：位置是相对方法返回值的 JSON 指针。
 pub(crate) struct BlobAt {
     pointer: String,
+    /// `pointer` 指的是数组：它每一项里这个位置都换成 Blob（一页条目各自的正文）。
+    each: Option<String>,
     /// 那里是 base64 编码的字节（图片），解码后交出；否则是文本。
     base64: bool,
-    /// Blob 的类型从回复的这个位置读（图片的 `mime`）；不给就是 UTF-8 文本。
+    /// Blob 的类型从回复的这个位置读（图片的 `mime`；有 `each` 时相对那一项）；不给就是
+    /// UTF-8 文本。
+    mime_at: Option<String>,
+}
+
+/// 回复里具体的一处：`BlobAt` 按这次回复展开（`each` 按数组长度）。
+struct BlobSite {
+    at: String,
+    base64: bool,
     mime_at: Option<String>,
 }
 
 impl BlobAt {
-    /// 插件写的一项：`"/diff/text"`，或 `{ at, base64, mime_at }`。
+    /// 插件写的一项：`"/diff/text"`，或 `{ at, each, base64, mime_at }`。
     fn parse(item: &Value) -> Option<BlobAt> {
         let pointer = |v: Option<&Value>| {
             v?.as_str()
@@ -2182,11 +2192,16 @@ impl BlobAt {
         match item {
             Value::String(_) => Some(BlobAt {
                 pointer: pointer(Some(item))?,
+                each: None,
                 base64: false,
                 mime_at: None,
             }),
             Value::Object(object) => Some(BlobAt {
                 pointer: pointer(object.get("at"))?,
+                each: match object.get("each") {
+                    None | Some(Value::Null) => None,
+                    some => Some(pointer(some)?),
+                },
                 base64: match object.get("base64") {
                     None | Some(Value::Null) => false,
                     Some(Value::Bool(base64)) => *base64,
@@ -2200,45 +2215,79 @@ impl BlobAt {
             _ => None,
         }
     }
+
+    /// 这次回复 `value` 里它指的各处（`prefix` 是方法返回值在回复里的位置）。
+    fn sites(&self, value: &Value, prefix: &str) -> Vec<BlobSite> {
+        let base = format!("{prefix}{}", self.pointer);
+        let Some(each) = &self.each else {
+            return vec![BlobSite {
+                mime_at: self.mime_at.as_ref().map(|at| format!("{prefix}{at}")),
+                at: base,
+                base64: self.base64,
+            }];
+        };
+        let len = value
+            .pointer(&base)
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        (0..len)
+            .map(|ix| BlobSite {
+                at: format!("{base}/{ix}{each}"),
+                base64: self.base64,
+                mime_at: self.mime_at.as_ref().map(|at| format!("{base}/{ix}{at}")),
+            })
+            .collect()
+    }
+}
+
+impl BlobSite {
+    /// 把这一处的正文从 `value` 里取出来做成 Blob，原处只剩 `null`。那里不是字符串（这次回复
+    /// 没有正文）或 base64 解不开就照原样。
+    fn take(self, value: &mut Value) -> Option<HostBlob> {
+        let mime = match &self.mime_at {
+            Some(mime_at) => value
+                .pointer(mime_at)
+                .and_then(Value::as_str)
+                .unwrap_or("application/octet-stream")
+                .to_string(),
+            None => "text/plain;charset=utf-8".to_string(),
+        };
+        let slot = value
+            .pointer_mut(&self.at)
+            .filter(|slot| slot.is_string())?;
+        let bytes = if self.base64 {
+            let decoded =
+                <api::client::protocol::files::Base64Bytes as serde::Deserialize>::deserialize(
+                    &*slot,
+                )
+                .ok()?;
+            *slot = Value::Null;
+            decoded.0
+        } else {
+            let Value::String(text) = slot.take() else {
+                return None;
+            };
+            text.into_bytes()
+        };
+        Some(HostBlob {
+            at: self.at,
+            bytes: nsh_core::ImageData::from(bytes),
+            mime,
+        })
+    }
 }
 
 /// 把 `value` 里 `blobs` 指的（加上 `prefix`）正文取出来做成 Blob：几 MB 的 diff、文件正文、
-/// 图片插件只是转交给原生组件（`URL.createObjectURL` 给编辑器、`DiffView`、`<Image>`），不该
-/// 先进它的 JS 堆。那里不是字符串（这次回复没有正文）或 base64 解不开就照原样。
+/// 图片、一页对话插件只是转交给原生组件（`URL.createObjectURL` 给编辑器、Markdown、`DiffView`、
+/// `<Image>`），不该先进它的 JS 堆。
 fn blob_answer(mut value: Value, blobs: &[BlobAt], prefix: &str) -> HostAnswer {
-    let blobs = blobs
+    let sites: Vec<BlobSite> = blobs
         .iter()
-        .filter_map(|blob| {
-            let at = format!("{prefix}{}", blob.pointer);
-            let mime = match &blob.mime_at {
-                Some(mime_at) => value
-                    .pointer(&format!("{prefix}{mime_at}"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("application/octet-stream")
-                    .to_string(),
-                None => "text/plain;charset=utf-8".to_string(),
-            };
-            let slot = value.pointer_mut(&at).filter(|slot| slot.is_string())?;
-            let bytes = if blob.base64 {
-                let decoded =
-                    <api::client::protocol::files::Base64Bytes as serde::Deserialize>::deserialize(
-                        &*slot,
-                    )
-                    .ok()?;
-                *slot = Value::Null;
-                decoded.0
-            } else {
-                let Value::String(text) = slot.take() else {
-                    return None;
-                };
-                text.into_bytes()
-            };
-            Some(HostBlob {
-                at,
-                bytes: nsh_core::ImageData::from(bytes),
-                mime,
-            })
-        })
+        .flat_map(|blob| blob.sites(&value, prefix))
+        .collect();
+    let blobs = sites
+        .into_iter()
+        .filter_map(|site| site.take(&mut value))
         .collect();
     HostAnswer { value, blobs }
 }
@@ -3400,20 +3449,22 @@ mod tests {
     use super::*;
 
     /// 回复里的文本和 base64 图片取出来做成 Blob：图片解码成字节、类型从回复里读，文本是
-    /// UTF-8；原处只剩 `null`，不在回复里再带一份。没有正文的位置照原样。
+    /// UTF-8；原处只剩 `null`，不在回复里再带一份。`each` 按数组每一项取。没有正文的位置照原样。
     #[test]
     fn blob_answer_takes_texts_and_base64_images_out_of_the_reply() {
         let blobs: Vec<BlobAt> = [
             json!("/content/text"),
             json!({ "at": "/content/data", "base64": true, "mime_at": "/content/mime" }),
             json!("/missing"),
+            json!({ "at": "/turns", "each": "/text" }),
         ]
         .iter()
         .map(|item| BlobAt::parse(item).unwrap())
         .collect();
         let reply = json!({
             "value": {
-                "content": { "text": "h\u{e9}llo", "data": "iVBORw==", "mime": "image/png" }
+                "content": { "text": "h\u{e9}llo", "data": "iVBORw==", "mime": "image/png" },
+                "turns": [{ "text": "a" }, { "tools": [] }, { "text": "c" }]
             }
         });
 
@@ -3443,6 +3494,16 @@ mod tests {
                     vec![0x89, b'P', b'N', b'G'],
                     "image/png"
                 ),
+                (
+                    "/value/turns/0/text",
+                    b"a".to_vec(),
+                    "text/plain;charset=utf-8"
+                ),
+                (
+                    "/value/turns/2/text",
+                    b"c".to_vec(),
+                    "text/plain;charset=utf-8"
+                ),
             ]
         );
         assert_eq!(answer.value["value"]["content"]["data"], Value::Null);
@@ -3456,6 +3517,7 @@ mod tests {
             json!(3),
             json!({ "at": "/data", "base64": "yes" }),
             json!({ "at": "/data", "mime_at": "mime" }),
+            json!({ "at": "/turns", "each": "text" }),
         ] {
             assert!(BlobAt::parse(&bad).is_none(), "{bad}");
         }

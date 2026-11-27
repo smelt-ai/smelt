@@ -324,24 +324,6 @@ export declare function launchableProfiles(settings: unknown): Array<{
   launchable: boolean;
   in_history_sources: boolean;
 }>;
-export declare function handoffPrompt(payload: {
-  source_agent: string;
-  source_profile_label?: string | null;
-  source_title: string;
-  cwd?: string | null;
-  target_agent: string;
-  target_profile_label?: string | null;
-  detail: {
-    model?: string | null;
-    turns: Array<{
-      is_user: boolean;
-      timestamp_ms?: number | null;
-      text: string;
-      tools?: string[];
-      tool_paths?: string[];
-    }>;
-  };
-}): string;
 
 export type ResolveResult<T> =
   | ({ ok: true } & T)
@@ -544,8 +526,20 @@ export declare function callWithBlobs<T = any>(
   timeoutMs?: number,
 ): Promise<T>;
 
-/** `callWithBlobs` 的一处正文：文本的 JSON 指针，或 base64 字节及其类型所在的位置。 */
-export type BlobAt = string | { at: string; base64: true; mime_at?: string };
+/**
+ * `callWithBlobs` 的一处正文：文本的 JSON 指针，或 `{ at, … }`。`base64: true` 是 base64 字节，
+ * 类型在 `mime_at`；`each` 是 `at` 那个数组每一项里的位置（一页条目各自的正文），这时
+ * `mime_at` 也相对那一项。
+ */
+export type BlobAt =
+  | string
+  | { at: string; each?: string; base64?: boolean; mime_at?: string };
+
+/**
+ * `blob()` 的 `blob:` 地址，交给原生组件读（编辑器、Markdown、图片）：换了 Blob 才换地址，旧地址
+ * 和组件卸载时 revoke。在组件里调，随组件清理。
+ */
+export declare function blobUrl(blob: () => Blob | null | undefined): () => string | undefined;
 
 export type CallDetailResult<T = any> =
   | { ok: true; value: T }

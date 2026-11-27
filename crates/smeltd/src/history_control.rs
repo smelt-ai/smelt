@@ -18,7 +18,12 @@ pub(crate) fn dispatch(
         }
         ControlMethod::HistoryDetail => call::<HistoryDetailCall>(params, |p| {
             Ok(HistoryDetailResult {
-                detail: history_service::detail(&p.agent, &p.path)?,
+                detail: history_service::detail(&p)?,
+            })
+        }),
+        ControlMethod::HistoryHandoff => call::<HistoryHandoffCall>(params, |p| {
+            Ok(HistoryHandoffResult {
+                prompt: history_service::handoff(&p)?,
             })
         }),
         ControlMethod::HistoryDelete => call::<HistoryDeleteCall>(params, |p| {

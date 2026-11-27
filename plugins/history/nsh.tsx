@@ -1,19 +1,19 @@
 // 历史会话（NSH A2 独立 VM 版本）：复用纯逻辑 model.js 与 Rust 一等 <TextView>（SmeltMarkdown）。
-import { computed, Scroll, signal, Text, View } from "nsh";
+import { computed, List, Scroll, signal, Text, View } from "nsh";
 import { Input, MenuItem, MenuSeparator, Submenu } from "nsh/base";
 import {
   activeContext,
   agentCatalog,
   agentForSpace,
+  blobUrl,
   bootTask,
   call,
+  callWithBlobs,
   clipboardWrite,
   command,
   currentTheme,
   DIALOG_SURFACE_CLASS,
-  handoffPrompt,
   initHost,
-  isInterruptMarker,
   launchableProfiles,
   machineMetaEntry,
   MENU_ITEM_CLASS,
@@ -33,6 +33,7 @@ import {
   text,
   viewShown,
 } from "smelt/sdk";
+import type { BlobAt } from "smelt/sdk";
 
 import {
   continueLabel,
@@ -91,15 +92,22 @@ interface SessionSummary {
 
 interface Turn {
   is_user: boolean;
-  timestamp_ms: number | null;
-  text: string;
+  /** agent 回显的「用户中断」标记，画成分隔线。 */
+  interrupted: boolean;
+  /** 正文以 Blob 交来，只转交给 Markdown；没有正文是 `null`。 */
+  text: Blob | null;
   tools: string[];
-  tool_paths: string[];
 }
 
-interface SessionDetail {
-  model: string | null;
+/** 打开的那份会话：已取到的轮次（从头起），整份的轮数。 */
+interface OpenedDetail {
+  machine: string | null;
+  agent: string;
+  path: string;
   turns: Turn[];
+  total: number;
+  /** 正在取下一页。 */
+  loading: boolean;
 }
 
 interface CachedList {
@@ -226,7 +234,7 @@ const pickedSource = signal<{ kind: string; profile_id: string | null }>({
 let sourcePickedByUser = false;
 const listsMap = signal<Record<string, CachedList>>({});
 const filterText = signal("");
-const openedDetail = signal<{ path: string; detail: SessionDetail } | null>(null);
+const openedDetail = signal<OpenedDetail | null>(null);
 const renameDialog = signal<RenameDialogState | null>(null);
 const deleteDialog = signal<DeleteDialogState | null>(null);
 
@@ -415,20 +423,38 @@ function selectSource(kind: string, profileId: string | null) {
   refresh();
 }
 
+/** 一页几轮：长会话的全文几十 MB，按页取，滚近末尾取下一页。 */
+const DETAIL_PAGE = 50;
+/** 每轮正文以 Blob 交来，不进插件的 JS 堆。 */
+const DETAIL_BLOBS: BlobAt[] = [{ at: "/detail/turns", each: "/text" }];
+
+function fetchTurns(machine: string | null, agent: string, path: string, offset: number) {
+  return callWithBlobs(
+    machine,
+    "history.detail",
+    { agent, path, offset, limit: DETAIL_PAGE },
+    DETAIL_BLOBS,
+  ).then((res: any) => (res?.detail ? detailFromWire(res.detail) : null));
+}
+
 function openSessionDetail(path: string) {
   const project = currentProject();
   if (!project) return;
   closeDetail();
   const gen = detailGen;
-  const source = activeSource();
-  void call(project.machine, "history.detail", {
-    agent: source.kind,
-    path,
-  }).then(
-    (res: any) => {
+  const agent = activeSource().kind;
+  void fetchTurns(project.machine, agent, path, 0).then(
+    (page) => {
       if (detailGen !== gen) return;
-      if (res?.detail) {
-        openedDetail.set({ path, detail: detailFromWire(res.detail) });
+      if (page) {
+        openedDetail.set({
+          machine: project.machine,
+          agent,
+          path,
+          turns: page.turns,
+          total: page.total,
+          loading: false,
+        });
       } else {
         console.error(`[history] 这份存档读不出内容：${path}`);
       }
@@ -436,6 +462,33 @@ function openSessionDetail(path: string) {
     (error: unknown) => {
       if (detailGen !== gen) return;
       console.error("[history] 读取会话内容失败：", errMsg(error));
+    },
+  );
+}
+
+/** 取打开那份会话的下一页。取不到就停在已有的轮次上（重新点开再试），不反复重试。 */
+function loadMoreTurns() {
+  const opened = openedDetail();
+  if (!opened || opened.loading || opened.turns.length >= opened.total) return;
+  const gen = detailGen;
+  openedDetail.set({ ...opened, loading: true });
+  const stop = (cur: OpenedDetail) => ({ ...cur, total: cur.turns.length, loading: false });
+  void fetchTurns(opened.machine, opened.agent, opened.path, opened.turns.length).then(
+    (page) => {
+      const cur = openedDetail();
+      if (detailGen !== gen || !cur) return;
+      if (!page || page.turns.length === 0) {
+        openedDetail.set(stop(cur));
+        return;
+      }
+      const turns = [...cur.turns, ...page.turns];
+      openedDetail.set({ ...cur, turns, total: Math.max(page.total, turns.length), loading: false });
+    },
+    (error: unknown) => {
+      const cur = openedDetail();
+      if (detailGen !== gen || !cur) return;
+      console.error("[history] 读取会话内容失败：", errMsg(error));
+      openedDetail.set(stop(cur));
     },
   );
 }
@@ -461,7 +514,6 @@ function resumeSession(
 
 function handOffSession(
   session: SessionSummary,
-  sourceAcpId: string,
   target: { agent: string; profile_id: string | null; profile_label: string | null },
 ) {
   const project = currentProject();
@@ -472,29 +524,20 @@ function handOffSession(
     source.profile_id && Array.isArray(settings?.profiles)
       ? (settings.profiles.find((p: any) => p.id === source.profile_id)?.label ?? null)
       : null;
-  void call(project.machine, "history.detail", {
+  // 提示在运行时按存档拼好：全文不进插件。
+  void call(project.machine, "history.handoff", {
     agent: source.kind,
     path: session.path,
+    source_title: session.title,
+    source_profile_label: sourceProfileLabel,
+    target_agent: target.agent,
+    target_profile_label: target.profile_label,
+    cwd: project.root,
   }).then(
     (res: any) => {
-      if (!res?.detail) {
+      const prompt = res?.prompt;
+      if (typeof prompt !== "string") {
         notifyError(t("handoff.unreadable", { path: session.path }));
-        return;
-      }
-      const detail = detailFromWire(res.detail);
-      let prompt: string;
-      try {
-        prompt = handoffPrompt({
-          source_agent: sourceAcpId,
-          source_profile_label: sourceProfileLabel,
-          source_title: session.title,
-          cwd: project.root,
-          target_agent: target.agent,
-          target_profile_label: target.profile_label,
-          detail,
-        });
-      } catch (error) {
-        notifyError(t("handoff.read_failed", { error: errMsg(error) }));
         return;
       }
       void run(HANDOFF_CMD, {
@@ -754,9 +797,10 @@ function Placeholder(props: { message: string }) {
 
 function HistoryTurnItem(props: { turn: Turn; cwd: string; machine: string | null }) {
   const look = currentTheme;
-  const interrupted = computed(() => props.turn.is_user && isInterruptMarker(props.turn.text));
+  const interrupted = computed(() => props.turn.interrupted);
   const tools = computed(() => toolSummary(props.turn.tools));
-  const hasBody = computed(() => props.turn.text.trim().length > 0);
+  const markdownUrl = blobUrl(() => props.turn.text);
+  const hasBody = computed(() => markdownUrl() != null);
 
   return (
     <View
@@ -788,7 +832,7 @@ function HistoryTurnItem(props: { turn: Turn; cwd: string; machine: string | nul
                 >
                   <If when={hasBody()}>
                     <SmeltMarkdown
-                      markdown={props.turn.text}
+                      markdownUrl={markdownUrl()}
                       cwd={props.cwd}
                       machine={props.machine}
                       onLinkError={(error) => notifyError(errMsg(error))}
@@ -839,7 +883,7 @@ function HistoryTurnItem(props: { turn: Turn; cwd: string; machine: string | nul
                   }}
                 >
                   <SmeltMarkdown
-                    markdown={props.turn.text}
+                    markdownUrl={markdownUrl()}
                     cwd={props.cwd}
                     machine={props.machine}
                     onLinkError={(error) => notifyError(errMsg(error))}
@@ -1193,25 +1237,25 @@ export function Main() {
               else={<Placeholder message={t("empty.pick")} />}
             >
               <If
-                when={(activeOpened()?.detail.turns.length ?? 0) > 0}
+                when={(activeOpened()?.turns.length ?? 0) > 0}
                 else={<Placeholder message={t("empty.no_turns")} />}
               >
-                <Scroll style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
-                  <View style={{ paddingTop: 12, width: "100%" }}>
-                    <Each
-                      of={activeOpened()?.detail.turns ?? []}
-                      key={(_turn: Turn, idx: number) => `${activeOpened()?.path ?? ""}:${idx}`}
-                    >
-                      {(turn: () => Turn) => (
-                        <HistoryTurnItem
-                          turn={turn()}
-                          cwd={currentProject()?.root ?? ""}
-                          machine={currentProject()?.machine ?? null}
-                        />
-                      )}
-                    </Each>
-                  </View>
-                </Scroll>
+                <List
+                  each={activeOpened()?.turns ?? []}
+                  keyExtractor={(_turn: Turn, idx: number) => `${activeOpened()?.path ?? ""}:${idx}`}
+                  estimatedItemSize={120}
+                  onLoadMore={loadMoreTurns}
+                  style={{ flex: 1, minWidth: 0, minHeight: 0 }}
+                  contentStyle={{ paddingTop: 12 }}
+                >
+                  {(turn: () => Turn) => (
+                    <HistoryTurnItem
+                      turn={turn()}
+                      cwd={currentProject()?.root ?? ""}
+                      machine={currentProject()?.machine ?? null}
+                    />
+                  )}
+                </List>
               </If>
             </If>
           </View>
@@ -1387,11 +1431,7 @@ export function Main() {
                                           <MenuRow
                                             label={target().label}
                                             onSelect={() =>
-                                              handOffSession(
-                                                session(),
-                                                sourceMeta().acp_id!,
-                                                target(),
-                                              )
+                                              handOffSession(session(), target())
                                             }
                                           />
                                         )}

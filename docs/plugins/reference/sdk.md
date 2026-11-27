@@ -76,7 +76,8 @@
 | 导出 | 说明 |
 | --- | --- |
 | `call(machine, method, params?, timeoutMs?)` | 调 Control API，失败抛错 |
-| `callDetail(machine, method, params?, timeoutMs?)` | 同上，给 `{ ok, value }` 或 `{ ok: false, code, message }` |
+| `callDetail(machine, method, params?, timeoutMs?, blobs?)` | 同上，给 `{ ok, value }` 或 `{ ok: false, code, message }` |
+| `callWithBlobs(machine, method, params, blobs, timeoutMs?)`、`blobUrl(blob)` | 回复里的大正文以 `Blob` 交来，换成 `blob:` 地址交给原生组件。见[大正文](../runtime.md#大正文用-callwithblobs) |
 | `request(machine, payload, timeoutMs?)` | 带 `op` 的守护命令，不在版本约定里 |
 | `waitOnline(machine, failures?)` | 等机器上线 |
 
@@ -157,7 +158,7 @@
 | `SmeltNativeView`、`SmeltNativeWindowBar`、`SmeltNativeWindowDrag`、`SmeltBackdropRegion`、`SmeltNativeDesktop`、`SmeltNativeTerminal` | 内置插件的原生组件 |
 | `shellState()`、`jsViews()` | 宿主外壳自己的状态 |
 | `acpSubscribe`、`acpUnsubscribe`、`acpAction`、`acpHistory`、`acpRestart`、`acpPasteImage`、`acpClipboardImages`、`acpImageUri`、`onAcpEvent` | 对话模块。见[调用运行时：对话](../runtime.md#对话) |
-| `agentCatalog`、`agentForSpace`、`launchableProfiles`、`handoffPrompt`、`resolveStartAcp`、`resolveResumeAcp`、`resolveHandoffAcp`、`resolveCliResume`、`rememberedAcpConfig`、`rememberAcpConfigValue`、`conversationAcp`、`newSessionIcon`、`daemonStateStatus`、`agentIdFromLaunch`、`isInterruptMarker` | 新建会话、对话、会话列表 |
+| `agentCatalog`、`agentForSpace`、`launchableProfiles`、`resolveStartAcp`、`resolveResumeAcp`、`resolveHandoffAcp`、`resolveCliResume`、`rememberedAcpConfig`、`rememberAcpConfigValue`、`conversationAcp`、`newSessionIcon`、`daemonStateStatus`、`agentIdFromLaunch`、`isInterruptMarker` | 新建会话、对话、会话列表 |
 | `quotaTarget`、`quotaFacts` | 额度 |
 | `isManagedAutomationWorkspace` | 自动化 |
 | `customProviderIdProblem`、`apiBaseUrlProblem`、`piMcpPresets` | 智能体设置 |

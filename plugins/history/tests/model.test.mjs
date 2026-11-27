@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   continueLabel,
+  detailFromWire,
   fallbackSource,
   filterSessions,
   formatCount,
@@ -208,5 +209,28 @@ describe("fallbackSource", () => {
       kind: "antigravity",
       profile_id: null,
     });
+  });
+});
+
+describe("detailFromWire", () => {
+  test("正文是 Blob 原样留着，空正文算没有；total 是整份的轮数", () => {
+    const body = new Blob(["答完了"]);
+    const page = detailFromWire({
+      total: 120,
+      turns: [
+        { is_user: false, text: body, tools: ["Bash"] },
+        { is_user: true, interrupted: true, text: new Blob(["[Request interrupted by user]"]) },
+        { is_user: false, text: new Blob([]), tools: ["Read"] },
+      ],
+    });
+    expect(page.total).toBe(120);
+    expect(page.turns[0].text).toBe(body);
+    expect(page.turns[0].tools).toEqual(["Bash"]);
+    expect(page.turns[1].interrupted).toBe(true);
+    expect(page.turns[2].text).toBeNull();
+  });
+
+  test("没给 total 时就是这一页的轮数", () => {
+    expect(detailFromWire({ turns: [{ is_user: true, text: new Blob(["x"]) }] }).total).toBe(1);
   });
 });

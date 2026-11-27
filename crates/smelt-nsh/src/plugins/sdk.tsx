@@ -337,27 +337,6 @@ export function launchableProfiles(settings: unknown): Array<{
   return JSON.parse(Smelt.launchableProfiles(JSON.stringify(settings)));
 }
 
-export function handoffPrompt(payload: {
-  source_agent: string;
-  source_profile_label?: string | null;
-  source_title: string;
-  cwd?: string | null;
-  target_agent: string;
-  target_profile_label?: string | null;
-  detail: {
-    model?: string | null;
-    turns: Array<{
-      is_user: boolean;
-      timestamp_ms?: number | null;
-      text: string;
-      tools?: string[];
-      tool_paths?: string[];
-    }>;
-  };
-}): string {
-  return Smelt.handoffPrompt(JSON.stringify(payload));
-}
-
 export type ResolveResult<T> =
   | ({ ok: true } & T)
   | { ok: false; code: string; params: Record<string, unknown> };
@@ -1206,8 +1185,35 @@ export function call(
   return host.call("call", payload);
 }
 
-/** `callWithBlobs` 的一处正文：文本的 JSON 指针，或 base64 字节及其类型所在的位置。 */
-export type BlobAt = string | { at: string; base64: true; mime_at?: string };
+/**
+ * `callWithBlobs` 的一处正文：文本的 JSON 指针，或 `{ at, … }`。`base64: true` 是 base64 字节，
+ * 类型在 `mime_at`；`each` 是 `at` 那个数组每一项里的位置（一页条目各自的正文），这时
+ * `mime_at` 也相对那一项。
+ */
+export type BlobAt =
+  | string
+  | { at: string; each?: string; base64?: boolean; mime_at?: string };
+
+/**
+ * `blob()` 的 `blob:` 地址，交给原生组件读（编辑器、Markdown、图片）：换了 Blob 才换地址，旧地址
+ * 和组件卸载时 revoke。在组件里调，随组件清理。
+ */
+export function blobUrl(blob: () => Blob | null | undefined): () => string | undefined {
+  const source = computed(blob);
+  let made: string | undefined;
+  const url = computed(() => {
+    const next = source();
+    const prev = made;
+    made = next ? URL.createObjectURL(next) : undefined;
+    if (prev) URL.revokeObjectURL(prev);
+    return made;
+  });
+  cleanup(() => {
+    if (made) URL.revokeObjectURL(made);
+    made = undefined;
+  });
+  return url;
+}
 
 /**
  * 同 `call`，回复里 `blobs` 这些位置（JSON 指针，如 `/patch`、`/diff/text`）上的正文以

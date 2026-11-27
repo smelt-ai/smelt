@@ -215,6 +215,7 @@ fn dispatch_control(
         },
         history @ (ControlMethod::HistoryList
         | ControlMethod::HistoryDetail
+        | ControlMethod::HistoryHandoff
         | ControlMethod::HistoryDelete) => {
             match super::history_control::dispatch(history, params) {
                 Ok(result) => {

@@ -136,6 +136,7 @@ define_control_methods! {
     SessionCompleteFiles => (SESSION_COMPLETE_FILES_METHOD, "session.complete_files"),
     HistoryList => (HISTORY_LIST_METHOD, "history.list"),
     HistoryDetail => (HISTORY_DETAIL_METHOD, "history.detail"),
+    HistoryHandoff => (HISTORY_HANDOFF_METHOD, "history.handoff"),
     HistoryDelete => (HISTORY_DELETE_METHOD, "history.delete"),
     AgentHostGet => (AGENT_HOST_GET_METHOD, "agent.host.get"),
     AgentHostApplyEdit => (AGENT_HOST_APPLY_EDIT_METHOD, "agent.host.apply_edit"),

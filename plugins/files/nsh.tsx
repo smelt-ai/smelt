@@ -14,6 +14,7 @@ import {
 import { Menu } from "nsh/desktop";
 import {
   activeContext,
+  blobUrl,
   bootTask,
   call,
   callDetail,
@@ -1470,27 +1471,6 @@ function Placeholder(props: { text: string }) {
       </Text>
     </View>
   );
-}
-
-/**
- * `blob()` 的 `blob:` 地址，交给原生组件（编辑器、Markdown、图片）读：换了 blob 才换地址，旧地址和
- * 组件卸载时 revoke。只在组件里用，随组件清理。
- */
-function blobUrl(blob: () => Blob | null): () => string | undefined {
-  const source = computed(blob);
-  let made: string | undefined;
-  const url = computed(() => {
-    const next = source();
-    const prev = made;
-    made = next ? URL.createObjectURL(next) : undefined;
-    if (prev) URL.revokeObjectURL(prev);
-    return made;
-  });
-  cleanup(() => {
-    if (made) URL.revokeObjectURL(made);
-    made = undefined;
-  });
-  return url;
 }
 
 /**
