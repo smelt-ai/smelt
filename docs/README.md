@@ -41,6 +41,7 @@ Each design states its status at the top.
 - [`pi-session-messaging-design.html`](pi-session-messaging-design.html) — Pi↔Pi session messaging (transcript as inbox). P0 is implemented (#55); P1 and P2 are open.
 - [`cross-agent-messaging.md`](cross-agent-messaging.md) — Bidirectional peer messaging across all ACP agents (Pi, Codex, Claude Code, Antigravity, custom profiles) via smeltd bus + ACP `mcpServers` + CLI fallback. Implemented.
 - [`collaboration.md`](collaboration.md) — Multiplayer around a live session. Not started.
+- [`conversation-history-loading.md`](conversation-history-loading.md) — Conversation data model as turns → items: timeline carries item summaries, full content fetched per item, history paged by turn. Proposal, not started.
 
 ## Product / planning
 
