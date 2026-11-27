@@ -13,7 +13,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Component, Path, PathBuf},
-    sync::mpsc::{self, RecvTimeoutError},
+    sync::{
+        Arc, Mutex, Weak,
+        mpsc::{self, RecvTimeoutError},
+    },
     time::{Duration, Instant},
 };
 
@@ -1261,7 +1264,7 @@ pub(crate) enum LiveInput {
 /// 后台发现与热重载句柄：释放后自动停止文件监听与后台线程。
 pub(crate) struct ShellLive {
     inputs: mpsc::Sender<LiveInput>,
-    _watcher: Option<notify::RecommendedWatcher>,
+    _watcher: Option<Arc<Mutex<notify::RecommendedWatcher>>>,
 }
 
 impl ShellLive {
@@ -1273,10 +1276,14 @@ impl ShellLive {
         updates: UnboundedSender<ShellUpdate>,
     ) -> Self {
         let (inputs, received) = mpsc::channel();
-        let watcher = watch_sources(&sources, inputs.clone())
-            .inspect_err(|error| eprintln!("[smelt-nsh] 监听插件目录失败：{error}"))
-            .ok()
-            .flatten();
+        let (watcher, links) = match watch_sources(&sources, inputs.clone()) {
+            Ok(Some((watcher, links))) => (Some(watcher), Some(links)),
+            Ok(None) => (None, None),
+            Err(error) => {
+                eprintln!("[smelt-nsh] 监听插件目录失败：{error}");
+                (None, None)
+            }
+        };
         std::thread::Builder::new()
             .name("smelt-nsh-shell-live".into())
             .spawn(move || {
@@ -1289,6 +1296,7 @@ impl ShellLive {
                 match plugins_res {
                     Ok(plugins) => Worker {
                         sources,
+                        links,
                         plugins,
                         updates,
                         builtin_members: BTreeMap::new(),
@@ -1328,6 +1336,8 @@ struct BuiltinMemberRecord {
 
 struct Worker {
     sources: Vec<SourceDir>,
+    /// 软链进来的插件的真实目录监听，每批改动处理前对一遍链接。
+    links: Option<LinkWatch>,
     plugins: Plugins,
     updates: UnboundedSender<ShellUpdate>,
     /// 共享内置 VM（`__builtins__`）当前装入的成员记录。
@@ -1482,6 +1492,9 @@ impl Worker {
                         &mut fallback_requests,
                     );
                 }
+            }
+            if let Some(links) = &self.links {
+                links.sync();
             }
             let filter = (!full_rescan).then_some(&changed_roots);
             let update = self.scan(filter, full_rescan, fallback_requests, false);
@@ -2912,10 +2925,100 @@ struct WatchedDir {
     canonical: PathBuf,
 }
 
+/// 插件目录里一个软链（Windows 上也含 Junction）进来的插件。
+#[derive(Clone, PartialEq, Eq)]
+struct LinkedPlugin {
+    /// 链接指向的真实目录（规范化后）。
+    target: PathBuf,
+    /// 链接本身，也就是宿主认的插件目录。
+    plugin_dir: PathBuf,
+}
+
+/// 软链进来的插件：FSEvents（macOS）和 ReadDirectoryChangesW（Windows）递归监听时不跟进链接，
+/// 真实目录里改了源码收不到事件。每个链接的真实目录单独挂监听，事件记回链接所在的插件目录。
+/// 链接增删由插件根目录自己的事件带出来，处理每批改动前重新对一遍。
+struct LinkWatch {
+    /// 弱引用：监听回调里拿着 `inputs`，后台线程要是强持有监听器，`ShellLive` 释放后通道永远不关。
+    watcher: Weak<Mutex<notify::RecommendedWatcher>>,
+    links: Arc<Mutex<Vec<LinkedPlugin>>>,
+    roots: Vec<PathBuf>,
+}
+
+impl LinkWatch {
+    fn sync(&self) {
+        let Some(watcher) = self.watcher.upgrade() else {
+            return;
+        };
+        let desired = linked_plugins(&self.roots);
+        let current = self
+            .links
+            .lock()
+            .expect("linked plugins lock poisoned")
+            .clone();
+        if desired == current {
+            return;
+        }
+        // 改监听时不拿 `links` 的锁：监听回调线程也要拿它，两把锁不嵌套。
+        {
+            let mut watcher = watcher.lock().expect("plugin watcher lock poisoned");
+            for old in &current {
+                if !desired.iter().any(|link| link.target == old.target) {
+                    let _ = watcher.unwatch(&old.target);
+                }
+            }
+            for new in &desired {
+                if !current.iter().any(|link| link.target == new.target)
+                    && let Err(error) = watcher.watch(&new.target, notify::RecursiveMode::Recursive)
+                {
+                    eprintln!(
+                        "[smelt-nsh] 监听软链插件 {} 失败：{error}",
+                        new.target.display()
+                    );
+                }
+            }
+        }
+        *self.links.lock().expect("linked plugins lock poisoned") = desired;
+    }
+}
+
+fn linked_plugins(roots: &[PathBuf]) -> Vec<LinkedPlugin> {
+    let mut out = Vec::new();
+    for root in roots {
+        let Ok(entries) = fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with('.')
+                || !entry.file_type().is_ok_and(|kind| kind.is_symlink())
+            {
+                continue;
+            }
+            let Ok(target) = dunce::canonicalize(entry.path()) else {
+                continue;
+            };
+            if target.is_dir() {
+                out.push(LinkedPlugin {
+                    target,
+                    plugin_dir: entry.path(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// 插件目录内的相对路径落在隐藏目录、`node_modules`、`tsconfig.json` 上，不触发重编。
+fn ignored_plugin_path<'a>(mut parts: impl Iterator<Item = Component<'a>>) -> bool {
+    parts.any(|part| {
+        let s = part.as_os_str().to_string_lossy();
+        s.starts_with('.') || s == "node_modules" || s == "tsconfig.json"
+    })
+}
+
 fn watch_sources(
     sources: &[SourceDir],
     inputs: mpsc::Sender<LiveInput>,
-) -> notify::Result<Option<notify::RecommendedWatcher>> {
+) -> notify::Result<Option<(Arc<Mutex<notify::RecommendedWatcher>>, LinkWatch)>> {
     let dirs: Vec<WatchedDir> = sources
         .iter()
         .filter(|s| s.watch)
@@ -2934,6 +3037,8 @@ fn watch_sources(
         return Ok(None);
     }
     let matcher = dirs.clone();
+    let links: Arc<Mutex<Vec<LinkedPlugin>>> = Arc::default();
+    let linked = links.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         let Ok(event) = event else {
             let _ = inputs.send(LiveInput::Changed(None));
@@ -2961,12 +3066,15 @@ fn watch_sources(
                 if plugin_dir.to_string_lossy().starts_with('.') {
                     continue;
                 }
-                let ignored = parts.any(|part| {
-                    let s = part.as_os_str().to_string_lossy();
-                    s.starts_with('.') || s == "node_modules" || s == "tsconfig.json"
-                });
-                if !ignored {
+                if !ignored_plugin_path(parts) {
                     let _ = inputs.send(LiveInput::Changed(Some(dir.original.join(plugin_dir))));
+                }
+            }
+            for link in linked.lock().expect("linked plugins lock poisoned").iter() {
+                if let Ok(rel) = path.strip_prefix(&link.target)
+                    && !ignored_plugin_path(rel.components())
+                {
+                    let _ = inputs.send(LiveInput::Changed(Some(link.plugin_dir.clone())));
                 }
             }
         }
@@ -2974,7 +3082,14 @@ fn watch_sources(
     for dir in &dirs {
         watcher.watch(&dir.original, notify::RecursiveMode::Recursive)?;
     }
-    Ok(Some(watcher))
+    let watcher = Arc::new(Mutex::new(watcher));
+    let link_watch = LinkWatch {
+        watcher: Arc::downgrade(&watcher),
+        links,
+        roots: dirs.into_iter().map(|dir| dir.original).collect(),
+    };
+    link_watch.sync();
+    Ok(Some((watcher, link_watch)))
 }
 
 #[cfg(test)]
@@ -3041,6 +3156,71 @@ mod tests {
                 return update;
             }
         }
+    }
+
+    /// 软链进用户插件目录的插件（`ln -s ~/repo/plugin ~/.smelt/plugins/x`，常见的本地开发装法）：
+    /// 改链接指向的真实目录也要热重载；运行中新链进来的插件同样跟进。
+    #[cfg(unix)]
+    #[test]
+    fn shell_live_hot_reloads_symlinked_plugins() {
+        let root = TempDir::new("smelt-nsh-manifest-links");
+        let user = root.0.join("user");
+        let repo = root.0.join("repo");
+        fs::create_dir_all(&user).unwrap();
+        let body = |label: &str| {
+            format!(
+                "import {{ Text }} from \"nsh\";\nexport function Main() {{ return <Text>{label}</Text>; }}\n"
+            )
+        };
+        write_plugin(&repo.join("linked"), "linked", "main.tsx", &body("v1"));
+        std::os::unix::fs::symlink(repo.join("linked"), user.join("linked")).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (sync_tx, sync_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            while let Some(update) = rx.blocking_recv() {
+                if sync_tx.send(update).is_err() {
+                    break;
+                }
+            }
+        });
+        let _live = ShellLive::start(
+            vec![SourceDir {
+                path: user.clone(),
+                source: PluginSource::User,
+                watch: true,
+            }],
+            root.0.join("stage"),
+            ShellSource::Source("export function Shell() { return null; }"),
+            crate::ui_sets(),
+            tx,
+        );
+        let initial = wait_update(&sync_rx, "首次扫描", |u| u.initial_scripts.is_some());
+        assert!(
+            initial
+                .loaded
+                .iter()
+                .any(|p| p.id == "linked" && p.error.is_none()),
+            "软链插件应正常加载：{:?}",
+            initial.loaded
+        );
+
+        let installs = |id: &'static str| {
+            move |u: &ShellUpdate| {
+                u.changes
+                    .iter()
+                    .any(|c| matches!(c, Change::Install(p) if p.id() == id))
+            }
+        };
+        fs::write(repo.join("linked/main.tsx"), body("v2")).unwrap();
+        wait_update(&sync_rx, "改软链插件的真实目录", installs("linked"));
+
+        // 运行中再链进来一个：先被装上，之后改它的真实目录也能热重载。
+        write_plugin(&repo.join("later"), "later", "main.tsx", &body("v1"));
+        std::os::unix::fs::symlink(repo.join("later"), user.join("later")).unwrap();
+        wait_update(&sync_rx, "新链进来的插件", installs("later"));
+        fs::write(repo.join("later/main.tsx"), body("v2")).unwrap();
+        wait_update(&sync_rx, "改新链插件的真实目录", installs("later"));
     }
 
     /// 覆盖 `ShellLive` 共享内置 VM 与独立用户 VM 热重载完整链路：
