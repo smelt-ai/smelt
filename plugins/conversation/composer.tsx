@@ -4,6 +4,7 @@ import {
   computed,
   effect,
   Image,
+  keymap,
   reduceMotion,
   Scroll,
   signal,
@@ -16,6 +17,7 @@ import {
   acpPasteImage,
   call,
   fileUriToPath,
+  localOs,
   run,
   SmeltButton,
   SmeltDisclosure,
@@ -221,14 +223,43 @@ export function Composer(props: {
     inputApi?.focus?.();
   };
 
+  const acceptSelected = () => {
+    const items = completionItems();
+    if (items.length === 0) return false;
+    acceptCompletion(items[Math.max(0, Math.min(completionIndex(), items.length - 1))]);
+    return true;
+  };
+
+  // 弹层开着、输入框有焦点时，上下键（macOS 上还有 Ctrl+P/N）、Tab、Esc 归弹层。
+  // 输入框自己吃键，onKeyDown 到不了，所以绑在 keymap 上，先于输入框处理。
+  const inputFocused = signal(false);
+  const completionOpen = computed(() => completionItems().length > 0);
+  const emacsKeys = localOs() === "darwin";
+  effect(() => {
+    if (!inputFocused() || !completionOpen()) return;
+    const step = (by: number) => () => {
+      const n = completionItems().length;
+      if (n > 0) completionIndex.set((completionIndex() + by + n) % n);
+    };
+    const moves: Record<string, () => void> = { up: step(-1), down: step(1) };
+    if (emacsKeys) {
+      moves["ctrl+p"] = step(-1);
+      moves["ctrl+n"] = step(1);
+    }
+    const offMoves = keymap.bind(moves, { when: "always", repeat: true });
+    const offKeys = keymap.bind(
+      { tab: () => void acceptSelected(), escape: () => completionDismissed.set(true) },
+      { when: "always" },
+    );
+    return () => {
+      offMoves();
+      offKeys();
+    };
+  });
+
   const handleSubmit = () => {
     if (props.readOnly() || props.dead()) return;
-    const items = completionItems();
-    if (items.length > 0) {
-      const idx = Math.max(0, Math.min(completionIndex(), items.length - 1));
-      acceptCompletion(items[idx]);
-      return;
-    }
+    if (acceptSelected()) return;
     const text = draft().trim();
     const atts = attachments();
     if (!text && atts.length === 0) return;
@@ -733,7 +764,11 @@ export function Composer(props: {
                     ? ct("composer.placeholder_running")
                     : ct("composer.placeholder")
               }
-              onFocus={() => props.onFocusIn?.()}
+              onFocus={() => {
+                inputFocused.set(true);
+                props.onFocusIn?.();
+              }}
+              onBlur={() => inputFocused.set(false)}
               onChange={({ value }: any) => {
                 draft.set(value);
                 caretPos.set(value.length);
@@ -752,29 +787,8 @@ export function Composer(props: {
               }}
               onSubmit={handleSubmit}
               onPaste={(ev: any) => void handlePaste(ev)}
-              onKeyDown={(ev: any) => {
-                const key = ev?.key;
-                const items = completionItems();
-                if (items.length > 0) {
-                  if (key === "ArrowDown") {
-                    completionIndex.set((completionIndex() + 1) % items.length);
-                    return;
-                  }
-                  if (key === "ArrowUp") {
-                    completionIndex.set((completionIndex() - 1 + items.length) % items.length);
-                    return;
-                  }
-                  if (key === "Tab") {
-                    const idx = Math.max(0, Math.min(completionIndex(), items.length - 1));
-                    acceptCompletion(items[idx]);
-                    return;
-                  }
-                  if (key === "Escape") {
-                    completionDismissed.set(true);
-                    return;
-                  }
-                }
-                if (key === "Escape" && props.turnActive() && !draft().trim()) {
+              onKeyPress={(e: any) => {
+                if (e?.key === "Escape" && props.turnActive() && !draft().trim()) {
                   props.onCancel();
                 }
               }}
