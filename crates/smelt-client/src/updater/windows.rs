@@ -65,9 +65,9 @@ pub async fn fetch_latest(channel: UpdateChannel) -> anyhow::Result<UpdateCandid
     }))
 }
 
-/// 这个 exe 是不是安装程序装的：发版构建，而且旁边有卸载程序。开发构建、拷出来的 exe
-/// 没有能覆盖的安装，不检查、不下载。
-pub fn installed_by_setup() -> bool {
+/// 这个 exe 能不能自更新：发版构建，而且是安装程序装的（旁边有卸载程序）。开发构建、
+/// 拷出来的 exe 没有能覆盖的安装，不检查、不下载。
+pub fn can_self_update() -> bool {
     smelt_version::RELEASE.is_some()
         && smelt_paths::current_exe().is_ok_and(|exe| exe.with_file_name(UNINSTALLER).is_file())
 }

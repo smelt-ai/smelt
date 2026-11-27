@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { FileContentCache } from "../cache.js";
 
-const text = (body, version) => ({ kind: "text", text: body, version });
+const text = (body, version) => ({ kind: "text", blob: new Blob([body]), version });
 
 describe("FileContentCache", () => {
   test("超上限淘汰最久没用的，get 算用过", () => {

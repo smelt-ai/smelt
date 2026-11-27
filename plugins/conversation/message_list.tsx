@@ -755,6 +755,8 @@ export function MessageList(props: {
   onLoadOlder: () => void;
   onViewableRange: (firstRowIdx: number, lastRowIdx: number) => void;
   onScrollAtLatestChange: (atLatest: boolean) => void;
+  onUserScroll?: () => void;
+  onJumpToLatest?: () => void;
   onToggleTurnFold: (key: string) => void;
   onToggleProcessGroup: (key: string) => void;
   onOpenDiff: (state: EditDiffDialogState) => void;
@@ -821,7 +823,11 @@ export function MessageList(props: {
   }));
 
   return (
-    <View selectable style={{ position: "relative", flex: 1, width: "100%", minHeight: 0 }}>
+    <View
+      selectable
+      onWheel={() => props.onUserScroll?.()}
+      style={{ position: "relative", flex: 1, width: "100%", minHeight: 0 }}
+    >
       <List
         ref={(api: any) => {
           internalListApi = api;
@@ -831,7 +837,7 @@ export function MessageList(props: {
         keyExtractor={(r: any) => r.key}
         initialScrollAtEnd
         alignment="bottom"
-        maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 40 }}
+        maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 96 }}
         estimatedItemSize={100}
         onLoadMoreAtStart={() => {
           if (props.hasOlderHistory() && !props.loadingOlder()) {
@@ -1398,8 +1404,12 @@ export function MessageList(props: {
             icon="icons/arrow-down.svg"
             label={ct("action.jump_latest")}
             onPress={() => {
-              internalListApi?.scrollToEnd?.({ animated: true });
-              props.onScrollAtLatestChange(true);
+              if (props.onJumpToLatest) {
+                props.onJumpToLatest();
+              } else {
+                internalListApi?.scrollToEnd?.({ animated: false });
+                props.onScrollAtLatestChange(true);
+              }
             }}
           />
         </View>

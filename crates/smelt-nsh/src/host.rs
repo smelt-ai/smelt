@@ -22,6 +22,7 @@ use gpui::{
     App, AppContext as _, ClipboardItem, Context, Image, ImageFormat, IntoElement, Render,
     SharedString, Window, div,
 };
+use nsh_core::host_channel::{HostAnswer, HostBlob};
 use nsh_engine::HostCall;
 use serde_json::{Value, json};
 use smelt_plugin_api::{
@@ -56,8 +57,7 @@ pub(crate) enum Action {
         machine: RuntimeKey,
         method: ControlMethod,
         params: Value,
-        timeout: Duration,
-        detailed: bool,
+        options: CallOptions,
         call: HostCall,
     },
     Request {
@@ -836,9 +836,26 @@ impl Bridge {
                     .get("detailed")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                const BAD_BLOBS: &str = "call：blobs 要是数组，每项是以 / 开头的 JSON 指针，\
+                     或 { at, base64: true, mime_at } 这样的对象";
+                let blobs = match data.get_mut("blobs").map(Value::take) {
+                    None | Some(Value::Null) => Vec::new(),
+                    Some(Value::Array(list)) => {
+                        match list.iter().map(BlobAt::parse).collect::<Option<Vec<_>>>() {
+                            Some(blobs) => blobs,
+                            None => return call.reject(BAD_BLOBS),
+                        }
+                    }
+                    Some(_) => return call.reject(BAD_BLOBS),
+                };
+                let options = CallOptions {
+                    timeout,
+                    detailed,
+                    blobs,
+                };
                 if let Some(client) = bridge.cached_client(&machine) {
                     api::blocking::spawn_detached(move || {
-                        execute_call_rpc(Some(client), method, params, timeout, detailed, call);
+                        execute_call_rpc(Some(client), method, params, options, call);
                     });
                 } else {
                     send_action(
@@ -847,8 +864,7 @@ impl Bridge {
                             machine,
                             method,
                             params,
-                            timeout,
-                            detailed,
+                            options,
                             call,
                         },
                     );
@@ -2137,14 +2153,157 @@ impl Bridge {
     }
 }
 
+/// 插件 `call` 的选项。
+pub(crate) struct CallOptions {
+    timeout: Duration,
+    /// 失败也 resolve，带上错误码：`{ ok, value }` / `{ ok: false, code, message }`。
+    detailed: bool,
+    /// 回复里这些位置上的正文换成 Blob 交给插件。
+    blobs: Vec<BlobAt>,
+}
+
+/// 回复里一处换成 Blob 的正文：位置是相对方法返回值的 JSON 指针。
+pub(crate) struct BlobAt {
+    pointer: String,
+    /// `pointer` 指的是数组：它每一项里这个位置都换成 Blob（一页条目各自的正文）。
+    each: Option<String>,
+    /// 那里是 base64 编码的字节（图片），解码后交出；否则是文本。
+    base64: bool,
+    /// Blob 的类型从回复的这个位置读（图片的 `mime`；有 `each` 时相对那一项）；不给就是
+    /// UTF-8 文本。
+    mime_at: Option<String>,
+}
+
+/// 回复里具体的一处：`BlobAt` 按这次回复展开（`each` 按数组长度）。
+struct BlobSite {
+    at: String,
+    base64: bool,
+    mime_at: Option<String>,
+}
+
+impl BlobAt {
+    /// 插件写的一项：`"/diff/text"`，或 `{ at, each, base64, mime_at }`。
+    fn parse(item: &Value) -> Option<BlobAt> {
+        let pointer = |v: Option<&Value>| {
+            v?.as_str()
+                .filter(|s| s.starts_with('/'))
+                .map(str::to_string)
+        };
+        match item {
+            Value::String(_) => Some(BlobAt {
+                pointer: pointer(Some(item))?,
+                each: None,
+                base64: false,
+                mime_at: None,
+            }),
+            Value::Object(object) => Some(BlobAt {
+                pointer: pointer(object.get("at"))?,
+                each: match object.get("each") {
+                    None | Some(Value::Null) => None,
+                    some => Some(pointer(some)?),
+                },
+                base64: match object.get("base64") {
+                    None | Some(Value::Null) => false,
+                    Some(Value::Bool(base64)) => *base64,
+                    Some(_) => return None,
+                },
+                mime_at: match object.get("mime_at") {
+                    None | Some(Value::Null) => None,
+                    some => Some(pointer(some)?),
+                },
+            }),
+            _ => None,
+        }
+    }
+
+    /// 这次回复 `value` 里它指的各处（`prefix` 是方法返回值在回复里的位置）。
+    fn sites(&self, value: &Value, prefix: &str) -> Vec<BlobSite> {
+        let base = format!("{prefix}{}", self.pointer);
+        let Some(each) = &self.each else {
+            return vec![BlobSite {
+                mime_at: self.mime_at.as_ref().map(|at| format!("{prefix}{at}")),
+                at: base,
+                base64: self.base64,
+            }];
+        };
+        let len = value
+            .pointer(&base)
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        (0..len)
+            .map(|ix| BlobSite {
+                at: format!("{base}/{ix}{each}"),
+                base64: self.base64,
+                mime_at: self.mime_at.as_ref().map(|at| format!("{base}/{ix}{at}")),
+            })
+            .collect()
+    }
+}
+
+impl BlobSite {
+    /// 把这一处的正文从 `value` 里取出来做成 Blob，原处只剩 `null`。那里不是字符串（这次回复
+    /// 没有正文）或 base64 解不开就照原样。
+    fn take(self, value: &mut Value) -> Option<HostBlob> {
+        let mime = match &self.mime_at {
+            Some(mime_at) => value
+                .pointer(mime_at)
+                .and_then(Value::as_str)
+                .unwrap_or("application/octet-stream")
+                .to_string(),
+            None => "text/plain;charset=utf-8".to_string(),
+        };
+        let slot = value
+            .pointer_mut(&self.at)
+            .filter(|slot| slot.is_string())?;
+        let bytes = if self.base64 {
+            let decoded =
+                <api::client::protocol::files::Base64Bytes as serde::Deserialize>::deserialize(
+                    &*slot,
+                )
+                .ok()?;
+            *slot = Value::Null;
+            decoded.0
+        } else {
+            let Value::String(text) = slot.take() else {
+                return None;
+            };
+            text.into_bytes()
+        };
+        Some(HostBlob {
+            at: self.at,
+            bytes: nsh_core::ImageData::from(bytes),
+            mime,
+        })
+    }
+}
+
+/// 把 `value` 里 `blobs` 指的（加上 `prefix`）正文取出来做成 Blob：几 MB 的 diff、文件正文、
+/// 图片、一页对话插件只是转交给原生组件（`URL.createObjectURL` 给编辑器、Markdown、`DiffView`、
+/// `<Image>`），不该先进它的 JS 堆。
+fn blob_answer(mut value: Value, blobs: &[BlobAt], prefix: &str) -> HostAnswer {
+    let sites: Vec<BlobSite> = blobs
+        .iter()
+        .flat_map(|blob| blob.sites(&value, prefix))
+        .collect();
+    let blobs = sites
+        .into_iter()
+        .filter_map(|site| site.take(&mut value))
+        .collect();
+    HostAnswer { value, blobs }
+}
+
 fn execute_call_rpc(
     client: Option<api::client::RuntimeClient>,
     method: ControlMethod,
     params: Value,
-    timeout: Duration,
-    detailed: bool,
+    options: CallOptions,
     call: HostCall,
 ) {
+    let CallOptions {
+        timeout,
+        detailed,
+        blobs,
+    } = options;
     if detailed {
         let response = match client {
             Some(client) => match client.call_method(method, params, timeout) {
@@ -2171,7 +2330,7 @@ fn execute_call_rpc(
                 "message": api::machine_removed(),
             }),
         };
-        call.resolve(response);
+        call.answer(blob_answer(response, &blobs, "/value"));
     } else {
         let result = match client {
             Some(client) => client
@@ -2179,7 +2338,10 @@ fn execute_call_rpc(
                 .map_err(api::call_error_text),
             None => Err(api::machine_removed()),
         };
-        call.reply(result);
+        match result {
+            Ok(value) => call.answer(blob_answer(value, &blobs, "")),
+            Err(error) => call.reject(error),
+        }
     }
 }
 
@@ -2252,13 +2414,12 @@ pub(crate) fn handle_action(action: Action, bridge: &Bridge, plugins: &PluginHos
             machine,
             method,
             params,
-            timeout,
-            detailed,
+            options,
             call,
         } => {
             let client = api::host(cx).client(&machine, cx);
             api::blocking::spawn_detached(move || {
-                execute_call_rpc(client, method, params, timeout, detailed, call);
+                execute_call_rpc(client, method, params, options, call);
             });
         }
         Action::Request {
@@ -3286,6 +3447,81 @@ fn reveal_local_path(path: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回复里的文本和 base64 图片取出来做成 Blob：图片解码成字节、类型从回复里读，文本是
+    /// UTF-8；原处只剩 `null`，不在回复里再带一份。`each` 按数组每一项取。没有正文的位置照原样。
+    #[test]
+    fn blob_answer_takes_texts_and_base64_images_out_of_the_reply() {
+        let blobs: Vec<BlobAt> = [
+            json!("/content/text"),
+            json!({ "at": "/content/data", "base64": true, "mime_at": "/content/mime" }),
+            json!("/missing"),
+            json!({ "at": "/turns", "each": "/text" }),
+        ]
+        .iter()
+        .map(|item| BlobAt::parse(item).unwrap())
+        .collect();
+        let reply = json!({
+            "value": {
+                "content": { "text": "h\u{e9}llo", "data": "iVBORw==", "mime": "image/png" },
+                "turns": [{ "text": "a" }, { "tools": [] }, { "text": "c" }]
+            }
+        });
+
+        let answer = blob_answer(reply, &blobs, "/value");
+
+        let got: Vec<_> = answer
+            .blobs
+            .iter()
+            .map(|blob| {
+                (
+                    blob.at.as_str(),
+                    blob.bytes.bytes().to_vec(),
+                    blob.mime.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (
+                    "/value/content/text",
+                    "h\u{e9}llo".as_bytes().to_vec(),
+                    "text/plain;charset=utf-8"
+                ),
+                (
+                    "/value/content/data",
+                    vec![0x89, b'P', b'N', b'G'],
+                    "image/png"
+                ),
+                (
+                    "/value/turns/0/text",
+                    b"a".to_vec(),
+                    "text/plain;charset=utf-8"
+                ),
+                (
+                    "/value/turns/2/text",
+                    b"c".to_vec(),
+                    "text/plain;charset=utf-8"
+                ),
+            ]
+        );
+        assert_eq!(answer.value["value"]["content"]["data"], Value::Null);
+        assert_eq!(answer.value["value"]["content"]["mime"], "image/png");
+    }
+
+    #[test]
+    fn blob_specs_reject_what_is_not_a_pointer() {
+        for bad in [
+            json!("content/text"),
+            json!(3),
+            json!({ "at": "/data", "base64": "yes" }),
+            json!({ "at": "/data", "mime_at": "mime" }),
+            json!({ "at": "/turns", "each": "text" }),
+        ] {
+            assert!(BlobAt::parse(&bad).is_none(), "{bad}");
+        }
+    }
 
     #[test]
     fn push_split_isolates_shell_payload_from_guest_plugins() {

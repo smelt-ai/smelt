@@ -18,6 +18,7 @@ import {
   extractTurnAnswerPreview,
   promptRailEdgeFactor,
   consumeComposerRestore,
+  createBottomStickController,
   detectCompletionTrigger,
   entryWindowOf,
   isStreamingMetaUnchanged,
@@ -29,6 +30,7 @@ import {
   selectedConfigIndex,
   spliceEntries,
   subsequenceScore,
+  transcriptWindowOf,
   turnTimingsEqual,
   usagePercent,
 } from "../model.js";
@@ -57,6 +59,18 @@ describe("entryWindowOf / spliceEntries", () => {
     const current = ["a", "b"];
     spliceEntries(current, { keep: 1, take_next: true, resume: 2, window: { len: 2 } }, ["B"]);
     expect(current).toEqual(["a", "b"]);
+  });
+
+  test("子会话的一页拿读到的字节数当修订号，老运行时没有就记 0", () => {
+    expect(transcriptWindowOf({ entries: [1, 2], offset: 3, total: 5, cursor: 900 })).toEqual({
+      offset: 3,
+      len: 2,
+      total: 5,
+      revision: 900,
+      history_session_id: null,
+      acp_session_id: null,
+    });
+    expect(transcriptWindowOf({ entries: [1], offset: 0, total: 1 }).revision).toBe(0);
   });
 });
 
@@ -512,5 +526,112 @@ describe("sessionSkills", () => {
     ).toEqual([{ command: "skill:deploy", name: "deploy", description: "把构建推上去" }]);
     expect(sessionSkills([["review", "Review"]])).toEqual([]);
     expect(sessionSkills(undefined)).toEqual([]);
+  });
+});
+
+describe("createBottomStickController", () => {
+  function makeHarness(windowMs = 3000) {
+    const scrollCalls = [];
+    const atLatestEvents = [];
+    const frames = new Map();
+    const timers = new Map();
+    let nextFrame = 1;
+    let nextTimer = 1;
+    const ctrl = createBottomStickController({
+      scrollToEnd: (opts) => scrollCalls.push(opts),
+      setAtLatest: (v) => atLatestEvents.push(v),
+      requestFrame: (fn) => {
+        const id = nextFrame++;
+        frames.set(id, fn);
+        return id;
+      },
+      cancelFrame: (id) => frames.delete(id),
+      setTimer: (fn, ms) => {
+        const id = nextTimer++;
+        timers.set(id, { fn, ms });
+        return id;
+      },
+      clearTimer: (id) => timers.delete(id),
+      windowMs,
+    });
+    const flushFrames = () => {
+      const pending = [...frames.entries()];
+      frames.clear();
+      for (const [, fn] of pending) fn();
+    };
+    const flushTimers = () => {
+      const pending = [...timers.entries()];
+      timers.clear();
+      for (const [, t] of pending) t.fn();
+    };
+    return { ctrl, scrollCalls, atLatestEvents, frames, timers, flushFrames, flushTimers };
+  }
+
+  test("scrolls immediately non-animated on send and keeps re-sticking across multiple appended rows", () => {
+    const h = makeHarness();
+    h.ctrl.trigger();
+    expect(h.scrollCalls).toEqual([{ animated: false }]);
+    expect(h.atLatestEvents).toEqual([true]);
+    expect(h.ctrl.isActive()).toBe(true);
+
+    // Post-layout follow-up after composer shrinks / initial jump settles.
+    h.flushFrames();
+    expect(h.scrollCalls).toEqual([{ animated: false }, { animated: false }]);
+
+    // Row 1 (user bubble) and row 2 (tool card) arrive in the same frame -> coalesced to 1 rAF.
+    h.ctrl.onContentGrew();
+    h.ctrl.onContentGrew();
+    expect(h.frames.size).toBe(1);
+    h.flushFrames();
+    expect(h.scrollCalls).toHaveLength(3);
+
+    // Row 3 (assistant streaming text) arrives -> still sticks (does not drop after row 1).
+    h.ctrl.onContentGrew();
+    h.flushFrames();
+    expect(h.scrollCalls).toHaveLength(4);
+  });
+
+  test("suppresses stale nearEnd=false flicker during sticky window and re-sticks", () => {
+    const h = makeHarness();
+    h.ctrl.trigger();
+    h.flushFrames();
+    h.scrollCalls.length = 0;
+    h.atLatestEvents.length = 0;
+
+    // New row pushed content down before rAF ran -> onViewableItemsChange reports nearEnd=false.
+    h.ctrl.onViewableAtLatest(false);
+    expect(h.atLatestEvents).toEqual([]);
+    expect(h.frames.size).toBe(1);
+    h.flushFrames();
+    expect(h.scrollCalls).toEqual([{ animated: false }]);
+    expect(h.atLatestEvents).toEqual([true]);
+  });
+
+  test("immediately yields control when user scrolls manually or switches sessions", () => {
+    const h = makeHarness();
+    h.ctrl.trigger();
+    expect(h.frames.size).toBe(1);
+
+    h.ctrl.cancel();
+    expect(h.ctrl.isActive()).toBe(false);
+    expect(h.frames.size).toBe(0);
+    expect(h.timers.size).toBe(0);
+
+    h.ctrl.onContentGrew();
+    expect(h.frames.size).toBe(0);
+
+    h.ctrl.onViewableAtLatest(false);
+    expect(h.atLatestEvents[h.atLatestEvents.length - 1]).toBe(false);
+  });
+
+  test("deactivates cleanly after window expires", () => {
+    const h = makeHarness(2500);
+    h.ctrl.trigger();
+    h.flushFrames();
+    h.flushTimers();
+    expect(h.ctrl.isActive()).toBe(false);
+
+    h.ctrl.onViewableAtLatest(false);
+    expect(h.atLatestEvents[h.atLatestEvents.length - 1]).toBe(false);
   });
 });

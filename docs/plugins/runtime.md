@@ -40,6 +40,29 @@ if (!r.ok && r.code === "conflict") {
 
 `callDetail` 不会失败，给的是 `{ ok: true, value }` 或 `{ ok: false, code, message }`。`code` 是运行时的错误码：`invalid_request`、`unsupported_version`、`method_not_found`、`invalid_params`、`permission_denied`、`not_found`、`failed_precondition`、`conflict`、`busy`、`temporarily_unavailable`、`operation_failed`、`internal`，以后可能加新的。连不上这类不是运行时回的错误时是 `null`。
 
+### 大正文用 `callWithBlobs`
+
+```ts
+callWithBlobs<T>(machine, method, params, blobs: BlobAt[], timeoutMs?): Promise<T>
+```
+
+几 MB 的 diff、文件正文、一页对话这类插件只是转交给原生组件的内容，别进插件的 JS 堆：自带插件共用一个 VM 和 256 MB 的堆，一处爆了全都停。`blobs` 列出回复里哪些位置的正文以 `Blob` 交来，用 `blobUrl` 换成 `blob:` 地址交给原生组件（`SmeltEditor` 的 `valueUrl`、`SmeltMarkdown` 的 `markdownUrl`、`SmeltDiffView` 的 `patchUrl`、`<Image>` 的 `src`）。插件的堆随条数增长，不随字节数。
+
+```ts
+// 文本：JSON 指针
+await callWithBlobs(machine, "git.diff", params, ["/patch"]);
+// base64 字节（图片），类型在回复的 mime_at
+await callWithBlobs(machine, "file.open", params, [
+  { at: "/content/data", base64: true, mime_at: "/content/mime" },
+]);
+// 数组每一项里的正文
+await callWithBlobs(machine, "history.detail", params, [{ at: "/detail/turns", each: "/text" }]);
+```
+
+那里没有正文就照原样。`callDetail` 的最后一个参数也是 `blobs`，位置相对 `value`。反方向不用这个：`params` 里放 `Blob`，运行时收到的就是它的文本。
+
+`blobUrl(() => blob)` 在组件里调：换了 Blob 才换地址，旧地址和组件卸载时 revoke。
+
 ### `request`
 
 ```ts

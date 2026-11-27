@@ -1407,6 +1407,12 @@ fn app_fingerprint(app: &Path) -> anyhow::Result<String> {
     ))
 }
 
+/// 这一份能不能自更新：在 `.app` 里跑才有能整个换掉的 App。直接跑可执行文件的开发构建
+/// 不检查、不下载、不恢复。
+pub fn can_self_update() -> bool {
+    current_app_bundle().is_ok()
+}
+
 /// 从当前可执行文件路径反推 `Smelt.app` 的位置：
 /// `<App>.app/Contents/MacOS/smelt` 往上 3 层就是 `<App>.app`。
 /// 非 `.app` 环境（比如 `cargo run`）直接报错，不做任何文件操作。
@@ -1562,9 +1568,8 @@ enum ApplyingRecoveryState {
     NotSwapped,
 }
 
-/// `Applying` 落盘后只能凭磁盘上的完整指纹判定原子交换是否发生。
-/// 任一路径无法读取或两边都不是候选包时都保持现场并报错，不能猜测性删除可能是
-/// 唯一旧版本的交换目录。
+/// `Applying` 落盘后只能凭磁盘上的完整指纹判定原子交换是否发生。任一路径无法读取或
+/// 两边都不是候选包时报错：交换目录可能是唯一的旧版本，调用方不能直接删它。
 fn classify_applying_recovery(
     pending: &StagedUpdate,
     app_bundle: &Path,
@@ -1600,9 +1605,7 @@ fn classify_applying_recovery(
         return Ok(ApplyingRecoveryState::NotSwapped);
     }
 
-    anyhow::bail!(
-        "neither the current nor the swapped app matches the pending fingerprint; leaving everything in place so the old version isn't deleted by mistake"
-    )
+    anyhow::bail!("neither the current nor the swapped app matches the pending fingerprint")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1804,56 +1807,13 @@ fn reconcile_update_state_locked(
         return Ok(None);
     };
     pending.normalize_legacy_metadata();
-
-    if let Err(error) = validate_staged_metadata(&pending) {
-        if pending.phase == StagedUpdatePhase::Applying {
-            return Err(error).context("the Applying update's metadata is invalid; leaving the swap in place for manual review");
-        }
-        smelt_sys::app_log::error(
-            "updater",
-            &format!("待安装更新元数据无效，已作废：{error:#}"),
-        );
-        abandon_pending_update_locked(state_path, &mut state, &pending, app_bundle, None)?;
-        return Ok(None);
-    }
-
-    // Applying 是 write-ahead 状态。先看正式 App 是否已经是目标指纹；此时缓存副本
-    // 是否还在都不影响提交，必须先于暂存校验判定。
-    let mut applying_recovery = None;
-    if pending.phase == StagedUpdatePhase::Applying && !pending.fingerprint.is_empty() {
-        let recovery = classify_applying_recovery(&pending, app_bundle)?;
-        if recovery == ApplyingRecoveryState::Installed {
-            finish_recovered_update_locked(state_path, &mut state, &pending, app_bundle)?;
-            return Ok(None);
-        }
-        applying_recovery = Some(recovery);
+    if pending.phase == StagedUpdatePhase::Applying {
+        return recover_applying_update_locked(state_path, state, pending, app_bundle);
     }
 
     let fingerprint = match validate_staged_update(&pending, app_bundle) {
         Ok(fingerprint) => fingerprint,
         Err(error) => {
-            if pending.phase == StagedUpdatePhase::Applying {
-                if applying_recovery == Some(ApplyingRecoveryState::NotSwapped) {
-                    let verified_swap = pending.swap_app.clone();
-                    smelt_sys::app_log::error(
-                        "updater",
-                        &format!(
-                            "未交换的候选包 {} 无法通过恢复校验，已安全作废：{error:#}",
-                            pending.version
-                        ),
-                    );
-                    abandon_pending_update_locked(
-                        state_path,
-                        &mut state,
-                        &pending,
-                        app_bundle,
-                        verified_swap,
-                    )?;
-                    return Ok(None);
-                }
-                return Err(error)
-                    .context("the Applying update has no verifiable staged package; leaving the swap in place so the old version isn't deleted by mistake");
-            }
             smelt_sys::app_log::error(
                 "updater",
                 &format!(
@@ -1868,23 +1828,114 @@ fn reconcile_update_state_locked(
     if pending.fingerprint.is_empty() {
         pending.fingerprint = fingerprint;
     }
+    resume_staged_update_locked(state_path, state, pending)
+}
 
-    if pending.phase == StagedUpdatePhase::Applying {
-        // 兼容旧状态缺少指纹、但暂存包仍完整的情况：补出指纹后再判定一次。
-        let recovery = match applying_recovery {
-            Some(recovery) => recovery,
-            None => classify_applying_recovery(&pending, app_bundle)?,
-        };
-        if recovery == ApplyingRecoveryState::Installed {
+/// 交换到一半（`Applying`）的作业。GUI 能启动到这里，说明 `app_bundle` 是一份能用的
+/// Smelt，留下的就是它：凭指纹认出交换已完成就提交；认出还没换就回到 Ready，用同一个
+/// 安装流程重试；认不出来（记录坏了、两边指纹都对不上、读不了）就作废作业，交换目录挪
+/// 进废纸篓，不卡在恢复失败上。
+fn recover_applying_update_locked(
+    state_path: &Path,
+    mut state: UpdateState,
+    mut pending: StagedUpdate,
+    app_bundle: &Path,
+) -> anyhow::Result<Option<StagedUpdate>> {
+    let recovery = validate_staged_metadata(&pending)
+        .and_then(|()| classify_applying_recovery(&pending, app_bundle));
+    let swap = pending.swap_app.take();
+    match (recovery, swap) {
+        (Ok(ApplyingRecoveryState::Installed), swap) => {
+            pending.swap_app = swap;
             finish_recovered_update_locked(state_path, &mut state, &pending, app_bundle)?;
-            return Ok(None);
+            Ok(None)
         }
-        let swap = pending.swap_app.take().ok_or_else(|| {
-            anyhow::anyhow!("the swap directory disappeared after the NotSwapped check")
-        })?;
-        remove_registered_swap(app_bundle, &swap)?;
+        // 认出还没换时交换目录是校验过的候选副本，删掉没有风险。
+        (Ok(ApplyingRecoveryState::NotSwapped), Some(swap)) => {
+            if let Err(error) = validate_staged_update(&pending, app_bundle) {
+                smelt_sys::app_log::error(
+                    "updater",
+                    &format!(
+                        "未交换的候选包 {} 无法通过恢复校验，已作废：{error:#}",
+                        pending.version
+                    ),
+                );
+                abandon_pending_update_locked(
+                    state_path,
+                    &mut state,
+                    &pending,
+                    app_bundle,
+                    Some(swap),
+                )?;
+                return Ok(None);
+            }
+            if let Err(error) = remove_registered_swap(app_bundle, &swap) {
+                // 交换开始前登记位一定是空的（见 `abandon_pending_update_locked`），记进去
+                // 由下次启动回收；回收前不会开始下一次交换。
+                smelt_sys::app_log::error(
+                    "updater",
+                    &format!("未交换的候选副本暂未删掉，下次启动再清：{error:#}"),
+                );
+                state.cleanup_app = Some(swap);
+            }
+            resume_staged_update_locked(state_path, state, pending)
+        }
+        (recovery, swap) => {
+            let reason = recovery
+                .err()
+                .unwrap_or_else(|| anyhow::anyhow!("the Applying state has no swap directory"));
+            smelt_sys::app_log::error(
+                "updater",
+                &format!(
+                    "上次交换到一半的更新 {} 认不出结果，已作废，继续用正在运行的这份：{reason:#}",
+                    pending.version
+                ),
+            );
+            if let Some(swap) = swap {
+                trash_unrecognized_swap(app_bundle, &swap);
+            }
+            abandon_pending_update_locked(state_path, &mut state, &pending, app_bundle, None)?;
+            Ok(None)
+        }
     }
+}
 
+/// 认不出是哪个版本的交换目录不直接删，挪进废纸篓，用户要的话能「放回原处」。不是登记在
+/// App 旁边的交换路径（记录坏了、App 挪过地方）一概不碰。
+fn trash_unrecognized_swap(app_bundle: &Path, swap: &Path) {
+    if !is_registered_swap_path(app_bundle, swap) {
+        smelt_sys::app_log::error(
+            "updater",
+            &format!("交换目录不在 App 旁边，没动它：{}", swap.display()),
+        );
+        return;
+    }
+    let result = match std::fs::symlink_metadata(swap) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => Err(error.into()),
+        // 交换目录一定是目录；符号链接只会是残留或篡改，删链接本身，不跟随。
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            std::fs::remove_file(swap).map_err(Into::into)
+        }
+        Ok(_) => crate::app_location::move_to_trash(swap),
+    };
+    if let Err(error) = result {
+        smelt_sys::app_log::error(
+            "updater",
+            &format!(
+                "交换目录没能移到废纸篓，留在原处：{}：{error:#}",
+                swap.display()
+            ),
+        );
+    }
+}
+
+/// 恢复出的作业回到 Ready，交给同一个安装流程。
+fn resume_staged_update_locked(
+    state_path: &Path,
+    mut state: UpdateState,
+    mut pending: StagedUpdate,
+) -> anyhow::Result<Option<StagedUpdate>> {
     pending.phase = StagedUpdatePhase::Ready;
     pending.swap_app = None;
     // GUI 能进入恢复就说明旧 helper 没有持有独占 launch gate；遗留 attempt 必须视为
@@ -1893,7 +1944,6 @@ fn reconcile_update_state_locked(
     pending.installer_attempt = None;
     state.staged = Some(pending.clone());
     save_update_state_locked(state_path, &state)?;
-
     Ok(Some(pending))
 }
 
@@ -2936,37 +2986,105 @@ mod tests {
 
         let error = classify_applying_recovery(&pending, &app).unwrap_err();
 
-        assert!(error.to_string().contains("leaving everything in place"));
+        assert!(
+            error
+                .to_string()
+                .contains("neither the current nor the swapped app")
+        );
         assert!(app.is_dir());
         assert!(swap.is_dir());
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// 认出还没换、但暂存包已经失效：作废作业，交换目录是校验过的候选副本，直接回收。
     #[test]
-    fn applying_recovery_preserves_swap_when_candidate_cannot_be_verified() {
-        let root = test_root("missing-applying-candidate");
-        let app = fake_current_app(&root, b"current-version");
+    fn unswapped_job_with_invalid_staged_package_is_abandoned_and_its_copy_removed() {
+        let root = test_root("unswapped-invalid-staged");
+        let app = fake_current_app(&root, b"old-version");
         let swap = fake_app(
-            root.join(".Smelt.smelt-update-missing-candidate.app"),
+            root.join(".Smelt.smelt-update-unswapped.app"),
+            b"new-version",
+        );
+        let state_path = root.join("update-state.json");
+        let mut pending = staged_update("unswapped");
+        pending.phase = StagedUpdatePhase::Applying;
+        pending.staged_app = root.join("missing.app");
+        pending.fingerprint = app_fingerprint(&swap).unwrap();
+        pending.swap_app = Some(swap.clone());
+        let state = UpdateState {
+            current_url: None,
+            staged: Some(pending),
+            cleanup_app: None,
+        };
+
+        let recovered = reconcile_update_state_locked(&state_path, state, &app).unwrap();
+
+        assert!(recovered.is_none());
+        let state = load_update_state_locked(&state_path).unwrap();
+        assert!(state.staged.is_none());
+        assert!(state.cleanup_app.is_none());
+        assert!(!swap.exists());
+        assert!(app.is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 认不出交换结果的作业不卡住恢复：作废，继续用正在运行的这份。记录里的交换路径不在
+    /// App 旁边（App 挪过地方、记录坏了）时一概不碰。
+    #[test]
+    fn unrecognized_applying_job_is_abandoned_without_touching_unregistered_paths() {
+        let root = test_root("unrecognized-applying");
+        let app = fake_current_app(&root, b"current-version");
+        let elsewhere = fake_app(
+            root.join("moved-from/.Smelt.smelt-update-moved.app"),
             b"previous-version",
         );
         let state_path = root.join("update-state.json");
-        let mut pending = staged_update("missing-candidate");
+        let mut pending = staged_update("moved");
         pending.phase = StagedUpdatePhase::Applying;
-        pending.fingerprint.clear();
         pending.staged_app = root.join("missing.app");
-        pending.swap_app = Some(swap.clone());
+        pending.swap_app = Some(elsewhere.clone());
         let state = UpdateState {
             current_url: Some("https://example.test/current".into()),
             staged: Some(pending),
             cleanup_app: None,
         };
 
-        let error = reconcile_update_state_locked(&state_path, state, &app).unwrap_err();
+        let recovered = reconcile_update_state_locked(&state_path, state, &app).unwrap();
 
-        assert!(error.to_string().contains("the swap in place"));
+        assert!(recovered.is_none());
+        let state = load_update_state_locked(&state_path).unwrap();
+        assert!(state.staged.is_none());
+        assert!(state.cleanup_app.is_none());
         assert!(app.is_dir());
-        assert!(swap.is_dir());
+        assert!(elsewhere.is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 交换目录已经不在了（被用户删了）也一样作废，不报恢复失败。
+    #[test]
+    fn applying_job_with_missing_swap_is_abandoned() {
+        let root = test_root("missing-swap");
+        let app = fake_current_app(&root, b"current-version");
+        let state_path = root.join("update-state.json");
+        let mut pending = staged_update("gone");
+        pending.phase = StagedUpdatePhase::Applying;
+        pending.swap_app = Some(root.join(".Smelt.smelt-update-gone.app"));
+        let state = UpdateState {
+            current_url: None,
+            staged: Some(pending),
+            cleanup_app: None,
+        };
+
+        let recovered = reconcile_update_state_locked(&state_path, state, &app).unwrap();
+
+        assert!(recovered.is_none());
+        assert!(
+            load_update_state_locked(&state_path)
+                .unwrap()
+                .staged
+                .is_none()
+        );
+        assert!(app.is_dir());
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -285,6 +285,21 @@ diff:
   run_failed:
     en: "Couldn't run git diff: %{error}"
     zh-CN: 无法执行 git diff：%{error}
+  too_large:
+    en: Too large to show (%{size})
+    zh-CN: 文件太大，不显示（%{size}）
+  left_out:
+    en: Not included in All Changes (%{count})
+    zh-CN: 没放进全部更改（%{count}）
+  left_out_too_large:
+    en: Too large to show · %{size}
+    zh-CN: 太大，不显示 · %{size}
+  left_out_directory:
+    en: Directory, no contents
+    zh-CN: 目录，没有内容
+  left_out_separate:
+    en: "%{size} · open to view"
+    zh-CN: "%{size} · 点开单独查看"
   open_in_file:
     en: Open in File
     zh-CN: 在文件里打开
