@@ -1043,8 +1043,8 @@ updater:
       en: This Smelt can't update itself
       zh-CN: 这个 Smelt 不能自动更新
     not_installed_detail:
-      en: It wasn't installed by the installer (a development build, for example). Download and run the installer from the download page, then you can update here.
-      zh-CN: 它不是安装程序装的（比如开发构建）。去下载页下载安装程序装好后，就能在这里更新。
+      en: This copy wasn't installed from a release (a development build, for example). Download and install Smelt from the download page, then you can update here.
+      zh-CN: 这一份不是从发布包装好的（比如开发构建）。去下载页下载安装后，就能在这里更新。
   action:
     download:
       en: Download and Update
