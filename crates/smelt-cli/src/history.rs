@@ -29,6 +29,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
         (Some("get"), Some(path)) => respond(control::<HistoryDetailCall>(HistoryDetailParams {
             agent: query.agent,
             path: path.to_string(),
+            ..Default::default()
         })),
         (Some("delete"), Some(resume_id)) => respond(delete(&query, resume_id)),
         _ => usage(&t!("history.usage")),

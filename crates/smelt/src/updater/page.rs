@@ -196,7 +196,6 @@ fn failure_title(failure: UpdateFailure) -> String {
     match failure {
         UpdateFailure::Check => t!("updater.failure.check").into_owned(),
         UpdateFailure::Download => t!("updater.failure.download").into_owned(),
-        UpdateFailure::Recovery => t!("updater.failure.recovery").into_owned(),
         UpdateFailure::Location => t!("updater.failure.location").into_owned(),
         UpdateFailure::NotInstalled => t!("updater.failure.not_installed").into_owned(),
     }
@@ -207,7 +206,6 @@ fn failure_detail(failure: UpdateFailure) -> String {
     match failure {
         UpdateFailure::Check => t!("updater.failure.check_detail").into_owned(),
         UpdateFailure::Download => t!("updater.failure.download_detail").into_owned(),
-        UpdateFailure::Recovery => t!("updater.failure.recovery_detail").into_owned(),
         UpdateFailure::Location => t!("updater.failure.location_detail").into_owned(),
         UpdateFailure::NotInstalled => t!("updater.failure.not_installed_detail").into_owned(),
     }
@@ -342,7 +340,6 @@ fn build_update_json(this: &update::Updater) -> Value {
     };
 
     let can_check = status.can_check();
-    let can_request_check = can_check || status.can_retry_recovery();
     let check_label = match status {
         UpdateStatus::Checking => t!("updater.check.checking").into_owned(),
         UpdateStatus::Downloading { .. } => t!("updater.check.downloading").into_owned(),
@@ -350,9 +347,6 @@ fn build_update_json(this: &update::Updater) -> Value {
         UpdateStatus::Applying { .. } => t!("updater.check.quitting").into_owned(),
         UpdateStatus::ReadyToInstall(_) | UpdateStatus::InstallFailed(_) => {
             t!("updater.check.again").into_owned()
-        }
-        UpdateStatus::Failed(UpdateFailure::Recovery) => {
-            t!("updater.check.retry_recovery").into_owned()
         }
         _ => t!("updater.check.idle").into_owned(),
     };
@@ -402,7 +396,7 @@ fn build_update_json(this: &update::Updater) -> Value {
         "status_tone": status_tone,
         "progress": progress,
         "check_label": check_label,
-        "can_check_request": can_request_check,
+        "can_check_request": can_check,
         "download_label": download_label,
         "restart_label": restart_label,
         "move_label": move_label,

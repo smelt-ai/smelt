@@ -36,15 +36,14 @@ pub(super) fn update_asset(release: &GithubRelease) -> Option<&GithubAsset> {
 /// 产物都传完才把清单重写成全量的，在那之前最新的发布装不了，退到上一个。退到不比
 /// 装着的新就停：交给 `decide_check_outcome` 判成没有更新，不会装回旧版。
 pub async fn fetch_latest(channel: UpdateChannel) -> anyhow::Result<UpdateCandidate> {
-    let installed = installed_release()?;
+    let installed = installed_version()?;
     let mut last_error = None;
     for candidate in fetch_candidates(channel)
         .await?
         .into_iter()
         .take(MAX_CANDIDATES)
     {
-        // 更新清单可以不给版本号（拿地址最后一段凑），这里却靠版本号认新旧。认不出的跳过，
-        // 接着看上一个。
+        // GitHub 上的 tag 不一定是发版号，这里却靠版本号认新旧。认不出的跳过，接着看上一个。
         if let Err(error) = semver::Version::parse(&candidate.version) {
             last_error = Some(anyhow::anyhow!(
                 "the package version isn't a release number: {} ({error})",
@@ -52,7 +51,7 @@ pub async fn fetch_latest(channel: UpdateChannel) -> anyhow::Result<UpdateCandid
             ));
             continue;
         }
-        if installed.covers(&candidate) {
+        if !is_newer(&candidate, &installed) {
             return Ok(candidate);
         }
         match expected_sha256(&candidate.url).await {
@@ -65,21 +64,11 @@ pub async fn fetch_latest(channel: UpdateChannel) -> anyhow::Result<UpdateCandid
     }))
 }
 
-/// 这个 exe 是不是安装程序装的：发版构建，而且旁边有卸载程序。开发构建、拷出来的 exe
-/// 没有能覆盖的安装，不检查、不下载。
-pub fn installed_by_setup() -> bool {
+/// 这个 exe 能不能自更新：发版构建，而且是安装程序装的（旁边有卸载程序）。开发构建、
+/// 拷出来的 exe 没有能覆盖的安装，不检查、不下载。
+pub fn can_self_update() -> bool {
     smelt_version::RELEASE.is_some()
         && smelt_paths::current_exe().is_ok_and(|exe| exe.with_file_name(UNINSTALLER).is_file())
-}
-
-/// 装着的就是编进程序的那次发版。
-pub fn installed_release() -> anyhow::Result<InstalledRelease> {
-    let release = smelt_version::RELEASE.ok_or_else(|| {
-        anyhow::anyhow!("development builds have no release number and don't auto-update")
-    })?;
-    let version = semver::Version::parse(release)
-        .with_context(|| format!("the built-in release number isn't semver: {release}"))?;
-    Ok(InstalledRelease::Version(version))
 }
 
 /// 下好、校验过的安装程序，等用户点「立即重启更新」或退出时拉起。
@@ -89,13 +78,6 @@ pub struct StagedUpdate {
     pub url: String,
     installer: PathBuf,
     sha256: String,
-}
-
-impl StagedUpdate {
-    /// 安装尝试不跨进程记录（见模块说明），启动时恢复不出失败过的作业。
-    pub fn installer_failed(&self) -> bool {
-        false
-    }
 }
 
 /// 已经拉起的安装程序。它的日志写在安装程序旁边，装失败时去那儿看。
@@ -121,6 +103,20 @@ fn download_dir() -> anyhow::Result<PathBuf> {
 
 fn installer_path(dir: &Path, version: &str) -> PathBuf {
     dir.join(format!("smelt-{}-setup.exe", safe_component(version)))
+}
+
+/// 版本号只留文件名里安全的字符，拼出来的路径出不了下载目录。
+fn safe_component(value: &str) -> String {
+    let value: String = value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect();
+    let value = value.trim_matches('.');
+    if value.is_empty() {
+        "latest".to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 /// 安装程序旁边那份 `SHA256SUMS` 里它的校验和。GitHub 的下载地址是
@@ -293,16 +289,18 @@ pub fn launch_installer(update: &StagedUpdate, relaunch: bool) -> anyhow::Result
     })
 }
 
-/// 启动时调用。没有跨进程的待装作业要恢复（见模块说明），只清掉已经装上的这个版本的
-/// 安装程序和日志。新版是安装程序装完直接拉起的，那时它可能还没退出、删不掉，下次再清。
+/// 启动时调用，尽力而为：清掉已经装上的这个版本的安装程序和日志。新版是安装程序装完直接
+/// 拉起的，那时它可能还没退出、删不掉，下次再清。
 ///
 /// 还留着别的版本的安装日志，说明那次没装成（装成了跑的就是那个版本）。记进 app.log，
 /// 指向安装日志。
-pub fn recover_pending_update() -> anyhow::Result<Option<StagedUpdate>> {
+pub fn clean_up_after_update() {
     let Some(release) = smelt_version::RELEASE else {
-        return Ok(None);
+        return;
     };
-    let dir = download_dir()?;
+    let Ok(dir) = download_dir() else {
+        return;
+    };
     let installer = installer_path(&dir, release);
     let current_log = installer.with_extension("log");
     let _ = std::fs::remove_file(&current_log);
@@ -313,7 +311,6 @@ pub fn recover_pending_update() -> anyhow::Result<Option<StagedUpdate>> {
             &format!("上次应用更新没装成，安装日志：{}", log.display()),
         );
     }
-    Ok(None)
 }
 
 /// 下载目录里别的版本留下的安装日志。装上的这个版本的日志不算：安装程序拉起新版时还
@@ -326,20 +323,6 @@ fn failed_install_logs(dir: &Path, current_log: &Path) -> Vec<PathBuf> {
         .map(|entry| entry.path())
         .filter(|path| path != current_log && path.extension().is_some_and(|ext| ext == "log"))
         .collect()
-}
-
-/// 暂存着安装程序（待安装或安装失败）时更新源换了包：删掉旧的安装程序。
-pub fn discard_staged_update(expected: &StagedUpdate) -> anyhow::Result<()> {
-    match std::fs::remove_file(&expected.installer) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| {
-            format!(
-                "couldn't delete the installer: {}",
-                expected.installer.display()
-            )
-        }),
-    }
 }
 
 #[cfg(test)]

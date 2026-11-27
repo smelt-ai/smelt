@@ -123,12 +123,14 @@ pub struct SubagentView {
 Control API 方法：
 
 ```text
-subagent.transcript { session_id, subagent_id, before?, limit? }
-  → { entries: Vec<AcpEntry>, revision, has_more }
+subagent.transcript { subagent_id, before?, limit?, since? }
+  → { entries: Vec<AcpEntry>, offset, total, cursor }
 ```
 
 - 校验：`subagent_id` 必须是宿主分的格式（`sa-` 加 12 位十六进制），文件在 `~/.smelt/subagents/` 下。
 - 解析复用 `pi_rpc` 的历史回放（`replay_messages`），子会话里的工具调用、输出和普通对话一样显示。
+- 不给 `before` 是最后一页；`before` 翻更早的页。
+- `cursor` 是这次读到的文件字节数。带上它作 `since`，只回那以后变了的条目：从第一条不一样的起到末尾。已有条目也会变（工具结果回来、上次读时写到一半的那一轮被回放当成中断），所以运行时把「读到 `since` 为止」和现在各归约一遍逐条比，不另记哪些条目会变。子会话文件只往后追加；`since` 超出文件就从头算。
 - 桌面（本机和远程运行时）、手机都走这个操作，界面不直接读文件。
 
 ## 界面
@@ -176,8 +178,9 @@ ACP 智能体（Claude Code、Codex 经 ACP）自己的子智能体卡片不变�
 
 - 放在对话视图（`AcpView`）自己的右侧，是它的一部分，所以天然跟对话走：切到别的对话就是别的对话的侧边视图。右侧工具面板（文件树、变更、历史、插件）按项目走（`ProjectUiState`），不放那里。
 - 内容：子智能体的标题、状态、模型、耗时，下面是子会话的对话条目，只读，没有输入框，运行中有「停止」。
-- 打开时和 `revision` 变化时取一页 `subagent.transcript`，结果缓存在视图状态上；render 只读缓存。
-- 开着哪个子智能体、宽度，不落盘：重开对话时侧边视图是关的。实现位于 `crates/plugins/conversation/src/view/render/subagents.rs`。
+- 打开时取最后一页 `subagent.transcript`；之后 `revision` 每变一次带上次的 `cursor` 只取变了的，按对话同一份窗口规则（SDK `mergeEntryWindow`）拼进手里那段。同一时间只有一个请求在路上，期间又变了就等它回来再取一次。往上滚到顶取更早的页。
+- 回答以 Blob 交给 Markdown，不进插件的 JS 堆。工具输出还在条目里（侧边视图只画标题），等子过程并入对话的「轮→条目」方案（`docs/conversation-history-loading.md`）一起去掉。
+- 开着哪个子智能体、宽度，不落盘：重开对话时侧边视图是关的。实现位于 `plugins/conversation/subagents.tsx`。
 
 ### 手机（待补齐界面）
 

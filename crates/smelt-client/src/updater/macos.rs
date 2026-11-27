@@ -1,17 +1,23 @@
-//! macOS 的更新：静默下载新版 zip、校验签名后暂存 `.app`，退出时由一次性 helper 把
-//! `.app` 原子换成新版本。暂存、交换、恢复都是持久化事务，任何时刻退出（包括强杀）
-//! 下次启动都能接上。
+//! macOS 的更新：静默下载新版 zip，校验签名身份和版本号后放在缓存目录里等着装；装的时候
+//! 拉起一次性的安装程序（`smelt-installer --install`），等 App 退出后把 `.app` 原子换成新
+//! 版本，需要时再打开。`make install` 装本地构建的包也走同一条换包的路（[`replace_app`]）。
+//!
+//! 不记任何状态：
+//! - 装的是哪版看程序自己编进去的版本号（[`installed_version`]），不另外记。
+//! - 下好的包只在这次运行里等着装，重启后重新检查、重新下载。缓存目录随时可以整个删掉。
+//! - 换包用 `renamex_np` 一步换完：任何时刻被打断，原位置上都是一个完整的 App（旧的或新的），
+//!   交换位置上的另一份都是可以删的东西，下次启动删掉（[`clean_up_after_update`]）。
+//!
+//! 哪一步失败都只算这一次：旧 App 原样留着，下次检查照常进行。
 
 use super::*;
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-
-use sha2::{Digest, Sha256};
 
 const BUNDLE_ID: &str = "com.zzfn.smelt";
 const APP_NAME: &str = "Smelt";
@@ -21,13 +27,13 @@ const APP_NAME: &str = "Smelt";
 const UPDATE_ASSET: &str = "Smelt.app.zip";
 #[cfg(target_arch = "x86_64")]
 const UPDATE_ASSET: &str = "Smelt-x86_64.app.zip";
-const BUNDLED_RELEASE_URL_FILE: &str = "Contents/Resources/SmeltUpdateURL";
-const UPDATE_STATE_DIR: &str = ".smelt";
-const UPDATE_LOCK_FILE: &str = "update.lock";
+/// GUI 和安装程序互相等的两把锁放在 `~/.smelt`。
+const LOCK_DIR: &str = ".smelt";
 const APP_LAUNCH_GATE_FILE: &str = "app-launch-gate.lock";
 const APP_RUNTIME_LOCK_FILE: &str = "app-runtime.lock";
-const BUNDLE_FINGERPRINT_VERSION: &str = "sha256-tree-v1";
 const INSTALLER_NAME: &str = "smelt-installer";
+/// 安装程序最多等 App 的窗口全部退出多久。
+const INSTALLER_PARENT_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// 查指定通道最新的发布。macOS 的更新包下下来再校验签名，查的时候不用多确认什么。
 pub async fn fetch_latest(channel: UpdateChannel) -> anyhow::Result<UpdateCandidate> {
@@ -39,198 +45,24 @@ pub(super) fn update_asset(release: &GithubRelease) -> Option<&GithubAsset> {
     release.asset(UPDATE_ASSET)
 }
 
-/// 候选 App 已复制到正式 App 同卷并完成校验后，调用方在交换前完成守护交接。
-pub enum InstallPreparation {
-    Proceed,
-    RetryLater,
+/// 下好、校验过的新版 App，在缓存目录的 `<随机 id>/Smelt.app`。只在这次运行里等着装。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StagedUpdate {
+    pub version: String,
+    pub url: String,
+    app: PathBuf,
 }
 
-pub enum FinalizeOutcome {
-    Installed,
-    RetryLater,
-    Invalidated,
-}
-
-/// GUI 成功派生一次性 installer 后的持久化凭据。命令行只携带这两个不透明 id；
-/// 候选、目标 App、父进程和重启策略全部从受锁保护的 SQLite 事务读取。
+/// 已经拉起的安装程序。它的进度和错误写在 app.log。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InstallerTicket {
-    pub update_id: String,
-    pub attempt_id: String,
+    pid: u32,
 }
 
 impl std::fmt::Display for InstallerTicket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "job={} attempt={}", self.update_id, self.attempt_id)
+        write!(f, "pid={}", self.pid)
     }
-}
-
-const INSTALLER_PARENT_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// 已下载暂存、尚未应用到 App 的更新包。存在客户端库（`update_state`、`staged_update`、
-/// `installer_attempt` 三张表），让用户在任何时刻退出（包括强杀）后，下次启动都能接上
-/// 安装。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum StagedUpdatePhase {
-    Preparing,
-    #[default]
-    Ready,
-    Applying,
-}
-
-impl StagedUpdatePhase {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Preparing => "preparing",
-            Self::Ready => "ready",
-            Self::Applying => "applying",
-        }
-    }
-
-    fn parse(name: &str) -> anyhow::Result<Self> {
-        Ok(match name {
-            "preparing" => Self::Preparing,
-            "ready" => Self::Ready,
-            "applying" => Self::Applying,
-            other => anyhow::bail!("unrecognized update phase: {other}"),
-        })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StagedUpdate {
-    id: String,
-    pub version: String,
-    pub url: String,
-    pub staged_app: PathBuf,
-    fingerprint: String,
-    phase: StagedUpdatePhase,
-    swap_app: Option<PathBuf>,
-    /// 已启动、正等待 GUI 退出的一次性安装尝试。helper 只能凭作业 id + attempt id
-    /// 取回它，不能从命令行指定候选或目标路径。
-    installer_attempt: Option<InstallerAttempt>,
-    /// 进程外 helper 曾失败。恢复时只展示失败并等待用户显式重试；新 attempt 创建
-    /// 成功时清除。只存状态，不持久化可能含路径或系统细节的错误正文。
-    installer_failed: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct InstallerAttempt {
-    id: String,
-    target_app: PathBuf,
-    relaunch: bool,
-    helper_dir: PathBuf,
-}
-
-impl StagedUpdate {
-    fn new(version: &str, url: &str) -> anyhow::Result<Self> {
-        validate_download_url(url)?;
-        if version.trim().is_empty() {
-            anyhow::bail!("the update job has no version");
-        }
-        let id = uuid::Uuid::new_v4().simple().to_string();
-        let root = cache_root()?;
-        let staged_app = root.join(format!("{APP_NAME}-{}-{id}.app", safe_component(version)));
-        Ok(Self {
-            id,
-            version: version.to_string(),
-            url: url.trim().to_string(),
-            staged_app,
-            fingerprint: String::new(),
-            phase: StagedUpdatePhase::Preparing,
-            swap_app: None,
-            installer_attempt: None,
-            installer_failed: false,
-        })
-    }
-
-    fn normalize_legacy_metadata(&mut self) {
-        if self.id.is_empty() {
-            let mut hasher = Sha256::new();
-            hasher.update(self.url.as_bytes());
-            hasher.update(self.staged_app.as_os_str().as_encoded_bytes());
-            self.id = format!("legacy-{}", hex::encode(hasher.finalize()));
-        }
-    }
-
-    pub fn installer_failed(&self) -> bool {
-        self.installer_failed
-    }
-}
-
-#[derive(Default)]
-struct UpdateState {
-    /// 最近一次成功安装的发布包 URL。
-    current_url: Option<String>,
-    /// 上次下载暂存、还没应用成功的更新；启动时存在则自动补装。
-    staged: Option<StagedUpdate>,
-    /// 原子交换成功后留下的旧 App。当前旧进程退出前保留完整 bundle；下次启动时
-    /// 只清理由本次事务明确登记的目录。
-    cleanup_app: Option<PathBuf>,
-}
-
-impl UpdateState {
-    fn from_record(record: smelt_client_store::UpdateStateRecord) -> anyhow::Result<Self> {
-        let staged = match record.staged {
-            Some(staged) => Some(StagedUpdate {
-                id: staged.update_id,
-                version: staged.version,
-                url: staged.url,
-                staged_app: staged.staged_app,
-                fingerprint: staged.fingerprint,
-                phase: StagedUpdatePhase::parse(&staged.phase)?,
-                swap_app: staged.swap_app,
-                installer_attempt: staged.installer_attempt.map(|attempt| InstallerAttempt {
-                    id: attempt.attempt_id,
-                    target_app: attempt.target_app,
-                    relaunch: attempt.relaunch,
-                    helper_dir: attempt.helper_dir,
-                }),
-                installer_failed: staged.installer_failed,
-            }),
-            None => None,
-        };
-        Ok(Self {
-            current_url: record.current_url,
-            staged,
-            cleanup_app: record.cleanup_app,
-        })
-    }
-
-    fn to_record(&self) -> smelt_client_store::UpdateStateRecord {
-        smelt_client_store::UpdateStateRecord {
-            current_url: self.current_url.clone(),
-            cleanup_app: self.cleanup_app.clone(),
-            staged: self
-                .staged
-                .as_ref()
-                .map(|staged| smelt_client_store::StagedUpdateRecord {
-                    update_id: staged.id.clone(),
-                    version: staged.version.clone(),
-                    url: staged.url.clone(),
-                    staged_app: staged.staged_app.clone(),
-                    fingerprint: staged.fingerprint.clone(),
-                    phase: staged.phase.as_str().to_string(),
-                    swap_app: staged.swap_app.clone(),
-                    installer_attempt: staged.installer_attempt.as_ref().map(|attempt| {
-                        smelt_client_store::InstallerAttemptRecord {
-                            attempt_id: attempt.id.clone(),
-                            target_app: attempt.target_app.clone(),
-                            relaunch: attempt.relaunch,
-                            helper_dir: attempt.helper_dir.clone(),
-                        }
-                    }),
-                    installer_failed: staged.installer_failed,
-                }),
-        }
-    }
-}
-
-static UPDATE_GATE: Mutex<()> = Mutex::new(());
-
-struct UpdateFileLock {
-    _process_guard: MutexGuard<'static, ()>,
-    _file: File,
 }
 
 /// GUI 整个生命周期持共享锁；installer 提交交换前持独占锁。新 GUI 在独占锁期间
@@ -290,7 +122,7 @@ fn acquire_app_runtime_lease_at(dir: &Path) -> anyhow::Result<AppRuntimeLease> {
 }
 
 pub fn acquire_app_runtime_lease() -> anyhow::Result<AppRuntimeLease> {
-    acquire_app_runtime_lease_at(&update_dir()?)
+    acquire_app_runtime_lease_at(&lock_dir()?)
 }
 
 enum ExclusiveLockWait {
@@ -385,800 +217,149 @@ fn acquire_installer_runtime_lease_at(
 }
 
 fn acquire_installer_runtime_lease() -> anyhow::Result<AppRuntimeLease> {
-    acquire_installer_runtime_lease_at(&update_dir()?, INSTALLER_PARENT_WAIT_TIMEOUT)
+    acquire_installer_runtime_lease_at(&lock_dir()?, INSTALLER_PARENT_WAIT_TIMEOUT)
 }
 
-fn update_dir() -> anyhow::Result<PathBuf> {
+fn lock_dir() -> anyhow::Result<PathBuf> {
     dirs::home_dir()
-        .map(|home| home.join(UPDATE_STATE_DIR))
+        .map(|home| home.join(LOCK_DIR))
         .ok_or_else(|| anyhow::anyhow!("couldn't find the home directory"))
 }
 
-fn update_state_path() -> anyhow::Result<PathBuf> {
-    Ok(update_dir()?.join(smelt_client_store::DATABASE_FILE_NAME))
+/// 这一份能不能自更新：发版构建（有版本号可比），而且在 `.app` 里跑（有能整个换掉的
+/// App）。开发构建、直接跑可执行文件的不检查、不下载。
+pub fn can_self_update() -> bool {
+    smelt_version::RELEASE.is_some() && current_app_bundle().is_ok()
 }
 
-fn acquire_update_lock() -> anyhow::Result<UpdateFileLock> {
-    let process_guard = UPDATE_GATE
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let dir = update_dir()?;
-    std::fs::create_dir_all(&dir)?;
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(dir.join(UPDATE_LOCK_FILE))?;
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    Ok(UpdateFileLock {
-        _process_guard: process_guard,
-        _file: file,
-    })
+/// 从当前可执行文件路径反推 `Smelt.app` 的位置：
+/// `<App>.app/Contents/MacOS/smelt` 往上 3 层就是 `<App>.app`。
+/// 非 `.app` 环境（比如 `cargo run`）直接报错，不做任何文件操作。
+pub(crate) fn current_app_bundle() -> anyhow::Result<PathBuf> {
+    app_bundle_for_exe(&smelt_paths::current_exe()?)
 }
 
-fn update_state_store(path: &Path) -> anyhow::Result<smelt_client_store::ClientStore> {
-    smelt_client_store::ClientStore::open(path)
-        .map_err(anyhow::Error::msg)
-        .with_context(|| {
-            format!(
-                "couldn't open the update state database: {}",
-                path.display()
-            )
-        })
-}
-
-fn load_update_state_locked(path: &Path) -> anyhow::Result<UpdateState> {
-    let store = update_state_store(path)
-        .with_context(|| format!("couldn't read the update state: {}", path.display()))?;
-    store
-        .update_state()
-        .map_err(anyhow::Error::msg)
-        .and_then(UpdateState::from_record)
-        .with_context(|| format!("couldn't read the update state: {}", path.display()))
-}
-
-fn save_update_state_locked(path: &Path, state: &UpdateState) -> anyhow::Result<()> {
-    let store = update_state_store(path)
-        .with_context(|| format!("couldn't save the update state: {}", path.display()))?;
-    store
-        .put_update_state(&state.to_record())
-        .map_err(anyhow::Error::msg)
-        .with_context(|| format!("couldn't save the update state: {}", path.display()))
-}
-
-fn same_update(left: &StagedUpdate, right: &StagedUpdate) -> bool {
-    let same_payload = left.url == right.url && left.staged_app == right.staged_app;
-    if left.id.is_empty() || right.id.is_empty() {
-        same_payload
-    } else {
-        left.id == right.id && same_payload
-    }
-}
-
-fn begin_staged_update_in_state(
-    state: &mut UpdateState,
-    update: &StagedUpdate,
-) -> anyhow::Result<()> {
-    if update.phase != StagedUpdatePhase::Preparing {
-        anyhow::bail!("a new update job must start in Preparing");
-    }
-    if state.staged.is_some() {
-        anyhow::bail!("another update job is already preparing or waiting to install");
-    }
-    state.staged = Some(update.clone());
-    Ok(())
-}
-
-fn promote_staged_update_in_state(
-    state: &mut UpdateState,
-    update: &StagedUpdate,
-) -> anyhow::Result<()> {
-    if update.phase != StagedUpdatePhase::Ready || update.fingerprint.is_empty() {
-        anyhow::bail!("only a verified update job can become Ready");
-    }
-    let current = state
-        .staged
-        .as_ref()
-        .filter(|current| same_update(current, update))
-        .ok_or_else(|| anyhow::anyhow!("the update job was cancelled or replaced by recovery"))?;
-    match current.phase {
-        StagedUpdatePhase::Preparing => {
-            state.staged = Some(update.clone());
-            Ok(())
-        }
-        StagedUpdatePhase::Ready if current == update => Ok(()),
-        StagedUpdatePhase::Ready | StagedUpdatePhase::Applying => {
-            anyhow::bail!("refusing to roll back the update from a late download callback")
-        }
-    }
-}
-
-fn clear_preparing_update_in_state(state: &mut UpdateState, expected: &StagedUpdate) -> bool {
-    if state.staged.as_ref().is_some_and(|current| {
-        same_update(current, expected) && current.phase == StagedUpdatePhase::Preparing
-    }) {
-        state.staged = None;
-        true
-    } else {
-        false
-    }
-}
-
-/// 返回允许由检查替换的精确暂存作业（待安装或安装失败）。只认同一条 Ready 事务；若
-/// 恢复流程已经推进到另一条作业或 Applying，调用方必须停下，不能用过期 UI 状态清除它。
-fn staged_update_to_replace(
-    state: &UpdateState,
-    expected: &StagedUpdate,
-) -> anyhow::Result<StagedUpdate> {
-    if expected.phase != StagedUpdatePhase::Ready {
-        anyhow::bail!("the staged update job isn't Ready");
-    }
-    let pending = state
-        .staged
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("the staged update job no longer exists"))?;
-    if !same_update(&pending, expected) {
-        anyhow::bail!("the pending update was replaced by another job");
-    }
-    if pending.phase != StagedUpdatePhase::Ready {
-        anyhow::bail!(
-            "the pending update is already being applied and can't be discarded by a check"
-        );
-    }
-    Ok(pending)
-}
-
-/// 下载开始前先登记 Preparing；应用成功前不清除，中途强杀由启动恢复接管。
-fn begin_staged_update(update: &StagedUpdate) -> anyhow::Result<()> {
-    let _guard = acquire_update_lock()?;
-    let path = update_state_path()?;
-    let mut state = load_update_state_locked(&path)?;
-    // 旧 Bundle 仍占用时允许下载和暂存下一版；唯一不能跨越的边界是下一次交换。
-    // 这样 cleanup_app 仍只有一个明确所有者，也不会让网络下载被长寿命旧 daemon 卡死。
-    begin_staged_update_in_state(&mut state, update)?;
-    save_update_state_locked(&path, &state)
-}
-
-/// 只允许 Preparing -> Ready，不能让迟到的下载结果覆盖 Applying。
-fn promote_staged_update(update: &StagedUpdate) -> anyhow::Result<()> {
-    let _guard = acquire_update_lock()?;
-    let path = update_state_path()?;
-    let mut state = load_update_state_locked(&path)?;
-    promote_staged_update_in_state(&mut state, update)?;
-    save_update_state_locked(&path, &state)
-}
-
-/// 下载失败只清除仍停在 Preparing 的同一作业，不能抹掉恢复/安装已推进的状态。
-fn clear_preparing_update(expected: &StagedUpdate) -> anyhow::Result<()> {
-    let _guard = acquire_update_lock()?;
-    let path = update_state_path()?;
-    let mut state = load_update_state_locked(&path)?;
-    if clear_preparing_update_in_state(&mut state, expected) {
-        save_update_state_locked(&path, &state)?;
-    }
-    Ok(())
-}
-
-/// 更新源已指向另一份发布包时，原子作废精确匹配的暂存作业（待安装或安装失败）。
-/// 状态先持久化清空，再删除缓存；中途强杀至多留下可清理的缓存，不会让新旧作业同时生效。
-pub fn discard_staged_update(expected: &StagedUpdate) -> anyhow::Result<()> {
-    let _guard = acquire_update_lock()?;
-    let state_path = update_state_path()?;
-    let mut state = load_update_state_locked(&state_path)?;
-    if state.staged.is_none() {
-        return Ok(());
-    }
-    let app_bundle = current_app_bundle()?;
-    discard_staged_update_locked(&state_path, &mut state, expected, &app_bundle)
-}
-
-fn discard_staged_update_locked(
-    state_path: &Path,
-    state: &mut UpdateState,
-    expected: &StagedUpdate,
-    app_bundle: &Path,
-) -> anyhow::Result<()> {
-    if state.staged.is_none() {
-        return Ok(());
-    }
-    let pending = staged_update_to_replace(state, expected)?;
-    abandon_pending_update_locked(state_path, state, &pending, app_bundle, None)
-}
-
-/// 读取当前包对应的发布 URL。
-///
-/// 打包时写进 `Contents/Resources/SmeltUpdateURL` 的地址描述的就是正在运行的这个包，
-/// 优先认它。用户状态里的 `current_url` 是上次自更新成功时记下的，用户之后手动装了
-/// 别的包（拖 dmg、make install）它不会跟着变，只在包里没带地址时兜底。
-pub fn installed_release() -> anyhow::Result<InstalledRelease> {
-    let bundled_path = current_app_bundle()?.join(BUNDLED_RELEASE_URL_FILE);
-    let bundled_url = match std::fs::read_to_string(&bundled_path) {
-        Ok(url) => Some(url),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "couldn't read the current release URL: {}",
-                    bundled_path.display()
-                )
-            });
-        }
-    };
-    let state_url = {
-        let _guard = acquire_update_lock()?;
-        load_update_state_locked(&update_state_path()?)?.current_url
-    };
-    Ok(resolve_installed_release(bundled_url, state_url))
-}
-
-fn resolve_installed_release(
-    bundled_url: Option<String>,
-    state_url: Option<String>,
-) -> InstalledRelease {
-    [bundled_url, state_url]
-        .into_iter()
-        .flatten()
-        .map(|url| url.trim().to_string())
-        .find(|url| !url.is_empty())
-        .map_or(InstalledRelease::Unknown, InstalledRelease::Url)
-}
-
-fn installer_root() -> anyhow::Result<PathBuf> {
-    let dir = update_dir()?.join("installer");
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
-}
-
-fn copy_installer_helper(source: &Path, destination: &Path) -> anyhow::Result<()> {
-    let metadata = std::fs::symlink_metadata(source)
-        .with_context(|| format!("the install helper doesn't exist: {}", source.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        anyhow::bail!(
-            "the install helper must be a regular file: {}",
-            source.display()
-        );
-    }
-    let parent = destination
+fn app_bundle_for_exe(exe: &Path) -> anyhow::Result<PathBuf> {
+    let bundle = exe
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("the install helper target has no parent directory"))?;
-    std::fs::create_dir(parent).with_context(|| {
-        format!(
-            "couldn't create the install helper directory: {}",
-            parent.display()
-        )
-    })?;
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
-    }
-    std::fs::copy(source, destination).with_context(|| {
-        format!(
-            "couldn't copy the install helper: {}",
-            destination.display()
-        )
-    })?;
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
-fn clear_installer_attempt_in_state(
-    state: &mut UpdateState,
-    update_id: &str,
-    attempt_id: &str,
-) -> bool {
-    let Some(pending) = state.staged.as_mut() else {
-        return false;
-    };
-    if pending.id == update_id
-        && pending
-            .installer_attempt
-            .as_ref()
-            .is_some_and(|attempt| attempt.id == attempt_id)
-    {
-        pending.installer_attempt = None;
-        true
-    } else {
-        false
-    }
-}
-
-fn clear_installer_attempt(update_id: &str, attempt_id: &str) -> anyhow::Result<()> {
-    let _guard = acquire_update_lock()?;
-    let state_path = update_state_path()?;
-    let mut state = load_update_state_locked(&state_path)?;
-    if clear_installer_attempt_in_state(&mut state, update_id, attempt_id) {
-        save_update_state_locked(&state_path, &state)?;
-    }
-    Ok(())
-}
-
-fn record_installer_failure_in_state(
-    state: &mut UpdateState,
-    update_id: &str,
-    attempt_id: &str,
-) -> bool {
-    let Some(pending) = state.staged.as_mut() else {
-        return false;
-    };
-    if pending.id != update_id
-        || !pending
-            .installer_attempt
-            .as_ref()
-            .is_some_and(|attempt| attempt.id == attempt_id)
-    {
-        return false;
-    }
-    pending.installer_attempt = None;
-    pending.installer_failed = true;
-    true
-}
-
-fn record_installer_failure(update_id: &str, attempt_id: &str) -> anyhow::Result<bool> {
-    let _guard = acquire_update_lock()?;
-    let state_path = update_state_path()?;
-    let mut state = load_update_state_locked(&state_path)?;
-    let recorded = record_installer_failure_in_state(&mut state, update_id, attempt_id);
-    if recorded {
-        save_update_state_locked(&state_path, &state)?;
-    }
-    Ok(recorded)
-}
-
-/// 复制已随当前 App 签名的 helper 到私有目录，先持久化 attempt，再派生进程。
-/// spawn 成功前 GUI 不得退出；spawn 失败会撤销精确匹配的 attempt，Ready 作业仍保留。
-pub fn launch_installer(update: &StagedUpdate, relaunch: bool) -> anyhow::Result<InstallerTicket> {
-    let app_bundle = current_app_bundle()?;
-    let source = app_bundle.join("Contents/MacOS").join(INSTALLER_NAME);
-    let attempt_id = uuid::Uuid::new_v4().simple().to_string();
-    let helper_dir = installer_root()?.join(&attempt_id);
-    let helper = helper_dir.join(INSTALLER_NAME);
-    copy_installer_helper(&source, &helper)?;
-
-    let ticket = (|| -> anyhow::Result<InstallerTicket> {
-        let _guard = acquire_update_lock()?;
-        let state_path = update_state_path()?;
-        let mut state = load_update_state_locked(&state_path)?;
-        let pending = state
-            .staged
-            .as_mut()
-            .filter(|pending| same_update(pending, update))
-            .ok_or_else(|| {
-                anyhow::anyhow!("the pending update was replaced by another update job")
-            })?;
-        if pending.phase != StagedUpdatePhase::Ready {
-            anyhow::bail!("the update transaction isn't Ready");
-        }
-        if pending.installer_attempt.is_some() {
-            anyhow::bail!("an installer is already waiting for the app to quit");
-        }
-        pending.installer_failed = false;
-        pending.installer_attempt = Some(InstallerAttempt {
-            id: attempt_id.clone(),
-            target_app: app_bundle,
-            relaunch,
-            helper_dir: helper_dir.clone(),
-        });
-        let update_id = pending.id.clone();
-        save_update_state_locked(&state_path, &state)?;
-        Ok(InstallerTicket {
-            update_id,
-            attempt_id: attempt_id.clone(),
-        })
-    })();
-    let ticket = match ticket {
-        Ok(ticket) => ticket,
-        Err(error) => {
-            let _ = std::fs::remove_dir_all(&helper_dir);
-            return Err(error);
-        }
-    };
-
-    let spawned = std::process::Command::new(&helper)
-        .arg("--update-id")
-        .arg(&ticket.update_id)
-        .arg("--attempt-id")
-        .arg(&ticket.attempt_id)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-    if let Err(error) = spawned {
-        let rollback = clear_installer_attempt(&ticket.update_id, &ticket.attempt_id);
-        let _ = std::fs::remove_dir_all(&helper_dir);
-        rollback.context("couldn't spawn the installer, and revoking the attempt also failed")?;
-        return Err(error).context("couldn't spawn the installer");
-    }
-    Ok(ticket)
-}
-
-fn installer_attempt_from_state(
-    state: UpdateState,
-    update_id: &str,
-    attempt_id: &str,
-) -> anyhow::Result<(StagedUpdate, InstallerAttempt)> {
-    if !is_valid_update_id(update_id) || !is_valid_update_id(attempt_id) {
-        anyhow::bail!("invalid installer ticket");
-    }
-    let pending = state
-        .staged
-        .filter(|pending| pending.id == update_id && pending.phase == StagedUpdatePhase::Ready)
-        .ok_or_else(|| anyhow::anyhow!("the installer's Ready update job doesn't exist"))?;
-    let attempt = pending
-        .installer_attempt
-        .clone()
-        .filter(|attempt| attempt.id == attempt_id)
-        .ok_or_else(|| anyhow::anyhow!("the installer attempt was revoked or replaced"))?;
-    Ok((pending, attempt))
-}
-
-fn load_installer_attempt(
-    update_id: &str,
-    attempt_id: &str,
-) -> anyhow::Result<(StagedUpdate, InstallerAttempt)> {
-    let _guard = acquire_update_lock()?;
-    let state = load_update_state_locked(&update_state_path()?)?;
-    installer_attempt_from_state(state, update_id, attempt_id)
-}
-
-fn relaunch_app(app_bundle: &Path) -> anyhow::Result<()> {
-    // 不使用 -n：若用户已抢先启动新版，只激活已有实例，不能再制造重复 GUI。
-    let status = std::process::Command::new("/usr/bin/open")
-        .arg(app_bundle)
-        .status()
-        .context("couldn't launch the new Smelt")?;
-    if !status.success() {
-        anyhow::bail!("couldn't launch the new Smelt: open exit {status}");
-    }
-    Ok(())
-}
-
-/// `smelt-installer` 的完整生命周期：重新读取 ticket，获取排他的 App runtime lease，
-/// 再次读取并提交同一 attempt，释放 lease 后按事务策略拉起固定目标路径。
-/// 安装失败也会清除精确 attempt、保留 Ready 作业并尽力拉回旧 App。
-pub fn run_installer(update_id: &str, attempt_id: &str) -> anyhow::Result<()> {
-    let (_pending, attempt) = load_installer_attempt(update_id, attempt_id)?;
-    let outcome = (|| {
-        let runtime_lease = acquire_installer_runtime_lease()?;
-        let outcome = finalize_pending_update_for_attempt(
-            update_id,
-            attempt_id,
-            &attempt.target_app,
-            &runtime_lease,
-        );
-        // 新 GUI 必须能在启动时拿到共享 lease；不能持着独占锁调用 LaunchServices。
-        drop(runtime_lease);
-        outcome
-    })();
-    // Invalidated 只有在锁内重新验证精确 attempt 后才会返回，并且作废状态已经落盘；
-    // 它不再有 Ready 作业可标记失败，但仍属于当前 helper，有权把稳定 GUI 拉回来。
-    let invalidated_by_this_attempt = matches!(outcome, Ok(FinalizeOutcome::Invalidated));
-    let result = match outcome {
-        Ok(FinalizeOutcome::Installed) => Ok(()),
-        Ok(FinalizeOutcome::Invalidated) => {
-            anyhow::bail!("the candidate app failed its final check")
-        }
-        Ok(FinalizeOutcome::RetryLater) => {
-            anyhow::bail!("the installer doesn't support deferred commits")
-        }
-        Err(error) => Err(error),
-    };
-    let persistence_result = if result.is_err() {
-        Some(
-            record_installer_failure(update_id, attempt_id)
-                .context("the installer failed, and saving the failure also failed"),
-        )
-    } else {
-        None
-    };
-    // 成功安装，或失败确实由当前 attempt 原子登记时，helper 才有权 relaunch。
-    // ticket 已失效意味着另一个 GUI/attempt 已接管；旧 helper 不能抢跑污染新事务。
-    let may_relaunch = result.is_ok()
-        || invalidated_by_this_attempt
-        || matches!(persistence_result, Some(Ok(true)));
-    let relaunch_result = if attempt.relaunch && may_relaunch {
-        relaunch_app(&attempt.target_app)
-    } else {
-        Ok(())
-    };
-    if result.is_ok() {
-        let _ = std::fs::remove_dir_all(&attempt.helper_dir);
-    }
-    let result = match (result, persistence_result) {
-        (Err(install_error), Some(Err(persistence_error))) => Err(install_error).context(format!(
-            "saving the installer failure also failed: {persistence_error:#}"
-        )),
-        (result, _) => result,
-    };
-    match (result, relaunch_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(install_error), Ok(())) => Err(install_error),
-        (Ok(()), Err(relaunch_error)) => Err(relaunch_error),
-        (Err(install_error), Err(relaunch_error)) => Err(install_error).context(format!(
-            "reopening Smelt after the failed install also failed: {relaunch_error:#}"
-        )),
-    }
-}
-
-/// 本地构建的包（`make install`）的前半段：校验，复制到目标同目录的交换位置。返回交换
-/// id，交给 [`commit_local_app`] 提交；交不出去时用 [`discard_local_app`] 删掉副本。
-/// 先复制好，GUI 和守护停下的时间就只剩一次交换。
-///
-/// 交换位置先登记成待回收的旧包（`cleanup_app`）再复制：它在哪一步都是要删的东西，
-/// 交换前是新包的副本，交换后是换下的旧包。复制时 Ctrl-C、提交进程被杀，下次 GUI
-/// 启动的恢复都会把它收掉。和在线更新一样，上次换下的旧包没回收掉就不开始新的替换。
-///
-/// 候选是开发者自己刚打的包：不走下载事务，也不和已装版本比签名身份。
-pub fn stage_local_app(source: &Path, target: &Path) -> anyhow::Result<String> {
-    validate_local_app(source)?;
-    if target.extension().and_then(|value| value.to_str()) != Some("app") {
-        anyhow::bail!("the install target isn't a .app: {}", target.display());
-    }
-    let id = uuid::Uuid::new_v4().simple().to_string();
-    let swap = swap_path(target, &id)?;
-    {
-        let _guard = acquire_update_lock()?;
-        let state_path = update_state_path()?;
-        let mut state = load_update_state_locked(&state_path)?;
-        reject_applying_update(&state)?;
-        if !cleanup_registered_app_locked(&state_path, &mut state, target)? {
-            anyhow::bail!("the app replaced last time is still in use; stopped replacing");
-        }
-        state.cleanup_app = Some(swap.clone());
-        save_update_state_locked(&state_path, &state)?;
-    }
-    // 复制几百 MB 不占着更新锁：GUI 启动时的恢复也要拿这把锁。
-    if let Err(error) = copy_app_bundle(source, &swap) {
-        let _ = discard_local_app(target, &id);
-        return Err(error);
-    }
-    Ok(id)
-}
-
-/// 删掉还没换上去的新包副本，撤掉它的回收登记。登记已经不是它（被 GUI 启动时的恢复
-/// 收掉了）就不碰。
-pub fn discard_local_app(target: &Path, id: &str) -> anyhow::Result<()> {
-    let swap = swap_path(target, id)?;
-    let _guard = acquire_update_lock()?;
-    let state_path = update_state_path()?;
-    let mut state = load_update_state_locked(&state_path)?;
-    if state.cleanup_app.as_deref() != Some(swap.as_path()) {
-        return Ok(());
-    }
-    remove_registered_swap(target, &swap)?;
-    state.cleanup_app = None;
-    save_update_state_locked(&state_path, &state)
-}
-
-/// 后半段，和在线更新同一条顺序：让 GUI 退出并等它们全部退出，确认没人在用目标 App、
-/// 停守护，原子交换 App，回收旧包，再打开 `target`。守护和 smelt-agent 由新 GUI 启动时
-/// 从 App 里换上，这里不碰 `~/.smelt/bin`。
-///
-/// 守护停机会杀掉它名下终端和 ACP 的进程组，而 `make install` 常在 Smelt 自己的终端里
-/// 跑：这一段必须放在脱离那个终端的新会话里（见 `smelt-installer`），也就看不到终端，
-/// 进度和错误只写 app.log。
-pub fn commit_local_app(target: &Path, id: &str) -> anyhow::Result<()> {
-    let swap = swap_path(target, id)?;
-    if let Err(error) = request_running_app_quit() {
-        smelt_sys::app_log::warn(
-            "installer",
-            &format!("没能让 Smelt 自己退出，等用户手动退出：{error:#}"),
-        );
-    }
-    let committed = swap_local_app(target, &swap);
-    if committed.is_err() {
-        // 没换上：交换位置里还是新包副本。删不掉也还登记着，下次 GUI 启动时回收。
-        let _ = discard_local_app(target, id);
-    }
-    // 成功打开新版；失败也把刚才让它退出的旧版拉回来。
-    let relaunched = relaunch_app(target);
-    committed?;
-    relaunched
-}
-
-fn validate_local_app(app: &Path) -> anyhow::Result<()> {
-    if app.extension().and_then(|value| value.to_str()) != Some("app") || !app.is_dir() {
-        anyhow::bail!("not a .app bundle: {}", app.display());
-    }
-    if !app.join("Contents/Info.plist").is_file() {
-        anyhow::bail!("the app has no Contents/Info.plist: {}", app.display());
-    }
-    for name in ["smelt", "smeltd", "smelt-notify", INSTALLER_NAME] {
-        if !app.join("Contents/MacOS").join(name).is_file() {
-            anyhow::bail!("the app has no Contents/MacOS/{name}: {}", app.display());
-        }
-    }
-    Ok(())
-}
-
-/// 和用户按 ⌘Q 不同，Apple Event 的 quit 不弹退出确认，GUI 照常落盘布局后退出。
-fn request_running_app_quit() -> anyhow::Result<()> {
-    let script = format!(
-        "if application id \"{BUNDLE_ID}\" is running then tell application id \"{BUNDLE_ID}\" to quit"
-    );
-    let output = std::process::Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .context("couldn't run osascript")?;
-    if !output.status.success() {
-        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    Ok(())
-}
-
-fn reject_applying_update(state: &UpdateState) -> anyhow::Result<()> {
-    if state
-        .staged
-        .as_ref()
-        .is_some_and(|staged| staged.phase == StagedUpdatePhase::Applying)
-    {
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or_else(|| anyhow::anyhow!("the executable path is too shallow: {}", exe.display()))?
+        .to_path_buf();
+    if bundle.extension().and_then(|e| e.to_str()) != Some("app") {
         anyhow::bail!(
-            "an online update hasn't finished swapping; open Smelt once to let it recover"
+            "not running from a .app bundle ({}); skipping self-update",
+            bundle.display()
         );
     }
-    Ok(())
+    Ok(bundle)
 }
 
-/// 交换之前的失败都返回错误，交换位置里仍是新包副本；交换之后只剩收尾，失败只记日志，
-/// 不把已经装上的新版报成失败。
-fn swap_local_app(target: &Path, swap: &Path) -> anyhow::Result<()> {
-    let runtime_lease = acquire_installer_runtime_lease()?;
-    let _guard = acquire_update_lock()?;
-    let state_path = update_state_path()?;
-    let mut state = load_update_state_locked(&state_path)?;
-    if state.cleanup_app.as_deref() != Some(swap) {
-        anyhow::bail!(
-            "the new package copy was reclaimed (was Smelt opened meanwhile?); rerun make install"
-        );
-    }
-    reject_applying_update(&state)?;
-    if std::fs::symlink_metadata(target).is_ok() {
-        quiesce_app_target(target)?;
-        swap_app_bundles(target, swap)?;
-    } else {
-        // 还没装过：直接放上去，交换位置空了，登记跟着撤掉。
-        std::fs::rename(swap, target)
-            .with_context(|| format!("couldn't install the app: {}", target.display()))?;
-        state.cleanup_app = None;
-    }
-    drop(runtime_lease);
-
-    // 之前下好还没装的在线更新是给换下去的那一版准备的，留着它，⌘Q 退出时会把刚装的包
-    // 盖回去。状态先落盘再删缓存，和作废暂存作业同一个顺序。
-    let discarded = state.staged.take();
-    if let Err(error) = save_update_state_locked(&state_path, &state) {
-        smelt_sys::app_log::warn(
-            "installer",
-            &format!("App 已换上，更新状态没写进去，旧包留到下次启动回收：{error:#}"),
-        );
-        return Ok(());
-    }
-    if let Some(update) = &discarded {
-        discard_update_artifacts(update);
-    }
-    // 换下的旧包没人用就现在删；还有人用就留着登记，下次 GUI 启动时回收。
-    if let Err(error) = cleanup_registered_app_locked(&state_path, &mut state, target) {
-        smelt_sys::app_log::warn(
-            "installer",
-            &format!("旧 App 暂未删除，留到下次启动回收：{error:#}"),
-        );
-    }
-    Ok(())
-}
-
-/// 交换 App 前的最后一步，在线更新和 `make install` 共用：调用方持有独占的 runtime
-/// lease，懂锁的 GUI 都已退出、新的起不来。先停守护及其会话，再用 lsof 检查剩余占用。
-fn quiesce_app_target(app_bundle: &Path) -> anyhow::Result<()> {
-    quiesce_app_target_with(shutdown_local_daemon, || bundle_use_state(app_bundle))
-}
-
-fn quiesce_app_target_with(
-    shutdown: impl FnOnce() -> bool,
-    probe: impl FnOnce() -> anyhow::Result<BundleUseState>,
-) -> anyhow::Result<()> {
-    if !shutdown() {
-        anyhow::bail!("the old daemon didn't exit; stopped replacing the app");
-    }
-    if probe()? != BundleUseState::Unused {
-        anyhow::bail!("the target app is in use again; refusing to replace it");
-    }
-    Ok(())
-}
-
+/// 下载的包放在 `~/Library/Caches/com.zzfn.smelt/update`。
 fn cache_root() -> anyhow::Result<PathBuf> {
-    let dir = dirs::cache_dir()
+    Ok(dirs::cache_dir()
         .ok_or_else(|| anyhow::anyhow!("couldn't find the system cache directory"))?
         .join(BUNDLE_ID)
-        .join("update");
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+        .join("update"))
 }
 
-/// 下载 ZIP → 解压 → 校验 `.app` → 原子记录待安装作业。
+fn remove_dir_if_exists(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+/// 下载 ZIP → 解压 → 校验签名身份和版本号，放进缓存目录等着装。
 ///
-/// ZIP 有几十 MB，一次性 `.bytes()` 读完既吃内存又让 UI 整段时间无进度可显示，
-/// 所以按 chunk 流式落盘，边下边通过 `on_progress` 上报字节数。
+/// ZIP 有上百 MB，一次性读完既吃内存又让界面整段时间没有进度，所以按 chunk 流式落盘，
+/// 边下边经 `on_progress` 报字节数。缓存目录里原有的东西（上次没装的包、中断的下载）先
+/// 清掉：同一时间只等着装一个包。
 pub async fn download_and_stage(
     url: &str,
     version: &str,
     on_progress: impl Fn(DownloadProgress),
 ) -> anyhow::Result<StagedUpdate> {
-    let mut update = StagedUpdate::new(version, url)?;
-    begin_staged_update(&update)?;
-
+    validate_download_url(url)?;
+    let expected = semver::Version::parse(version.trim())
+        .with_context(|| format!("the update version isn't a release number: {version:?}"))?;
+    let trusted_app = current_app_bundle()?;
     let root = cache_root()?;
-    let zip_path = root.join(format!(".{APP_NAME}-{}.zip", update.id));
-    let extract_root = root.join(format!(".{APP_NAME}-{}-extract", update.id));
-    let _ = std::fs::remove_dir_all(&extract_root);
-    let _ = std::fs::remove_dir_all(&update.staged_app);
-    let _ = std::fs::remove_file(&zip_path);
+    if let Err(error) = remove_dir_if_exists(&root) {
+        smelt_sys::app_log::warn(
+            "updater",
+            &format!("清不掉更新缓存 {}：{error}", root.display()),
+        );
+    }
+    let dir = root.join(uuid::Uuid::new_v4().simple().to_string());
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("couldn't create the download directory: {}", dir.display()))?;
 
     let result = async {
-        let mut resp = open_package_download(url, "ZIP").await?;
-        let total = resp.content_length();
-        on_progress(DownloadProgress::Bytes { received: 0, total });
-
-        let mut file = std::fs::File::create(&zip_path)?;
-        let mut received = 0u64;
-        let mut reported = 0u64;
-        while let Some(chunk) = resp.chunk().await? {
-            received += chunk.len() as u64;
-            ensure_package_size(received)?;
-            file.write_all(&chunk)?;
-            if received - reported >= PROGRESS_REPORT_STEP || Some(received) == total {
-                reported = received;
-                on_progress(DownloadProgress::Bytes { received, total });
-            }
-        }
-        file.flush()?;
-        drop(file);
+        let zip_path = dir.join(UPDATE_ASSET);
+        download_package(url, &zip_path, &on_progress).await?;
         on_progress(DownloadProgress::Installing);
 
+        let extract_root = dir.join("extract");
         extract_zip(&zip_path, &extract_root)?;
-        let extracted_app = find_app_bundle(&extract_root)?;
-        std::fs::rename(&extracted_app, &update.staged_app).map_err(|error| {
-            anyhow::anyhow!(
-                "couldn't move the new .app: {} → {} ({error})",
-                extracted_app.display(),
-                update.staged_app.display()
+        let _ = std::fs::remove_file(&zip_path);
+        let extracted = find_app_bundle(&extract_root)?;
+        let app = dir.join(format!("{APP_NAME}.app"));
+        std::fs::rename(&extracted, &app).with_context(|| {
+            format!(
+                "couldn't move the new .app: {} → {}",
+                extracted.display(),
+                app.display()
             )
         })?;
-        let trusted_app = current_app_bundle()?;
-        validate_staged_update(&update, &trusted_app)
+        let _ = std::fs::remove_dir_all(&extract_root);
+        validate_app_bundle_against(&app, &trusted_app)?;
+        ensure_bundle_version(&app, &expected)?;
+        anyhow::Ok(app)
     }
     .await;
 
-    let _ = std::fs::remove_dir_all(&extract_root);
-    let _ = std::fs::remove_file(&zip_path);
-
     match result {
-        Ok(fingerprint) => {
-            update.fingerprint = fingerprint;
-            update.phase = StagedUpdatePhase::Ready;
-            if let Err(error) = promote_staged_update(&update) {
-                let _ = clear_preparing_update(&update);
-                let _ = std::fs::remove_dir_all(&update.staged_app);
-                return Err(error);
-            }
-            Ok(update)
-        }
+        Ok(app) => Ok(StagedUpdate {
+            version: version.trim().to_string(),
+            url: url.trim().to_string(),
+            app,
+        }),
         Err(error) => {
-            let _ = clear_preparing_update(&update);
-            let _ = std::fs::remove_dir_all(&update.staged_app);
+            let _ = std::fs::remove_dir_all(&dir);
             Err(error)
         }
     }
 }
 
+async fn download_package(
+    url: &str,
+    to: &Path,
+    on_progress: &impl Fn(DownloadProgress),
+) -> anyhow::Result<()> {
+    let mut resp = open_package_download(url, "ZIP").await?;
+    let total = resp.content_length();
+    on_progress(DownloadProgress::Bytes { received: 0, total });
+
+    let mut file = File::create(to)?;
+    let mut received = 0u64;
+    let mut reported = 0u64;
+    while let Some(chunk) = resp.chunk().await? {
+        received += chunk.len() as u64;
+        ensure_package_size(received)?;
+        file.write_all(&chunk)?;
+        if received - reported >= PROGRESS_REPORT_STEP || Some(received) == total {
+            reported = received;
+            on_progress(DownloadProgress::Bytes { received, total });
+        }
+    }
+    file.flush()?;
+    Ok(())
+}
+
 fn extract_zip(zip_path: &Path, extract_root: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(extract_root)?;
-    let out = std::process::Command::new("/usr/bin/ditto")
+    let out = Command::new("/usr/bin/ditto")
         .args(["-x", "-k"])
         .arg(zip_path)
         .arg(extract_root)
@@ -1206,28 +387,39 @@ fn find_app_bundle(root: &Path) -> anyhow::Result<PathBuf> {
     anyhow::bail!("no .app bundle in the ZIP")
 }
 
-fn validate_staged_update(update: &StagedUpdate, trusted_app: &Path) -> anyhow::Result<String> {
-    validate_staged_metadata(update)?;
-    let staged = registered_staged_path(update)?;
-    let fingerprint = validate_app_bundle_against(&staged, trusted_app)?;
-    if !update.fingerprint.is_empty() && update.fingerprint != fingerprint {
-        anyhow::bail!("the staged app's fingerprint doesn't match the download");
+/// 读 App 的 Info.plist 里的一项。
+fn bundle_info(app: &Path, key: &str) -> anyhow::Result<String> {
+    let output = Command::new("/usr/bin/plutil")
+        .args(["-extract", key, "raw", "-o", "-"])
+        .arg(app.join("Contents/Info.plist"))
+        .output()
+        .with_context(|| format!("couldn't read {key} of {}", app.display()))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "couldn't read {key} of {}: {}",
+            app.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
-    Ok(fingerprint)
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn validate_staged_metadata(update: &StagedUpdate) -> anyhow::Result<()> {
-    validate_download_url(&update.url)?;
-    if !is_valid_update_id(&update.id) {
-        anyhow::bail!("invalid update job id");
-    }
-    if update.version.trim().is_empty() {
-        anyhow::bail!("the update job has no version");
+/// 包里的版本号（`CFBundleShortVersionString`，打包时写的完整版本号）要和更新源说的是同一次
+/// 发版。对不上就是更新源写错了：照装的话，装完一检查还是「有新版本」，每次都再装一遍。
+fn ensure_bundle_version(app: &Path, expected: &semver::Version) -> anyhow::Result<()> {
+    let text = bundle_info(app, "CFBundleShortVersionString")?;
+    let actual = semver::Version::parse(&text).with_context(|| {
+        format!("the update package's version isn't a release number: {text:?}")
+    })?;
+    if actual.cmp_precedence(expected).is_ne() {
+        anyhow::bail!(
+            "the update package is version {actual}, but the update source says {expected}"
+        );
     }
     Ok(())
 }
 
-fn validate_app_bundle_against(app: &Path, trusted_app: &Path) -> anyhow::Result<String> {
+fn validate_app_bundle_against(app: &Path, trusted_app: &Path) -> anyhow::Result<()> {
     if !app.is_dir() || app.extension().and_then(|ext| ext.to_str()) != Some("app") {
         anyhow::bail!(
             "the update package isn't a valid .app directory: {}",
@@ -1293,8 +485,7 @@ fn validate_app_bundle_against(app: &Path, trusted_app: &Path) -> anyhow::Result
             anyhow::bail!("the update package's signing identity doesn't match this Smelt");
         }
     }
-
-    app_fingerprint(app)
+    Ok(())
 }
 
 fn designated_requirement(app: &Path) -> anyhow::Result<String> {
@@ -1332,150 +523,241 @@ fn designated_requirement(app: &Path) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("the app has no designated requirement: {}", app.display()))
 }
 
-fn app_fingerprint(app: &Path) -> anyhow::Result<String> {
-    let mut hasher = Sha256::new();
-    let mut entries = vec![app.to_path_buf()];
-    let mut cursor = 0;
-    while cursor < entries.len() {
-        let path = entries[cursor].clone();
-        cursor += 1;
-        if std::fs::symlink_metadata(&path)?.file_type().is_dir() {
-            for entry in std::fs::read_dir(&path)? {
-                entries.push(entry?.path());
-            }
-        }
+/// 拉起安装程序，返回后调用方停守护、退出 App。安装程序等这个 App 的窗口全部退出后换包，
+/// `relaunch` 时换完（或没换成）再把 App 打开。
+///
+/// 安装程序要在 App 外面跑：换包前得确认没有进程还在用旧 App（`lsof`），它自己要是从 App
+/// 里跑，就永远确认不了。所以先拷一份放到下好的包旁边，装完和包一起删掉。
+///
+/// 同时告诉它这个 App 是哪个版本：等它真去换时，App 要是已经被别的途径换掉了（手动拖装了
+/// 别的版本、`make install`），就不能拿这次下的包盖上去。
+pub fn launch_installer(update: &StagedUpdate, relaunch: bool) -> anyhow::Result<InstallerTicket> {
+    let target = current_app_bundle()?;
+    if !update.app.is_dir() {
+        anyhow::bail!("the downloaded update is gone: {}", update.app.display());
     }
-    entries.sort_by(|left, right| {
-        left.strip_prefix(app)
-            .unwrap_or(left)
-            .as_os_str()
-            .as_encoded_bytes()
-            .cmp(
-                right
-                    .strip_prefix(app)
-                    .unwrap_or(right)
-                    .as_os_str()
-                    .as_encoded_bytes(),
-            )
-    });
+    let helper = update.app.with_file_name(INSTALLER_NAME);
+    copy_installer_helper(&target.join("Contents/MacOS").join(INSTALLER_NAME), &helper)?;
+    let mut command = Command::new(&helper);
+    command
+        .arg("--install")
+        .arg(&update.app)
+        .arg("--target")
+        .arg(&target)
+        .arg("--replacing")
+        .arg(smelt_version::VERSION);
+    if relaunch {
+        command.arg("--relaunch");
+    }
+    let child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("couldn't launch the installer")?;
+    Ok(InstallerTicket { pid: child.id() })
+}
 
-    hasher.update(BUNDLE_FINGERPRINT_VERSION.as_bytes());
-    hasher.update((entries.len() as u64).to_le_bytes());
-    let mut buffer = [0u8; 64 * 1024];
-    for path in entries {
-        let relative = path.strip_prefix(app).unwrap_or(&path);
-        let relative = relative.as_os_str().as_encoded_bytes();
-        hasher.update((relative.len() as u64).to_le_bytes());
-        hasher.update(relative);
+fn copy_installer_helper(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
 
-        let metadata = std::fs::symlink_metadata(&path)?;
-        let file_type = metadata.file_type();
-        if file_type.is_dir() {
-            hasher.update(b"d");
-        } else if file_type.is_file() {
-            hasher.update(b"f");
-            hasher.update(metadata.len().to_le_bytes());
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                hasher.update((metadata.permissions().mode() & 0o111).to_le_bytes());
-            }
-            let mut file = File::open(&path)
-                .with_context(|| format!("couldn't read an app file: {}", path.display()))?;
-            loop {
-                let read = file.read(&mut buffer)?;
-                if read == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..read]);
-            }
-        } else if file_type.is_symlink() {
-            hasher.update(b"l");
-            let target = std::fs::read_link(&path)?;
-            let target = target.as_os_str().as_encoded_bytes();
-            hasher.update((target.len() as u64).to_le_bytes());
-            hasher.update(target);
-        } else {
-            anyhow::bail!(
-                "the app contains an unsupported file type: {}",
-                path.display()
+    let metadata = std::fs::symlink_metadata(source)
+        .with_context(|| format!("the install helper doesn't exist: {}", source.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!(
+            "the install helper must be a regular file: {}",
+            source.display()
+        );
+    }
+    match std::fs::remove_file(destination) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(error).with_context(|| {
+                format!(
+                    "couldn't replace the install helper: {}",
+                    destination.display()
+                )
+            });
+        }
+        _ => {}
+    }
+    std::fs::copy(source, destination).with_context(|| {
+        format!(
+            "couldn't copy the install helper: {}",
+            destination.display()
+        )
+    })?;
+    std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+/// `smelt-installer --install` 的全过程：等 App 的窗口全部退出，确认 `target` 还是 `replacing`
+/// 这个版本，把下好的包挪到 App 旁边再校验一遍签名身份，停守护、确认没人在用旧 App，原子
+/// 交换，删掉换下来的旧 App。最后删掉缓存里的这一份，`relaunch` 时打开 App：换上了是新版，
+/// 没换成是原来那个，不让人对着一个消失的窗口。
+pub fn install_update(
+    staged_app: &Path,
+    target: &Path,
+    replacing: &str,
+    relaunch: bool,
+) -> anyhow::Result<()> {
+    let installed = install_staged_app(staged_app, target, replacing);
+    // 装没装上，这一份都不要了：打开的 App 会重新检查。
+    if let Some(entry) = staged_entry(staged_app)
+        && let Err(error) = std::fs::remove_dir_all(&entry)
+    {
+        smelt_sys::app_log::warn(
+            "installer",
+            &format!("删不掉下好的包 {}，下次启动再清：{error}", entry.display()),
+        );
+    }
+    let relaunched = if relaunch {
+        relaunch_app(target)
+    } else {
+        Ok(())
+    };
+    match (installed, relaunched) {
+        (Ok(()), relaunched) => relaunched,
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(relaunch_error)) => Err(error).context(format!(
+            "reopening Smelt after the failed install also failed: {relaunch_error:#}"
+        )),
+    }
+}
+
+fn install_staged_app(staged_app: &Path, target: &Path, replacing: &str) -> anyhow::Result<()> {
+    let _lease = acquire_installer_runtime_lease()?;
+    let current = bundle_info(target, "CFBundleShortVersionString")?;
+    if current != replacing {
+        anyhow::bail!(
+            "{} was replaced by {current} after the update was downloaded for {replacing}; skipped",
+            target.display()
+        );
+    }
+    let swap = swap_path(target, &new_swap_id())?;
+    move_app_bundle(staged_app, &swap)?;
+    let replaced = validate_app_bundle_against(&swap, target)
+        .context("the update failed its final check")
+        .and_then(|()| replace_app(target, &swap, quiesce_app_target));
+    if replaced.is_err() {
+        let _ = remove_swap(target, &swap);
+    }
+    replaced
+}
+
+/// 下好的包所在的那一份缓存（`<缓存>/<id>`）。不在缓存目录里的不认，不去删它。
+fn staged_entry(staged_app: &Path) -> Option<PathBuf> {
+    let entry = staged_app.parent()?;
+    (entry.parent()? == cache_root().ok()?).then(|| entry.to_path_buf())
+}
+
+/// 把交换位置上的新 App 换到 `target`，调用方持有独占的 runtime lease。`target` 原来有 App
+/// 就先 `quiesce`（停守护、确认没人在用），再原子交换，然后删掉换下来的旧 App（删不掉留给
+/// 下次启动）；原来没有就直接放上去。返回错误时什么都没换，`swap` 上还是新 App，由调用方删。
+fn replace_app(
+    target: &Path,
+    swap: &Path,
+    quiesce: impl FnOnce(&Path) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    if std::fs::symlink_metadata(target).is_err() {
+        return std::fs::rename(swap, target)
+            .with_context(|| format!("couldn't install the app: {}", target.display()));
+    }
+    quiesce(target)?;
+    swap_app_bundles(target, swap)?;
+    if let Err(error) = remove_swap(target, swap) {
+        smelt_sys::app_log::warn(
+            "installer",
+            &format!(
+                "新 App 已换上，换下的旧 App {} 暂时删不掉，下次启动再清：{error:#}",
+                swap.display()
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// 启动时调用，尽力而为：删掉缓存里上次没装的包，和 App 旁边上次换包留下的交换位置（换下
+/// 来的旧 App，或没换上的新 App）。还有进程在用的留着，下次再清。
+pub fn clean_up_after_update() {
+    if let Ok(root) = cache_root()
+        && let Err(error) = remove_dir_if_exists(&root)
+    {
+        smelt_sys::app_log::warn(
+            "updater",
+            &format!("清不掉更新缓存 {}：{error}", root.display()),
+        );
+    }
+    let Ok(target) = current_app_bundle() else {
+        return;
+    };
+    for swap in leftover_swaps(&target) {
+        let removed = bundle_use_state(&swap).and_then(|state| match state {
+            BundleUseState::Unused => remove_swap(&target, &swap),
+            BundleUseState::InUse => anyhow::bail!("still in use"),
+        });
+        if let Err(error) = removed {
+            smelt_sys::app_log::warn(
+                "updater",
+                &format!("上次换包留下的 {} 暂时删不掉：{error:#}", swap.display()),
             );
         }
     }
-    Ok(format!(
-        "{BUNDLE_FINGERPRINT_VERSION}:{}",
-        hex::encode(hasher.finalize())
-    ))
 }
 
-/// 从当前可执行文件路径反推 `Smelt.app` 的位置：
-/// `<App>.app/Contents/MacOS/smelt` 往上 3 层就是 `<App>.app`。
-/// 非 `.app` 环境（比如 `cargo run`）直接报错，不做任何文件操作。
-pub(crate) fn current_app_bundle() -> anyhow::Result<PathBuf> {
-    app_bundle_for_exe(&smelt_paths::current_exe()?)
-}
-
-fn app_bundle_for_exe(exe: &Path) -> anyhow::Result<PathBuf> {
-    let bundle = exe
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .ok_or_else(|| anyhow::anyhow!("the executable path is too shallow: {}", exe.display()))?
-        .to_path_buf();
-    if bundle.extension().and_then(|e| e.to_str()) != Some("app") {
-        anyhow::bail!(
-            "not running from a .app bundle ({}); skipping self-update",
-            bundle.display()
-        );
+/// 交换位置：`target` 旁边的 `.<名字>.smelt-update-<id>.app`。换包时新 App 先放在这儿，换完
+/// 这儿是旧 App。和 `target` 在同一个目录，才能原子交换。
+fn swap_path(target: &Path, id: &str) -> anyhow::Result<PathBuf> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        anyhow::bail!("invalid swap id: {id:?}");
     }
-    Ok(bundle)
-}
-
-fn swap_path(app_bundle: &Path, update_id: &str) -> anyhow::Result<PathBuf> {
-    if !is_valid_update_id(update_id) {
-        anyhow::bail!("invalid update job id");
-    }
-    let parent = app_bundle.parent().ok_or_else(|| {
-        anyhow::anyhow!(
-            "the app path has no parent directory: {}",
-            app_bundle.display()
-        )
+    let parent = target.parent().ok_or_else(|| {
+        anyhow::anyhow!("the app path has no parent directory: {}", target.display())
     })?;
-    let stem = app_bundle
+    Ok(parent.join(format!("{}{id}.app", swap_prefix(target))))
+}
+
+fn new_swap_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+fn swap_prefix(target: &Path) -> String {
+    let stem = target
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or(APP_NAME);
-    Ok(parent.join(format!(".{stem}.smelt-update-{update_id}.app")))
+    format!(".{stem}.smelt-update-")
 }
 
-fn is_valid_update_id(update_id: &str) -> bool {
-    !update_id.is_empty()
-        && update_id
-            .chars()
-            .all(|value| value.is_ascii_alphanumeric() || value == '-')
-}
-
-fn is_registered_swap_path(app_bundle: &Path, path: &Path) -> bool {
-    let Some(parent) = app_bundle.parent() else {
-        return false;
-    };
+fn is_swap_path(target: &Path, path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
         return false;
     };
-    path.parent() == Some(parent)
-        && name.starts_with(&format!(
-            ".{}.smelt-update-",
-            app_bundle
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or(APP_NAME)
-        ))
+    path.parent().is_some()
+        && path.parent() == target.parent()
+        && name.starts_with(&swap_prefix(target))
         && name.ends_with(".app")
 }
 
-fn remove_registered_swap(app_bundle: &Path, path: &Path) -> anyhow::Result<()> {
-    if !is_registered_swap_path(app_bundle, path) {
+fn leftover_swaps(target: &Path) -> Vec<PathBuf> {
+    let Some(parent) = target.parent() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| is_swap_path(target, path))
+        .collect()
+}
+
+/// 删交换位置。只删 [`swap_path`] 那样的路径；是文件或符号链接（只能是中断或篡改的残留）
+/// 就删路径本身，不跟着链接走。
+fn remove_swap(target: &Path, path: &Path) -> anyhow::Result<()> {
+    if !is_swap_path(target, path) {
         anyhow::bail!(
-            "refusing to clean up a path not registered next to the app: {}",
+            "refusing to remove a path that isn't a swap: {}",
             path.display()
         );
     }
@@ -1487,50 +769,34 @@ fn remove_registered_swap(app_bundle: &Path, path: &Path) -> anyhow::Result<()> 
     if metadata.file_type().is_dir() {
         std::fs::remove_dir_all(path)?;
     } else {
-        // 正常交换目录一定是目录；文件或符号链接只能是中断/篡改残留，删除路径本身，
-        // 绝不跟随链接。
         std::fs::remove_file(path)?;
     }
     Ok(())
 }
 
-fn is_registered_staged_path(cache: &Path, path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-        return false;
-    };
-    path.parent() == Some(cache)
-        && name.starts_with(&format!("{APP_NAME}-"))
-        && name.ends_with(".app")
-}
-
-fn registered_staged_path(update: &StagedUpdate) -> anyhow::Result<PathBuf> {
-    let cache = cache_root()?.canonicalize()?;
-    if std::fs::symlink_metadata(&update.staged_app)?
-        .file_type()
-        .is_symlink()
-    {
-        anyhow::bail!(
-            "the staged app can't be a symlink: {}",
-            update.staged_app.display()
-        );
+/// 把下好的包挪到交换位置。同一个卷上直接改名；跨卷（App 放在别的盘上）就复制一份，复制
+/// 失败把半截删掉。
+fn move_app_bundle(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    match std::fs::rename(source, destination) {
+        Ok(()) => Ok(()),
+        Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
+            let copied = copy_app_bundle(source, destination);
+            if copied.is_err() {
+                let _ = std::fs::remove_dir_all(destination);
+            }
+            copied
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "couldn't move the new app next to the installed one: {}",
+                destination.display()
+            )
+        }),
     }
-    let staged = update.staged_app.canonicalize().with_context(|| {
-        format!(
-            "the staged app doesn't exist: {}",
-            update.staged_app.display()
-        )
-    })?;
-    if !is_registered_staged_path(&cache, &staged) {
-        anyhow::bail!(
-            "the staged app isn't in the update cache: {}",
-            staged.display()
-        );
-    }
-    Ok(staged)
 }
 
 fn copy_app_bundle(source: &Path, destination: &Path) -> anyhow::Result<()> {
-    let output = std::process::Command::new("/usr/bin/ditto")
+    let output = Command::new("/usr/bin/ditto")
         .arg(source)
         .arg(destination)
         .output()?;
@@ -1556,53 +822,123 @@ fn swap_app_bundles(left: &Path, right: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ApplyingRecoveryState {
-    Installed,
-    NotSwapped,
+fn relaunch_app(app_bundle: &Path) -> anyhow::Result<()> {
+    // 不用 -n：用户已经抢先打开了的话只激活那一个，不再开第二个。
+    let status = Command::new("/usr/bin/open")
+        .arg(app_bundle)
+        .status()
+        .context("couldn't launch Smelt")?;
+    if !status.success() {
+        anyhow::bail!("couldn't launch Smelt: open exit {status}");
+    }
+    Ok(())
 }
 
-/// `Applying` 落盘后只能凭磁盘上的完整指纹判定原子交换是否发生。
-/// 任一路径无法读取或两边都不是候选包时都保持现场并报错，不能猜测性删除可能是
-/// 唯一旧版本的交换目录。
-fn classify_applying_recovery(
-    pending: &StagedUpdate,
-    app_bundle: &Path,
-) -> anyhow::Result<ApplyingRecoveryState> {
-    let swap = pending.swap_app.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("the Applying state has no swap directory; can't tell how the install went")
-    })?;
-    let expected_swap = swap_path(app_bundle, &pending.id)?;
-    if swap != &expected_swap {
-        anyhow::bail!(
-            "the Applying state has an invalid swap path: {}",
-            swap.display()
+/// 本地构建的包（`make install`）的前半段：校验，复制到目标旁边的交换位置，返回交换 id，
+/// 交给 [`commit_local_app`] 提交；交不出去时用 [`discard_local_app`] 删掉副本。先复制好，
+/// GUI 和守护停下的时间就只剩一次交换。
+///
+/// 候选是开发者自己刚打的包：不和已装的版本比签名身份。
+pub fn stage_local_app(source: &Path, target: &Path) -> anyhow::Result<String> {
+    validate_local_app(source)?;
+    if target.extension().and_then(|value| value.to_str()) != Some("app") {
+        anyhow::bail!("the install target isn't a .app: {}", target.display());
+    }
+    let id = new_swap_id();
+    let swap = swap_path(target, &id)?;
+    if let Err(error) = copy_app_bundle(source, &swap) {
+        let _ = remove_swap(target, &swap);
+        return Err(error);
+    }
+    Ok(id)
+}
+
+/// 删掉还没换上去的新包副本。
+pub fn discard_local_app(target: &Path, id: &str) -> anyhow::Result<()> {
+    remove_swap(target, &swap_path(target, id)?)
+}
+
+/// 后半段，和在线更新同一条换包的路：让 GUI 退出并等它们全部退出，停守护、确认没人在用
+/// 目标 App，原子交换，删掉旧包，再打开 `target`。守护和 smelt-agent 由新 GUI 启动时从 App
+/// 里换上，这里不碰 `~/.smelt/bin`。
+///
+/// 守护停机会杀掉它名下终端和 ACP 的进程组，而 `make install` 常在 Smelt 自己的终端里
+/// 跑：这一段必须放在脱离那个终端的新会话里（见 `smelt-installer`），也就看不到终端，
+/// 进度和错误只写 app.log。
+pub fn commit_local_app(target: &Path, id: &str) -> anyhow::Result<()> {
+    let swap = swap_path(target, id)?;
+    if let Err(error) = request_running_app_quit() {
+        smelt_sys::app_log::warn(
+            "installer",
+            &format!("没能让 Smelt 自己退出，等用户手动退出：{error:#}"),
         );
     }
-
-    let current_fingerprint = app_fingerprint(app_bundle).with_context(|| {
-        format!(
-            "couldn't read the current app's fingerprint: {}",
-            app_bundle.display()
-        )
-    })?;
-    if current_fingerprint == pending.fingerprint {
-        return Ok(ApplyingRecoveryState::Installed);
+    let committed = (|| {
+        let _lease = acquire_installer_runtime_lease()?;
+        if !swap.is_dir() {
+            anyhow::bail!(
+                "the new package copy is gone (was Smelt opened meanwhile?); rerun make install"
+            );
+        }
+        replace_app(target, &swap, quiesce_app_target)
+    })();
+    if committed.is_err() {
+        let _ = remove_swap(target, &swap);
     }
+    // 换上了打开新版；没换成也把刚才让它退出的旧版拉回来。
+    let relaunched = relaunch_app(target);
+    committed?;
+    relaunched
+}
 
-    let swap_fingerprint = app_fingerprint(swap).with_context(|| {
-        format!(
-            "couldn't read the swapped app's fingerprint: {}",
-            swap.display()
-        )
-    })?;
-    if swap_fingerprint == pending.fingerprint {
-        return Ok(ApplyingRecoveryState::NotSwapped);
+fn validate_local_app(app: &Path) -> anyhow::Result<()> {
+    if app.extension().and_then(|value| value.to_str()) != Some("app") || !app.is_dir() {
+        anyhow::bail!("not a .app bundle: {}", app.display());
     }
+    if !app.join("Contents/Info.plist").is_file() {
+        anyhow::bail!("the app has no Contents/Info.plist: {}", app.display());
+    }
+    for name in ["smelt", "smeltd", "smelt-notify", INSTALLER_NAME] {
+        if !app.join("Contents/MacOS").join(name).is_file() {
+            anyhow::bail!("the app has no Contents/MacOS/{name}: {}", app.display());
+        }
+    }
+    Ok(())
+}
 
-    anyhow::bail!(
-        "neither the current nor the swapped app matches the pending fingerprint; leaving everything in place so the old version isn't deleted by mistake"
-    )
+/// 和用户按 ⌘Q 不同，Apple Event 的 quit 不弹退出确认，GUI 照常落盘布局后退出。
+fn request_running_app_quit() -> anyhow::Result<()> {
+    let script = format!(
+        "if application id \"{BUNDLE_ID}\" is running then tell application id \"{BUNDLE_ID}\" to quit"
+    );
+    let output = Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .context("couldn't run osascript")?;
+    if !output.status.success() {
+        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(())
+}
+
+/// 换 App 前的最后一步，在线更新和 `make install` 共用：调用方持有独占的 runtime lease，
+/// 懂锁的 GUI 都已退出、新的起不来。先停守护及其会话，再用 lsof 检查剩余占用。
+fn quiesce_app_target(app_bundle: &Path) -> anyhow::Result<()> {
+    quiesce_app_target_with(shutdown_local_daemon, || bundle_use_state(app_bundle))
+}
+
+fn quiesce_app_target_with(
+    shutdown: impl FnOnce() -> bool,
+    probe: impl FnOnce() -> anyhow::Result<BundleUseState>,
+) -> anyhow::Result<()> {
+    if !shutdown() {
+        anyhow::bail!("the old daemon didn't exit; stopped replacing the app");
+    }
+    if probe()? != BundleUseState::Unused {
+        anyhow::bail!("the target app is in use again; refusing to replace it");
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1664,408 +1000,28 @@ fn bundle_use_state(app: &Path) -> anyhow::Result<BundleUseState> {
     )
 }
 
-/// 尝试回收事务登记的旧 Bundle。返回 false 表示仍占用；探测失败则报错并保留。
-fn cleanup_registered_app_locked(
-    state_path: &Path,
-    state: &mut UpdateState,
-    app_bundle: &Path,
-) -> anyhow::Result<bool> {
-    let Some(cleanup) = state.cleanup_app.clone() else {
-        return Ok(true);
-    };
-    if !is_registered_swap_path(app_bundle, &cleanup) {
-        anyhow::bail!(
-            "the update state has an invalid cleanup path: {}",
-            cleanup.display()
-        );
-    }
-    if bundle_use_state(&cleanup)? == BundleUseState::InUse {
-        return Ok(false);
-    }
-    remove_registered_swap(app_bundle, &cleanup)
-        .with_context(|| format!("couldn't clean up the old app: {}", cleanup.display()))?;
-    state.cleanup_app = None;
-    save_update_state_locked(state_path, state)?;
-    Ok(true)
-}
-
-fn discard_update_artifacts(update: &StagedUpdate) {
-    if let Ok(cache) = cache_root() {
-        if is_registered_staged_path(&cache, &update.staged_app) {
-            match std::fs::symlink_metadata(&update.staged_app) {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
-                    let _ = std::fs::remove_file(&update.staged_app);
-                }
-                Ok(_) => {
-                    let _ = std::fs::remove_dir_all(&update.staged_app);
-                }
-                Err(_) => {}
-            }
-        }
-
-        // Preparing 阶段被强杀时 ZIP 和解压目录也属于同一个 job；id 只接受生成器
-        // 会产生的字符，防止损坏状态通过路径分隔符逃出缓存根目录。
-        if is_valid_update_id(&update.id) {
-            let _ = std::fs::remove_file(cache.join(format!(".{APP_NAME}-{}.zip", update.id)));
-            let _ =
-                std::fs::remove_dir_all(cache.join(format!(".{APP_NAME}-{}-extract", update.id)));
-        }
-    }
-}
-
-fn finish_recovered_update_locked(
-    state_path: &Path,
-    state: &mut UpdateState,
-    pending: &StagedUpdate,
-    app_bundle: &Path,
-) -> anyhow::Result<()> {
-    state.current_url = Some(pending.url.trim().to_string());
-    state.cleanup_app = pending.swap_app.clone();
-    state.staged = None;
-    save_update_state_locked(state_path, state)?;
-    discard_update_artifacts(pending);
-    if let Err(error) = cleanup_registered_app_locked(state_path, state, app_bundle) {
-        // 提交已经完成，清理失败不能把一次成功安装重新报告成失败；登记路径仍在
-        // update-state.json 中，下次启动会继续收敛。
-        smelt_sys::app_log::error(
-            "updater",
-            &format!("更新事务已恢复，旧 App 将留到下次启动清理：{error:#}"),
-        );
-    }
-    Ok(())
-}
-
-fn abandon_pending_update_locked(
-    state_path: &Path,
-    state: &mut UpdateState,
-    pending: &StagedUpdate,
-    app_bundle: &Path,
-    verified_cleanup_app: Option<PathBuf>,
-) -> anyhow::Result<()> {
-    // 只有作废 Applying 作业时才带着它的交换目录进来，那时登记位一定是空的（finalize 在
-    // 登记位有东西时不开始交换）。别的情况登记位里可能是还没回收的旧包，不能冲掉。
-    if verified_cleanup_app.is_some() {
-        state.cleanup_app = verified_cleanup_app;
-    }
-    state.staged = None;
-    save_update_state_locked(state_path, state)?;
-    discard_update_artifacts(pending);
-    if let Err(error) = cleanup_registered_app_locked(state_path, state, app_bundle) {
-        smelt_sys::app_log::error(
-            "updater",
-            &format!("作废更新作业后清理交换目录失败，将在下次启动重试：{error:#}"),
-        );
-    }
-    Ok(())
-}
-
-/// 启动时在同一个更新事务锁内完成状态恢复和遗留清理。
-///
-/// `Applying` 表示原子交换前已经写入日志：当前 App 指纹等于候选指纹时说明交换
-/// 已完成，只需提交状态；否则回到 Ready 并复用同一个安装流程重试。
-pub fn recover_pending_update() -> anyhow::Result<Option<StagedUpdate>> {
-    let _guard = acquire_update_lock()?;
-    let state_path = update_state_path()?;
-    let state = match load_update_state_locked(&state_path) {
-        Ok(state) => state,
-        Err(error) => {
-            // 读不出来（别的版本写的、库坏了）就从空状态重新开始，不让一份坏状态卡死更新。
-            smelt_sys::app_log::error("updater", &format!("更新状态读不出来，已清空：{error:#}"));
-            let state = UpdateState::default();
-            save_update_state_locked(&state_path, &state)?;
-            state
-        }
-    };
-
-    let app_bundle = current_app_bundle()?;
-    reconcile_update_state_locked(&state_path, state, &app_bundle)
-}
-
-fn reconcile_update_state_locked(
-    state_path: &Path,
-    mut state: UpdateState,
-    app_bundle: &Path,
-) -> anyhow::Result<Option<StagedUpdate>> {
-    match cleanup_registered_app_locked(state_path, &mut state, app_bundle) {
-        Ok(true) => {}
-        Ok(false) => {
-            smelt_sys::app_log::info(
-                "updater",
-                "旧 App 仍被使用；允许暂存更新，但提交下一次交换前必须先回收",
-            );
-        }
-        Err(error) => smelt_sys::app_log::error(
-            "updater",
-            &format!("旧 App 暂未清理；允许恢复暂存作业，但提交交换前会拒绝：{error:#}"),
-        ),
-    }
-
-    let Some(mut pending) = state.staged.clone() else {
-        return Ok(None);
-    };
-    pending.normalize_legacy_metadata();
-
-    if let Err(error) = validate_staged_metadata(&pending) {
-        if pending.phase == StagedUpdatePhase::Applying {
-            return Err(error).context("the Applying update's metadata is invalid; leaving the swap in place for manual review");
-        }
-        smelt_sys::app_log::error(
-            "updater",
-            &format!("待安装更新元数据无效，已作废：{error:#}"),
-        );
-        abandon_pending_update_locked(state_path, &mut state, &pending, app_bundle, None)?;
-        return Ok(None);
-    }
-
-    // Applying 是 write-ahead 状态。先看正式 App 是否已经是目标指纹；此时缓存副本
-    // 是否还在都不影响提交，必须先于暂存校验判定。
-    let mut applying_recovery = None;
-    if pending.phase == StagedUpdatePhase::Applying && !pending.fingerprint.is_empty() {
-        let recovery = classify_applying_recovery(&pending, app_bundle)?;
-        if recovery == ApplyingRecoveryState::Installed {
-            finish_recovered_update_locked(state_path, &mut state, &pending, app_bundle)?;
-            return Ok(None);
-        }
-        applying_recovery = Some(recovery);
-    }
-
-    let fingerprint = match validate_staged_update(&pending, app_bundle) {
-        Ok(fingerprint) => fingerprint,
-        Err(error) => {
-            if pending.phase == StagedUpdatePhase::Applying {
-                if applying_recovery == Some(ApplyingRecoveryState::NotSwapped) {
-                    let verified_swap = pending.swap_app.clone();
-                    smelt_sys::app_log::error(
-                        "updater",
-                        &format!(
-                            "未交换的候选包 {} 无法通过恢复校验，已安全作废：{error:#}",
-                            pending.version
-                        ),
-                    );
-                    abandon_pending_update_locked(
-                        state_path,
-                        &mut state,
-                        &pending,
-                        app_bundle,
-                        verified_swap,
-                    )?;
-                    return Ok(None);
-                }
-                return Err(error)
-                    .context("the Applying update has no verifiable staged package; leaving the swap in place so the old version isn't deleted by mistake");
-            }
-            smelt_sys::app_log::error(
-                "updater",
-                &format!(
-                    "待安装更新 {} 无法通过恢复校验，已作废并允许重新下载：{error:#}",
-                    pending.version
-                ),
-            );
-            abandon_pending_update_locked(state_path, &mut state, &pending, app_bundle, None)?;
-            return Ok(None);
-        }
-    };
-    if pending.fingerprint.is_empty() {
-        pending.fingerprint = fingerprint;
-    }
-
-    if pending.phase == StagedUpdatePhase::Applying {
-        // 兼容旧状态缺少指纹、但暂存包仍完整的情况：补出指纹后再判定一次。
-        let recovery = match applying_recovery {
-            Some(recovery) => recovery,
-            None => classify_applying_recovery(&pending, app_bundle)?,
-        };
-        if recovery == ApplyingRecoveryState::Installed {
-            finish_recovered_update_locked(state_path, &mut state, &pending, app_bundle)?;
-            return Ok(None);
-        }
-        let swap = pending.swap_app.take().ok_or_else(|| {
-            anyhow::anyhow!("the swap directory disappeared after the NotSwapped check")
-        })?;
-        remove_registered_swap(app_bundle, &swap)?;
-    }
-
-    pending.phase = StagedUpdatePhase::Ready;
-    pending.swap_app = None;
-    // GUI 能进入恢复就说明旧 helper 没有持有独占 launch gate；遗留 attempt 必须视为
-    // 外部安装失败。旧 helper 不得复活，新 attempt 只能由用户显式重试创建。
-    pending.installer_failed |= pending.installer_attempt.is_some();
-    pending.installer_attempt = None;
-    state.staged = Some(pending.clone());
-    save_update_state_locked(state_path, &state)?;
-
-    Ok(Some(pending))
-}
-
-fn finalize_pending_update_for_attempt(
-    update_id: &str,
-    attempt_id: &str,
-    target_app: &Path,
-    _runtime_lease: &AppRuntimeLease,
-) -> anyhow::Result<FinalizeOutcome> {
-    let (update, attempt) = load_installer_attempt(update_id, attempt_id)?;
-    if attempt.target_app != target_app {
-        anyhow::bail!("the installer's target app doesn't match the saved attempt");
-    }
-    finalize_pending_update_at(&update, Some(attempt_id), target_app, |_| {
-        quiesce_app_target(target_app)?;
-        Ok(InstallPreparation::Proceed)
-    })
-}
-
-fn finalize_pending_update_at(
-    update: &StagedUpdate,
-    expected_attempt_id: Option<&str>,
-    app_bundle: &Path,
-    prepare: impl FnOnce(&Path) -> anyhow::Result<InstallPreparation>,
-) -> anyhow::Result<FinalizeOutcome> {
-    let _guard = acquire_update_lock()?;
-    let state_path = update_state_path()?;
-    let mut state = load_update_state_locked(&state_path)?;
-    let mut pending = state
-        .staged
-        .clone()
-        .filter(|current| same_update(current, update))
-        .ok_or_else(|| anyhow::anyhow!("the pending update was replaced by another update job"))?;
-    pending.normalize_legacy_metadata();
-    if pending.phase != StagedUpdatePhase::Ready {
-        anyhow::bail!("the update transaction isn't Ready; run recovery first");
-    }
-    if let Some(expected_attempt_id) = expected_attempt_id {
-        let _attempt = pending
-            .installer_attempt
-            .as_ref()
-            .filter(|attempt| attempt.id == expected_attempt_id && attempt.target_app == app_bundle)
-            .ok_or_else(|| anyhow::anyhow!("the installer attempt was revoked or replaced"))?;
-    }
-    // 旧 Bundle 可能仍被 managed 迁移前的 smeltd 引用。提交正确性不依赖旧包清理；
-    // 无法证明没有进程使用时必须保留，由独立 fail-closed GC 后续处理。
-    if state.cleanup_app.is_some() {
-        anyhow::bail!(
-            "the previous update's old app hasn't been safely reclaimed; refusing to start a new swap"
-        );
-    }
-    let fingerprint = match validate_staged_update(&pending, app_bundle) {
-        Ok(fingerprint) => fingerprint,
-        Err(error) => {
-            smelt_sys::app_log::error(
-                "updater",
-                &format!("待安装更新校验已失效，作废后重新下载：{error:#}"),
-            );
-            abandon_pending_update_locked(&state_path, &mut state, &pending, app_bundle, None)?;
-            return Ok(FinalizeOutcome::Invalidated);
-        }
-    };
-    if !pending.fingerprint.is_empty() && pending.fingerprint != fingerprint {
-        anyhow::bail!("the staged app's fingerprint doesn't match the saved record");
-    }
-    pending.fingerprint = fingerprint.clone();
-    pending.phase = StagedUpdatePhase::Ready;
-    pending.swap_app = None;
-    state.staged = Some(pending.clone());
-    save_update_state_locked(&state_path, &state)?;
-
-    let swap = swap_path(app_bundle, &pending.id)?;
-    remove_registered_swap(app_bundle, &swap)?;
-    if let Err(error) = copy_app_bundle(&pending.staged_app, &swap) {
-        let _ = remove_registered_swap(app_bundle, &swap);
-        return Err(error);
-    }
-    let copied_fingerprint = match validate_app_bundle_against(&swap, app_bundle) {
-        Ok(fingerprint) => fingerprint,
-        Err(error) => {
-            let _ = remove_registered_swap(app_bundle, &swap);
-            return Err(error)
-                .context("the app failed verification after copying to the install directory");
-        }
-    };
-    if copied_fingerprint != fingerprint {
-        let _ = remove_registered_swap(app_bundle, &swap);
-        anyhow::bail!("the app's fingerprint changed after copying to the install directory");
-    }
-
-    match prepare(&swap) {
-        Ok(InstallPreparation::Proceed) => {}
-        Ok(InstallPreparation::RetryLater) => {
-            remove_registered_swap(app_bundle, &swap)?;
-            return Ok(FinalizeOutcome::RetryLater);
-        }
-        Err(error) => {
-            let _ = remove_registered_swap(app_bundle, &swap);
-            return Err(error);
-        }
-    }
-
-    pending.phase = StagedUpdatePhase::Applying;
-    pending.swap_app = Some(swap.clone());
-    state.staged = Some(pending.clone());
-    if let Err(error) = save_update_state_locked(&state_path, &state) {
-        let _ = remove_registered_swap(app_bundle, &swap);
-        return Err(error);
-    }
-
-    if let Err(error) = swap_app_bundles(app_bundle, &swap) {
-        pending.phase = StagedUpdatePhase::Ready;
-        pending.swap_app = None;
-        state.staged = Some(pending);
-        if let Err(persist_error) = save_update_state_locked(&state_path, &state) {
-            // 磁盘仍是已持久化的 Applying + swap_app。保留候选目录作为恢复证据；
-            // 删除它会让下次启动无法判定交换边界。
-            return Err(error).context(format!(
-                "the atomic app swap failed, and restoring the Ready state failed too; left the swap in place: {persist_error:#}"
-            ));
-        }
-        let _ = remove_registered_swap(app_bundle, &swap);
-        return Err(error);
-    }
-
-    let previous_current_url = state.current_url.clone();
-    state.current_url = Some(pending.url.trim().to_string());
-    state.staged = None;
-    state.cleanup_app = Some(swap.clone());
-    if let Err(commit_error) = save_update_state_locked(&state_path, &state) {
-        if let Err(rollback_error) = swap_app_bundles(app_bundle, &swap) {
-            return Err(commit_error).context(format!(
-                "committing the update state failed, and the atomic app rollback failed too: {rollback_error:#}"
-            ));
-        }
-        pending.phase = StagedUpdatePhase::Ready;
-        pending.swap_app = None;
-        state.current_url = previous_current_url;
-        state.cleanup_app = None;
-        state.staged = Some(pending);
-        if let Err(persist_error) = save_update_state_locked(&state_path, &state) {
-            // 持久状态仍是 Applying，且 App 已回滚。保留 swap 候选，让启动恢复能证明
-            // NotSwapped；不能先删现场再留下一个不可解释的 Applying 快照。
-            return Err(commit_error).context(format!(
-                "the app was rolled back atomically, but restoring the Ready state failed; left the swap in place: {persist_error:#}"
-            ));
-        }
-        let _ = remove_registered_swap(app_bundle, &swap);
-        return Err(commit_error);
-    }
-
-    discard_update_artifacts(&pending);
-    Ok(FinalizeOutcome::Installed)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::swap_app_bundles;
     use super::{
-        ApplyingRecoveryState, BundleUseState, CheckOutcome, GithubRelease, InstalledRelease,
-        InstallerAttempt, StagedUpdate, StagedUpdatePhase, UpdateCandidate, UpdateFailure,
-        UpdateState, UpdateStatus, acquire_app_runtime_lease_at,
-        acquire_installer_runtime_lease_at, app_bundle_for_exe, app_fingerprint,
-        begin_staged_update_in_state, classify_applying_recovery, classify_bundle_use_output,
-        clear_installer_attempt_in_state, clear_preparing_update_in_state,
-        decide_staged_update_check, discard_staged_update_locked, installer_attempt_from_state,
-        is_valid_update_id, load_update_state_locked, promote_staged_update_in_state,
-        quiesce_app_target_with, reconcile_update_state_locked, record_installer_failure_in_state,
-        resolve_installed_release, safe_component, same_update, save_update_state_locked,
-        staged_update_to_replace, update_asset,
+        BundleUseState, GithubRelease, acquire_app_runtime_lease_at,
+        acquire_installer_runtime_lease_at, app_bundle_for_exe, classify_bundle_use_output,
+        ensure_bundle_version, is_swap_path, leftover_swaps, quiesce_app_target_with, remove_swap,
+        replace_app, swap_app_bundles, swap_path, update_asset,
     };
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    fn test_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "smelt-updater-{label}-{}",
+            uuid::Uuid::new_v4().simple()
+        ))
+    }
+
+    /// 只有一个标记文件的假 App，用来认出交换前后是哪一份。
+    fn marked_app(app: &Path, marker: &str) {
+        std::fs::create_dir_all(app).unwrap();
+        std::fs::write(app.join(marker), marker).unwrap();
+    }
 
     #[test]
     fn app_bundle_resolves_only_after_following_symlinks() {
@@ -2141,64 +1097,6 @@ mod tests {
         );
         assert!(failed.is_err());
         assert!(!probed.get());
-    }
-
-    /// 自更新记下 1031 之后手动装了 1102：认包里的地址，不认状态里的旧地址。
-    #[test]
-    fn bundled_url_wins_over_stale_state_url() {
-        let bundled = "https://example.test/v2026.1102.0/Smelt.app.zip";
-        let stale = "https://example.test/v2026.1031.0/Smelt.app.zip";
-        assert_eq!(
-            resolve_installed_release(Some(format!("{bundled}\n")), Some(stale.into())),
-            InstalledRelease::Url(bundled.into())
-        );
-    }
-
-    #[test]
-    fn state_url_is_fallback_when_bundle_has_none() {
-        let state = "https://example.test/current.zip";
-        for bundled in [None, Some("  \n".to_string())] {
-            assert_eq!(
-                resolve_installed_release(bundled, Some(state.into())),
-                InstalledRelease::Url(state.into())
-            );
-        }
-        assert_eq!(
-            resolve_installed_release(None, None),
-            InstalledRelease::Unknown
-        );
-    }
-
-    fn staged_update(id: &str) -> StagedUpdate {
-        StagedUpdate {
-            id: id.into(),
-            version: "0.6.15".into(),
-            url: "https://example.test/releases/35039".into(),
-            staged_app: PathBuf::from(format!("/tmp/Smelt-{id}.app")),
-            fingerprint: "abc123".into(),
-            phase: StagedUpdatePhase::Ready,
-            swap_app: None,
-            installer_attempt: None,
-            installer_failed: false,
-        }
-    }
-
-    fn test_root(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "smelt-updater-{label}-{}",
-            uuid::Uuid::new_v4().simple()
-        ))
-    }
-
-    fn fake_app(app: PathBuf, executable: &[u8]) -> PathBuf {
-        let bin = app.join("Contents/MacOS");
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("smelt"), executable).unwrap();
-        app
-    }
-
-    fn fake_current_app(root: &std::path::Path, executable: &[u8]) -> PathBuf {
-        fake_app(root.join("Smelt.app"), executable)
     }
 
     fn signed_test_app(root: &std::path::Path, bundle_id: &str) -> PathBuf {
@@ -2379,102 +1277,6 @@ mod tests {
     }
 
     #[test]
-    fn installer_ticket_is_bound_to_exact_ready_attempt() {
-        let mut pending = staged_update("update-one");
-        pending.installer_attempt = Some(InstallerAttempt {
-            id: "attempt-one".into(),
-            target_app: PathBuf::from("/Applications/Smelt.app"),
-            relaunch: true,
-            helper_dir: PathBuf::from("/tmp/attempt-one"),
-        });
-        let state = || UpdateState {
-            staged: Some(pending.clone()),
-            ..UpdateState::default()
-        };
-
-        assert!(installer_attempt_from_state(state(), "update-one", "attempt-one").is_ok());
-        assert!(installer_attempt_from_state(state(), "update-one", "attempt-old").is_err());
-        assert!(installer_attempt_from_state(state(), "update-old", "attempt-one").is_err());
-
-        let mut applying = state();
-        applying.staged.as_mut().unwrap().phase = StagedUpdatePhase::Applying;
-        assert!(installer_attempt_from_state(applying, "update-one", "attempt-one").is_err());
-    }
-
-    #[test]
-    fn installer_failure_is_bound_to_exact_attempt() {
-        let mut pending = staged_update("update-one");
-        pending.installer_attempt = Some(InstallerAttempt {
-            id: "attempt-new".into(),
-            target_app: PathBuf::from("/Applications/Smelt.app"),
-            relaunch: true,
-            helper_dir: PathBuf::from("/tmp/attempt-new"),
-        });
-        let mut state = UpdateState {
-            staged: Some(pending),
-            ..UpdateState::default()
-        };
-
-        assert!(!record_installer_failure_in_state(
-            &mut state,
-            "update-one",
-            "attempt-old"
-        ));
-        let pending = state.staged.as_ref().unwrap();
-        assert!(!pending.installer_failed);
-        assert_eq!(
-            pending.installer_attempt.as_ref().unwrap().id,
-            "attempt-new"
-        );
-
-        assert!(record_installer_failure_in_state(
-            &mut state,
-            "update-one",
-            "attempt-new"
-        ));
-        let pending = state.staged.as_ref().unwrap();
-        assert!(pending.installer_failed);
-        assert!(pending.installer_attempt.is_none());
-    }
-
-    #[test]
-    fn stale_helper_cannot_clear_a_new_attempt() {
-        let mut pending = staged_update("update-one");
-        pending.installer_attempt = Some(InstallerAttempt {
-            id: "attempt-new".into(),
-            target_app: PathBuf::from("/Applications/Smelt.app"),
-            relaunch: true,
-            helper_dir: PathBuf::from("/tmp/attempt-new"),
-        });
-        let mut state = UpdateState {
-            staged: Some(pending),
-            ..UpdateState::default()
-        };
-
-        assert!(!clear_installer_attempt_in_state(
-            &mut state,
-            "update-one",
-            "attempt-old"
-        ));
-        assert_eq!(
-            state
-                .staged
-                .as_ref()
-                .unwrap()
-                .installer_attempt
-                .as_ref()
-                .unwrap()
-                .id,
-            "attempt-new"
-        );
-        assert!(clear_installer_attempt_in_state(
-            &mut state,
-            "update-one",
-            "attempt-new"
-        ));
-        assert!(state.staged.unwrap().installer_attempt.is_none());
-    }
-    #[test]
     fn update_asset_is_the_app_zip_for_this_arch() {
         let release: GithubRelease = serde_json::from_str(
             r#"{"tag_name":"v0.9.0","assets":[
@@ -2496,303 +1298,11 @@ mod tests {
     }
 
     #[test]
-    fn staged_file_component_is_safe() {
-        assert_eq!(
-            safe_component("3q64A_0.6.14_202608101017"),
-            "3q64A_0.6.14_202608101017"
-        );
-        assert_eq!(safe_component("../../$(bad)"), "bad");
-        assert_eq!(safe_component("..."), "latest");
-        assert!(is_valid_update_id("legacy-abc123"));
-        assert!(!is_valid_update_id("../../other"));
-    }
-
-    /// 暂存记录要能完整跨进程存活：版本、URL、暂存 .app 路径、安装尝试一个都不能丢。
-    #[test]
-    fn staged_update_survives_the_client_store() {
-        let root = test_root("staged-roundtrip");
-        let path = root.join(smelt_client_store::DATABASE_FILE_NAME);
-        let mut staged = staged_update("job-a");
-        staged.phase = StagedUpdatePhase::Applying;
-        staged.swap_app = Some(PathBuf::from("/Applications/.Smelt.smelt-update-job-a.app"));
-        staged.installer_attempt = Some(InstallerAttempt {
-            id: "attempt-1".to_string(),
-            target_app: PathBuf::from("/Applications/Smelt.app"),
-            relaunch: true,
-            helper_dir: PathBuf::from("/tmp/helper"),
-        });
-        let state = UpdateState {
-            current_url: Some("https://example.test/a.zip".to_string()),
-            staged: Some(staged.clone()),
-            cleanup_app: Some(PathBuf::from("/Applications/.Smelt.old.app")),
-        };
-        save_update_state_locked(&path, &state).unwrap();
-        let back = load_update_state_locked(&path).unwrap();
-        assert_eq!(back.staged, Some(staged));
-        assert_eq!(back.current_url, state.current_url);
-        assert_eq!(back.cleanup_app, state.cleanup_app);
-    }
-
-    /// 暂存着包也能检查：更新源可能又发了更新的版本（#165）。
-    #[test]
-    fn staged_jobs_allow_a_new_manual_check() {
-        assert!(UpdateStatus::ReadyToInstall(staged_update("ready")).can_check());
-        assert!(UpdateStatus::InstallFailed(staged_update("failed")).can_check());
-        assert!(UpdateStatus::Idle.can_check());
-        assert!(UpdateStatus::Failed(UpdateFailure::Download).can_check());
-        assert!(!UpdateStatus::Failed(UpdateFailure::Recovery).can_check());
-        assert!(UpdateStatus::Failed(UpdateFailure::Recovery).can_retry_recovery());
-    }
-
-    #[test]
-    fn staged_update_check_keeps_the_same_release_but_replaces_a_changed_one() {
-        let staged = staged_update("ready");
-        let same = UpdateCandidate {
-            version: "0.6.15".into(),
-            url: staged.url.clone(),
-        };
-        assert_eq!(
-            decide_staged_update_check(
-                same,
-                &InstalledRelease::Url("https://example.test/releases/old".into()),
-                &staged,
-                true
-            ),
-            None
-        );
-
-        let replacement = UpdateCandidate {
-            version: "0.6.16".into(),
-            url: "https://example.test/releases/35040".into(),
-        };
-        assert_eq!(
-            decide_staged_update_check(
-                replacement.clone(),
-                &InstalledRelease::Url("https://example.test/releases/old".into()),
-                &staged,
-                true,
-            ),
-            Some(CheckOutcome::Download(replacement))
-        );
-
-        let rolled_back = UpdateCandidate {
-            version: "0.6.14".into(),
-            url: "https://example.test/releases/current".into(),
-        };
-        assert_eq!(
-            decide_staged_update_check(
-                rolled_back,
-                &InstalledRelease::Url("https://example.test/releases/current".into()),
-                &staged,
-                true,
-            ),
-            Some(CheckOutcome::NoUpdate)
-        );
-    }
-
-    #[test]
-    fn replacing_a_staged_job_never_clears_a_different_or_applying_transaction() {
-        let failed = staged_update("failed");
-        let mut state = UpdateState {
-            staged: Some(failed.clone()),
-            ..UpdateState::default()
-        };
-        assert_eq!(staged_update_to_replace(&state, &failed).unwrap(), failed);
-
-        let newer = staged_update("newer");
-        state.staged = Some(newer.clone());
-        assert!(staged_update_to_replace(&state, &failed).is_err());
-        assert_eq!(state.staged, Some(newer));
-
-        let mut applying = failed.clone();
-        applying.phase = StagedUpdatePhase::Applying;
-        applying.swap_app = Some(PathBuf::from(
-            "/Applications/.Smelt.smelt-update-failed.app",
-        ));
-        state.staged = Some(applying.clone());
-        assert!(staged_update_to_replace(&state, &failed).is_err());
-        assert_eq!(state.staged, Some(applying));
-    }
-
-    #[test]
-    fn replacing_a_staged_job_persists_the_clear_before_the_next_download() {
-        let root = test_root("replace-failed");
-        let app = fake_current_app(&root, b"current-version");
-        let state_path = root.join("update-state.json");
-        let failed = staged_update("failed");
-        let mut state = UpdateState {
-            current_url: Some("https://example.test/releases/current".into()),
-            staged: Some(failed.clone()),
-            cleanup_app: None,
-        };
-
-        discard_staged_update_locked(&state_path, &mut state, &failed, &app).unwrap();
-
-        assert!(state.staged.is_none());
-        let persisted = load_update_state_locked(&state_path).unwrap();
-        assert!(persisted.staged.is_none());
-        assert_eq!(persisted.current_url, state.current_url);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    /// 作废暂存作业不能冲掉还没回收的旧包登记，否则旧包就没人删了。
-    #[test]
-    fn discarding_a_staged_job_keeps_the_pending_cleanup() {
-        let root = test_root("discard-keeps-cleanup");
-        let app = fake_current_app(&root, b"current-version");
-        // 不在 App 同目录：清理会拒绝它，登记应原样留着。
-        let cleanup = root.join("elsewhere/.Smelt.smelt-update-old.app");
-        std::fs::create_dir_all(&cleanup).unwrap();
-        let state_path = root.join("update-state.json");
-        let ready = staged_update("ready");
-        let mut state = UpdateState {
-            current_url: None,
-            staged: Some(ready.clone()),
-            cleanup_app: Some(cleanup.clone()),
-        };
-
-        discard_staged_update_locked(&state_path, &mut state, &ready, &app).unwrap();
-
-        let persisted = load_update_state_locked(&state_path).unwrap();
-        assert!(persisted.staged.is_none());
-        assert_eq!(persisted.cleanup_app, Some(cleanup.clone()));
-        assert!(cleanup.is_dir());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    /// 暂存着 A（待安装）时更新源换成 B：A 挡着 B 下不下来，作废 A 之后 B 才能开始（#165）。
-    #[test]
-    fn discarding_a_ready_job_lets_the_newer_download_begin() {
-        let root = test_root("replace-ready");
-        let app = fake_current_app(&root, b"current-version");
-        let state_path = root.join("update-state.json");
-        let ready = staged_update("ready");
-        let mut state = UpdateState {
-            current_url: Some("https://example.test/releases/current".into()),
-            staged: Some(ready.clone()),
-            cleanup_app: None,
-        };
-        let mut newer = staged_update("newer");
-        newer.url = "https://example.test/releases/35040".into();
-        newer.phase = StagedUpdatePhase::Preparing;
-        newer.fingerprint.clear();
-        assert!(begin_staged_update_in_state(&mut state, &newer).is_err());
-
-        discard_staged_update_locked(&state_path, &mut state, &ready, &app).unwrap();
-        begin_staged_update_in_state(&mut state, &newer).unwrap();
-
-        assert_eq!(state.staged, Some(newer));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn update_identity_prevents_late_job_from_clearing_newer_one() {
-        let first = staged_update("first");
-        let second = staged_update("second");
-        let mut forged = first.clone();
-        forged.url = "https://example.test/releases/other".into();
-        assert!(same_update(&first, &first));
-        assert!(!same_update(&first, &second));
-        assert!(!same_update(&first, &forged));
-    }
-
-    #[test]
-    fn late_download_callbacks_cannot_regress_applying_transaction() {
-        let mut preparing = staged_update("monotonic");
-        preparing.phase = StagedUpdatePhase::Preparing;
-        preparing.fingerprint.clear();
-        let mut state = UpdateState::default();
-        begin_staged_update_in_state(&mut state, &preparing).unwrap();
-
-        let mut ready = preparing.clone();
-        ready.phase = StagedUpdatePhase::Ready;
-        ready.fingerprint = "sha256-tree-v1:ready".into();
-        promote_staged_update_in_state(&mut state, &ready).unwrap();
-
-        let mut applying = ready.clone();
-        applying.phase = StagedUpdatePhase::Applying;
-        applying.swap_app = Some(PathBuf::from(
-            "/Applications/.Smelt.smelt-update-monotonic.app",
-        ));
-        state.staged = Some(applying.clone());
-
-        assert!(promote_staged_update_in_state(&mut state, &ready).is_err());
-        assert!(!clear_preparing_update_in_state(&mut state, &preparing));
-        assert_eq!(state.staged, Some(applying));
-    }
-
-    #[test]
-    fn critical_update_state_write_reports_failure() {
-        let path = PathBuf::from("/dev/null/update-state.json");
-        let error = save_update_state_locked(&path, &UpdateState::default()).unwrap_err();
-        assert!(error.to_string().contains("couldn't save the update state"));
-    }
-
-    #[test]
-    fn unknown_phase_is_reported_instead_of_guessed() {
-        let root = test_root("corrupt-state");
-        let path = root.join(smelt_client_store::DATABASE_FILE_NAME);
-        let mut staged = staged_update("odd");
-        staged.phase = StagedUpdatePhase::Ready;
-        let mut record = UpdateState {
-            current_url: None,
-            staged: Some(staged),
-            cleanup_app: None,
-        }
-        .to_record();
-        record.staged.as_mut().unwrap().phase = "half-installed".to_string();
-        smelt_client_store::ClientStore::open(&path)
-            .unwrap()
-            .put_update_state(&record)
-            .unwrap();
-
-        let error = load_update_state_locked(&path)
-            .err()
-            .expect("认不出的阶段必须报错");
-        assert!(error.to_string().contains("couldn't read the update state"));
-    }
-
-    #[test]
-    fn bundle_fingerprint_covers_resources_not_just_main_executable() {
-        let root = test_root("bundle-fingerprint");
-        let app = fake_current_app(&root, b"same-main-binary");
-        let resources = app.join("Contents/Resources");
-        std::fs::create_dir_all(&resources).unwrap();
-        std::fs::write(resources.join("release"), b"first").unwrap();
-        let first = app_fingerprint(&app).unwrap();
-
-        std::fs::write(resources.join("release"), b"second").unwrap();
-        let second = app_fingerprint(&app).unwrap();
-
-        assert_ne!(first, second);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn bundle_fingerprint_is_independent_of_install_path() {
-        let root = test_root("bundle-fingerprint-path");
-        let first = fake_current_app(&root.join("first"), b"same-main-binary");
-        let second = fake_current_app(&root.join("second"), b"same-main-binary");
-        for app in [&first, &second] {
-            let resources = app.join("Contents/Resources");
-            std::fs::create_dir_all(&resources).unwrap();
-            std::fs::write(resources.join("release"), b"same-resource").unwrap();
-        }
-
-        assert_eq!(
-            app_fingerprint(&first).unwrap(),
-            app_fingerprint(&second).unwrap()
-        );
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn macos_bundle_validation_checks_identity_and_signed_resources() {
         let root = test_root("signed-bundle");
         let app = signed_test_app(&root.join("valid"), super::BUNDLE_ID);
 
-        let fingerprint = super::validate_app_bundle_against(&app, &app).unwrap();
-        assert!(fingerprint.starts_with(super::BUNDLE_FINGERPRINT_VERSION));
+        super::validate_app_bundle_against(&app, &app).unwrap();
 
         std::fs::write(app.join("Contents/Resources/release"), b"tampered-resource").unwrap();
         let signature_error = super::validate_app_bundle_against(&app, &app).unwrap_err();
@@ -2845,178 +1355,112 @@ mod tests {
     }
 
     #[test]
-    fn recovery_commits_completed_swap_even_when_staged_cache_is_missing() {
-        let root = test_root("commit-after-swap");
-        let app = fake_current_app(&root, b"new-version");
-        let swap = fake_app(
-            root.join(".Smelt.smelt-update-completed.app"),
-            b"old-version",
-        );
-        let state_path = root.join("update-state.json");
-        let mut pending = staged_update("completed");
-        pending.phase = StagedUpdatePhase::Applying;
-        pending.staged_app = root.join("already-removed.app");
-        pending.fingerprint = app_fingerprint(&app).unwrap();
-        pending.swap_app = Some(swap.clone());
-        let state = UpdateState {
-            current_url: Some("https://example.test/old".into()),
-            staged: Some(pending.clone()),
-            cleanup_app: None,
-        };
+    fn replace_app_swaps_in_the_new_app_and_removes_the_old_one() {
+        let root = test_root("replace");
+        let target = root.join("Smelt.app");
+        let swap = swap_path(&target, "t1").unwrap();
+        marked_app(&target, "old");
+        marked_app(&swap, "new");
 
-        let recovered = reconcile_update_state_locked(&state_path, state, &app).unwrap();
+        replace_app(&target, &swap, |_| Ok(())).unwrap();
 
-        assert!(recovered.is_none());
-        let state = load_update_state_locked(&state_path).unwrap();
-        assert_eq!(state.current_url.as_deref(), Some(pending.url.as_str()));
-        assert!(state.staged.is_none());
+        assert!(target.join("new").is_file());
+        assert!(!target.join("old").exists());
+        assert!(!swap.exists(), "换下来的旧 App 要删掉");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 停不下守护、还有进程在用旧 App：什么都不换，新 App 留在交换位置上由调用方删。
+    #[test]
+    fn replace_app_changes_nothing_when_the_app_cannot_be_quiesced() {
+        let root = test_root("replace-busy");
+        let target = root.join("Smelt.app");
+        let swap = swap_path(&target, "t1").unwrap();
+        marked_app(&target, "old");
+        marked_app(&swap, "new");
+
+        assert!(replace_app(&target, &swap, |_| anyhow::bail!("in use")).is_err());
+
+        assert!(target.join("old").is_file());
+        assert!(swap.join("new").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replace_app_installs_when_there_is_no_app_yet() {
+        let root = test_root("replace-fresh");
+        let target = root.join("Smelt.app");
+        let swap = swap_path(&target, "t1").unwrap();
+        marked_app(&swap, "new");
+
+        replace_app(&target, &swap, |_| panic!("没有旧 App，不用停守护")).unwrap();
+
+        assert!(target.join("new").is_file());
         assert!(!swap.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// 启动时只清 App 旁边的交换位置，别的东西一概不碰。
     #[test]
-    fn applying_recovery_only_removes_a_verified_unswapped_candidate() {
-        let root = test_root("classify-before-swap");
-        let app = fake_current_app(&root, b"old-version");
-        let swap = fake_app(
-            root.join(".Smelt.smelt-update-before-swap.app"),
-            b"new-version",
-        );
-        let mut pending = staged_update("before-swap");
-        pending.phase = StagedUpdatePhase::Applying;
-        pending.fingerprint = app_fingerprint(&swap).unwrap();
-        pending.swap_app = Some(swap.clone());
+    fn only_swap_paths_next_to_the_app_count_as_leftovers() {
+        let root = test_root("leftovers");
+        let target = root.join("Smelt.app");
+        let swap = swap_path(&target, "abc").unwrap();
+        marked_app(&target, "current");
+        marked_app(&swap, "old");
+        marked_app(&root.join("Other.app"), "other");
+        marked_app(&root.join(".Other.smelt-update-abc.app"), "other");
+        std::fs::write(root.join(".Smelt.smelt-update-abc.txt"), "x").unwrap();
 
-        assert_eq!(
-            classify_applying_recovery(&pending, &app).unwrap(),
-            ApplyingRecoveryState::NotSwapped
-        );
-        assert!(swap.is_dir());
+        assert_eq!(leftover_swaps(&target), vec![swap.clone()]);
+        assert!(!is_swap_path(&target, &target));
+        assert!(!is_swap_path(
+            &target,
+            &root.join("nested").join(".Smelt.smelt-update-abc.app")
+        ));
+        assert!(remove_swap(&target, &root.join("Other.app")).is_err());
+        assert!(root.join("Other.app").is_dir());
+
+        remove_swap(&target, &swap).unwrap();
+        assert!(!swap.exists());
+        remove_swap(&target, &swap).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn applying_recovery_tracks_the_atomic_exchange_boundary() {
-        let root = test_root("classify-atomic-swap");
-        let app = fake_current_app(&root, b"old-version");
-        let swap = fake_app(
-            root.join(".Smelt.smelt-update-atomic-boundary.app"),
-            b"new-version",
-        );
-        let mut pending = staged_update("atomic-boundary");
-        pending.phase = StagedUpdatePhase::Applying;
-        pending.fingerprint = app_fingerprint(&swap).unwrap();
-        pending.swap_app = Some(swap.clone());
-
+    fn swap_id_cannot_escape_the_app_directory() {
+        let target = Path::new("/Applications/Smelt.app");
         assert_eq!(
-            classify_applying_recovery(&pending, &app).unwrap(),
-            ApplyingRecoveryState::NotSwapped
+            swap_path(target, "abc123").unwrap(),
+            Path::new("/Applications/.Smelt.smelt-update-abc123.app")
         );
-        swap_app_bundles(&app, &swap).unwrap();
-        assert_eq!(
-            classify_applying_recovery(&pending, &app).unwrap(),
-            ApplyingRecoveryState::Installed
-        );
-        std::fs::remove_dir_all(root).unwrap();
+        assert!(swap_path(target, "../../evil").is_err());
+        assert!(swap_path(target, "").is_err());
     }
 
+    /// 包里的版本要和更新源说的是同一次发版：构建信息不同不要紧，版本号不同就是更新源写错了。
     #[test]
-    fn applying_recovery_preserves_both_apps_when_exchange_is_ambiguous() {
-        let root = test_root("ambiguous-swap");
-        let app = fake_current_app(&root, b"unexpected-current");
-        let swap = fake_app(
-            root.join(".Smelt.smelt-update-ambiguous.app"),
-            b"previous-version",
-        );
-        let candidate = fake_app(root.join("candidate.app"), b"expected-new-version");
-        let mut pending = staged_update("ambiguous");
-        pending.phase = StagedUpdatePhase::Applying;
-        pending.fingerprint = app_fingerprint(&candidate).unwrap();
-        pending.swap_app = Some(swap.clone());
+    fn package_version_must_match_the_update_source() {
+        let root = test_root("bundle-version");
+        let app = root.join("Smelt.app");
+        std::fs::create_dir_all(app.join("Contents")).unwrap();
+        std::fs::write(
+            app.join("Contents/Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleShortVersionString</key><string>2026.1102.0+g32c3172</string>
+</dict></plist>
+"#,
+        )
+        .unwrap();
+        let version = |text: &str| semver::Version::parse(text).unwrap();
 
-        let error = classify_applying_recovery(&pending, &app).unwrap_err();
-
-        assert!(error.to_string().contains("leaving everything in place"));
-        assert!(app.is_dir());
-        assert!(swap.is_dir());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn applying_recovery_preserves_swap_when_candidate_cannot_be_verified() {
-        let root = test_root("missing-applying-candidate");
-        let app = fake_current_app(&root, b"current-version");
-        let swap = fake_app(
-            root.join(".Smelt.smelt-update-missing-candidate.app"),
-            b"previous-version",
-        );
-        let state_path = root.join("update-state.json");
-        let mut pending = staged_update("missing-candidate");
-        pending.phase = StagedUpdatePhase::Applying;
-        pending.fingerprint.clear();
-        pending.staged_app = root.join("missing.app");
-        pending.swap_app = Some(swap.clone());
-        let state = UpdateState {
-            current_url: Some("https://example.test/current".into()),
-            staged: Some(pending),
-            cleanup_app: None,
-        };
-
-        let error = reconcile_update_state_locked(&state_path, state, &app).unwrap_err();
-
-        assert!(error.to_string().contains("the swap in place"));
-        assert!(app.is_dir());
-        assert!(swap.is_dir());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn recovery_discards_unverifiable_ready_job_instead_of_getting_stuck() {
-        let root = test_root("discard-invalid-ready");
-        let app = fake_current_app(&root, b"old-version");
-        let state_path = root.join("update-state.json");
-        let mut pending = staged_update("missing");
-        pending.staged_app = root.join("missing.app");
-        let state = UpdateState {
-            current_url: Some("https://example.test/current".into()),
-            staged: Some(pending),
-            cleanup_app: None,
-        };
-
-        let recovered = reconcile_update_state_locked(&state_path, state, &app).unwrap();
-
-        assert!(recovered.is_none());
-        let state = load_update_state_locked(&state_path).unwrap();
-        assert_eq!(
-            state.current_url.as_deref(),
-            Some("https://example.test/current")
-        );
-        assert!(state.staged.is_none());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn recovery_never_deletes_unregistered_cleanup_path() {
-        let root = test_root("reject-cleanup-path");
-        let app = fake_current_app(&root, b"current-version");
-        let unrelated = root.join("do-not-delete.app");
-        std::fs::create_dir_all(&unrelated).unwrap();
-        let state_path = root.join("update-state.json");
-        let state = UpdateState {
-            current_url: None,
-            staged: None,
-            cleanup_app: Some(unrelated.clone()),
-        };
-
-        save_update_state_locked(&state_path, &state).unwrap();
-        let recovered = reconcile_update_state_locked(&state_path, state, &app).unwrap();
-
-        assert!(recovered.is_none());
-        assert!(unrelated.is_dir());
-        assert_eq!(
-            load_update_state_locked(&state_path).unwrap().cleanup_app,
-            Some(unrelated)
-        );
+        ensure_bundle_version(&app, &version("2026.1102.0")).unwrap();
+        let error = ensure_bundle_version(&app, &version("2026.1103.0"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("2026.1103.0"), "{error}");
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -1,8 +1,25 @@
 // Pi 子智能体与后台任务入口：工具栏计数胶囊、弹层列表、以及查看单个子智能体过程的侧边抽屉。
-import { cleanup, computed, effect, Scroll, signal, Text, View } from "nsh";
-import { call, SmeltButton, SmeltIcon, SmeltMarkdown, SmeltPopover, theme } from "smelt/sdk";
+import { cleanup, computed, effect, List, Scroll, signal, Text, untracked, View } from "nsh";
+import {
+  blobUrl,
+  callWithBlobs,
+  mergeEntryWindow,
+  SmeltButton,
+  SmeltIcon,
+  SmeltMarkdown,
+  SmeltPopover,
+  theme,
+} from "smelt/sdk";
+import type { BlobAt, EntryWindow } from "smelt/sdk";
 import { ct } from "./i18n.ts";
-import { formatDuration, runningBackgroundTasks, runningSubagents } from "./model.js";
+import {
+  EMPTY_ENTRY_WINDOW,
+  formatDuration,
+  runningBackgroundTasks,
+  runningSubagents,
+  spliceEntries,
+  transcriptWindowOf,
+} from "./model.js";
 
 export function SubagentsControl(props: {
   subagents: () => any[];
@@ -176,6 +193,38 @@ export function BackgroundTasksControl(props: {
   );
 }
 
+/** 一页几条。 */
+const TRANSCRIPT_PAGE = 200;
+/** 子会话里的回答以 Blob 交来，只转交给 Markdown，不进插件的 JS 堆。 */
+const TRANSCRIPT_BLOBS: BlobAt[] = [{ at: "/entries", each: "/Assistant/text" }];
+
+/** 手里连续的一段子会话。`cursor` 是跟着跑那条线上次读到哪儿；老运行时不给，每次取最后一页。 */
+interface Transcript {
+  entries: any[];
+  window: EntryWindow;
+  cursor: number | null;
+}
+
+const EMPTY_TRANSCRIPT: Transcript = { entries: [], window: EMPTY_ENTRY_WINDOW, cursor: null };
+
+/** 把取回的一页按窗口规则（和对话同一份）拼进手里的。只有跟着跑的那条线推进 `cursor`。 */
+function mergeTranscript(current: Transcript, page: any, follows: boolean): Transcript {
+  const plan = mergeEntryWindow(current.window, transcriptWindowOf(page));
+  return {
+    entries: spliceEntries(current.entries, plan, Array.isArray(page?.entries) ? page.entries : []),
+    window: plan.window,
+    cursor: follows ? (typeof page?.cursor === "number" ? page.cursor : null) : current.cursor,
+  };
+}
+
+/** 正在看的远端子会话：同一时间只有一个跟着跑的请求在路上，期间又变了就等它回来再取一次。 */
+interface Follow {
+  id: string;
+  machine: string | null;
+  busy: boolean;
+  again: boolean;
+}
+
 export function SubagentDrawer(props: {
   inspected: () => { id: string; title: string } | null;
   entries: () => any[];
@@ -185,9 +234,8 @@ export function SubagentDrawer(props: {
   onClose: () => void;
 }) {
   const look = theme;
-  const remoteEntries = signal<any[]>([]);
-  const remoteOffset = signal(0);
-  const remoteLoading = signal(false);
+  const transcript = signal<Transcript>(EMPTY_TRANSCRIPT);
+  const loadingOlder = signal(false);
 
   const inlineEntries = computed(() => {
     const target = props.inspected();
@@ -202,6 +250,8 @@ export function SubagentDrawer(props: {
     }
     return [];
   });
+  // 只认有没有：`inlineEntries` 随父对话每一帧重算，跟着跑别因此重取。
+  const hasInline = computed(() => inlineEntries().length > 0);
 
   const liveRevision = computed(() => {
     const target = props.inspected();
@@ -210,65 +260,85 @@ export function SubagentDrawer(props: {
     return typeof match?.revision === "number" ? match.revision : 0;
   });
 
-  // Pi 子智能体有独立子会话文件，不挂在父 ToolCall.children，需通过 `subagent.transcript` RPC 拉取。
-  effect(() => {
-    const target = props.inspected();
-    const rev = liveRevision();
-    const machine = props.machine();
-    void rev;
-    if (!target) {
-      remoteEntries.set([]);
-      remoteOffset.set(0);
-      remoteLoading.set(false);
+  let follow: Follow | null = null;
+  cleanup(() => {
+    follow = null;
+  });
+
+  const fetchTranscript = (f: Follow, params: Record<string, unknown>) =>
+    callWithBlobs(
+      f.machine,
+      "subagent.transcript",
+      { subagent_id: f.id, limit: TRANSCRIPT_PAGE, ...params },
+      TRANSCRIPT_BLOBS,
+    );
+
+  // 跟着跑：打开时取最后一页，之后子会话每多一条消息带上次的 `cursor`，只取变了的。
+  const refresh = (f: Follow) => {
+    if (follow !== f) return;
+    if (f.busy) {
+      f.again = true;
       return;
     }
-    if (inlineEntries().length > 0) return;
-    let cancelled = false;
-    remoteLoading.set(true);
-    void call(machine, "subagent.transcript", {
-      subagent_id: target.id,
-      limit: 200,
-    })
-      .then((res: any) => {
-        if (cancelled) return;
-        remoteEntries.set(Array.isArray(res?.entries) ? res.entries : []);
-        remoteOffset.set(typeof res?.offset === "number" ? res.offset : 0);
-      })
-      .catch(() => {
-        if (!cancelled) remoteEntries.set([]);
-      })
+    f.busy = true;
+    const since = untracked(() => transcript().cursor);
+    void fetchTranscript(f, since == null ? {} : { since })
+      .then(
+        (page: any) => {
+          if (follow === f) transcript.set(mergeTranscript(untracked(transcript), page, true));
+        },
+        (error: unknown) => {
+          if (follow === f) console.error("[subagent] 读取子会话失败：", error);
+        },
+      )
       .finally(() => {
-        if (!cancelled) remoteLoading.set(false);
-      });
-    cleanup(() => {
-      cancelled = true;
-    });
-  });
-
-  const nestedEntries = computed(() => {
-    const inline = inlineEntries();
-    return inline.length > 0 ? inline : remoteEntries();
-  });
-
-  const loadOlderRemote = () => {
-    const target = props.inspected();
-    const before = remoteOffset();
-    if (!target || before <= 0 || remoteLoading()) return;
-    remoteLoading.set(true);
-    void call(props.machine(), "subagent.transcript", {
-      subagent_id: target.id,
-      before,
-      limit: 200,
-    })
-      .then((res: any) => {
-        const older = Array.isArray(res?.entries) ? res.entries : [];
-        if (older.length > 0) {
-          remoteEntries.set([...older, ...remoteEntries()]);
+        f.busy = false;
+        if (follow === f && f.again) {
+          f.again = false;
+          refresh(f);
         }
-        remoteOffset.set(typeof res?.offset === "number" ? res.offset : 0);
-      })
-      .catch(() => {})
-      .finally(() => remoteLoading.set(false));
+      });
+  };
+
+  // Pi 子智能体有独立子会话文件，不挂在父 ToolCall.children，经 `subagent.transcript` 取。
+  effect(() => {
+    const target = props.inspected();
+    const machine = props.machine();
+    liveRevision();
+    if (!target || hasInline()) {
+      follow = null;
+      transcript.set(EMPTY_TRANSCRIPT);
+      loadingOlder.set(false);
+      return;
+    }
+    if (follow?.id !== target.id || follow.machine !== machine) {
+      follow = { id: target.id, machine, busy: false, again: false };
+      transcript.set(EMPTY_TRANSCRIPT);
+      loadingOlder.set(false);
+    }
+    refresh(follow);
+  });
+
+  const nestedEntries = computed(() => (hasInline() ? inlineEntries() : transcript().entries));
+  const hasOlder = computed(() => !hasInline() && transcript().window.offset > 0);
+
+  const loadOlder = () => {
+    const f = follow;
+    const before = transcript().window.offset;
+    if (!f || before <= 0 || loadingOlder()) return;
+    loadingOlder.set(true);
+    void fetchTranscript(f, { before })
+      .then(
+        (page: any) => {
+          if (follow === f) transcript.set(mergeTranscript(transcript(), page, false));
+        },
+        (error: unknown) => {
+          if (follow === f) console.error("[subagent] 读取更早的子会话失败：", error);
+        },
+      )
+      .finally(() => {
+        if (follow === f) loadingOlder.set(false);
+      });
   };
 
   return (
@@ -310,54 +380,75 @@ export function SubagentDrawer(props: {
           </Text>
           <SmeltButton quiet small icon="icons/close.svg" onPress={props.onClose} />
         </View>
-        <Scroll style={{ flex: 1, minHeight: 0 }}>
-          <View style={{ padding: 12, gap: 10 }}>
-            <If when={inlineEntries().length === 0 && remoteOffset() > 0}>
+        <List
+          each={nestedEntries()}
+          keyExtractor={(_entry: any, ix: number) =>
+            `${props.inspected()?.id ?? ""}:${(hasInline() ? 0 : transcript().window.offset) + ix}`
+          }
+          initialScrollAtEnd
+          alignment="bottom"
+          maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 96 }}
+          estimatedItemSize={60}
+          onLoadMoreAtStart={loadOlder}
+          style={{ flex: 1, minHeight: 0 }}
+          contentStyle={{ padding: 12, gap: 10 }}
+          header={
+            <If when={hasOlder()}>
               <SmeltButton
                 quiet
                 small
-                loading={remoteLoading()}
+                loading={loadingOlder()}
                 label={ct("status.load_older")}
-                onPress={loadOlderRemote}
+                onPress={loadOlder}
               />
             </If>
-            <Each of={nestedEntries()}>
-              {(child) => (
-                <View style={{ gap: 4 }}>
-                  <If when={Boolean(child()?.Assistant)}>
-                    <SmeltMarkdown
-                      markdown={child().Assistant.text ?? ""}
-                      cwd={props.cwd()}
-                      machine={props.machine()}
-                      styles={
-                        child().Assistant.thought
-                          ? { root: { color: look().palette.muted, fontSize: look().type.text_xsmall.size } }
-                          : undefined
-                      }
-                    />
-                  </If>
-                  <If when={Boolean(child()?.ToolCall)}>
-                    <View
-                      style={{
-                        paddingHorizontal: 8,
-                        paddingVertical: 5,
-                        borderRadius: 6,
-                        backgroundColor: look().palette.bg,
-                        borderWidth: 1,
-                        borderColor: look().palette.hair,
-                      }}
-                    >
-                      <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.muted }}>
-                        {child().ToolCall.title}
-                      </Text>
-                    </View>
-                  </If>
-                </View>
-              )}
-            </Each>
-          </View>
-        </Scroll>
+          }
+        >
+          {(entry: () => any) => (
+            <SubagentEntry entry={entry()} cwd={props.cwd()} machine={props.machine()} />
+          )}
+        </List>
       </View>
     </If>
+  );
+}
+
+/** 子过程里的一条：回答交给 Markdown，工具只写标题。远端子会话的回答是 Blob，内嵌的是正文。 */
+function SubagentEntry(props: { entry: any; cwd: string | null; machine: string | null }) {
+  const look = theme;
+  const answer = () => props.entry?.Assistant;
+  const markdownUrl = blobUrl(() => (answer()?.text instanceof Blob ? answer().text : null));
+  return (
+    <View style={{ gap: 4 }}>
+      <If when={answer() != null}>
+        <SmeltMarkdown
+          markdown={typeof answer()?.text === "string" ? answer().text : undefined}
+          markdownUrl={markdownUrl()}
+          cwd={props.cwd}
+          machine={props.machine}
+          styles={
+            answer()?.thought
+              ? { root: { color: look().palette.muted, fontSize: look().type.text_xsmall.size } }
+              : undefined
+          }
+        />
+      </If>
+      <If when={props.entry?.ToolCall != null}>
+        <View
+          style={{
+            paddingHorizontal: 8,
+            paddingVertical: 5,
+            borderRadius: 6,
+            backgroundColor: look().palette.bg,
+            borderWidth: 1,
+            borderColor: look().palette.hair,
+          }}
+        >
+          <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.muted }}>
+            {props.entry.ToolCall.title}
+          </Text>
+        </View>
+      </If>
+    </View>
   );
 }

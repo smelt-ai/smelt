@@ -23,7 +23,6 @@ use smelt_plugin_api::{
         automation::{
             AutomationProblem, AutomationSchedule, AutomationTrigger, is_managed_workspace,
         },
-        chrono::DateTime,
         copilot_quota::format_amount,
         daemon_state::DaemonSessionState,
         entry_window::{self, EntryWindow},
@@ -34,8 +33,6 @@ use smelt_plugin_api::{
         provider_quota::ProviderQuotaData,
         quota_service::QuotaTarget,
         runtime_path::PathStyle,
-        session_handoff::{HandoffContext, HandoffPeer, build_handoff_prompt},
-        session_history::{SessionDetail, Turn, handoff_turns_from_history},
         workspace_directory::{self, WorkspaceAcp},
         workspace_override::{config_dir_env_var, split_env_assignment},
     },
@@ -311,8 +308,8 @@ impl Smelt {
         is_interrupt_marker(&text)
     }
 
-    /// 一处改动的增删行数 `[added, removed]`，和 `<SmeltDiffView>` 同一份按行比对。新建文件 `old_text` 传空串。
-    /// 参数名会原样进 `smelt/host.d.ts`，不能用 `new` 这类 JS 保留字。
+    /// 一处改动的增删行数 `[added, removed]`，和 `<SmeltDiffView>` 同一份按行比对。新建文件
+    /// `old_text` 传空串。参数名进生成的 `host.d.ts`，别用 `new` 这类 TS 保留字。
     pub fn diff_line_stats(old_text: String, new_text: String) -> Vec<usize> {
         let (added, removed) = diff_line_stats(&old_text, &new_text);
         vec![added, removed]
@@ -504,69 +501,6 @@ impl Smelt {
             })
             .collect();
         Ok(serde_json::Value::Array(profiles).to_string())
-    }
-
-    /// 按 `smelt-model` 同一份规则把历史会话轮次压成交接给目标 agent 的首条 prompt。
-    pub fn handoff_prompt(payload_json: String) -> Result<String, String> {
-        let payload: serde_json::Value = serde_json::from_str(&payload_json)
-            .map_err(|error| format!("handoff_prompt：JSON 不对：{error}"))?;
-        let source_agent = payload["source_agent"]
-            .as_str()
-            .and_then(ConversationAgentKind::from_id)
-            .ok_or_else(|| "handoff_prompt：缺合法 source_agent".to_owned())?;
-        let target_agent = payload["target_agent"]
-            .as_str()
-            .and_then(ConversationAgentKind::from_id)
-            .ok_or_else(|| "handoff_prompt：缺合法 target_agent".to_owned())?;
-        let source_profile_label = payload["source_profile_label"].as_str();
-        let target_profile_label = payload["target_profile_label"].as_str();
-        let source_title = payload["source_title"].as_str().unwrap_or_default();
-        let cwd = payload["cwd"].as_str();
-        let detail_val = &payload["detail"];
-        let model = detail_val["model"].as_str().map(str::to_owned);
-        let turns: Vec<Turn> = detail_val["turns"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .map(|turn| Turn {
-                        is_user: turn["is_user"].as_bool().unwrap_or(false),
-                        timestamp: turn["timestamp_ms"]
-                            .as_i64()
-                            .and_then(DateTime::from_timestamp_millis),
-                        text: turn["text"].as_str().unwrap_or_default().to_owned(),
-                        tools: turn["tools"]
-                            .as_array()
-                            .map(|items| {
-                                items
-                                    .iter()
-                                    .filter_map(serde_json::Value::as_str)
-                                    .map(str::to_owned)
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                        tool_paths: turn["tool_paths"]
-                            .as_array()
-                            .map(|items| {
-                                items
-                                    .iter()
-                                    .filter_map(serde_json::Value::as_str)
-                                    .map(str::to_owned)
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let detail = SessionDetail { turns, model };
-        Ok(build_handoff_prompt(&HandoffContext {
-            turns: handoff_turns_from_history(&detail),
-            source_title,
-            source: HandoffPeer::new(source_agent, source_profile_label),
-            target: HandoffPeer::new(target_agent, target_profile_label),
-            cwd,
-            source_model: detail.model,
-        }))
     }
 
     /// 结合那台机器的 `AgentHostSettings` 算出开始对话的 `WorkspaceAcp`（与 `smelt-model` 同源）。
@@ -1034,7 +968,7 @@ mod tests {
     }
 
     #[test]
-    fn file_link_catalog_and_handoff_match_model_rules() {
+    fn file_link_and_catalog_match_model_rules() {
         let parsed =
             Smelt::parse_file_link("posix".into(), "src/main.rs:42".into(), "/repo".into())
                 .unwrap()
@@ -1073,29 +1007,6 @@ mod tests {
                 .iter()
                 .any(|id| id == "claude")
         );
-
-        let prompt = Smelt::handoff_prompt(
-            serde_json::json!({
-                "source_agent": "grok",
-                "source_profile_label": null,
-                "source_title": "老会话",
-                "cwd": "/repo",
-                "target_agent": "claude",
-                "target_profile_label": null,
-                "detail": {
-                    "model": "grok-4.5",
-                    "turns": [
-                        { "is_user": true, "text": "接着干", "tools": [], "tool_paths": [] }
-                    ]
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-        assert!(prompt.contains("原会话由 Grok 进行"));
-        assert!(prompt.contains("现在由你（Claude Code）接手"));
-        assert!(prompt.contains("原会话使用的模型：grok-4.5"));
-        assert!(prompt.contains("接着干"));
     }
 
     #[test]

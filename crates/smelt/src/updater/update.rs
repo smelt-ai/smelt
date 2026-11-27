@@ -35,6 +35,9 @@ pub(crate) struct Updater {
     pub(crate) status: UpdateStatus,
     /// 每次开始安装加一，安装失败的回调对得上才改状态，旧的不覆盖新的。
     generation: u64,
+    /// 这一份是不是装好的、能被换掉的 Smelt（macOS 在 `.app` 里跑，Windows 是安装程序
+    /// 装的），启动时查一次。不是的话更新入口都停在「这个 Smelt 不能自动更新」。
+    self_updatable: bool,
     /// App 放的位置装不上更新（被系统转移、只读），启动时查一次。有问题时更新入口都停在
     /// 「需要先移到『应用程序』」。
     #[cfg(target_os = "macos")]
@@ -81,6 +84,7 @@ pub(crate) fn register(cx: &mut App) {
     let entity = cx.new(|_| Updater {
         status: UpdateStatus::default(),
         generation: 0,
+        self_updatable: updater::can_self_update(),
         #[cfg(target_os = "macos")]
         location_issue: None,
         #[cfg(target_os = "macos")]
@@ -113,7 +117,7 @@ pub(crate) fn register(cx: &mut App) {
     })
     .detach();
 
-    // 被系统转移、放在只读位置的 App 装不上更新：先提议移到「应用程序」，不恢复也不检查，
+    // 被系统转移、放在只读位置的 App 装不上更新：先提议移到「应用程序」，不清理也不检查，
     // 免得下载了还是装不上。移过去重开后才走正常流程。
     #[cfg(target_os = "macos")]
     if let Some(issue) = api::app_location::current_issue() {
@@ -127,16 +131,19 @@ pub(crate) fn register(cx: &mut App) {
             .detach();
         return;
     }
-    // 状态恢复、交换事务收敛和旧包清理由 updater 在同一把锁内完成；之后做常规静默检查，
-    // 恢复出的待安装作业由检查决定保留还是换成更新源上更新的包。Windows 不是安装程序装的
-    // （开发构建等）在检查时拦下，见 `blocked_by_app_location`。
-    entity.update(cx, |this, cx| this.recover_update_at_launch(true, cx));
+    // 先清掉上次更新留下的东西（没装的包、换下来的旧 App），再静默检查一次。不是装好的
+    // 那份（开发构建等）什么都不做：没有能换的 App，见 `blocked_from_updating`。
+    entity.update(cx, |this, cx| {
+        if !this.blocked_from_updating(cx) {
+            this.clean_up_and_check(cx);
+        }
+    });
 }
 
 impl Updater {
     /// 有新版本要处理：查到了、在下、待装、正在装。
     pub(crate) fn update_available(&self) -> bool {
-        self.status.staged_update().is_some()
+        self.status.ready_update().is_some()
             || matches!(
                 self.status,
                 UpdateStatus::Available { .. }
@@ -146,32 +153,28 @@ impl Updater {
             )
     }
 
-    /// App 放的位置装不上更新时，所有更新入口都停在「需要先移到『应用程序』」，不检查、
-    /// 不下载、不安装：在那儿每一步都白做，最后还是写不进去。
-    #[cfg(target_os = "macos")]
-    fn blocked_by_app_location(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.location_issue.is_none() {
+    /// 这一份 Smelt 换不掉时，所有更新入口都停在原因上，不检查、不下载、不安装：在那儿
+    /// 每一步都白做，最后还是装不上。放的位置不对（macOS 被系统转移、只读）先移到「应用
+    /// 程序」；不是装好的那份（开发构建、拷出来的 exe）不能自动更新。
+    fn blocked_from_updating(&mut self, cx: &mut Context<Self>) -> bool {
+        #[cfg(target_os = "macos")]
+        let failure = if self.location_issue.is_some() {
+            Some(UpdateFailure::Location)
+        } else {
+            (!self.self_updatable).then_some(UpdateFailure::NotInstalled)
+        };
+        #[cfg(windows)]
+        let failure = (!self.self_updatable).then_some(UpdateFailure::NotInstalled);
+        let Some(failure) = failure else {
             return false;
-        }
-        self.status = UpdateStatus::Failed(UpdateFailure::Location);
+        };
+        self.status = UpdateStatus::Failed(failure);
         cx.notify();
         true
     }
 
-    /// Windows 上不是安装程序装的（开发构建、拷出来的 exe）没有能覆盖的安装，所有更新
-    /// 入口都停在「这个 Smelt 不能自动更新」，不检查、不下载、不安装。
-    #[cfg(windows)]
-    fn blocked_by_app_location(&mut self, cx: &mut Context<Self>) -> bool {
-        if updater::installed_by_setup() {
-            return false;
-        }
-        self.status = UpdateStatus::Failed(UpdateFailure::NotInstalled);
-        cx.notify();
-        true
-    }
-
-    /// 换更新通道并马上检查一次。通道只决定之后从哪儿取包，不改当前包显示的版本；新通道
-    /// 指向别的包时照常按地址不同下载。进行中的更新锁着通道。
+    /// 换更新通道并马上检查一次。通道只决定之后从哪儿取包：新通道上的版本比装着的新才下载，
+    /// 旧的不装回去。进行中的更新锁着通道。
     pub(crate) fn set_channel(&mut self, channel: updater::UpdateChannel, cx: &mut Context<Self>) {
         if self.prefs.channel == channel || !self.status.can_check() {
             return;
@@ -187,11 +190,26 @@ impl Updater {
         cx.notify();
     }
 
-    /// 设置页的「检查更新」、命令「检查更新」：能查就查，恢复失败的先重试恢复。
+    /// 设置页的「检查更新」、命令「检查更新」：能查就查。
     pub(crate) fn request_check(&mut self, cx: &mut Context<Self>) {
-        if self.status.can_check() || self.status.can_retry_recovery() {
-            self.check_or_recover_update(false, cx);
+        if self.status.can_check() {
+            self.check_for_update(false, cx);
         }
+    }
+
+    /// 启动时：在后台清掉上次更新留下的东西，清完再静默检查。检查可能马上开始下载，下载
+    /// 用同一个缓存目录，所以要等清完。
+    fn clean_up_and_check(&mut self, cx: &mut Context<Self>) {
+        self.status = UpdateStatus::Checking;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            api::blocking::run(updater::clean_up_after_update).await;
+            let _ = this.update(cx, |this, cx| {
+                this.status = UpdateStatus::Idle;
+                this.check_for_update(true, cx);
+            });
+        })
+        .detach();
     }
 
     /// 「移到『应用程序』并重新打开」：拷过去、安排好等这个进程退出后从新位置重开，再退出。
@@ -244,84 +262,60 @@ impl Updater {
     ///
     /// 开着「自动下载安装」时发现新版本直接接上后台静默下载；关掉则停在 `Available`，只亮
     /// 出版本号等用户自己决定何时下载。检查本身两种情况下都照做。
+    ///
+    /// 有个下好的包等着装时，更新源还指着它就接着等，检查失败也回到等着装；更新源换了包就
+    /// 按新的走，旧包在下新包时清掉。没装成的包（`InstallFailed`）不留：可能就是包没了才没
+    /// 装成，检查结果说有新版就重新下。
     fn check_for_update(&mut self, silent: bool, cx: &mut Context<Self>) {
-        if self.blocked_by_app_location(cx) {
+        if self.blocked_from_updating(cx) {
             return;
         }
         if !self.status.can_check() {
             return;
         }
-        // 暂存着包（待安装或安装失败）时记下原状态：检查失败、或更新源仍指向它，都回到原状态。
-        let staged = self
-            .status
-            .staged_update()
-            .cloned()
-            .map(|update| (self.status.clone(), update));
+        let ready = match &self.status {
+            UpdateStatus::ReadyToInstall(update) => Some(update.clone()),
+            _ => None,
+        };
         self.status = UpdateStatus::Checking;
         let channel = self.prefs.channel;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            // 本机已装哪个发布要读包里的文件、拿更新锁读状态库，和查网络一样放后台。
             let result = async {
-                let installed = api::blocking::run(updater::installed_release).await?;
+                let installed = updater::installed_version()?;
                 let latest = api::blocking::spawn_tokio(updater::fetch_latest(channel))
                     .await
-                    .and_then(|r| r);
+                    .and_then(|r| r)?;
                 anyhow::Ok((installed, latest))
             }
             .await;
             let _ = this.update(cx, |this, cx| {
-                let (installed, result) = match result {
-                    Ok(checked) => checked,
-                    Err(error) => {
-                        api::app_log::error(
-                            "updater",
-                            &format!("读取本机更新状态失败，暂停检查：{error:#}"),
-                        );
-                        this.status = staged.map_or(
-                            UpdateStatus::Failed(UpdateFailure::Recovery),
-                            |(status, _)| status,
-                        );
-                        cx.notify();
-                        return;
-                    }
-                };
                 match result {
-                    Ok(candidate) => {
-                        // 读的是此刻的开关而不是发起检查时的：检查期间刚把自动更新关掉，
-                        // 就不该再被一个后台下载打脸。
-                        let auto_install = this.prefs.auto_install;
-                        if let Some((status, update)) = staged {
-                            match updater::decide_staged_update_check(
+                    Ok((installed, candidate)) => {
+                        if let Some(update) = ready
+                            && update.version == candidate.version
+                            && update.url == candidate.url
+                        {
+                            this.status = UpdateStatus::ReadyToInstall(update);
+                        } else {
+                            // 读的是此刻的开关而不是发起检查时的：检查期间刚把自动更新关掉，
+                            // 就不该再被一个后台下载打脸。
+                            let outcome = updater::decide_check_outcome(
                                 candidate,
                                 &installed,
-                                &update,
-                                auto_install,
-                            ) {
-                                Some(outcome) => {
-                                    this.replace_staged_update_after_check(
-                                        status, update, outcome, cx,
-                                    );
-                                }
-                                None => {
-                                    this.status = status;
-                                    cx.notify();
-                                }
-                            }
+                                this.prefs.auto_install,
+                            );
+                            this.apply_check_outcome(outcome, cx);
                             return;
                         }
-                        let outcome =
-                            updater::decide_check_outcome(candidate, &installed, auto_install);
-                        this.apply_check_outcome(outcome, cx);
-                        return;
                     }
                     Err(error) => {
                         api::app_log::error(
                             "updater",
                             &format!("检查 {channel:?} 更新失败：{error:#}"),
                         );
-                        this.status = if let Some((status, _)) = staged {
-                            status
+                        this.status = if let Some(update) = ready {
+                            UpdateStatus::ReadyToInstall(update)
                         } else if silent {
                             UpdateStatus::Idle
                         } else {
@@ -354,57 +348,6 @@ impl Updater {
         }
     }
 
-    /// 只在更新源已经指向另一份发布包后进入。`status` 是检查前的待安装或安装失败状态。
-    /// 作废旧作业放到后台线程，成功后才开始新下载，保证 begin_staged_update 永远不会撞上
-    /// 旧事务；作废失败就回到原状态。
-    fn replace_staged_update_after_check(
-        &mut self,
-        status: UpdateStatus,
-        update: updater::StagedUpdate,
-        outcome: updater::CheckOutcome,
-        cx: &mut Context<Self>,
-    ) {
-        cx.spawn(async move |this, cx| {
-            let update_for_work = update.clone();
-            let result =
-                api::blocking::run(move || updater::discard_staged_update(&update_for_work)).await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(()) => {
-                    api::app_log::info(
-                        "updater",
-                        &format!(
-                            "更新源已换掉暂存的包 {}，作废旧作业并继续检查结果",
-                            update.version
-                        ),
-                    );
-                    this.apply_check_outcome(outcome, cx);
-                }
-                Err(error) => {
-                    api::app_log::error(
-                        "updater",
-                        &format!("作废暂存的更新 {} 失败：{error:#}", update.version),
-                    );
-                    this.status = status;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// 恢复失败时先收敛原事务；暂存着包（待安装或安装失败）则由检查拉取更新源，确认发布
-    /// 地址变了才作废旧作业，不能绕过持久化事务直接另起下载。
-    fn check_or_recover_update(&mut self, silent: bool, cx: &mut Context<Self>) {
-        if self.blocked_by_app_location(cx) {
-            return;
-        }
-        if self.status.can_retry_recovery() {
-            self.recover_update_at_launch(silent, cx);
-        } else {
-            self.check_for_update(silent, cx);
-        }
-    }
-
     /// 后台静默下载新版并准备好（macOS 暂存 `.app`，Windows 校验安装程序），完成后置
     /// `ReadyToInstall`（不重启、不打断）。下载线程经 channel 往回推进度；发送端随下载结束
     /// 而放掉，收不到了就是下载收尾，再等任务拿最终结果。
@@ -413,7 +356,7 @@ impl Updater {
         candidate: updater::UpdateCandidate,
         cx: &mut Context<Self>,
     ) {
-        if self.blocked_by_app_location(cx) {
+        if self.blocked_from_updating(cx) {
             return;
         }
         let version = candidate.version;
@@ -470,44 +413,6 @@ impl Updater {
                     }
                 };
                 cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn recover_update_at_launch(&mut self, silent_check: bool, cx: &mut Context<Self>) {
-        self.status = UpdateStatus::Checking;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let result = api::blocking::run(updater::recover_pending_update).await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(Some(update)) => {
-                    api::app_log::info(
-                        "updater",
-                        &format!("恢复待安装更新 {}，等待用户显式重试", update.version),
-                    );
-                    // 安装程序持续失败不能变成「拉起旧 App → 自动退出 → 再失败」的循环：
-                    // 恢复只亮出待装的作业，用户明确点了才开始新的一次。
-                    this.status = if update.installer_failed() {
-                        UpdateStatus::InstallFailed(update)
-                    } else {
-                        UpdateStatus::ReadyToInstall(update)
-                    };
-                    // 暂存后更新源可能又发了新版：照样检查，换了包就作废这条再下新的。
-                    this.check_for_update(silent_check, cx);
-                }
-                Ok(None) => {
-                    this.status = UpdateStatus::Idle;
-                    this.check_for_update(silent_check, cx);
-                }
-                Err(error) => {
-                    api::app_log::error(
-                        "updater",
-                        &format!("恢复更新事务失败，暂停新更新作业：{error:#}"),
-                    );
-                    this.status = UpdateStatus::Failed(UpdateFailure::Recovery);
-                    cx.notify();
-                }
             });
         })
         .detach();
@@ -582,7 +487,7 @@ pub(crate) fn begin_ready_update_install(_window: &mut Window, cx: &mut App) {
     let Some(entity) = updater(cx) else {
         return;
     };
-    let blocked = entity.update(cx, |this, cx| this.blocked_by_app_location(cx));
+    let blocked = entity.update(cx, |this, cx| this.blocked_from_updating(cx));
     if blocked || entity.read(cx).status.ready_update().is_none() {
         return;
     }

@@ -132,7 +132,6 @@ jobs:
         env:
           # 前缀就够：临时钥匙串里只有这一张 Developer ID 证书，codesign 按前缀找到它。
           SMELT_CODESIGN_IDENTITY: "Developer ID Application"
-          SMELT_UPDATE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Smelt${{ matrix.suffix }}.app.zip
         run: make dist-build
 
       # 桌面自更新下载的是这个 zip（文件名按架构定，见 smelt-client 的 updater/macos.rs）。

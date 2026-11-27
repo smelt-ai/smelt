@@ -1,7 +1,7 @@
 //! 桌面客户端自己的库：`~/.smelt/client.sqlite3`。
 //!
-//! 放的是每台设备可以不同、不该交给运行时的东西（设计文档 D1）：外观、更新设置、
-//! 快捷键、工作台布局和页面路由、远程运行时的连接。插件的界面状态存在插件自己的库里
+//! 放的是每台设备可以不同、不该交给运行时的东西（设计文档 D1）：外观、快捷键、
+//! 工作台布局和页面路由、远程运行时的连接。插件的界面状态存在插件自己的库里
 //! （[`plugin_store`]）。运行时的数据在运行时自己的库里，GUI
 //! 只经协议读写。每样东西一张表、一个字段一列，表结构见 `schema.rs`。
 
@@ -63,12 +63,6 @@ pub struct AppearanceRecord {
     pub material: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UpdateSettingsRecord {
-    pub channel: String,
-    pub auto_install: bool,
-}
-
 /// 用户改过的一条快捷键。`command` 是命令 id（`<来源>/<名字>`）；`keystroke` 是 GPUI 的
 /// 按键写法（`cmd-k`），`None` 是用户把这条清掉了、不绑任何键。没有记录的命令用出厂键位。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,35 +84,6 @@ pub struct WorkspaceUiRecord {
 pub struct WorkspaceLayoutStateRecord {
     pub layout_id: String,
     pub state: String,
-}
-
-/// 在线更新的进度，强杀之后下次启动接着装。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct UpdateStateRecord {
-    pub current_url: Option<String>,
-    pub cleanup_app: Option<PathBuf>,
-    pub staged: Option<StagedUpdateRecord>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StagedUpdateRecord {
-    pub update_id: String,
-    pub version: String,
-    pub url: String,
-    pub staged_app: PathBuf,
-    pub fingerprint: String,
-    pub phase: String,
-    pub swap_app: Option<PathBuf>,
-    pub installer_attempt: Option<InstallerAttemptRecord>,
-    pub installer_failed: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InstallerAttemptRecord {
-    pub attempt_id: String,
-    pub target_app: PathBuf,
-    pub relaunch: bool,
-    pub helper_dir: PathBuf,
 }
 
 /// 一个远程运行时怎么连（设计文档 D6）。本机运行时总在，不存这里。
@@ -143,29 +108,6 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or_default()
-}
-
-/// 更新器状态里的路径。更新器只在 macOS 写这些列（设计文档 D4）。
-///
-/// Unix 上这就是 `OsStr` 的原始字节，和以前的 `OsStrExt::as_bytes` 相同，已经落库的
-/// 非 UTF-8 路径还能读回来。别的平台用同一套 `as_encoded_bytes`（WTF-8），不再引用
-/// Unix 的 `OsStrExt`。
-fn path_bytes(path: &Path) -> &[u8] {
-    path.as_os_str().as_encoded_bytes()
-}
-
-fn path_from(bytes: Vec<u8>) -> PathBuf {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStringExt as _;
-        return PathBuf::from(std::ffi::OsString::from_vec(bytes));
-    }
-    #[cfg(not(unix))]
-    {
-        // 更新器不在这些平台写列。迁移进来的 JSON 路径是 UTF-8；坏数据用替换符，
-        // 不把不可信字节交给 `from_encoded_bytes_unchecked`。
-        PathBuf::from(String::from_utf8_lossy(&bytes).into_owned())
-    }
 }
 
 fn sql(error: rusqlite::Error) -> String {
@@ -199,19 +141,6 @@ pub(crate) fn write_appearance(
         .map_err(sql)
 }
 
-pub(crate) fn write_update_settings(
-    connection: &Connection,
-    record: &UpdateSettingsRecord,
-) -> Result<(), String> {
-    connection
-        .execute(
-            "INSERT OR REPLACE INTO update_settings (id, channel, auto_install) VALUES (1, ?1, ?2)",
-            params![record.channel, record.auto_install],
-        )
-        .map(drop)
-        .map_err(sql)
-}
-
 pub(crate) fn write_workspace_ui(
     connection: &Connection,
     record: &WorkspaceUiRecord,
@@ -223,62 +152,6 @@ pub(crate) fn write_workspace_ui(
         )
         .map(drop)
         .map_err(sql)
-}
-
-pub(crate) fn write_update_state(
-    connection: &Connection,
-    record: &UpdateStateRecord,
-) -> Result<(), String> {
-    connection
-        .execute(
-            "INSERT OR REPLACE INTO update_state (id, current_url, cleanup_app) VALUES (1, ?1, ?2)",
-            params![
-                record.current_url,
-                record.cleanup_app.as_deref().map(path_bytes)
-            ],
-        )
-        .map_err(sql)?;
-    connection
-        .execute("DELETE FROM staged_update", [])
-        .map_err(sql)?;
-    connection
-        .execute("DELETE FROM installer_attempt", [])
-        .map_err(sql)?;
-    let Some(staged) = record.staged.as_ref() else {
-        return Ok(());
-    };
-    connection
-        .execute(
-            "INSERT INTO staged_update (id, update_id, version, url, staged_app, fingerprint, phase,
-               swap_app, installer_failed)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                staged.update_id,
-                staged.version,
-                staged.url,
-                path_bytes(&staged.staged_app),
-                staged.fingerprint,
-                staged.phase,
-                staged.swap_app.as_deref().map(path_bytes),
-                staged.installer_failed
-            ],
-        )
-        .map_err(sql)?;
-    if let Some(attempt) = staged.installer_attempt.as_ref() {
-        connection
-            .execute(
-                "INSERT INTO installer_attempt (id, attempt_id, target_app, relaunch, helper_dir)
-                 VALUES (1, ?1, ?2, ?3, ?4)",
-                params![
-                    attempt.attempt_id,
-                    path_bytes(&attempt.target_app),
-                    attempt.relaunch,
-                    path_bytes(&attempt.helper_dir)
-                ],
-            )
-            .map_err(sql)?;
-    }
-    Ok(())
 }
 
 pub(crate) fn write_runtime_migrated(connection: &Connection) -> Result<(), String> {
@@ -379,33 +252,6 @@ impl ClientStore {
     }
 
     #[track_caller]
-    pub fn update_settings(&self) -> Result<Option<UpdateSettingsRecord>, ClientStoreError> {
-        self.with(|connection| {
-            connection
-                .query_row(
-                    "SELECT channel, auto_install FROM update_settings WHERE id = 1",
-                    [],
-                    |row| {
-                        Ok(UpdateSettingsRecord {
-                            channel: row.get(0)?,
-                            auto_install: row.get(1)?,
-                        })
-                    },
-                )
-                .optional()
-                .map_err(sql)
-        })
-    }
-
-    #[track_caller]
-    pub fn put_update_settings(
-        &self,
-        record: &UpdateSettingsRecord,
-    ) -> Result<(), ClientStoreError> {
-        self.write(|connection| write_update_settings(connection, record))
-    }
-
-    #[track_caller]
     pub fn workspace_ui(&self) -> Result<Option<WorkspaceUiRecord>, ClientStoreError> {
         self.with(|connection| {
             connection
@@ -477,78 +323,6 @@ impl ClientStore {
                 .map(drop)
                 .map_err(sql)
         })
-    }
-
-    #[track_caller]
-    pub fn update_state(&self) -> Result<UpdateStateRecord, ClientStoreError> {
-        self.with(|connection| {
-            let (current_url, cleanup_app) = connection
-                .query_row(
-                    "SELECT current_url, cleanup_app FROM update_state WHERE id = 1",
-                    [],
-                    |row| {
-                        Ok((
-                            row.get::<_, Option<String>>(0)?,
-                            row.get::<_, Option<Vec<u8>>>(1)?,
-                        ))
-                    },
-                )
-                .optional()
-                .map_err(sql)?
-                .unwrap_or_default();
-            let attempt = connection
-                .query_row(
-                    "SELECT attempt_id, target_app, relaunch, helper_dir
-                     FROM installer_attempt WHERE id = 1",
-                    [],
-                    |row| {
-                        Ok(InstallerAttemptRecord {
-                            attempt_id: row.get(0)?,
-                            target_app: path_from(row.get(1)?),
-                            relaunch: row.get(2)?,
-                            helper_dir: path_from(row.get(3)?),
-                        })
-                    },
-                )
-                .optional()
-                .map_err(sql)?;
-            let staged = connection
-                .query_row(
-                    "SELECT update_id, version, url, staged_app, fingerprint, phase, swap_app,
-                       installer_failed
-                     FROM staged_update WHERE id = 1",
-                    [],
-                    |row| {
-                        Ok(StagedUpdateRecord {
-                            update_id: row.get(0)?,
-                            version: row.get(1)?,
-                            url: row.get(2)?,
-                            staged_app: path_from(row.get(3)?),
-                            fingerprint: row.get(4)?,
-                            phase: row.get(5)?,
-                            swap_app: row.get::<_, Option<Vec<u8>>>(6)?.map(path_from),
-                            installer_attempt: None,
-                            installer_failed: row.get(7)?,
-                        })
-                    },
-                )
-                .optional()
-                .map_err(sql)?
-                .map(|staged| StagedUpdateRecord {
-                    installer_attempt: attempt,
-                    ..staged
-                });
-            Ok(UpdateStateRecord {
-                current_url,
-                cleanup_app: cleanup_app.map(path_from),
-                staged,
-            })
-        })
-    }
-
-    #[track_caller]
-    pub fn put_update_state(&self, record: &UpdateStateRecord) -> Result<(), ClientStoreError> {
-        self.write(|connection| write_update_state(connection, record))
     }
 
     /// 旧版本留在运行时库里的客户端数据是否已经取回过（只做一次）。

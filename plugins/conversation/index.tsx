@@ -38,6 +38,7 @@ import {
   buildDisplayRows,
   confirmedConfigValue,
   consumeComposerRestore,
+  createBottomStickController,
   EMPTY_ENTRY_WINDOW,
   entryUserText,
   entryWindowOf,
@@ -222,17 +223,6 @@ export function SmeltConversation(props: SmeltConversationProps) {
   let backfilledAt: number | null = null;
   let lastRejectedNoticeId: number | null = null;
   let lastInitialPromptText: string | null = null;
-  let pendingSendScrollRowCount: number | null = null;
-  let pendingSendScrollTimer: ReturnType<typeof setTimeout> | null = null;
-
-  const clearPendingSendScroll = () => {
-    pendingSendScrollRowCount = null;
-    if (pendingSendScrollTimer != null) {
-      clearTimeout(pendingSendScrollTimer);
-      pendingSendScrollTimer = null;
-    }
-  };
-  cleanup(clearPendingSendScroll);
 
   const agentId = computed(() => {
     const dir = props.directoryAcp;
@@ -537,6 +527,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
       imagePreviewCopied.set(false);
       pinnedPrompt.set(null);
       readingGlobalIndex.set(null);
+      bottomStick.cancel();
       atLatest.set(true);
       loadingOlder.set(false);
       lastRestoreRev = 0;
@@ -777,24 +768,22 @@ export function SmeltConversation(props: SmeltConversationProps) {
     }
   };
 
-  /** 用户主动发消息后立刻滚到底部，并在新气泡落地时再贴一次底，确保重新吸附流式输出。 */
+  const bottomStick = createBottomStickController({
+    scrollToEnd: (opts: { animated?: boolean }) => listApi?.scrollToEnd?.(opts),
+    setAtLatest: updateAtLatest,
+  });
+  cleanup(bottomStick.cancel);
+
+  /** 用户主动发消息后立刻无动画跳到底，并在新气泡/回复落地后的布局帧持续补贴底。 */
   const scrollToBottomAfterSend = () => {
-    clearPendingSendScroll();
-    pendingSendScrollRowCount = displayRows().length;
-    listApi?.scrollToEnd?.({ animated: true });
-    updateAtLatest(true);
-    pendingSendScrollTimer = setTimeout(clearPendingSendScroll, 2000);
+    bottomStick.trigger({ animated: false });
   };
 
   effect(() => {
-    const count = displayRows().length;
-    if (pendingSendScrollRowCount != null && count > pendingSendScrollRowCount) {
-      clearPendingSendScroll();
-      queueMicrotask(() => {
-        listApi?.scrollToEnd?.({ animated: false });
-        updateAtLatest(true);
-      });
-    }
+    // 订阅行数与流式文本变化：仅在发送后贴底窗口激活时经 rAF 合并补贴底。
+    displayRows().length;
+    streamingText().length;
+    bottomStick.onContentGrew();
   });
 
   const handleViewableRange = (firstRowIdx: number, _lastRowIdx: number) => {
@@ -1092,7 +1081,9 @@ export function SmeltConversation(props: SmeltConversationProps) {
                 }}
                 onLoadOlder={() => void handleLoadOlder()}
                 onViewableRange={handleViewableRange}
-                onScrollAtLatestChange={updateAtLatest}
+                onScrollAtLatestChange={(nearEnd) => bottomStick.onViewableAtLatest(nearEnd)}
+                onUserScroll={() => bottomStick.cancel()}
+                onJumpToLatest={() => bottomStick.trigger({ animated: !turnActive() })}
                 onToggleTurnFold={(key) => {
                   const next = new Set(expandedTurnFolds());
                   if (!next.delete(key)) next.add(key);
@@ -1145,10 +1136,12 @@ export function SmeltConversation(props: SmeltConversationProps) {
           prompts={promptItems}
           readingGlobalIndex={readingGlobalIndex}
           onJump={(item) => {
+            bottomStick.cancel();
             readingGlobalIndex.set(item.globalIndex);
             listApi?.scrollToIndex?.({ index: item.rowIndex, animated: true });
           }}
           onScrub={(item) => {
+            bottomStick.cancel();
             readingGlobalIndex.set(item.globalIndex);
             listApi?.scrollToIndex?.({ index: item.rowIndex, animated: false });
           }}

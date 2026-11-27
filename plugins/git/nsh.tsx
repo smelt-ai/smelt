@@ -16,6 +16,7 @@ import {
   activeContext,
   bootTask,
   call,
+  callWithBlobs,
   clipboardWrite,
   currentTheme,
   DIALOG_SURFACE_CLASS,
@@ -56,10 +57,11 @@ import {
   clearConfirmedGitIndexOps,
   commitButtonBusyKey,
   commitGraphRowSvg,
+  diffEntryFor,
   diffFeedbackText,
-  diffParseFailure,
-  diffScrollTarget,
+  diffLeftOutReason,
   formatCommitTime,
+  formatSize,
   fullFilePath,
   GIT_AUTOFETCH_INTERVAL_MS,
   gitAutofetchWait,
@@ -70,14 +72,11 @@ import {
   gitStatusRetryDelay,
   GRAPH_ROW_H,
   graphWidth,
-  hunkPatch,
   layoutGraph,
   LOG_LIMIT,
-  mapJoinedLineToFile,
   MAX_TREE_WIDTH,
   MIN_TREE_WIDTH,
   needsFetch,
-  parseUnifiedPatch,
   projectKey,
   pullRequestLink,
   releaseGitWrite,
@@ -150,15 +149,23 @@ interface CommitNode {
 
 interface GitDiffState {
   root: ProjectRef;
+  /** 单文件视图的文件；汇总视图为空。 */
   path: string;
+  oldPath: string | null;
+  untracked: boolean;
   aggregate: boolean;
+  scope: DiffScope;
+  /** 回复到了（成功或失败）。 */
+  loaded: boolean;
+  /** 补丁 Blob 的地址，正文不进插件的堆；没有可显示的为 null。换状态时放掉（`setGitDiff`）。 */
+  patchUrl: string | null;
+  /** 代替补丁的一句话：无差异、太大、出错。 */
+  message: string | null;
+  /** 汇总视图的改动列表（`in_patch` 的在补丁里，其余单独打开）。 */
+  entries: any[];
   worktreeFile: string | null;
   patchable: boolean;
-  scope: DiffScope;
   hasStaged: boolean;
-  patch: string | null;
-  parsed: ReturnType<typeof parseUnifiedPatch> | null;
-  parseError: string | null;
 }
 
 interface DangerDialogState {
@@ -208,8 +215,9 @@ const logSelectedHash = signal<string | null>(null);
 const logDetailFiles = signal<Array<[string, string]>>([]);
 const logDetailLoading = signal<boolean>(false);
 const logDetailFile = signal<string | null>(null);
-const logDetailPatch = signal<string | null>(null);
-const logDetailError = signal<string | null>(null);
+// 提交里那个文件的补丁 Blob 地址，或代替它的一句话；都为 null 时在读取。
+const logDetailUrl = signal<string | null>(null);
+const logDetailMessage = signal<string | null>(null);
 let logLoadedRootKey: string | null = null;
 
 // 版本信号：驱动依赖 Map/Set 的 computed 重算
@@ -919,8 +927,54 @@ function clearComment() {
 function resetDiffView() {
   diffGen += 1;
   pendingDiffFile = null;
-  gitDiff.set(null);
+  setGitDiff(null);
   clearComment();
+}
+
+/** 换掉当前的 diff 状态，放掉旧状态的补丁 Blob。停放起来的状态（切项目）不经这里。 */
+function setGitDiff(next: GitDiffState | null) {
+  const old = gitDiff()?.patchUrl;
+  if (old && old !== next?.patchUrl) URL.revokeObjectURL(old);
+  gitDiff.set(next);
+}
+
+function diffState(
+  repo: ProjectRef,
+  path: string,
+  aggregate: boolean,
+  scope: DiffScope,
+  rest: Partial<GitDiffState> = {},
+): GitDiffState {
+  return {
+    root: repo,
+    path,
+    oldPath: null,
+    untracked: false,
+    aggregate,
+    scope,
+    loaded: false,
+    patchUrl: null,
+    message: null,
+    entries: [],
+    worktreeFile: null,
+    patchable: false,
+    hasStaged: false,
+    ...rest,
+  };
+}
+
+/** 有内容的 Blob 换成地址交给 DiffView，空的为 null。 */
+function blobUrl(blob: any): string | null {
+  return blob instanceof Blob && blob.size > 0 ? URL.createObjectURL(blob) : null;
+}
+
+/** 一个 `GitDiffText`（正文以 Blob 交来）：要显示的补丁地址，或代替它的一句话。 */
+function diffShown(diff: any, empty: string): { url: string | null; message: string | null } {
+  if (diff?.kind === "too_large") {
+    return { url: null, message: t("diff.too_large", { size: formatSize(diff.size) }) };
+  }
+  const url = blobUrl(diff?.text);
+  return { url, message: url ? null : empty };
 }
 
 function hunkOpsFor(diff: GitDiffState | null): HunkOps {
@@ -930,62 +984,46 @@ function hunkOpsFor(diff: GitDiffState | null): HunkOps {
   return !diff.hasStaged ? "stage_discard" : "none";
 }
 
-function openDiff(repo: ProjectRef, path: string, untracked: boolean) {
+function openDiff(repo: ProjectRef, path: string, untracked: boolean, oldPath: string | null = null) {
   setActiveRepo(repo);
   const scope = diffScope();
   pendingDiffFile = null;
   const gen = ++diffGen;
   clearComment();
   gitTab.set("changes");
-  gitDiff.set({
-    root: repo,
-    path,
-    aggregate: false,
-    worktreeFile: null,
-    patchable: false,
-    scope,
-    hasStaged: false,
-    patch: null,
-    parsed: null,
-    parseError: null,
-  });
+  const file = { oldPath, untracked };
+  setGitDiff(diffState(repo, path, false, scope, file));
 
-  void call(repo.machine, "git.diff.file", { root: repo.root, path, untracked, scope })
+  void callWithBlobs(
+    repo.machine,
+    "git.diff.file",
+    { root: repo.root, path, old_path: oldPath, untracked, scope },
+    ["/diff/text"],
+  )
     .then((res: any) => {
       if (gen !== diffGen) return;
-      const raw = String(res?.text ?? "");
-      const parsed = parseUnifiedPatch(raw);
-      const err = diffParseFailure(raw, t("diff.empty"));
-      const patchable = !untracked && !res?.is_gitlink && parsed.header.length > 0;
-      gitDiff.set({
-        root: repo,
-        path,
-        aggregate: false,
-        worktreeFile: typeof res?.worktree_file === "string" ? res.worktree_file : null,
-        patchable,
-        scope,
-        hasStaged: Boolean(res?.has_staged),
-        patch: raw,
-        parsed,
-        parseError: err,
-      });
+      const shown = diffShown(res?.diff, t("diff.empty"));
+      setGitDiff(
+        diffState(repo, path, false, scope, {
+          ...file,
+          loaded: true,
+          patchUrl: shown.url,
+          message: shown.message,
+          worktreeFile: typeof res?.worktree_file === "string" ? res.worktree_file : null,
+          patchable: !untracked && !res?.is_gitlink && shown.url != null,
+          hasStaged: Boolean(res?.has_staged),
+        }),
+      );
     })
     .catch((err: any) => {
       if (gen !== diffGen) return;
-      const msg = t("diff.run_failed", { error: err?.message ?? String(err) });
-      gitDiff.set({
-        root: repo,
-        path,
-        aggregate: false,
-        worktreeFile: null,
-        patchable: false,
-        scope,
-        hasStaged: false,
-        patch: msg,
-        parsed: null,
-        parseError: msg,
-      });
+      const message = t("diff.run_failed", { error: err?.message ?? String(err) });
+      setGitDiff(diffState(repo, path, false, scope, { ...file, loaded: true, message }));
     });
+}
+
+function openEntryAlone(repo: ProjectRef, entry: any) {
+  openDiff(repo, entry.path, entry.status === "untracked", entry.old_path ?? null);
 }
 
 function openAllDiffs(repo: ProjectRef, keepPending = false) {
@@ -999,58 +1037,32 @@ function openAllDiffs(repo: ProjectRef, keepPending = false) {
       : [];
   const gen = ++diffGen;
   clearComment();
-  gitDiff.set({
-    root: repo,
-    path: "",
-    aggregate: true,
-    worktreeFile: null,
-    patchable: false,
-    scope,
-    hasStaged: false,
-    patch: null,
-    parsed: null,
-    parseError: null,
-  });
+  setGitDiff(diffState(repo, "", true, scope));
 
-  void call(repo.machine, "git.diff.all", {
-    root: repo.root,
-    scope,
-    untracked_paths: untrackedPaths,
-  })
+  void callWithBlobs(
+    repo.machine,
+    "git.diff.files",
+    { root: repo.root, scope, untracked_paths: untrackedPaths },
+    ["/patch"],
+  )
     .then((res: any) => {
       if (gen !== diffGen) return;
-      const raw = String(res?.text ?? "");
-      const parsed = parseUnifiedPatch(raw, { includeRaw: false });
-      const err = diffParseFailure(raw, t("diff.empty"));
-      gitDiff.set({
-        root: repo,
-        path: "",
-        aggregate: true,
-        worktreeFile: null,
-        patchable: false,
-        scope,
-        hasStaged: false,
-        patch: raw,
-        parsed,
-        parseError: err,
-      });
+      const entries: any[] = Array.isArray(res?.files) ? res.files : [];
+      const patchUrl = blobUrl(res?.patch);
+      setGitDiff(
+        diffState(repo, "", true, scope, {
+          loaded: true,
+          patchUrl,
+          entries,
+          message: patchUrl || entries.length > 0 ? null : t("diff.empty"),
+        }),
+      );
       queueMicrotask(() => flushPendingDiffFile());
     })
     .catch((err: any) => {
       if (gen !== diffGen) return;
-      const msg = t("diff.run_failed", { error: err?.message ?? String(err) });
-      gitDiff.set({
-        root: repo,
-        path: "",
-        aggregate: true,
-        worktreeFile: null,
-        patchable: false,
-        scope,
-        hasStaged: false,
-        patch: msg,
-        parsed: null,
-        parseError: msg,
-      });
+      const message = t("diff.run_failed", { error: err?.message ?? String(err) });
+      setGitDiff(diffState(repo, "", true, scope, { loaded: true, message }));
     });
 }
 
@@ -1063,45 +1075,41 @@ function openAggregateFile(repo: ProjectRef, path: string) {
   pendingDiffFile = path;
   const cur = gitDiff();
   const sameScope = cur && sameProject(cur.root, repo) && cur.aggregate && cur.scope === diffScope();
-  const hasInPatch =
-    sameScope &&
-    cur.patch != null &&
-    diffScrollTarget(cur.parsed?.files ?? [], path) != null;
-  const loading = sameScope && cur.patch == null;
+  const listed = sameScope && cur.loaded && diffEntryFor(cur.entries, path) != null;
+  const loading = sameScope && !cur.loaded;
 
-  if (!hasInPatch && !loading) {
+  if (!listed && !loading) {
     openAllDiffs(repo, true);
   }
   flushPendingDiffFile();
 }
 
+/** 汇总视图到了以后跳到点过的文件：在补丁里的滚过去，不在的单独打开。 */
 function flushPendingDiffFile() {
-  if (!pendingDiffFile || !changesDiffApi) return;
   const cur = gitDiff();
-  if (!cur || cur.patch == null || cur.parseError) return;
-  const files = changesDiffApi.files?.() ?? cur.parsed?.files ?? [];
-  const target = diffScrollTarget(files, pendingDiffFile);
-  if (!target) return;
-  collapsedDiffFiles.delete(target);
-  try {
-    changesDiffApi.expandFile?.(target);
-    changesDiffApi.scrollToFile?.(target);
-  } catch {
-    // 忽略
+  if (!pendingDiffFile || !cur || !cur.aggregate || !cur.loaded) return;
+  const entry = diffEntryFor(cur.entries, pendingDiffFile);
+  if (!entry) return;
+  if (!entry.in_patch) {
+    openEntryAlone(cur.root, entry);
+    return;
   }
+  if (!changesDiffApi) return;
   pendingDiffFile = null;
+  collapsedDiffFiles.delete(entry.path);
+  changesDiffApi.expandFile?.(entry.path);
+  changesDiffApi.scrollToFile?.(entry.path);
 }
 
-function applyHunk(repo: ProjectRef, hunkIndex: number, action: "stage" | "unstage" | "discard") {
+/** 第 `gap` 块单独成补丁交给 `git apply`；块的原文由 DiffView 从它读到的补丁里切出来。 */
+async function applyHunk(repo: ProjectRef, gap: number, action: "stage" | "unstage" | "discard") {
   const cur = gitDiff();
-  if (!cur || !cur.patchable || !cur.parsed) {
+  const patch: string | null = cur?.patchable ? await changesDiffApi?.hunkPatch?.(gap) : null;
+  if (!cur || !patch) {
     notifyError(t("hunk.unsupported"));
     return false;
   }
-  const hunk = cur.parsed.hunks[hunkIndex];
-  if (!hunk) return false;
-  const patch = hunkPatch(cur.parsed.header, hunk);
-  const path = cur.path;
+  if (gitDiff() !== cur) return false;
   const op =
     action === "stage" ? "stage_hunk" : action === "unstage" ? "unstage_hunk" : "discard_hunk";
 
@@ -1112,7 +1120,7 @@ function applyHunk(repo: ProjectRef, hunkIndex: number, action: "stage" | "unsta
     (err) => {
       if (!err) {
         invalidateRepo(repo);
-        openDiff(repo, path, false);
+        openDiff(repo, cur.path, cur.untracked, cur.oldPath);
       } else {
         notifyError(t("hunk.apply_failed", { error: err }));
       }
@@ -1121,17 +1129,17 @@ function applyHunk(repo: ProjectRef, hunkIndex: number, action: "stage" | "unsta
   return true;
 }
 
-function startDiscardHunk(repo: ProjectRef, hunkIndex: number) {
+function startDiscardHunk(repo: ProjectRef, gap: number) {
   const filePath = gitDiff()?.path ?? "";
   dangerDialog.set({
     title: t("discard.hunk_title"),
-    body: t("discard.hunk_body", { path: filePath, index: hunkIndex + 1 }),
+    body: t("discard.hunk_body", { path: filePath, index: gap + 1 }),
     warning: t("discard.hunk_warning"),
     okLabel: t("discard.hunk_ok"),
     onConfirm: () => {
       const rk = projectKey(repo.machine, repo.root);
       if (gitWrites.has(rk)) return false;
-      return applyHunk(repo, hunkIndex, "discard");
+      return applyHunk(repo, gap, "discard");
     },
   });
 }
@@ -1146,19 +1154,20 @@ function jumpHunk(forward: boolean) {
   }
 }
 
+/** 补丁里的文件：有一个展开的就全收起，否则全展开。 */
 function toggleAllAggregateFiles() {
   const cur = gitDiff();
   if (!cur || !cur.aggregate || !changesDiffApi) return;
-  const files: any[] = changesDiffApi.files?.() ?? [];
-  if (files.length === 0) return;
-  const shouldCollapse = files.some((f) => !f.collapsed);
-  for (const f of files) {
-    if (shouldCollapse) {
-      collapsedDiffFiles.add(f.path);
-      changesDiffApi.collapseFile?.(f.path);
+  const paths = cur.entries.filter((e) => e.in_patch).map((e) => String(e.path));
+  if (paths.length === 0) return;
+  const collapse = paths.some((p) => !collapsedDiffFiles.has(p));
+  for (const p of paths) {
+    if (collapse) {
+      collapsedDiffFiles.add(p);
+      changesDiffApi.collapseFile?.(p);
     } else {
-      collapsedDiffFiles.delete(f.path);
-      changesDiffApi.expandFile?.(f.path);
+      collapsedDiffFiles.delete(p);
+      changesDiffApi.expandFile?.(p);
     }
   }
   bump();
@@ -1170,23 +1179,45 @@ function setScope(next: DiffScope) {
   const cur = gitDiff();
   if (cur) {
     if (cur.aggregate) openAllDiffs(cur.root);
-    else openDiff(cur.root, cur.path, false);
+    else openDiff(cur.root, cur.path, cur.untracked, cur.oldPath);
   }
 }
 
-function sendDiffComment() {
+/** 选中行在各自文件里的行号（DiffView 给的是拼起来的行）。 */
+async function commentFileLines(range: CommentRange) {
+  const [start, end] = await Promise.all([
+    changesDiffApi?.fileLine?.(range.side, range.start),
+    changesDiffApi?.fileLine?.(range.side, range.end),
+  ]);
+  return {
+    path: String(start?.path ?? ""),
+    start: Number(start?.number ?? range.start + 1),
+    end: Number(end?.number ?? range.end + 1),
+  };
+}
+
+async function sendDiffComment() {
   const range = commentRange();
   const cur = gitDiff();
   if (!range || !cur) return;
-  const selected = String(changesDiffApi?.selectedText?.() ?? "");
-  const startInfo = mapJoinedLineToFile(cur.parsed, range.side, range.start);
-  const endInfo = mapJoinedLineToFile(cur.parsed, range.side, range.end);
-  const path = startInfo.path || cur.path;
-  const headerText = t("comment.feedback_header", { path });
-  const msg = diffFeedbackText(headerText, startInfo.line, endInfo.line, selected, commentText().trim());
-  void run(SEND_TEXT_CMD, { text: msg })
-    .then(() => clearComment())
-    .catch((err: any) => notifyError(err?.message ?? String(err)));
+  try {
+    const [selected, lines] = await Promise.all([
+      changesDiffApi?.selectedText?.(),
+      commentFileLines(range),
+    ]);
+    const headerText = t("comment.feedback_header", { path: lines.path || cur.path });
+    const msg = diffFeedbackText(
+      headerText,
+      lines.start,
+      lines.end,
+      String(selected ?? ""),
+      commentText().trim(),
+    );
+    await run(SEND_TEXT_CMD, { text: msg });
+    clearComment();
+  } catch (err: any) {
+    notifyError(err?.message ?? String(err));
+  }
 }
 
 // ---- 日志页 ----
@@ -1213,8 +1244,7 @@ function reloadLog(repo: ProjectRef) {
       logSelectedHash.set(null);
       logDetailFiles.set([]);
       logDetailFile.set(null);
-      logDetailPatch.set(null);
-      logDetailError.set(null);
+      setLogDetail(null, null);
     })
     .catch(() => {
       if (logLoadedRootKey !== k) return;
@@ -1235,8 +1265,7 @@ function selectCommit(repo: ProjectRef, hash: string) {
   logDetailLoading.set(true);
   logDetailFiles.set([]);
   logDetailFile.set(null);
-  logDetailPatch.set(null);
-  logDetailError.set(null);
+  setLogDetail(null, null);
 
   void call(repo.machine, "git.commit.files", { root: repo.root, hash })
     .then((res: any) => {
@@ -1255,22 +1284,26 @@ function selectCommitFile(repo: ProjectRef, path: string) {
   const hash = logSelectedHash();
   if (!hash) return;
   logDetailFile.set(path);
-  logDetailPatch.set(null);
-  logDetailError.set(null);
+  setLogDetail(null, null);
 
-  void call(repo.machine, "git.commit.file_diff", { root: repo.root, hash, path })
+  void callWithBlobs(repo.machine, "git.commit.file_diff", { root: repo.root, hash, path }, ["/text"])
     .then((res: any) => {
       if (logSelectedHash() !== hash || logDetailFile() !== path) return;
-      const raw = String(res?.text ?? "");
-      logDetailPatch.set(raw);
-      logDetailError.set(diffParseFailure(raw, t("log.no_diff")));
+      const shown = diffShown(res, t("log.no_diff"));
+      setLogDetail(shown.url, shown.message);
     })
     .catch((err: any) => {
       if (logSelectedHash() !== hash || logDetailFile() !== path) return;
-      const msg = t("log.show_failed", { error: err?.message ?? String(err) });
-      logDetailPatch.set(msg);
-      logDetailError.set(msg);
+      setLogDetail(null, t("log.show_failed", { error: err?.message ?? String(err) }));
     });
+}
+
+/** 换掉提交里那个文件的补丁，放掉旧的 Blob。 */
+function setLogDetail(url: string | null, message: string | null) {
+  const old = logDetailUrl();
+  if (old && old !== url) URL.revokeObjectURL(old);
+  logDetailUrl.set(url);
+  logDetailMessage.set(message);
 }
 
 // ---- 切换项目与刷新 ----
@@ -1313,7 +1346,7 @@ function syncProjectFromContext() {
       for (const p of ui.collapsedDiffFiles) collapsedDiffFiles.add(p);
       treeCollapsed.clear();
       for (const p of ui.treeCollapsed) treeCollapsed.add(p);
-      gitDiff.set(ui.diff && ui.diff.patch != null ? ui.diff : null);
+      gitDiff.set(ui.diff?.loaded ? ui.diff : null);
     } else {
       gitTab.set("changes");
       diffSplit.set(false);
@@ -1883,14 +1916,21 @@ export function Main() {
     return [{ id: "diff-comment", side: r.side, line: r.end }];
   });
 
-  const commentRangeTitle = computed(() => {
+  // 选中行在文件里的行号要问 DiffView（异步），到了再填标题。
+  const commentLines = signal<{ start: number; end: number } | null>(null);
+  effect(() => {
     const r = commentRange();
-    const cur = gitDiff();
-    if (!r || !cur) return "";
-    const a = mapJoinedLineToFile(cur.parsed, r.side, r.start).line;
-    const b = mapJoinedLineToFile(cur.parsed, r.side, r.end).line;
-    const lo = Math.min(a, b);
-    const hi = Math.max(a, b);
+    commentLines.set(null);
+    if (!r) return;
+    void commentFileLines(r).then((lines) => {
+      if (commentRange() === r) commentLines.set(lines);
+    });
+  });
+  const commentRangeTitle = computed(() => {
+    const l = commentLines();
+    if (!l) return "";
+    const lo = Math.min(l.start, l.end);
+    const hi = Math.max(l.start, l.end);
     return lo === hi
       ? t("comment.range_one", { line: lo })
       : t("comment.range", { start: lo, end: hi });
@@ -1899,9 +1939,11 @@ export function Main() {
   const allAggregateCollapsed = computed(() => {
     stateVersion();
     const cur = gitDiff();
-    if (!cur || !cur.aggregate || !cur.parsed || cur.parsed.files.length === 0) return false;
-    return cur.parsed.files.every((f) => collapsedDiffFiles.has(f.path));
+    const paths = cur?.aggregate ? cur.entries.filter((e) => e.in_patch).map((e) => e.path) : [];
+    return paths.length > 0 && paths.every((p) => collapsedDiffFiles.has(p));
   });
+
+  const diffLeftOut = computed(() => (gitDiff()?.entries ?? []).filter((e) => !e.in_patch));
 
   const logGraphW = computed(() => graphWidth(logGraphRows()));
   const logSummary = computed(() => {
@@ -2659,18 +2701,12 @@ export function Main() {
                               else={<Placeholder text={t("log.pick_file")} />}
                             >
                               <If
-                                when={logDetailPatch() != null}
-                                else={<Placeholder text={t("log.loading_file")} />}
+                                when={logDetailUrl() != null}
+                                else={
+                                  <Placeholder text={logDetailMessage() ?? t("log.loading_file")} />
+                                }
                               >
-                                <If
-                                  when={logDetailError() == null}
-                                  else={<Placeholder text={logDetailError() ?? t("log.no_diff")} />}
-                                >
-                                  <SmeltDiffView
-                                    patch={logDetailPatch() ?? ""}
-                                    layout="unified"
-                                  />
-                                </If>
+                                <SmeltDiffView patchUrl={logDetailUrl() ?? ""} layout="unified" />
                               </If>
                             </If>
                           </View>
@@ -2716,11 +2752,11 @@ export function Main() {
                     }
                   >
                     <If
-                      when={gitDiff()?.patch != null}
+                      when={Boolean(gitDiff()?.loaded)}
                       else={<Placeholder text={t("diff.loading")} />}
                     >
                       <If
-                        when={gitDiff()?.parseError == null}
+                        when={gitDiff()?.message == null}
                         else={
                           <View style={{ flex: 1, padding: 16 }}>
                             <Text
@@ -2730,7 +2766,7 @@ export function Main() {
                                 color: look().palette.muted,
                               }}
                             >
-                              {gitDiff()?.parseError ?? ""}
+                              {gitDiff()?.message ?? ""}
                             </Text>
                           </View>
                         }
@@ -2805,7 +2841,86 @@ export function Main() {
                           </View>
                         </View>
 
-                        {/* 1st-class Rust DiffView */}
+                        {/* 汇总补丁放不下的文件：说明原因，能单独看的点开 */}
+                        <If when={diffLeftOut().length > 0}>
+                          <Scroll
+                            style={{
+                              // 有补丁时只占顶上一条，没有时就是整页
+                              ...(gitDiff()?.patchUrl ? { flexShrink: 0, maxHeight: 132 } : { flex: 1 }),
+                              borderBottomWidth: 1,
+                              borderBottomColor: look().palette.hair,
+                            }}
+                          >
+                            <View style={{ display: "flex", flexDirection: "column", paddingTop: 4, paddingBottom: 4 }}>
+                              <Text
+                                style={{
+                                  paddingLeft: 12,
+                                  paddingRight: 12,
+                                  height: 22,
+                                  fontSize: look().type.small.size,
+                                  color: look().palette.muted,
+                                }}
+                              >
+                                {t("diff.left_out", { count: diffLeftOut().length })}
+                              </Text>
+                              <Each of={diffLeftOut()} key={(e: any) => e.path}>
+                                {(entry: () => any) => {
+                                  const reason = computed(() => diffLeftOutReason(entry()));
+                                  return (
+                                    <View
+                                      class={reason() === "separate" ? "hover:bg-accent" : undefined}
+                                      onPress={() => {
+                                        const cur = gitDiff();
+                                        if (cur && reason() === "separate") openEntryAlone(cur.root, entry());
+                                      }}
+                                      style={{
+                                        height: 22,
+                                        paddingLeft: 12,
+                                        paddingRight: 12,
+                                        display: "flex",
+                                        flexDirection: "row",
+                                        alignItems: "center",
+                                        gap: 8,
+                                        ...(reason() === "separate" ? { cursor: "pointer" } : {}),
+                                      }}
+                                    >
+                                      <Text
+                                        style={{
+                                          flex: 1,
+                                          minWidth: 0,
+                                          fontFamily: look().fonts?.mono,
+                                          fontSize: look().type.text_xsmall.size,
+                                          color: look().palette.text,
+                                          numberOfLines: 1,
+                                        }}
+                                      >
+                                        {entry().path}
+                                      </Text>
+                                      <Text
+                                        style={{
+                                          flexShrink: 0,
+                                          fontSize: look().type.small.size,
+                                          color: look().palette.muted,
+                                        }}
+                                      >
+                                        {reason() === "directory"
+                                          ? t("diff.left_out_directory")
+                                          : t(
+                                              reason() === "too_large"
+                                                ? "diff.left_out_too_large"
+                                                : "diff.left_out_separate",
+                                              { size: formatSize(entry().size) },
+                                            )}
+                                      </Text>
+                                    </View>
+                                  );
+                                }}
+                              </Each>
+                            </View>
+                          </Scroll>
+                        </If>
+
+                        <If when={gitDiff()?.patchUrl != null}>
                         <SmeltDiffView
                           diffRef={(api: any) => {
                             changesDiffApi = api;
@@ -2813,7 +2928,7 @@ export function Main() {
                               queueMicrotask(() => flushPendingDiffFile());
                             }
                           }}
-                          patch={gitDiff()?.patch ?? ""}
+                          patchUrl={gitDiff()?.patchUrl ?? ""}
                           layout={diffSplit() ? "split" : "unified"}
                           annotations={annotationsList()}
                           onFileToggle={({ file }: { file: any }) => {
@@ -2977,7 +3092,7 @@ export function Main() {
                                       label={t("hunk.stage")}
                                       onPress={() => {
                                         const cur = gitDiff();
-                                        if (cur) applyHunk(cur.root, hunkIx, "stage");
+                                        if (cur) void applyHunk(cur.root, hunkIx, "stage");
                                       }}
                                     />
                                     <SmeltButton
@@ -2999,7 +3114,7 @@ export function Main() {
                                     label={t("hunk.unstage")}
                                     onPress={() => {
                                       const cur = gitDiff();
-                                      if (cur) applyHunk(cur.root, hunkIx, "unstage");
+                                      if (cur) void applyHunk(cur.root, hunkIx, "unstage");
                                     }}
                                   />
                                 </If>
@@ -3102,6 +3217,7 @@ export function Main() {
                             </View>
                           )}
                         />
+                        </If>
                       </If>
                     </If>
                   </If>
