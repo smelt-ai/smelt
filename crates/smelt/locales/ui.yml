@@ -7,7 +7,7 @@ action:
     en: "Clear"
     zh-CN: "清除"
   never_mind:
-    en: "Never Mind"
+    en: "Never mind"
     zh-CN: "算了"
   reset:
     en: "Reset"
@@ -27,16 +27,16 @@ appearance:
     en: "Change…"
     zh-CN: "更换…"
   choose_image:
-    en: "Choose Image…"
+    en: "Choose image…"
     zh-CN: "选择图片…"
   choose_image_prompt:
-    en: "Choose a Background Image"
+    en: "Choose a background image"
     zh-CN: "选择背景图片"
   code:
     en: "Code"
     zh-CN: "代码"
   code_font:
-    en: "Code Font"
+    en: "Code font"
     zh-CN: "代码字体"
   code_font_hint:
     en: "Shared by the terminal, diffs and code blocks. Pick a monospaced font; missing glyphs fall back to the bundled Maple Mono NF"
@@ -45,19 +45,19 @@ appearance:
     en: "Default (%{name})"
     zh-CN: "默认（%{name}）"
   glass:
-    en: "Glass Tint"
+    en: "Glass tint"
     zh-CN: "毛玻璃底色"
   glass_hint:
     en: "How solid the theme color is behind translucent areas (like the sidebar): 100% is opaque, lower is more see-through"
     zh-CN: "布局里透明的地方（如左侧栏）主题底色铺多实：100% 不透，越低越透"
   image:
-    en: "Background Image"
+    en: "Background image"
     zh-CN: "背景图片"
   image_hint:
     en: "Fills the whole window, above the base color and below the content"
     zh-CN: "铺满整个窗口，叠在底色上、内容下面"
   image_opacity:
-    en: "Background Image Opacity"
+    en: "Background image opacity"
     zh-CN: "背景图透明度"
   image_opacity_hint:
     en: "Default 15%, at most 30% so text stays readable"
@@ -78,7 +78,7 @@ appearance:
     en: "No layouts available"
     zh-CN: "没有可选的布局"
   reset_layout:
-    en: "Reset Layout"
+    en: "Reset layout"
     zh-CN: "恢复布局"
   reset_layout_hint:
     en: "Discard dragged, split and collapsed changes and go back to this layout as shipped"
@@ -90,90 +90,90 @@ appearance:
     en: "Changes the interface and terminal colors together; light or dark follows the theme"
     zh-CN: "界面和终端配色一起换，明暗跟着主题走"
   ui_font:
-    en: "Interface Font"
+    en: "Interface font"
     zh-CN: "界面字体"
   ui_font_size:
-    en: "Interface Font Size"
+    en: "Interface font size"
     zh-CN: "界面字号"
   ui_font_size_hint:
     en: "Default 16px"
     zh-CN: "默认 16px"
 command:
   add_machine:
-    en: "Add Remote Machine"
+    en: "Add remote machine"
     zh-CN: "添加远程机器"
   debug_hud:
-    en: "Toggle Debug Panel"
+    en: "Toggle debug panel"
     zh-CN: "切换调试面板"
   group:
     app:
       en: "App"
       zh-CN: "应用"
   notify:
-    en: "Send System Notification"
+    en: "Send system notification"
     zh-CN: "发送系统通知"
   open_in_file_manager:
-    en: "Open in File Manager"
+    en: "Open in file manager"
     zh-CN: "用文件管理器打开"
   open_in_text_editor:
-    en: "Open in Text Editor"
+    en: "Open in text editor"
     zh-CN: "用系统文本编辑器打开"
   open_notification_settings:
-    en: "Open System Notification Settings"
+    en: "Open system notification settings"
     zh-CN: "打开系统通知设置"
   open_page:
-    en: "Open Page"
+    en: "Open page"
     zh-CN: "打开页"
   open_settings:
-    en: "Open Settings"
+    en: "Open settings"
     zh-CN: "打开设置"
   open_view:
-    en: "Open View"
+    en: "Open view"
     zh-CN: "打开视图"
   pick_paths:
-    en: "Choose Paths"
+    en: "Choose paths"
     zh-CN: "选择路径"
   quit:
     en: "Quit Smelt"
     zh-CN: "退出 Smelt"
   quit_now:
-    en: "Quit Now"
+    en: "Quit now"
     zh-CN: "直接退出"
   reconnect_machine:
-    en: "Reconnect Remote Machine"
+    en: "Reconnect remote machine"
     zh-CN: "重新连接远程机器"
   refresh_connections:
-    en: "Refresh Remote Connection Status"
+    en: "Refresh remote connection status"
     zh-CN: "刷新远程连接状态"
   remove_machine:
-    en: "Remove Remote Machine"
+    en: "Remove remote machine"
     zh-CN: "移除远程机器"
   rename_machine:
-    en: "Rename Remote Machine"
+    en: "Rename remote machine"
     zh-CN: "重命名远程机器"
   request_notification_permission:
-    en: "Request Notification Permission"
+    en: "Request notification permission"
     zh-CN: "请求系统通知授权"
   set_dock_badge:
-    en: "Set Dock Badge"
+    en: "Set Dock badge"
     zh-CN: "设置 Dock 角标"
   set_machine_relay:
-    en: "Change Remote Machine Relay"
+    en: "Change remote machine relay"
     zh-CN: "改远程机器的中继"
   set_machine_access:
-    en: "Change Remote Machine Access"
+    en: "Change remote machine access"
     zh-CN: "改远程机器的权限"
   set_view_badge:
-    en: "Set View Badge"
+    en: "Set view badge"
     zh-CN: "设视图角标"
   show_main_window:
-    en: "Show Main Window"
+    en: "Show main window"
     zh-CN: "显示主窗口"
   upgrade_machine:
-    en: "Upgrade Remote Machine Runtime"
+    en: "Upgrade remote machine runtime"
     zh-CN: "升级远程机器的运行时"
   withdraw_notification:
-    en: "Withdraw System Notification"
+    en: "Withdraw system notification"
     zh-CN: "撤回系统通知"
 daemon:
   exited:
@@ -202,16 +202,16 @@ daemon:
     zh-CN: "smeltd 不可用：%{error}"
 dock:
   collapse_left:
-    en: "Collapse Left Sidebar"
+    en: "Collapse left sidebar"
     zh-CN: "收起左侧"
   collapse_right:
-    en: "Collapse Right Sidebar"
+    en: "Collapse right sidebar"
     zh-CN: "收起右侧"
   expand_left:
-    en: "Expand Left Sidebar"
+    en: "Expand left sidebar"
     zh-CN: "展开左侧"
   expand_right:
-    en: "Expand Right Sidebar"
+    en: "Expand right sidebar"
     zh-CN: "展开右侧"
 error:
   cannot_upgrade:
@@ -234,7 +234,7 @@ error:
     zh-CN: "保存失败：%{error}"
 layout:
   empty_hint:
-    en: "No plugin has registered a home page layout. Check Panel Plugins in Settings to inspect errors or install a layout plugin."
+    en: "No plugin has registered a home page layout. Check Panel plugins in Settings to inspect errors or install a layout plugin."
     zh-CN: "当前没有插件登记首页布局。可在设置的「面板插件」里排查报错或安装布局插件。"
   empty_title:
     en: "No workbench layout available"
@@ -246,7 +246,7 @@ layout:
     en: "There's no outlet for the view \"%{id}\""
     zh-CN: "没有能放视图「%{id}」的出口"
   open_plugins:
-    en: "Open Panel Plugins"
+    en: "Open panel plugins"
     zh-CN: "打开面板插件"
   reset_failed:
     en: "Couldn't reset the layout: %{error}"
@@ -330,10 +330,10 @@ pane:
     zh-CN: "放大"
 picker:
   confirm_current:
-    en: "%{action} Current Folder"
+    en: "%{action} current folder"
     zh-CN: "%{action}当前目录"
   confirm_selected:
-    en: "%{action} Selection"
+    en: "%{action} selection"
     zh-CN: "%{action}所选项"
   deselect:
     en: "Deselect"
@@ -367,7 +367,7 @@ picker:
     en: "%{title} (%{machine})"
     zh-CN: "%{title}（%{machine}）"
   up:
-    en: "Parent Folder"
+    en: "Parent folder"
     zh-CN: "上一级"
 plugins:
   already_inside:
@@ -425,10 +425,10 @@ plugins:
     en: "Couldn't clean up the folder from an unfinished import: %{error}"
     zh-CN: "清理上次没导完的目录失败：%{error}"
   confirm_delete:
-    en: "Confirm Delete"
+    en: "Confirm delete"
     zh-CN: "确认删除"
   confirm_restore:
-    en: "Confirm Restore"
+    en: "Confirm restore"
     zh-CN: "确认恢复"
   copy_failed:
     en: "Couldn't copy the plugin: %{error}"
@@ -452,10 +452,10 @@ plugins:
     en: "No plugins yet."
     zh-CN: "还没有插件。"
   examples:
-    en: "Examples and Tutorials"
+    en: "Examples and tutorials"
     zh-CN: "示例和教程"
   examples_link:
-    en: "Examples and Tutorials ↗"
+    en: "Examples and tutorials ↗"
     zh-CN: "示例和教程 ↗"
   id_version:
     en: "%{id} · version %{version}"
@@ -464,25 +464,25 @@ plugins:
     en: "Import"
     zh-CN: "导入"
   import_button:
-    en: "Import Plugin…"
+    en: "Import plugin…"
     zh-CN: "导入插件…"
   import_hint:
     en: "Pick a folder containing smelt-plugin.json to copy into %{dir}. Plugins in %{dir} reload as soon as a file is saved."
     zh-CN: "选一个含 smelt-plugin.json 的目录，复制进 %{dir}。%{dir} 里的插件改完一保存就重新加载。"
   import_prompt:
-    en: "Import Plugin"
+    en: "Import plugin"
     zh-CN: "导入插件"
   imported:
     en: "Imported \"%{name}\""
     zh-CN: "已导入「%{name}」"
   installed:
-    en: "Installed Plugins"
+    en: "Installed plugins"
     zh-CN: "已装插件"
   installed_count:
-    en: "%{count} Installed"
+    en: "%{count} installed"
     zh-CN: "已装 %{count} 个"
   last_failed:
-    en: "Last Action Failed"
+    en: "Last action failed"
     zh-CN: "上一次操作失败"
   list_hint:
     en: "A plugin's views placed in the workbench layout are panels; the others open in the main area."
@@ -512,10 +512,10 @@ plugins:
     en: "Still used by %{plugins}. Delete those first, or remove this module from their requires"
     zh-CN: "%{plugins} 还在用它。先删掉它们，或者从它们的 requires 里去掉这个模块"
   open_dir:
-    en: "Open Plugin Folder"
+    en: "Open plugin folder"
     zh-CN: "打开插件目录"
   open_log:
-    en: "Open Log"
+    en: "Open log"
     zh-CN: "打开日志"
   override_builtin:
     en: "Overrides built-in plugin (delete to restore default)"
@@ -524,7 +524,7 @@ plugins:
     en: "Your version didn't load; using the built-in one. %{error}"
     zh-CN: "你的版本没装上，正在用自带版本。%{error}"
   restore_default:
-    en: "Restore Default…"
+    en: "Restore default…"
     zh-CN: "恢复默认…"
   restored:
     en: "Restored built-in \"%{name}\"; your override is in the trash folder"
@@ -539,7 +539,7 @@ plugins:
     en: "Plugins can read and write any file and run any command, just like Smelt. Only import ones you trust. Deleted plugins move to ~/.smelt/trash/plugins so you can get them back."
     zh-CN: "插件和 Smelt 一样能读写任意文件、运行任意命令，只导入你信任的。删除的插件挪进 ~/.smelt/trash/plugins，需要时能找回。"
   write:
-    en: "Write Your Own Plugin"
+    en: "Write your own plugin"
     zh-CN: "自己写插件"
   write_hint:
     en: "NSH TSX/JS plugins: JavaScript describes the interface and GPUI draws it natively. console.log output and script errors go to the log, tagged [plugin]."
@@ -603,10 +603,10 @@ reserved:
     en: "Redo"
     zh-CN: "重做"
   select_all:
-    en: "Select All"
+    en: "Select all"
     zh-CN: "全选"
   terminal_search:
-    en: "Search in Terminal"
+    en: "Search in terminal"
     zh-CN: "终端内搜索"
   undo:
     en: "Undo"
@@ -659,11 +659,11 @@ runtime:
     zh-CN: "升级中"
 settings:
   back:
-    en: "Back to App"
+    en: "Back to app"
     zh-CN: "返回应用"
   group:
     agents:
-      en: "Agents & Remote"
+      en: "Agents & remote"
       zh-CN: "Agent 与远程"
     general:
       en: "General"
@@ -675,14 +675,14 @@ settings:
       en: "System"
       zh-CN: "系统"
   nav:
-    en: "Settings Navigation"
+    en: "Settings navigation"
     zh-CN: "设置导航"
   page:
     appearance:
       en: "Appearance"
       zh-CN: "外观"
     panel_plugins:
-      en: "Panel Plugins"
+      en: "Panel plugins"
       zh-CN: "面板插件"
     shortcuts:
       en: "Shortcuts"
@@ -711,7 +711,7 @@ shortcuts:
     en: "Change the shortcut for \"%{title}\""
     zh-CN: "修改「%{title}」的快捷键"
   close_or_back:
-    en: "Close Preview or Go Back"
+    en: "Close preview or go back"
     zh-CN: "关闭预览或返回"
   hint:
     en: "Click a keycap to record a new shortcut: Esc cancels, ⌫ clears it. Include ⌘ or use an F key."
@@ -726,22 +726,22 @@ shortcuts:
     en: "If nothing happens, the system or another app may already use this key, such as a global shortcut"
     zh-CN: "按了没反应的话，这个键可能被系统或别的应用占用了，比如飞书的全局快捷键"
   reset:
-    en: "Reset to Default"
+    en: "Reset to default"
     zh-CN: "恢复默认"
   taken:
     en: "%{key} is already the shortcut for \"%{other}\". Reassigning leaves \"%{other}\" without a shortcut"
     zh-CN: "%{key} 已经是「%{other}」的快捷键。改绑后「%{other}」就没有快捷键了"
   terminal_complete:
-    en: "Terminal Completion / Reverse Completion"
+    en: "Terminal completion / reverse completion"
     zh-CN: "终端补全 / 反向补全"
   terminal_search:
-    en: "Search in Terminal"
+    en: "Search in terminal"
     zh-CN: "终端内搜索"
   unset:
     en: "Not set"
     zh-CN: "未设置"
   view_keys:
-    en: "Keys Inside Views"
+    en: "Keys inside views"
     zh-CN: "视图里的按键"
 language:
   page:
@@ -766,7 +766,7 @@ language:
 maintenance:
   cleanup:
     title:
-      en: "Clean Up"
+      en: "Clean up"
       zh-CN: "清理残留"
     row:
       en: "Leftover files"
@@ -784,7 +784,7 @@ maintenance:
       en: "Files in ~/.smelt that Smelt no longer uses: %{count} items, %{size}"
       zh-CN: "~/.smelt 里已经不再使用的文件：%{count} 项，共 %{size}"
     action:
-      en: "Clean Up…"
+      en: "Clean up…"
       zh-CN: "清理…"
     remove_failed:
       en: "Couldn't delete: %{error}"
@@ -801,7 +801,7 @@ maintenance:
         zh-CN: "删除"
   cli:
     title:
-      en: "Command Line"
+      en: "Command line"
       zh-CN: "命令行"
     row:
       en: "smelt command in Terminal"
@@ -876,16 +876,16 @@ terminal:
       zh-CN: 终端字号增大
 updater:
   group:
-    en: Updates & Help
+    en: Updates & help
     zh-CN: 更新与帮助
   docs:
     en: Documentation
     zh-CN: 帮助文档
   report_issue:
-    en: Report an Issue
+    en: Report an issue
     zh-CN: 反馈问题
   check_menu:
-    en: Check for Updates…
+    en: Check for updates…
     zh-CN: 检查更新…
   badge:
     en: New
@@ -899,7 +899,7 @@ updater:
       en: Updates
       zh-CN: 更新
     help:
-      en: Help & Feedback
+      en: Help & feedback
       zh-CN: 帮助与反馈
   help:
     docs_row:
@@ -909,7 +909,7 @@ updater:
       en: Open the log first, then drag it into the feedback page
       zh-CN: 先打开日志，再把它拖进反馈页
     open_log:
-      en: Open Log
+      en: Open log
       zh-CN: 打开日志
     source:
       en: Source code
@@ -936,7 +936,7 @@ updater:
       zh-CN: 发现新版本后在后台下载；关闭后仅提示
   check:
     idle:
-      en: Check for Updates
+      en: Check for updates
       zh-CN: 检查更新
     checking:
       en: Checking…
@@ -951,14 +951,14 @@ updater:
       en: Quitting…
       zh-CN: 正在退出…
     again:
-      en: Check for Newer Version
+      en: Check for newer version
       zh-CN: 检查新版本
   status:
     idle:
       en: Not checked yet
       zh-CN: 尚未检查更新
     idle_detail:
-      en: Click “Check for Updates” to get the latest %{channel} installer
+      en: Click “Check for updates” to get the latest %{channel} installer
       zh-CN: 点击“检查更新”获取%{channel}的最新安装包
     checking:
       en: Checking for updates
@@ -976,7 +976,7 @@ updater:
       en: New version available
       zh-CN: 发现新版本
     available_detail:
-      en: "%{channel} %{version} is out. Click “Download and Update” to get it"
+      en: "%{channel} %{version} is out. Click “Download and update” to get it"
       zh-CN: "%{channel}已发布 %{version}，点击“下载并更新”获取安装包"
     downloading:
       en: Downloading update
@@ -1003,7 +1003,7 @@ updater:
       en: Update ready
       zh-CN: 更新已准备就绪
     ready_detail:
-      en: Update %{version} is downloaded. Click “Restart to Update” to apply it
+      en: Update %{version} is downloaded. Click “Restart to update” to apply it
       zh-CN: 更新包 %{version} 已下载完成，点击“立即重启更新”生效
     install_failed:
       en: Couldn't install the update
@@ -1038,19 +1038,19 @@ updater:
       zh-CN: 这一份不是从发布包装好的（比如开发构建）。去下载页下载安装后，就能在这里更新。
   action:
     download:
-      en: Download and Update
+      en: Download and update
       zh-CN: 下载并更新
     restart:
-      en: Restart to Update
+      en: Restart to update
       zh-CN: 立即重启更新
     retry_restart:
-      en: Retry Restart to Update
+      en: Retry restart to update
       zh-CN: 重试重启更新
     move:
-      en: Move to Applications and Reopen
+      en: Move to Applications and reopen
       zh-CN: 移到「应用程序」并重新打开
     manual_download:
-      en: Go to Download Page
+      en: Go to download page
       zh-CN: 去下载页
   move:
     moving:
@@ -1063,7 +1063,7 @@ updater:
       en: Move Smelt to Applications?
       zh-CN: 把 Smelt 移到「应用程序」？
     confirm:
-      en: Move and Reopen
+      en: Move and reopen
       zh-CN: 移过去并重新打开
     read_only:
       en: Smelt is running from a read-only location (such as the installer disk image), so automatic updates can't be installed. After moving it reopens automatically; background sessions aren't affected.
@@ -1076,13 +1076,13 @@ updater:
       en: Restart to finish updating?
       zh-CN: 重启以完成更新？
     restart:
-      en: Restart and Update
+      en: Restart and update
       zh-CN: 重启并更新
     quit_title:
       en: Quit and install the update?
       zh-CN: 退出并安装更新？
     quit:
-      en: Quit and Update
+      en: Quit and update
       zh-CN: 退出并更新
   stop:
     sentence:

@@ -14,6 +14,12 @@ export interface SmeltConversationSpec {
   binding?: any;
 }
 
+/** `<SmeltConversation>` 的命令式接口（`conversationRef` 给出）。 */
+export interface SmeltConversationApi {
+  /** 往输入框里追加文本（如 `smelt.sessions/send-text`）：接在草稿后面，光标放到末尾并聚焦输入框。 */
+  insertText(text: string): void;
+}
+
 export interface SmeltConversationProps {
   machine: string | null;
   sessionId: string;
@@ -34,7 +40,8 @@ export interface SmeltConversationProps {
   } | null;
   reuseKey?: string;
   focusSeq?: number;
-  insertText?: { seq: number; text: string } | null;
+  /** 挂上时给出命令式接口，卸下时给 `null`。 */
+  conversationRef?: (api: SmeltConversationApi | null) => void;
   refreshModelsSeq?: number;
   readOnly?: boolean;
   style?: StyleProp<ViewStyle>;

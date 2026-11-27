@@ -7,6 +7,7 @@ import {
   SmeltDisclosureChevron,
   SmeltIcon,
   SmeltMarkdown,
+  SmeltRow,
   stableMemo,
   t,
 } from "smelt/sdk";
@@ -47,7 +48,7 @@ import {
   type RunDetailState,
   toggleRunDetailBlock,
 } from "./state.ts";
-import { ContentCard, ErrorAlert, RowItem, StatusDot, runStatusColor } from "./ui.tsx";
+import { ContentCard, ErrorAlert, StatusDot, runStatusColor } from "./ui.tsx";
 
 const BLOCK_PROCESS = "process";
 const BLOCK_INPUT = "input";
@@ -68,16 +69,17 @@ function DetailDisclosure(props: {
       style={{ width: "100%" }}
       content={<View style={{ width: "100%", paddingTop: 8 }}>{props.children}</View>}
     >
-      <RowItem
+      <SmeltRow
         testID={`automation-run-block-${props.blockKey}`}
+        accessibilityLabel={props.title}
         onPress={() => toggleRunDetailBlock(props.blockKey)}
         style={{
+          width: "100%",
           height: 24,
           marginLeft: -6,
           marginRight: -6,
           paddingLeft: 6,
           paddingRight: 6,
-          borderRadius: look().radius.row,
           gap: 6,
         }}
       >
@@ -103,7 +105,7 @@ function DetailDisclosure(props: {
             {props.meta ?? ""}
           </Text>
         </If>
-      </RowItem>
+      </SmeltRow>
     </SmeltDisclosure>
   );
 }
@@ -292,6 +294,52 @@ function TranscriptStep(props: {
   const flagColor = () =>
     props.flag === "failed" ? look().palette.bad : look().palette.faint;
 
+  // 可展开的步骤整行可点；不可展开的只是一行字，不做成按钮（不进 Tab 序、无悬停）。
+  const stepRowStyle = {
+    width: "100%",
+    minHeight: 24,
+    marginLeft: -6,
+    marginRight: -6,
+    paddingLeft: 6,
+    paddingRight: 6,
+    display: "flex",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  } as const;
+  const StepHead = () => (
+    <>
+      <SmeltIcon path={props.icon} size={12} color={ink()} />
+      <Text
+        style={{
+          flex: 1,
+          minWidth: 0,
+          fontSize: look().type.text_xsmall.size,
+          lineHeight: look().type.text_xsmall.line_height,
+          color: ink(),
+          numberOfLines: 1,
+        }}
+      >
+        {props.headline}
+      </Text>
+      <If when={props.flag != null}>
+        <Text
+          style={{
+            flexShrink: 0,
+            fontSize: look().type.text_xsmall.size,
+            lineHeight: look().type.text_xsmall.line_height,
+            color: flagColor(),
+          }}
+        >
+          {flagLabel()}
+        </Text>
+      </If>
+      <If when={props.expandable}>
+        <SmeltDisclosureChevron open={props.expanded} size={12} color={look().palette.faint} />
+      </If>
+    </>
+  );
+
   return (
     <SmeltDisclosure
       open={props.expandable && props.expanded}
@@ -310,51 +358,23 @@ function TranscriptStep(props: {
         </View>
       }
     >
-      <RowItem
-        testID={`automation-run-step-${props.stepKey}`}
-        disabled={!props.expandable}
-        onPress={() => {
-          if (props.expandable) toggleRunDetailBlock(props.stepKey);
-        }}
-        style={{
-          minHeight: 24,
-          marginLeft: -6,
-          marginRight: -6,
-          paddingLeft: 6,
-          paddingRight: 6,
-          borderRadius: look().radius.row,
-          gap: 8,
-        }}
+      <If
+        when={props.expandable}
+        else={
+          <View testID={`automation-run-step-${props.stepKey}`} style={stepRowStyle}>
+            <StepHead />
+          </View>
+        }
       >
-        <SmeltIcon path={props.icon} size={12} color={ink()} />
-        <Text
-          style={{
-            flex: 1,
-            minWidth: 0,
-            fontSize: look().type.text_xsmall.size,
-            lineHeight: look().type.text_xsmall.line_height,
-            color: ink(),
-            numberOfLines: 1,
-          }}
+        <SmeltRow
+          testID={`automation-run-step-${props.stepKey}`}
+          accessibilityLabel={props.headline}
+          onPress={() => toggleRunDetailBlock(props.stepKey)}
+          style={stepRowStyle}
         >
-          {props.headline}
-        </Text>
-        <If when={props.flag != null}>
-          <Text
-            style={{
-              flexShrink: 0,
-              fontSize: look().type.text_xsmall.size,
-              lineHeight: look().type.text_xsmall.line_height,
-              color: flagColor(),
-            }}
-          >
-            {flagLabel()}
-          </Text>
-        </If>
-        <If when={props.expandable}>
-          <SmeltDisclosureChevron open={props.expanded} size={12} color={look().palette.faint} />
-        </If>
-      </RowItem>
+          <StepHead />
+        </SmeltRow>
+      </If>
     </SmeltDisclosure>
   );
 }
@@ -946,9 +966,8 @@ export function RunPane(props: { machine: string | null; run: any }) {
         <If when={canCancel()}>
           <SmeltButton
             testID="automation-run-pane-cancel"
-            danger={true}
-            quiet={true}
-            small={true}
+            variant="danger-quiet"
+            size="sm"
             icon="icons/close.svg"
             label={t("menu.stop")}
             onPress={() => cancelAutomationRun(props.machine, r().id)}

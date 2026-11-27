@@ -1,7 +1,7 @@
 // 对话消息流列表：自然时间序虚拟列表（initialScrollAtEnd + maintainVisibleContentPosition 自动粘底，
 // 零 inverted 空闲唤醒）、局部流式信号、跨气泡选区、折叠过程行、差异弹窗入口、子智能体卡片与右键菜单。
 import { cleanup, computed, Image, List, Scroll, signal, Text, View } from "nsh";
-import { MenuItem, MenuSeparator } from "nsh/base";
+import { Menu } from "nsh/desktop";
 import {
   clipboardWrite,
   clipboardWriteImage,
@@ -10,11 +10,11 @@ import {
   isInterruptMarker,
   run,
   SmeltButton,
-  SmeltContextMenu,
   SmeltDisclosure,
   SmeltDisclosureChevron,
   SmeltIcon,
   SmeltMarkdown,
+  SmeltRow,
   theme,
 } from "smelt/sdk";
 import type { EditDiffDialogState, EditFileItem } from "./edit_diff_dialog.tsx";
@@ -54,36 +54,58 @@ function clipboardImagePayload(img: any): {
   return { ref_id, data_b64, mime, data_uri };
 }
 
+function toDesktopMenuItems(items: any[]): any[] {
+  return items.filter(Boolean).map((it: any) => {
+    if (it.type === "separator") return { type: "separator" as const };
+    if (Array.isArray(it.submenu)) {
+      return {
+        label: it.label ?? "",
+        disabled: Boolean(it.disabled),
+        submenu: toDesktopMenuItems(it.submenu),
+      };
+    }
+    return {
+      label: it.label ?? "",
+      disabled: Boolean(it.disabled),
+      onSelect: () => {
+        if (it.command) {
+          void run(it.command, it.args ?? null).catch(() => {});
+        }
+      },
+    };
+  });
+}
+
 function ImageThumbContextMenu(props: {
   img: () => any;
   onPreview: (img: any) => void;
   children: any;
 }) {
-  const look = theme;
   return (
-    <SmeltContextMenu popupStyle={{ minWidth: 156 }} trigger={props.children}>
-      <MenuItem
-        onSelect={() => {
-          const payload = clipboardImagePayload(props.img());
-          if (payload) void clipboardWriteImage(payload).catch(() => {});
-        }}
-        style={{ height: 28, paddingHorizontal: 10, borderRadius: 5, flexDirection: "row", alignItems: "center", gap: 8 }}
-      >
-        <SmeltIcon path="icons/copy.svg" size={13} color={look().palette.muted} />
-        <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
-          {ct("action.copy_image")}
-        </Text>
-      </MenuItem>
-      <MenuItem
-        onSelect={() => props.onPreview(props.img())}
-        style={{ height: 28, paddingHorizontal: 10, borderRadius: 5, flexDirection: "row", alignItems: "center", gap: 8 }}
-      >
-        <SmeltIcon path="icons/eye.svg" size={13} color={look().palette.muted} />
-        <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
-          {ct("image.preview")}
-        </Text>
-      </MenuItem>
-    </SmeltContextMenu>
+    <View
+      onContextMenu={(e: any) => {
+        const img = props.img();
+        const at = e?.pagePosition ? { x: e.pagePosition.x, y: e.pagePosition.y } : undefined;
+        void Menu.popup(
+          [
+            {
+              label: ct("action.copy_image"),
+              onSelect: () => {
+                const payload = clipboardImagePayload(img);
+                if (payload) void clipboardWriteImage(payload).catch(() => {});
+              },
+            },
+            {
+              label: ct("image.preview"),
+              onSelect: () => props.onPreview(img),
+            },
+          ],
+          at,
+        );
+      }}
+    >
+      {props.children}
+    </View>
   );
 }
 
@@ -178,7 +200,10 @@ function DiffFileChips(props: {
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, paddingTop: 4 }}>
         <Each of={props.files()}>
           {(file, idx) => (
-            <View
+            <SmeltButton
+              size="sm"
+              icon="icons/file.svg"
+              accessibilityLabel={file().label}
               onPress={() =>
                 props.onOpenDiff({
                   files: props.files(),
@@ -187,9 +212,7 @@ function DiffFileChips(props: {
                   machine: props.machine(),
                 })
               }
-              class="h-6 flex-row items-center gap-1.5 px-2 rounded-md border border-border bg-foreground/[0.06] hover:bg-accent"
             >
-              <SmeltIcon path="icons/file.svg" size={11} color={look().palette.muted} />
               <Text
                 style={{
                   fontFamily: look().fonts?.mono,
@@ -210,7 +233,7 @@ function DiffFileChips(props: {
                   -{file().removed}
                 </Text>
               </If>
-            </View>
+            </SmeltButton>
           )}
         </Each>
       </View>
@@ -223,6 +246,7 @@ function MessageContextWrapper(props: {
   sessionId: () => string;
   role: "user" | "assistant";
   globalIndex: () => number;
+  selectedText: () => string;
   copyText: () => string;
   copyImage?: () => any | null;
   canFork: () => boolean;
@@ -231,101 +255,74 @@ function MessageContextWrapper(props: {
   onEditResend: () => void;
   children: any;
 }) {
-  const look = theme;
-  const contributed = signal<any[]>([]);
+  // 用原生 onContextMenu + Menu.popup 代替 <ContextMenu>：后者在触发器上挂了 Touch 手势，
+  // 会把外层 <View selectable> 的跨段/跨气泡拖选截断成单段。
+  let menuSeq = 0;
 
-  const loadContributed = () => {
-    contextMenuItems(MESSAGE_MENU, props.machine(), {
-      machine: props.machine(),
-      session_id: props.sessionId(),
+  const openMenu = (e: any) => {
+    const seq = ++menuSeq;
+    const at = e?.pagePosition ? { x: e.pagePosition.x, y: e.pagePosition.y } : undefined;
+    const selected = props.selectedText();
+    const fullText = props.copyText();
+    const textToCopy = selected.trim().length > 0 ? selected : fullText;
+    const img = props.copyImage?.() ?? null;
+    const canFork = props.canFork();
+    const canEditResend = props.canEditResend();
+    const machine = props.machine();
+    const sessionId = props.sessionId();
+    const entryIndex = props.globalIndex();
+
+    void contextMenuItems(MESSAGE_MENU, machine, {
+      machine,
+      session_id: sessionId,
       role: props.role,
-      entry_index: props.globalIndex(),
-      text: props.copyText(),
+      entry_index: entryIndex,
+      text: textToCopy,
     })
-      .then((items) => contributed.set(Array.isArray(items) ? items : []))
-      .catch(() => contributed.set([]));
+      .catch(() => [])
+      .then((raw) => {
+        if (seq !== menuSeq) return;
+        const items: any[] = [];
+        if (textToCopy.trim().length > 0) {
+          items.push({
+            label: ct("action.copy"),
+            onSelect: () => {
+              void clipboardWrite(textToCopy).catch(() => {});
+            },
+          });
+        } else if (img != null) {
+          items.push({
+            label: ct("action.copy_image"),
+            onSelect: () => {
+              const payload = clipboardImagePayload(img);
+              if (payload) void clipboardWriteImage(payload).catch(() => {});
+            },
+          });
+        }
+        if (canFork) {
+          items.push({
+            label: ct("action.fork"),
+            onSelect: props.onFork,
+          });
+        }
+        if (canEditResend) {
+          items.push({
+            label: ct("action.edit_resend"),
+            onSelect: props.onEditResend,
+          });
+        }
+        const extra = Array.isArray(raw) ? toDesktopMenuItems(raw) : [];
+        if (extra.length > 0) {
+          if (items.length > 0) items.push({ type: "separator" });
+          items.push(...extra);
+        }
+        if (items.length > 0) {
+          void Menu.popup(items, at);
+        }
+      });
   };
 
-  return (
-    <SmeltContextMenu
-      popupStyle={{ minWidth: 184 }}
-      onOpenChange={({ open }: any) => {
-        if (open) loadContributed();
-      }}
-      trigger={props.children}
-    >
-      <If when={props.copyText().trim().length > 0}>
-        <MenuItem
-          onSelect={() => {
-            const text = props.copyText();
-            if (text) void clipboardWrite(text).catch(() => {});
-          }}
-          style={{ height: 28, paddingHorizontal: 10, borderRadius: 5, flexDirection: "row", alignItems: "center", gap: 8 }}
-        >
-          <SmeltIcon path="icons/copy.svg" size={13} color={look().palette.muted} />
-          <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
-            {ct("action.copy")}
-          </Text>
-        </MenuItem>
-      </If>
-      <If when={props.copyText().trim().length === 0 && props.copyImage?.() != null}>
-        <MenuItem
-          onSelect={() => {
-            const payload = clipboardImagePayload(props.copyImage?.());
-            if (payload) void clipboardWriteImage(payload).catch(() => {});
-          }}
-          style={{ height: 28, paddingHorizontal: 10, borderRadius: 5, flexDirection: "row", alignItems: "center", gap: 8 }}
-        >
-          <SmeltIcon path="icons/copy.svg" size={13} color={look().palette.muted} />
-          <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
-            {ct("action.copy_image")}
-          </Text>
-        </MenuItem>
-      </If>
-      <If when={props.canFork()}>
-        <MenuItem
-          onSelect={props.onFork}
-          style={{ height: 28, paddingHorizontal: 10, borderRadius: 5, flexDirection: "row", alignItems: "center", gap: 8 }}
-        >
-          <SmeltIcon path="icons/git-branch.svg" size={13} color={look().palette.muted} />
-          <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
-            {ct("action.fork")}
-          </Text>
-        </MenuItem>
-      </If>
-      <If when={props.canEditResend()}>
-        <MenuItem
-          onSelect={props.onEditResend}
-          style={{ height: 28, paddingHorizontal: 10, borderRadius: 5, flexDirection: "row", alignItems: "center", gap: 8 }}
-        >
-          <SmeltIcon path="icons/pencil.svg" size={13} color={look().palette.muted} />
-          <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
-            {ct("action.edit_resend")}
-          </Text>
-        </MenuItem>
-      </If>
-      <If when={contributed().length > 0}>
-        <MenuSeparator />
-        <Each of={contributed()}>
-          {(item) => (
-            <MenuItem
-              onSelect={() => {
-                const it = item();
-                if (it?.command) {
-                  void run(it.command, it.args ?? null).catch(() => {});
-                }
-              }}
-              style={{ height: 28, paddingHorizontal: 10, borderRadius: 5, flexDirection: "row", alignItems: "center", gap: 8 }}
-            >
-              <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
-                {item().label ?? ""}
-              </Text>
-            </MenuItem>
-          )}
-        </Each>
-      </If>
-    </SmeltContextMenu>
-  );
+  return <View onContextMenu={openMenu}>{props.children}</View>;
 }
 
 function ToolCallRow(props: {
@@ -383,6 +380,40 @@ function ToolCallRow(props: {
   const running = computed(() => tc()?.status === "in_progress" || tc()?.status === "pending");
   const failed = computed(() => tc()?.status === "failed");
 
+  const headerStyle = { minHeight: 26, paddingHorizontal: 8, paddingVertical: 4, gap: 8 };
+  const header = () => (
+    <>
+      <If
+        when={running()}
+        else={
+          <SmeltIcon
+            path={toolIconFor(tc()?.kind)}
+            size={13}
+            color={failed() ? look().palette.bad : look().palette.muted}
+          />
+        }
+      >
+        <SmeltIcon spin={props.visible()} size={12} color={look().palette.muted} />
+      </If>
+      <Text
+        style={{
+          flex: 1,
+          minWidth: 0,
+          fontSize: look().type.small.size,
+          color: failed() ? look().palette.bad : look().palette.muted,
+          numberOfLines: 1,
+        }}
+      >
+        {relativePathToCwd(String(tc()?.title ?? ""), props.cwd())}
+      </Text>
+      <If when={failed()}>
+        <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.bad }}>
+          {ct("status.failed")}
+        </Text>
+      </If>
+    </>
+  );
+
   return (
     <If
       when={peer() == null && asked() == null}
@@ -431,50 +462,58 @@ function ToolCallRow(props: {
         >
           {/* session_send / session_spawn 同伴消息行 */}
           <View
-            onPress={() => {
-              const target = peer()?.toId ?? peer()?.to_id;
-              if (target && props.onOpenConversation) props.onOpenConversation(target);
-            }}
-            class="hover:bg-accent"
             style={{
-              paddingHorizontal: 10,
-              paddingVertical: 6,
               borderRadius: look().radius.md,
               borderWidth: 1,
               borderColor: peer()?.error ? look().palette.bad : look().palette.hair,
               backgroundColor: look().palette.surface,
-              gap: 3,
+              overflow: "hidden",
             }}
           >
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-              <SmeltIcon
-                path={peer()?.spawned ? "icons/git-branch.svg" : "icons/arrow-right.svg"}
-                size={12}
-                color={peer()?.error ? look().palette.bad : look().palette.muted}
-              />
-              <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.text }}>
-                {ct(peer()?.spawned ? "peer.spawned" : "peer.sent", {
-                  to: peer()?.toTitle || peer()?.to_title || peer()?.toId || peer()?.to_id || "",
-                })}
-              </Text>
-            </View>
-            <If when={Boolean(peer()?.text)}>
-              <Text
-                style={{
-                  paddingLeft: 18,
-                  fontSize: look().type.text_xsmall.size,
-                  color: look().palette.muted,
-                  numberOfLines: 2,
-                }}
-              >
-                {peer()?.text ?? ""}
-              </Text>
-            </If>
-            <If when={Boolean(peer()?.error)}>
-              <Text style={{ paddingLeft: 18, fontSize: look().type.text_xsmall.size, color: look().palette.bad }}>
-                {peer()?.error ?? ""}
-              </Text>
-            </If>
+            <SmeltRow
+              rounded={false}
+              onPress={() => {
+                const target = peer()?.toId ?? peer()?.to_id;
+                if (target && props.onOpenConversation) props.onOpenConversation(target);
+              }}
+              style={{
+                flexDirection: "column",
+                alignItems: "stretch",
+                paddingHorizontal: 10,
+                paddingVertical: 6,
+                gap: 3,
+              }}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                <SmeltIcon
+                  path={peer()?.spawned ? "icons/git-branch.svg" : "icons/arrow-right.svg"}
+                  size={12}
+                  color={peer()?.error ? look().palette.bad : look().palette.muted}
+                />
+                <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.text }}>
+                  {ct(peer()?.spawned ? "peer.spawned" : "peer.sent", {
+                    to: peer()?.toTitle || peer()?.to_title || peer()?.toId || peer()?.to_id || "",
+                  })}
+                </Text>
+              </View>
+              <If when={Boolean(peer()?.text)}>
+                <Text
+                  style={{
+                    paddingLeft: 18,
+                    fontSize: look().type.text_xsmall.size,
+                    color: look().palette.muted,
+                    numberOfLines: 2,
+                  }}
+                >
+                  {peer()?.text ?? ""}
+                </Text>
+              </If>
+              <If when={Boolean(peer()?.error)}>
+                <Text style={{ paddingLeft: 18, fontSize: look().type.text_xsmall.size, color: look().palette.bad }}>
+                  {peer()?.error ?? ""}
+                </Text>
+              </If>
+            </SmeltRow>
           </View>
         </If>
       }
@@ -487,7 +526,10 @@ function ToolCallRow(props: {
           <View style={{ paddingLeft: 22, paddingTop: 8, gap: 6 }}>
             <Each of={textOutputs()}>
               {(part: () => any) => (
-                <View class="rounded-[10px] border border-border bg-sidebar p-2.5 gap-1">
+                <View
+                  class="border border-border bg-sidebar p-2.5 gap-1"
+                  style={{ borderRadius: look().radius.xl }}
+                >
                   <Scroll style={{ maxHeight: 220 }}>
                     <Text
                       class="font-mono text-muted-foreground"
@@ -526,19 +568,20 @@ function ToolCallRow(props: {
                       <If when={src() != null}>
                         <ImageThumbContextMenu img={img} onPreview={props.onPreviewImage}>
                           <View
-                            onPress={() => props.onPreviewImage(img())}
                             style={{
-                              borderRadius: 6,
+                              borderRadius: look().radius.md,
                               borderWidth: 1,
                               borderColor: look().palette.hair,
                               overflow: "hidden",
                               backgroundColor: look().palette.surface,
                             }}
                           >
-                            <Image
-                              src={src()!}
-                              style={{ width: 120, height: 84, objectFit: "contain" }}
-                            />
+                            <SmeltRow rounded={false} onPress={() => props.onPreviewImage(img())}>
+                              <Image
+                                src={src()!}
+                                style={{ width: 120, height: 84, objectFit: "contain" }}
+                              />
+                            </SmeltRow>
                           </View>
                         </ImageThumbContextMenu>
                       </If>
@@ -586,57 +629,20 @@ function ToolCallRow(props: {
         }
       >
         <View style={{ width: "100%", gap: 4 }}>
-          <View
-            onPress={() => {
-              if (hasDetails()) props.onToggleTool(String(tc()?.id ?? ""));
-            }}
-            class={hasDetails() ? "hover:bg-accent" : undefined}
-            style={{
-              minHeight: 26,
-              paddingHorizontal: 8,
-              paddingVertical: 4,
-              borderRadius: look().radius.row,
-              flexDirection: "row",
-              alignItems: "center",
-              gap: 8,
-            }}
+          {/* 有详情才能点开；没有就是一行说明，不响应悬停 */}
+          <If
+            when={hasDetails()}
+            else={
+              <View class="flex-row items-center" style={headerStyle}>
+                {header()}
+              </View>
+            }
           >
-            <If
-              when={running()}
-              else={
-                <SmeltIcon
-                  path={toolIconFor(tc()?.kind)}
-                  size={13}
-                  color={failed() ? look().palette.bad : look().palette.muted}
-                />
-              }
-            >
-              <SmeltIcon spin={props.visible()} size={12} color={look().palette.muted} />
-            </If>
-            <Text
-              style={{
-                flex: 1,
-                minWidth: 0,
-                fontSize: look().type.small.size,
-                color: failed() ? look().palette.bad : look().palette.muted,
-                numberOfLines: 1,
-              }}
-            >
-              {relativePathToCwd(String(tc()?.title ?? ""), props.cwd())}
-            </Text>
-            <If when={failed()}>
-              <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.bad }}>
-                {ct("status.failed")}
-              </Text>
-            </If>
-            <If when={hasDetails()}>
-              <SmeltDisclosureChevron
-                open={expanded()}
-                size={12}
-                color={look().palette.faint}
-              />
-            </If>
-          </View>
+            <SmeltRow onPress={() => props.onToggleTool(String(tc()?.id ?? ""))} style={headerStyle}>
+              {header()}
+              <SmeltDisclosureChevron open={expanded()} size={12} color={look().palette.faint} />
+            </SmeltRow>
+          </If>
 
           {/* 改动文件差异胶囊 */}
           <View style={{ paddingLeft: 22 }}>
@@ -660,54 +666,54 @@ function ToolCallRow(props: {
                   const isRunning = computed(() => status() === "running" || status() === "pending");
                   return (
                     <View
-                      onPress={() =>
-                        props.onInspectSubagent({
-                          id: runItem().id,
-                          title: runItem().title || runItem().id,
-                        })
-                      }
-                      class="hover:bg-accent"
                       style={{
-                        paddingHorizontal: 10,
-                        paddingVertical: 6,
                         borderRadius: look().radius.md,
                         borderWidth: 1,
                         borderColor: look().palette.hair,
                         backgroundColor: look().palette.surface,
-                        flexDirection: "row",
-                        alignItems: "center",
-                        gap: 8,
+                        overflow: "hidden",
                       }}
                     >
-                      <If
-                        when={isRunning()}
-                        else={<SmeltIcon path="icons/bot.svg" size={13} color={look().palette.muted} />}
+                      <SmeltRow
+                        rounded={false}
+                        onPress={() =>
+                          props.onInspectSubagent({
+                            id: runItem().id,
+                            title: runItem().title || runItem().id,
+                          })
+                        }
+                        style={{ paddingHorizontal: 10, paddingVertical: 6, gap: 8 }}
                       >
-                        <SmeltIcon spin={props.visible()} size={12} color={look().palette.muted} />
-                      </If>
-                      <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
-                        <Text style={{ fontSize: look().type.small.size, color: look().palette.text, numberOfLines: 1 }}>
-                          {runItem().title || runItem().id}
-                        </Text>
-                        <If when={Boolean(liveMatch()?.lastActivity)}>
-                          <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.faint, numberOfLines: 1 }}>
-                            {liveMatch()?.lastActivity ?? ""}
-                          </Text>
+                        <If
+                          when={isRunning()}
+                          else={<SmeltIcon path="icons/bot.svg" size={13} color={look().palette.muted} />}
+                        >
+                          <SmeltIcon spin={props.visible()} size={12} color={look().palette.muted} />
                         </If>
-                      </View>
-                      <Text
-                        style={{
-                          fontSize: look().type.text_xsmall.size,
-                          color:
-                            status() === "failed"
-                              ? look().palette.bad
-                              : isRunning()
-                                ? look().palette.muted
-                                : look().palette.faint,
-                        }}
-                      >
-                        {statusLabel(status())}
-                      </Text>
+                        <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
+                          <Text style={{ fontSize: look().type.small.size, color: look().palette.text, numberOfLines: 1 }}>
+                            {runItem().title || runItem().id}
+                          </Text>
+                          <If when={Boolean(liveMatch()?.lastActivity)}>
+                            <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.faint, numberOfLines: 1 }}>
+                              {liveMatch()?.lastActivity ?? ""}
+                            </Text>
+                          </If>
+                        </View>
+                        <Text
+                          style={{
+                            fontSize: look().type.text_xsmall.size,
+                            color:
+                              status() === "failed"
+                                ? look().palette.bad
+                                : isRunning()
+                                  ? look().palette.muted
+                                  : look().palette.faint,
+                          }}
+                        >
+                          {statusLabel(status())}
+                        </Text>
+                      </SmeltRow>
                     </View>
                   );
                 }}
@@ -775,6 +781,7 @@ export function MessageList(props: {
   const expandedThoughts = signal<Set<string>>(new Set());
   const expandedTaskNotes = signal<Set<string>>(new Set());
   const copiedKey = signal<string | null>(null);
+  const selectedText = signal("");
   let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
   let internalListApi: any = null;
 
@@ -825,6 +832,8 @@ export function MessageList(props: {
   return (
     <View
       selectable
+      focusable
+      onSelectionChange={(e: any) => selectedText.set(String(e?.text ?? ""))}
       onWheel={() => props.onUserScroll?.()}
       style={{ position: "relative", flex: 1, width: "100%", minHeight: 0 }}
     >
@@ -865,8 +874,8 @@ export function MessageList(props: {
           <If when={props.hasOlderHistory()}>
             <View style={{ width: "100%", alignItems: "center", paddingBottom: 8 }}>
               <SmeltButton
-                quiet
-                small
+                variant="quiet"
+                size="sm"
                 loading={props.loadingOlder()}
                 label={ct("status.load_older")}
                 onPress={props.onLoadOlder}
@@ -884,17 +893,9 @@ export function MessageList(props: {
             <View style={{ width: "100%", maxWidth: 768, alignSelf: "center" }}>
               {/* 1. 折叠的整轮思考/工具汇总行 */}
               <If when={kind() === "turn_fold"}>
-                <View
+                <SmeltRow
                   onPress={() => props.onToggleTurnFold(r().key)}
-                  class="hover:bg-accent"
-                  style={{
-                    height: 28,
-                    paddingHorizontal: 8,
-                    borderRadius: look().radius.row,
-                    flexDirection: "row",
-                    alignItems: "center",
-                    gap: 6,
-                  }}
+                  style={{ height: 28, paddingHorizontal: 8, gap: 6 }}
                 >
                   <SmeltDisclosureChevron
                     open={r().expanded}
@@ -909,23 +910,15 @@ export function MessageList(props: {
                       · {formatDuration(r().fold?.elapsedMs)}
                     </Text>
                   </If>
-                </View>
+                </SmeltRow>
               </If>
 
               {/* 2. 折叠的工具过程分组行 + 改动文件差异标签 */}
               <If when={kind() === "process_group"}>
                 <View style={{ width: "100%", gap: 4 }}>
-                  <View
+                  <SmeltRow
                     onPress={() => props.onToggleProcessGroup(r().key)}
-                    class="hover:bg-accent"
-                    style={{
-                      height: 28,
-                      paddingHorizontal: 8,
-                      borderRadius: look().radius.row,
-                      flexDirection: "row",
-                      alignItems: "center",
-                      gap: 6,
-                    }}
+                    style={{ height: 28, paddingHorizontal: 8, gap: 6 }}
                   >
                     <If
                       when={Boolean(r().group?.active && (r().group?.tally?.running ?? 0) > 0)}
@@ -947,7 +940,7 @@ export function MessageList(props: {
                         · {formatDuration(r().group?.elapsedMs)}
                       </Text>
                     </If>
-                  </View>
+                  </SmeltRow>
                   <If when={!r().expanded && (r().editFiles?.length ?? 0) > 0}>
                     <View style={{ paddingLeft: 18 }}>
                       <DiffFileChips
@@ -1000,7 +993,7 @@ export function MessageList(props: {
                                 class={
                                   copiedKey() === r().key
                                     ? "opacity-100"
-                                    : "opacity-0 group-hover/user:opacity-100"
+                                    : "opacity-0 group-hover/user:opacity-100 group-focus-within/user:opacity-100"
                                 }
                                 style={{
                                   height: 24,
@@ -1013,8 +1006,8 @@ export function MessageList(props: {
                                 }}
                               >
                                 <SmeltButton
-                                  quiet
-                                  small
+                                  variant="quiet"
+                                  size="sm"
                                   icon={copiedKey() === r().key ? "icons/check.svg" : "icons/copy.svg"}
                                   tooltip={
                                     copiedKey() === r().key
@@ -1039,6 +1032,7 @@ export function MessageList(props: {
                                 sessionId={props.sessionId}
                                 role="user"
                                 globalIndex={() => r().globalIndex}
+                                selectedText={selectedText}
                                 copyText={userText}
                                 copyImage={() => (userImages().length === 1 ? userImages()[0] : null)}
                                 canFork={() =>
@@ -1051,7 +1045,7 @@ export function MessageList(props: {
                                 onFork={() => props.onForkAt(r().globalIndex, "user")}
                                 onEditResend={() => props.onEditResendAt(r().globalIndex, userText())}
                               >
-                                <View class="rounded-[20px] bg-foreground/[0.08] px-4 py-2.5 gap-2">
+                                <View class="rounded-3xl bg-foreground/[0.08] px-4 py-2.5 gap-2">
                                   <If when={userImages().length > 0}>
                                     <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
                                       <Each of={userImages()}>
@@ -1061,13 +1055,15 @@ export function MessageList(props: {
                                             <If when={src() != null}>
                                               <ImageThumbContextMenu img={img} onPreview={props.onPreviewImage}>
                                                 <View
-                                                  onPress={() => props.onPreviewImage(img())}
-                                                  class="rounded-[10px] overflow-hidden border border-border"
+                                                  class="overflow-hidden border border-border"
+                                                  style={{ borderRadius: look().radius.xl }}
                                                 >
-                                                  <Image
-                                                    src={src()!}
-                                                    style={{ width: 104, height: 78, objectFit: "cover" }}
-                                                  />
+                                                  <SmeltRow rounded={false} onPress={() => props.onPreviewImage(img())}>
+                                                    <Image
+                                                      src={src()!}
+                                                      style={{ width: 104, height: 78, objectFit: "cover" }}
+                                                    />
+                                                  </SmeltRow>
                                                 </View>
                                               </ImageThumbContextMenu>
                                             </If>
@@ -1138,17 +1134,9 @@ export function MessageList(props: {
                                 </View>
                               }
                             >
-                              <View
+                              <SmeltRow
                                 onPress={() => toggleSet(expandedThoughts, r().key)}
-                                class="hover:bg-accent"
-                                style={{
-                                  height: 26,
-                                  paddingHorizontal: 8,
-                                  borderRadius: look().radius.row,
-                                  flexDirection: "row",
-                                  alignItems: "center",
-                                  gap: 6,
-                                }}
+                                style={{ height: 26, paddingHorizontal: 8, gap: 6 }}
                               >
                                 <SmeltDisclosureChevron
                                   open={thoughtExpanded()}
@@ -1158,7 +1146,7 @@ export function MessageList(props: {
                                 <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.faint }}>
                                   {isStreamingCell() ? ct("status.thinking") : ct("status.thinking").replace("…", "")}
                                 </Text>
-                              </View>
+                              </SmeltRow>
                             </SmeltDisclosure>
                           }
                         >
@@ -1167,6 +1155,7 @@ export function MessageList(props: {
                             sessionId={props.sessionId}
                             role="assistant"
                             globalIndex={() => r().globalIndex}
+                            selectedText={selectedText}
                             copyText={bodyText}
                             canFork={() => props.canFork() && props.settled()}
                             canEditResend={() => false}
@@ -1196,16 +1185,16 @@ export function MessageList(props: {
                                 >
                                   <If when={showActions()}>
                                     <SmeltButton
-                                      quiet
-                                      small
+                                      variant="quiet"
+                                      size="sm"
                                       icon={copiedKey() === r().key ? "icons/check.svg" : "icons/copy.svg"}
                                       tooltip={copiedKey() === r().key ? ct("action.copied") : ct("action.copy")}
                                       onPress={() => copyMessage(r().key, bodyText())}
                                     />
                                     <If when={props.canFork() && props.settled()}>
                                       <SmeltButton
-                                        quiet
-                                        small
+                                        variant="quiet"
+                                        size="sm"
                                         icon="icons/git-branch.svg"
                                         tooltip={ct("action.fork")}
                                         onPress={() => props.onForkAt(r().globalIndex, "assistant")}
@@ -1293,8 +1282,8 @@ export function MessageList(props: {
                               }
                             >
                               <SmeltButton
-                                quiet
-                                small
+                                variant="quiet"
+                                size="sm"
                                 label={ct("action.retry_turn")}
                                 onPress={props.onRetryTurn}
                               />
@@ -1332,19 +1321,30 @@ export function MessageList(props: {
                         const st = statusLabel(n?.status ?? "");
                         return title ? `${title} · ${st}` : st;
                       };
+                      const noteHeaderStyle = { paddingHorizontal: 10, paddingVertical: 6, gap: 6 };
+                      const noteHeader = () => (
+                        <>
+                          <SmeltIcon path="icons/info.svg" size={12} color={look().palette.muted} />
+                          <Text style={{ flex: 1, fontSize: look().type.text_xsmall.size, color: look().palette.muted }}>
+                            {headline()}
+                          </Text>
+                          <If when={tail().length > 0}>
+                            <SmeltDisclosureChevron open={expanded()} size={12} color={look().palette.faint} />
+                          </If>
+                        </>
+                      );
                       return (
                         <SmeltDisclosure
                           open={expanded() && tail().length > 0}
                           style={{
-                            paddingHorizontal: 10,
-                            paddingVertical: 6,
                             borderRadius: look().radius.md,
                             borderWidth: 1,
                             borderColor: look().palette.hair,
                             backgroundColor: look().palette.surface,
+                            overflow: "hidden",
                           }}
                           content={
-                            <Scroll style={{ maxHeight: 140, marginTop: 4, paddingLeft: 18 }}>
+                            <Scroll style={{ maxHeight: 140, paddingLeft: 28, paddingRight: 10, marginBottom: 6 }}>
                               <Text
                                 style={{
                                   fontFamily: look().fonts?.mono,
@@ -1357,24 +1357,23 @@ export function MessageList(props: {
                             </Scroll>
                           }
                         >
-                          <View
-                            onPress={() => {
-                              if (tail()) toggleSet(expandedTaskNotes, noteKey());
-                            }}
-                            style={{ flexDirection: "row", alignItems: "center", gap: 6 }}
+                          {/* 有输出尾巴才能点开 */}
+                          <If
+                            when={tail().length > 0}
+                            else={
+                              <View class="flex-row items-center" style={noteHeaderStyle}>
+                                {noteHeader()}
+                              </View>
+                            }
                           >
-                            <SmeltIcon path="icons/info.svg" size={12} color={look().palette.muted} />
-                            <Text style={{ flex: 1, fontSize: look().type.text_xsmall.size, color: look().palette.muted }}>
-                              {headline()}
-                            </Text>
-                            <If when={tail().length > 0}>
-                              <SmeltDisclosureChevron
-                                open={expanded()}
-                                size={12}
-                                color={look().palette.faint}
-                              />
-                            </If>
-                          </View>
+                            <SmeltRow
+                              rounded={false}
+                              onPress={() => toggleSet(expandedTaskNotes, noteKey())}
+                              style={noteHeaderStyle}
+                            >
+                              {noteHeader()}
+                            </SmeltRow>
+                          </If>
                         </SmeltDisclosure>
                       );
                     })()}
@@ -1399,8 +1398,9 @@ export function MessageList(props: {
           }}
         >
           <SmeltButton
-            floating
-            small
+            variant="floating"
+            size="sm"
+            shape="pill"
             icon="icons/arrow-down.svg"
             label={ct("action.jump_latest")}
             onPress={() => {

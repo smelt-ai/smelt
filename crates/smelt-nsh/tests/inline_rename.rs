@@ -543,7 +543,7 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
     assert!(
         wait_until(cx, Duration::from_secs(15), |cx| {
             session_above(cx, "Alpha Chat", "Beta Chat") == Some(true)
-                && has_a11y_label(cx, "New Conversation")
+                && has_a11y_label(cx, "New conversation")
         }),
         "侧栏会话或顶部启动栏未渲染，labels={:?}",
         a11y_labels_in_order(cx)
@@ -796,7 +796,7 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
     });
     assert!(
         wait_until(cx, Duration::from_secs(2), |cx| {
-            has_a11y_label(cx, "New Session")
+            has_a11y_label(cx, "New session")
                 && has_a11y_label(cx, "Shell Terminal 1")
                 && has_a11y_label(cx, "Terminal")
         }),
@@ -810,7 +810,7 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
             .collect::<Vec<_>>()
     );
     assert!(
-        !has_a11y_label(cx, "Remove from Favorites"),
+        !has_a11y_label(cx, "Remove from favorites"),
         "未悬停常用行时不应露出星标按钮（即使默认选中第一行）"
     );
     // 核对第一行选中底块与数字键帽的实际像素位置：数字键紧贴行右缘，不留星标占位空洞。
@@ -867,7 +867,7 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
     cx.simulate_mouse_move(row_center, None, Modifiers::default());
     assert!(
         wait_until(cx, Duration::from_secs(2), |cx| {
-            has_a11y_label(cx, "Remove from Favorites")
+            has_a11y_label(cx, "Remove from favorites")
                 && has_a11y_label(cx, "Shell Terminal")
                 && !has_a11y_label(cx, "Shell Terminal 1")
         }),
@@ -883,7 +883,7 @@ fn inline_rename_can_be_cancelled_and_dismissed(cx: &mut TestAppContext) {
     cx.simulate_mouse_move(point(px(2.), px(2.)), None, Modifiers::default());
     assert!(
         wait_until(cx, Duration::from_secs(2), |cx| {
-            !has_a11y_label(cx, "Remove from Favorites") && has_a11y_label(cx, "Shell Terminal 1")
+            !has_a11y_label(cx, "Remove from favorites") && has_a11y_label(cx, "Shell Terminal 1")
         }),
         "鼠标移开常用行后应隐藏星标并恢复数字键"
     );

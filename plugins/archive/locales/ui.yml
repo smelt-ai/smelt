@@ -4,7 +4,7 @@ view:
     en: Archive
     zh-CN: 归档
 title:
-  en: Archived Conversations
+  en: Archived conversations
   zh-CN: 已归档的对话
 action:
   cancel:
@@ -14,7 +14,7 @@ action:
     en: Restore
     zh-CN: 恢复
   delete:
-    en: Delete Permanently
+    en: Delete permanently
     zh-CN: 彻底删除
 row:
   untitled:
@@ -42,7 +42,7 @@ restore:
 delete:
   confirm:
     en: Permanently delete this archived conversation?
-    zh-CN: 确定彻底删除这段归档对话吗？
+    zh-CN: 彻底删除这段归档对话？
   description:
     en: Smelt's archive record and resume identity for “%{title}” will be permanently deleted and can't be restored. Project files are not deleted, and neither is the history that tools like Claude and Codex keep themselves.
     zh-CN: 「%{title}」的 Smelt 归档记录和续接身份将被永久删除，无法再恢复。不会删除项目文件，也不会删除 Claude、Codex 等工具自己保存的历史。

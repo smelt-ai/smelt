@@ -1,20 +1,21 @@
 // 自动化插件（`smelt.automations`）入口：导出主视图 `main`。
 import { computed, Text, View } from "nsh";
-import { t } from "smelt/sdk";
-import { runsForAutomation, sameAutomationRef } from "../model.js";
+import { SmeltConfirmDialog, t } from "smelt/sdk";
+import { deleteConfirmDescription, runsForAutomation, sameAutomationRef } from "../model.js";
 import { CatalogView } from "./catalog.tsx";
 import { DrillHeader, EditorForm, RunHistoryColumn } from "./editor.tsx";
 import { RunPane } from "./run_detail.tsx";
 import {
   bootAutomations,
+  confirmDeleteAutomation,
   currentTheme,
+  deletePrompt,
   editor,
   machineAutomationsOn,
   route,
   selectedRunId,
   storeVersion,
 } from "./state.ts";
-import { DeleteConfirmDialog } from "./ui.tsx";
 
 bootAutomations();
 
@@ -89,6 +90,11 @@ function DrillView() {
 }
 
 export function main() {
+  const deleteDescription = computed(() => {
+    const p = deletePrompt();
+    return p ? deleteConfirmDescription(p.name, p.runCount, t) : "";
+  });
+
   return (
     <View
       style={{
@@ -104,7 +110,16 @@ export function main() {
       <If when={route() == null} else={<DrillView />}>
         <CatalogView />
       </If>
-      <DeleteConfirmDialog />
+      <SmeltConfirmDialog
+        open={deletePrompt() != null}
+        title={t("delete.title")}
+        description={deleteDescription()}
+        confirmLabel={t("delete.confirm")}
+        cancelLabel={t("delete.cancel")}
+        danger={true}
+        onConfirm={confirmDeleteAutomation}
+        onCancel={() => deletePrompt.set(null)}
+      />
     </View>
   );
 }

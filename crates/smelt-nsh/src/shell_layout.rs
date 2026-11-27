@@ -20,8 +20,8 @@ use serde_json::{Value, json};
 use smelt_plugin_api as api;
 use smelt_ui::window_bar::{BAR_MARGIN, SafeArea, TOP_BAR_HEIGHT, WINDOW_EDGE_MARGIN};
 
-/// 左右停靠区开合按钮宽度（与 `workspace_shell.rs` 一致）。
-pub const DOCK_TOGGLE_WIDTH: f32 = 20.;
+/// 左右停靠区开合按钮宽度：外壳里是 `md` 档的纯图标按钮（SDK 控件尺寸表，见方 28）。
+pub const DOCK_TOGGLE_WIDTH: f32 = 28.;
 
 /// 窗口自身占掉的角（红黄绿灯宽度、底角圆角）。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

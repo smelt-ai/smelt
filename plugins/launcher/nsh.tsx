@@ -10,6 +10,7 @@ import {
   safeArea,
   SmeltButton,
   SmeltIcon,
+  SmeltRow,
   SmeltWindowBar,
   t,
   text,
@@ -97,7 +98,6 @@ export function nav() {
               tooltip={data().new_conversation ?? ""}
               command={NEW_CONVERSATION}
               onPress={() => runCmd(NEW_CONVERSATION)}
-              style={{ width: "100%" }}
             />
           </View>
         </If>
@@ -108,17 +108,12 @@ export function nav() {
             const p = () => look().palette;
             const uiType = () => (item().shown ? look().type.ui_medium : look().type.ui);
             return (
-              <View
-                class="hover:bg-accent"
+              <SmeltRow
+                selected={item().shown}
                 style={{
                   height: ROW_MD,
                   paddingLeft: 8,
                   paddingRight: 8,
-                  borderRadius: look().radius.row,
-                  backgroundColor: item().shown ? p().row_selected : "transparent",
-                  display: "flex",
-                  flexDirection: "row",
-                  alignItems: "center",
                   gap: 8,
                 }}
                 onPress={() => openView(item().id)}
@@ -143,16 +138,16 @@ export function nav() {
                 </Text>
                 <If when={Boolean(item().attention)}>
                   <View
+                    class="rounded-full"
                     style={{
                       width: 6,
                       height: 6,
-                      borderRadius: 3,
                       backgroundColor: p().bad,
                       flexShrink: 0,
                     }}
                   />
                 </If>
-              </View>
+              </SmeltRow>
             );
           }}
         </Each>
@@ -184,20 +179,20 @@ export function settings() {
       <If when={Boolean(data().available)}>
         <View style={{ position: "relative", flexShrink: 0 }}>
           <SmeltButton
-            quiet={true}
+            variant="quiet"
             icon="icons/settings.svg"
             label={t("settings")}
             onPress={() => runCmd(SETTINGS)}
           />
           <If when={Boolean(data().attention)}>
             <View
+              class="rounded-full"
               style={{
                 position: "absolute",
                 top: 4,
                 right: 4,
                 width: 5,
                 height: 5,
-                borderRadius: 2.5,
                 backgroundColor: look().palette.bad,
                 pointerEvents: "none",
               }}

@@ -495,10 +495,10 @@ function PermissionCardContent() {
           }}
         >
           <View
+            class="rounded-full"
             style={{
               width: 6,
               height: 6,
-              borderRadius: 3,
               backgroundColor: severityColor(),
               flexShrink: 0,
             }}
@@ -516,7 +516,7 @@ function PermissionCardContent() {
           </Text>
           <If when={line()?.fix != null}>
             <SmeltButton
-              small={true}
+              size="sm"
               label={
                 line()?.fix === "request" ? t("permission.request") : t("permission.open_settings")
               }

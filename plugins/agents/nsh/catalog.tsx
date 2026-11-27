@@ -1,7 +1,17 @@
 // 智能体目录页：页头工具行、默认智能体选择器、新建菜单、选默认提示条、按机器分组列表与空状态。
 
 import { computed, Scroll, Text, View } from "nsh";
-import { locale, SmeltButton, SmeltContextMenu, SmeltIcon, t } from "smelt/sdk";
+import {
+  locale,
+  SmeltButton,
+  SmeltContextMenu,
+  SmeltIcon,
+  SmeltMenuItem,
+  SmeltMenuLabel,
+  SmeltMenuSeparator,
+  SmeltRow,
+  t,
+} from "smelt/sdk";
 
 import {
   agentCardPrompt,
@@ -43,9 +53,6 @@ import {
   EngineChip,
   EngineMark,
   ErrorAlert,
-  MenuDivider,
-  MenuEntry,
-  MenuSectionTitle,
   PageToolbar,
   QuietBadge,
   SurfaceCard,
@@ -122,13 +129,13 @@ function CreateAgentButton(props: { small?: boolean }) {
           <Each of={menuEntries()} key={(e: FlatMenuEntry) => e.key}>
             {(entry: () => FlatMenuEntry) =>
               entry().kind === "separator" ? (
-                <MenuDivider />
+                <SmeltMenuSeparator />
               ) : entry().kind === "section" ? (
-                <MenuSectionTitle text={entry().label ?? ""} />
+                <SmeltMenuLabel label={entry().label ?? ""} />
               ) : (
-                <MenuEntry
+                <SmeltMenuItem
                   label={entry().label ?? ""}
-                  iconPath={entry().iconPath}
+                  icon={entry().iconPath}
                   onSelect={() => entry().onSelect?.()}
                 />
               )
@@ -138,7 +145,7 @@ function CreateAgentButton(props: { small?: boolean }) {
       }
     >
       <SmeltButton
-        small={props.small}
+        size={props.small ? "sm" : "md"}
         icon="icons/plus.svg"
         label={t("agent.new")}
         onPress={() => {
@@ -219,11 +226,11 @@ function DefaultAgentPicker() {
         <Each of={menuEntries()} key={(e: FlatMenuEntry) => e.key}>
           {(entry: () => FlatMenuEntry) =>
             entry().kind === "separator" ? (
-              <MenuDivider />
+              <SmeltMenuSeparator />
             ) : entry().kind === "section" ? (
-              <MenuSectionTitle text={entry().label ?? ""} />
+              <SmeltMenuLabel label={entry().label ?? ""} />
             ) : (
-              <MenuEntry
+              <SmeltMenuItem
                 label={entry().label ?? ""}
                 checked={entry().checked}
                 onSelect={() => entry().onSelect?.()}
@@ -262,98 +269,91 @@ function AgentCatalogRow(props: { machine: string | null; agent: () => any }) {
       popupStyle={{ minWidth: 184 }}
       trigger={
         <View
-          role="button"
-          onPress={handleRowPress}
+          class="w-full rounded-xl"
           style={{
-            width: "100%",
-            paddingLeft: 16,
-            paddingRight: 16,
-            paddingTop: 12,
-            paddingBottom: 12,
-            borderRadius: 12,
             borderWidth: 1,
             borderColor: look().palette.hair,
             backgroundColor: look().palette.surface,
-            display: "flex",
-            flexDirection: "row",
-            alignItems: "center",
-            gap: 12,
-            cursor: "default",
-          }}
-          hoverStyle={{
-            backgroundColor: look().palette.soft,
+            overflow: "hidden",
           }}
         >
-          <AgentMonogram name={name()} size={36} onCard={true} />
-          <View
-            style={{
-              flex: 1,
-              minWidth: 0,
-              display: "flex",
-              flexDirection: "column",
-              gap: 4,
-            }}
+          <SmeltRow
+            rounded={false}
+            accessibilityLabel={name()}
+            onPress={handleRowPress}
+            class="w-full gap-3"
+            style={{ paddingLeft: 16, paddingRight: 16, paddingTop: 12, paddingBottom: 12 }}
           >
+            <AgentMonogram name={name()} size={36} onCard={true} />
             <View
               style={{
-                width: "100%",
+                flex: 1,
+                minWidth: 0,
                 display: "flex",
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 8,
+                flexDirection: "column",
+                gap: 4,
               }}
             >
-              <Text
+              <View
                 style={{
-                  flex: 1,
-                  minWidth: 0,
-                  color: look().palette.text,
-                  fontSize: look().type.ui_medium.size,
-                  lineHeight: look().type.ui_medium.line_height,
-                  fontWeight: look().type.ui_medium.weight,
-                  numberOfLines: 1,
+                  width: "100%",
+                  display: "flex",
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 8,
                 }}
               >
-                {name()}
-              </Text>
-              <If when={isDef()}>
-                <QuietBadge label={t("default.badge")} onBg={true} />
-              </If>
-              <If when={showEngine()}>
-                <EngineChip label={engLabel()} engineId={engId()} />
+                <Text
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    color: look().palette.text,
+                    fontSize: look().type.ui_medium.size,
+                    lineHeight: look().type.ui_medium.line_height,
+                    fontWeight: look().type.ui_medium.weight,
+                    numberOfLines: 1,
+                  }}
+                >
+                  {name()}
+                </Text>
+                <If when={isDef()}>
+                  <QuietBadge label={t("default.badge")} onBg={true} />
+                </If>
+                <If when={showEngine()}>
+                  <EngineChip label={engLabel()} engineId={engId()} />
+                </If>
+              </View>
+              <If when={summary() != null}>
+                <Text
+                  style={{
+                    color: look().palette.muted,
+                    fontSize: look().type.text_xsmall.size,
+                    lineHeight: 18,
+                    numberOfLines: 2,
+                  }}
+                >
+                  {summary() ?? ""}
+                </Text>
               </If>
             </View>
-            <If when={summary() != null}>
-              <Text
-                style={{
-                  color: look().palette.muted,
-                  fontSize: look().type.text_xsmall.size,
-                  lineHeight: 18,
-                  numberOfLines: 2,
-                }}
-              >
-                {summary() ?? ""}
-              </Text>
-            </If>
-          </View>
+          </SmeltRow>
         </View>
       }
     >
-
-      <MenuEntry
+      <SmeltMenuItem
         label={t("new_conversation.title")}
         onSelect={() => startAgentConversation(ref())}
       />
-      <MenuEntry
+      <SmeltMenuItem
         label={t("default.set")}
         checked={isDef()}
         disabled={isDef() || !ready()}
         onSelect={() => chooseDefaultConversationAgent(ref(), false)}
       />
-      <MenuDivider />
-      <MenuEntry
+      <SmeltMenuSeparator />
+      <SmeltMenuItem
         label={t("delete.title")}
-        iconPath="icons/trash.svg"
+        icon="icons/trash.svg"
         danger={true}
         disabled={autoCount() !== 0}
         onSelect={() => requestDeleteAgent(ref())}

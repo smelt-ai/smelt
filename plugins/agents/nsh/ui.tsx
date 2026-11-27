@@ -1,26 +1,10 @@
-// 智能体插件的共用基础 UI 组件（卡片、工具行、菜单项、分段控件、开关、徽标、确认框）。
+// 智能体插件的共用基础 UI 组件（卡片、工具行、下拉按钮、带提示的分段控件、开关、徽标）。
 
 import { signal, Text, View } from "nsh";
-import {
-  MenuItem,
-  MenuSeparator,
-} from "nsh/base";
-import {
-  DIALOG_SURFACE_CLASS,
-  INPUT_CLASS,
-  MENU_ITEM_CLASS,
-  SmeltButton,
-  SmeltDialog,
-  SmeltIcon,
-  SmeltMenu,
-  SmeltSwitch,
-  SmeltTooltip,
-  t,
-} from "smelt/sdk";
-export { INPUT_CLASS, MENU_ITEM_CLASS };
+import { SmeltIcon, SmeltMenu, SmeltSwitch, SmeltTooltip, t } from "smelt/sdk";
 
 import { agentCatalogMonogram } from "../model.js";
-import { ConfirmRequest, currentTheme, findEngineMeta } from "./state.ts";
+import { currentTheme, findEngineMeta } from "./state.ts";
 
 export function Tip(props: { text: string }) {
   const look = currentTheme;
@@ -68,8 +52,8 @@ export function SurfaceCard(props: { children?: any; style?: any }) {
   const look = currentTheme;
   return (
     <View
+      class="rounded-xl"
       style={{
-        borderRadius: 12,
         borderWidth: 1,
         borderColor: look().palette.hair,
         backgroundColor: look().palette.surface,
@@ -200,7 +184,7 @@ export function AgentMonogram(props: { name: string; size: number; onCard?: bool
       style={{
         width: props.size,
         height: props.size,
-        borderRadius: 10,
+        borderRadius: look().radius.xl,
         flexShrink: 0,
         display: "flex",
         alignItems: "center",
@@ -240,85 +224,6 @@ export function ToggleSwitch(props: {
         accessibilityLabel={props.accessibilityLabel}
         onChange={props.onChange}
       />
-    </View>
-  );
-}
-
-export function MenuEntry(props: {
-  label: string;
-  iconPath?: string | null;
-  checked?: boolean;
-  danger?: boolean;
-  disabled?: boolean;
-  onSelect: () => void;
-}) {
-  const look = currentTheme;
-  const color = () => (props.danger ? look().palette.bad : look().palette.text);
-  const iconColor = () => (props.danger ? look().palette.bad : look().palette.muted);
-  return (
-    <MenuItem
-      checked={props.checked}
-      disabled={props.disabled}
-      closeOnSelect={true}
-      onSelect={props.onSelect}
-      class={MENU_ITEM_CLASS}
-      style={{ height: 28, gap: 8, opacity: props.disabled ? 0.45 : 1 }}
-    >
-      <If when={Boolean(props.iconPath)}>
-        <View style={{ width: 14, height: 14, flexShrink: 0 }}>
-          <SmeltIcon path={props.iconPath ?? ""} size={14} color={iconColor()} />
-        </View>
-      </If>
-      <Text
-        class="flex-1 min-w-0"
-        style={{
-          color: color(),
-          fontSize: look().type.ui.size,
-          lineHeight: look().type.ui.line_height,
-          numberOfLines: 1,
-        }}
-      >
-        {props.label}
-      </Text>
-      <If when={props.checked != null}>
-        <View
-          style={{
-            width: 14,
-            height: 14,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            flexShrink: 0,
-          }}
-        >
-          <If when={Boolean(props.checked)}>
-            <SmeltIcon path="icons/check.svg" size={13} color={look().palette.text} />
-          </If>
-        </View>
-      </If>
-    </MenuItem>
-  );
-}
-
-export function MenuDivider() {
-  return <MenuSeparator class="my-1 bg-border" style={{ height: 1 }} />;
-}
-
-export function MenuSectionTitle(props: { text: string }) {
-  const look = currentTheme;
-  return (
-    <View style={{ paddingLeft: 8, paddingRight: 8, paddingTop: 4, paddingBottom: 4 }}>
-      <Text
-        style={{
-          color: look().palette.faint,
-          fontSize: look().type.small.size,
-          lineHeight: look().type.small.line_height,
-          fontWeight: look().type.small_medium.weight,
-          numberOfLines: 1,
-        }}
-      >
-        {props.text}
-      </Text>
     </View>
   );
 }
@@ -407,147 +312,3 @@ export function DropdownButton(props: {
   );
 }
 
-export interface SegmentedOption {
-  key: string;
-  label: string;
-  tooltip?: string;
-}
-
-export function SegmentedControl(props: {
-  options: SegmentedOption[];
-  selectedKey: string;
-  onSelect: (key: string) => void;
-}) {
-  const look = currentTheme;
-  return (
-    <View
-      style={{
-        display: "flex",
-        flexDirection: "row",
-        alignItems: "center",
-        padding: 2,
-        gap: 2,
-        borderRadius: look().radius.md,
-        borderWidth: 1,
-        borderColor: look().palette.hair,
-        backgroundColor: look().palette.soft,
-        flexShrink: 0,
-      }}
-    >
-      <Each of={props.options} key={(opt: SegmentedOption) => opt.key}>
-        {(opt: () => SegmentedOption) => {
-          const active = () => opt().key === props.selectedKey;
-          return (
-            <View
-              role="button"
-              accessibilityLabel={opt().label}
-              tooltip={opt().tooltip ? <Tip text={opt().tooltip!} /> : undefined}
-              onPress={() => props.onSelect(opt().key)}
-              style={{
-                height: 24,
-                paddingLeft: 10,
-                paddingRight: 10,
-                borderRadius: look().radius.sm,
-                borderWidth: active() ? 1 : 0,
-                borderColor: active() ? look().palette.hair_strong : "transparent",
-                backgroundColor: active() ? look().palette.bg : "transparent",
-                display: "flex",
-                flexDirection: "row",
-                alignItems: "center",
-                justifyContent: "center",
-                flexShrink: 0,
-                cursor: "default",
-              }}
-            >
-              <Text
-                style={{
-                  color: active() ? look().palette.text : look().palette.muted,
-                  fontSize: look().type.small.size,
-                  lineHeight: look().type.small.line_height,
-                  fontWeight: active()
-                    ? look().type.small_medium.weight
-                    : look().type.small.weight,
-                  numberOfLines: 1,
-                }}
-              >
-                {opt().label}
-              </Text>
-            </View>
-          );
-        }}
-      </Each>
-    </View>
-  );
-}
-
-export function ConfirmDialog(props: {
-  request: () => ConfirmRequest | null;
-  onDismiss: () => void;
-}) {
-  const look = currentTheme;
-  const req = props.request;
-  return (
-    <SmeltDialog
-      open={req() != null}
-      role="alertdialog"
-      accessibilityLabel={req()?.title ?? ""}
-      accessibilityDescription={req()?.description ?? ""}
-      onOpenChange={({ open }: { open: boolean }) => {
-        if (!open) props.onDismiss();
-      }}
-      class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
-      style={{ width: 420, gap: 12 }}
-    >
-      <If when={req() != null}>
-        <Text
-          style={{
-            color: look().palette.text,
-            fontSize: look().type.ui_medium.size,
-            lineHeight: look().type.ui_medium.line_height,
-            fontWeight: look().type.ui_medium.weight,
-          }}
-        >
-          {req()!.title}
-        </Text>
-        <If when={Boolean(req()!.description)}>
-          <Text
-            style={{
-              color: look().palette.muted,
-              fontSize: look().type.text_xsmall.size,
-              lineHeight: look().type.text_xsmall.line_height,
-            }}
-          >
-            {req()!.description}
-          </Text>
-        </If>
-        <View
-          style={{
-            display: "flex",
-            flexDirection: "row",
-            alignItems: "center",
-            justifyContent: "flex-end",
-            gap: 8,
-          }}
-        >
-          <SmeltButton
-            quiet={true}
-            small={true}
-            label={t("common.cancel")}
-            onPress={props.onDismiss}
-          />
-          <SmeltButton
-            primary={!req()!.danger}
-            danger={req()!.danger}
-            small={true}
-            label={req()!.action}
-            onPress={() => {
-              const fn = req()!.onConfirm;
-              props.onDismiss();
-              fn();
-            }}
-          />
-        </View>
-      </If>
-    </SmeltDialog>
-  );
-}

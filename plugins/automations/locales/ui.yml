@@ -7,7 +7,7 @@ access:
     en: "Runs won't stop to wait for your approval. Commands run as you and can read and write local files."
     zh-CN: "运行时不会停下来等你批准，命令以你的身份执行，可以读写本机文件。"
   title:
-    en: "Unattended · Full Access"
+    en: "Unattended · Full access"
     zh-CN: "无人值守 · 完全访问"
 action:
   agent:
@@ -41,7 +41,7 @@ automation:
     zh-CN: "event_id 含非法字符"
   event_id_missing:
     en: "Enter an event_id"
-    zh-CN: "请填写 event_id"
+    zh-CN: "填写 event_id"
   event_id_too_long:
     en: "The event_id is too long"
     zh-CN: "event_id 过长"
@@ -50,7 +50,7 @@ automation:
     zh-CN: "事件主题须为小写点分名，例如 lark.message.received"
   event_topic_missing:
     en: "Enter an event topic"
-    zh-CN: "请填写事件主题"
+    zh-CN: "填写事件主题"
   event_topic_too_long:
     en: "The event topic is too long"
     zh-CN: "事件主题过长"
@@ -62,25 +62,25 @@ automation:
     zh-CN: "执行间隔需为 1 到 1440 分钟"
   no_agent:
     en: "Choose a configured agent"
-    zh-CN: "请选择已配置的智能体"
+    zh-CN: "先选一个已配置的智能体"
   no_days:
     en: "Choose at least one day"
-    zh-CN: "请至少选择一天"
+    zh-CN: "至少选一天"
   no_id:
     en: "The automation has no id"
     zh-CN: "自动化缺少 id"
   no_instruction:
     en: "Scheduled triggers bring no outside content, so enter an instruction"
-    zh-CN: "定时触发不会带入外部内容，请填写指令"
+    zh-CN: "定时触发不会带入外部内容，需要填写指令"
   no_name:
     en: "Enter a name for the automation"
-    zh-CN: "请填写自动化名称"
+    zh-CN: "填写自动化名称"
   no_shell_command:
     en: "Enter the shell command to run"
-    zh-CN: "请填写要执行的 Shell 命令"
+    zh-CN: "填写要执行的 Shell 命令"
   no_trigger:
     en: "Add at least one trigger"
-    zh-CN: "请至少添加一条触发条件"
+    zh-CN: "至少添加一条触发条件"
   no_webhook_token:
     en: "The external trigger has no receiving token"
     zh-CN: "外部触发缺少接收令牌"
@@ -95,9 +95,9 @@ automation:
     zh-CN: "运行记录不存在"
   time_out_of_range:
     en: "Enter a time between 00:00 and 23:59"
-    zh-CN: "请输入 00:00 到 23:59 之间的时间"
+    zh-CN: "输入 00:00 到 23:59 之间的时间"
   unnamed:
-    en: "Untitled Automation"
+    en: "Untitled automation"
     zh-CN: "未命名自动化"
   workspace_missing:
     en: "The automation's Smelt workspace doesn't exist or isn't a folder: %{path}"
@@ -177,7 +177,7 @@ automation_run:
     zh-CN: "自动化的 Smelt 工作区不存在或不是目录"
 catalog:
   col_next_run:
-    en: "Next Run"
+    en: "Next run"
     zh-CN: "下次运行"
   col_schedule:
     en: "Schedule"
@@ -198,13 +198,13 @@ catalog:
     en: "Loading…"
     zh-CN: "正在读取…"
   machine_menu:
-    en: "Create on Which Machine"
+    en: "Create on which machine"
     zh-CN: "建在哪台机器上"
   more:
-    en: "More Actions"
+    en: "More actions"
     zh-CN: "更多操作"
   new:
-    en: "New Automation"
+    en: "New automation"
     zh-CN: "新建自动化"
   no_runs:
     en: "No runs yet"
@@ -234,7 +234,7 @@ delete:
       zh-CN: "「%{name}」和它的 %{count} 条运行记录会被删除，此操作不可撤销。"
   title:
     en: "Delete this automation?"
-    zh-CN: "确定删除这条自动化吗？"
+    zh-CN: "删除这条自动化？"
 editor:
   back:
     en: "Back"
@@ -243,7 +243,7 @@ editor:
     en: "Cancel"
     zh-CN: "取消"
   choose_agent:
-    en: "Choose Agent"
+    en: "Choose agent"
     zh-CN: "选择智能体"
   command_placeholder:
     en: "e.g. curl -fsS https://example.com/health"
@@ -252,7 +252,7 @@ editor:
     en: "Create"
     zh-CN: "创建"
   create_agent:
-    en: "Create Agent"
+    en: "Create agent"
     zh-CN: "创建智能体"
   enabled:
     en: "Enabled"
@@ -273,7 +273,7 @@ editor:
     en: "e.g. Summarize today's progress and list to-dos"
     zh-CN: "例如：汇总今日进展并列出待办事项"
   runs:
-    en: "Run History"
+    en: "Run history"
     zh-CN: "运行记录"
   settings:
     en: "Settings"
@@ -282,7 +282,7 @@ editor:
     en: "Runs at set times, at intervals, or when the webhook receives a request."
     zh-CN: "到点、按间隔，或收到 webhook 时运行。"
   what:
-    en: "What to Do"
+    en: "What to do"
     zh-CN: "做什么"
   when:
     en: "When"
@@ -291,7 +291,7 @@ editor:
     en: "Where"
     zh-CN: "在哪做"
   who:
-    en: "Who Does It"
+    en: "Who does it"
     zh-CN: "谁来做"
 elapsed:
   hours:
@@ -325,13 +325,13 @@ error:
     zh-CN: "执行间隔需为 1 到 1440 分钟"
   invalid_time:
     en: "Enter a time between 00:00 and 23:59"
-    zh-CN: "请输入 00:00 到 23:59 之间的时间"
+    zh-CN: "输入 00:00 到 23:59 之间的时间"
   machine_removed:
     en: "This machine was removed"
     zh-CN: "这台机器已移除"
   no_days:
     en: "Choose at least one day"
-    zh-CN: "请至少选择一天"
+    zh-CN: "至少选一天"
   run_not_found:
     en: "Couldn't find the run record"
     zh-CN: "找不到对应的运行记录"
@@ -346,7 +346,7 @@ error:
     zh-CN: "无法识别该运行使用的智能体引擎"
   window_incomplete:
     en: "Enter both a start and an end time"
-    zh-CN: "请同时填写开始和结束时间"
+    zh-CN: "同时填写开始和结束时间"
 flash:
   copied:
     en: "Copied ✓"
@@ -371,7 +371,7 @@ machine:
     zh-CN: "本机"
 menu:
   delete:
-    en: "Delete Automation"
+    en: "Delete automation"
     zh-CN: "删除自动化"
   enable:
     en: "Enable"
@@ -380,17 +380,17 @@ menu:
     en: "Pause"
     zh-CN: "暂停"
   run_once:
-    en: "Run Once"
+    en: "Run once"
     zh-CN: "运行一次"
   stop:
     en: "Stop"
     zh-CN: "停止"
   view_runs:
-    en: "View Runs"
+    en: "View runs"
     zh-CN: "查看运行"
 meta:
   acp_session:
-    en: "ACP Session"
+    en: "ACP session"
     zh-CN: "ACP 会话"
   action:
     en: "Action"
@@ -399,7 +399,7 @@ meta:
     en: "Agent"
     zh-CN: "智能体"
   agent_definition_id:
-    en: "Agent Definition ID"
+    en: "Agent definition ID"
     zh-CN: "智能体定义 ID"
   command:
     en: "Command"
@@ -417,7 +417,7 @@ meta:
     en: "Finished"
     zh-CN: "结束"
   provider_session:
-    en: "Provider Session"
+    en: "Provider session"
     zh-CN: "Provider 会话"
   scheduled:
     en: "Scheduled"
@@ -464,19 +464,19 @@ missing:
     zh-CN: "触发器"
 notification:
   always:
-    en: "Every Run"
+    en: "Every run"
     zh-CN: "每次"
   always_hint:
     en: "Notify after every run."
     zh-CN: "每次跑完都弹通知。"
   failures:
-    en: "Failures Only"
+    en: "Failures only"
     zh-CN: "仅失败时"
   failures_hint:
     en: "Notify only when a run fails or is skipped; click it to open that run."
     zh-CN: "没跑成（失败或跳过）才弹通知，点开直达这次运行。"
   off:
-    en: "No Notification"
+    en: "No notification"
     zh-CN: "不通知"
   off_hint:
     en: "Runs are only kept in the run history."
@@ -526,16 +526,16 @@ peer:
 prompt:
   hint:
     en: "Sent to the agent on every run. Set standing instructions in the agent's settings."
-    zh-CN: "每次运行时发送给智能体。长期指令请在智能体设置中配置。"
+    zh-CN: "每次运行时发送给智能体。长期指令在智能体设置中配置。"
   webhook_hint:
     en: "The request body is appended to the instructions; to place it elsewhere, use {{payload}} or a field variable (such as {{text}}). Leave empty to send the request body as is. Set standing instructions in the agent's settings."
-    zh-CN: "收到的请求内容会附在指令后面；想放到指定位置，用 {{payload}} 或字段变量（如 {{text}}）。留空时直接发送请求内容。长期指令请在智能体设置中配置。"
+    zh-CN: "收到的请求内容会附在指令后面；想放到指定位置，用 {{payload}} 或字段变量（如 {{text}}）。留空时直接发送请求内容。长期指令在智能体设置中配置。"
 row_status:
   active:
     en: "Enabled"
     zh-CN: "已启用"
   agent_missing:
-    en: "Agent Deleted"
+    en: "Agent deleted"
     zh-CN: "智能体已删除"
   paused:
     en: "Paused"
@@ -560,13 +560,13 @@ run:
     en: "*(%{count} image(s), not saved to the archive)*"
     zh-CN: "*（%{count} 张图片，未写入存档）*"
   info:
-    en: "Run Info"
+    en: "Run info"
     zh-CN: "运行信息"
   input:
-    en: "This Run's Input"
+    en: "This run's input"
     zh-CN: "本次输入"
   instructions:
-    en: "Agent Instructions Snapshot"
+    en: "Agent instructions snapshot"
     zh-CN: "智能体指令快照"
   lines_hidden:
     en: "…(%{count} more lines not shown)"
@@ -635,20 +635,20 @@ run:
     zh-CN: "输入"
 run_source:
   event:
-    en: "Event Trigger"
+    en: "Event trigger"
     zh-CN: "事件触发"
   manual:
-    en: "Manual Run"
+    en: "Manual run"
     zh-CN: "手动运行"
   scheduled:
     en: "Scheduled"
     zh-CN: "定时触发"
   webhook:
-    en: "External Trigger"
+    en: "External trigger"
     zh-CN: "外部触发"
 run_status:
   awaiting_approval:
-    en: "Awaiting Approval"
+    en: "Awaiting approval"
     zh-CN: "等待审批"
   cancelled:
     en: "Cancelled"
@@ -663,7 +663,7 @@ run_status:
     en: "Failed"
     zh-CN: "失败"
   queued:
-    en: "Waiting to Deliver"
+    en: "Waiting to deliver"
     zh-CN: "等待投递"
   running:
     en: "Running"
@@ -675,26 +675,26 @@ run_status:
     en: "Starting"
     zh-CN: "启动中"
   waiting_for_user:
-    en: "Waiting for Input"
+    en: "Waiting for input"
     zh-CN: "等待输入"
 schedule:
   all_day:
-    en: "All Day"
+    en: "All day"
     zh-CN: "全天"
   daily:
     en: "Daily %{time}"
     zh-CN: "每天 %{time}"
   daily_time:
-    en: "Daily Run Time"
+    en: "Daily run time"
     zh-CN: "每日执行时间"
   delete:
-    en: "Delete Time Setting"
+    en: "Delete time setting"
     zh-CN: "删除时间设置"
   during:
     en: "%{days} %{start}–%{end} · every %{count} min"
     zh-CN: "%{days} %{start}–%{end} · 每隔 %{count} 分钟"
   end_time:
-    en: "End Time"
+    en: "End time"
     zh-CN: "结束时间"
   every_day:
     en: "Every day"
@@ -709,22 +709,22 @@ schedule:
     en: "From"
     zh-CN: "从"
   limit_hours:
-    en: "Limit Hours"
+    en: "Limit hours"
     zh-CN: "限制时段"
   no_days:
     en: "No days selected"
     zh-CN: "未选择星期"
   run_time:
-    en: "Run Time"
+    en: "Run time"
     zh-CN: "执行时间"
   start_time:
-    en: "Start Time"
+    en: "Start time"
     zh-CN: "开始时间"
   to:
     en: "to"
     zh-CN: "到"
   weekdays_time:
-    en: "Weekday Run Time"
+    en: "Weekday run time"
     zh-CN: "工作日执行时间"
   weekly:
     en: "%{days} · %{time}"
@@ -801,7 +801,7 @@ template:
       en: "Sum up this week's product, pricing and public news from the companies you follow."
       zh-CN: "汇总关注对象本周的产品、定价和公开动态。"
     name:
-      en: "Competitor Watch"
+      en: "Competitor watch"
       zh-CN: "竞品观察"
     prompt:
       en: "Sum up this week's product, pricing and public news from [products or companies to follow]. For each item, give the source, what changed, and what it means for us."
@@ -811,7 +811,7 @@ template:
       en: "Turn your to-do file into doable time blocks and quick wins for today."
       zh-CN: "按你的待办文件排出今天可执行的时间块和快赢项。"
     name:
-      en: "Daily Plan"
+      en: "Daily plan"
       zh-CN: "每日计划"
     prompt:
       en: "Read the to-do file [file path] and lay out doable time blocks for today. Give each block a goal and a definition of done; quick wins first, then deep work."
@@ -821,7 +821,7 @@ template:
       en: "Report only outdated or high-risk dependencies, with the smallest fix for each."
       zh-CN: "只报告过期或高风险依赖，并给出最小修复建议。"
     name:
-      en: "Dependency Checkup"
+      en: "Dependency checkup"
       zh-CN: "依赖体检"
     prompt:
       en: "Check whether the dependencies of the repository [repository path] are outdated or have known high-risk issues. Report only what needs attention, with the smallest fix for each."
@@ -834,7 +834,7 @@ template:
       en: "Start the day with a few bullet points: repository activity and the three things to do first."
       zh-CN: "用几条要点打开今天：仓库动态，以及最该先做的三件事。"
     name:
-      en: "Morning Brief"
+      en: "Morning brief"
       zh-CN: "每日晨报"
     prompt:
       en: "Look at the commits, branches and uncommitted changes in the repository [repository path] over the past day, and list the three things to handle first today as short bullet points. Don't write prose."
@@ -844,7 +844,7 @@ template:
       en: "Explain this week's most worthwhile piece of research in plain words, and whether we can use it."
       zh-CN: "用白话讲清本周最值得看的一篇研究，以及能不能用上。"
     name:
-      en: "Paper Digest"
+      en: "Paper digest"
       zh-CN: "论文速读"
     prompt:
       en: "Pick the most worthwhile research paper or technical article this week in [research area], explain the method and conclusions in plain words, and say whether we can use it in our work."
@@ -854,7 +854,7 @@ template:
       en: "Check pending merge requests and uncommitted changes in the repository and flag the risks to look at first."
       zh-CN: "检查仓库里待审的合并请求和未提交变更，标出该先看的风险。"
     name:
-      en: "Pending Changes"
+      en: "Pending changes"
       zh-CN: "待审变更"
     prompt:
       en: "Check the pending merge requests and uncommitted changes in the repository [repository path]. Flag risky files, testing gaps, and the order you suggest reviewing them in."
@@ -867,7 +867,7 @@ template:
       en: "Pull next steps out of recently changed files in your notes folder, deduplicated and grouped."
       zh-CN: "从笔记目录里最近改过的文件抽出可执行下一步，去重后分组。"
     name:
-      en: "To-Do Extractor"
+      en: "To-do extractor"
       zh-CN: "待办提取"
     prompt:
       en: "Read the files changed in the past day in the notes folder [folder path], extract actionable to-dos, remove duplicates, merge similar items, and group them into today / this week / later."
@@ -877,7 +877,7 @@ template:
       en: "Pick out model, framework and tool releases in the areas you follow, and say whether to follow up."
       zh-CN: "挑你关注方向的模型、框架、工具发布，说明要不要跟。"
     name:
-      en: "Tech Digest"
+      en: "Tech digest"
       zh-CN: "技术动态"
     prompt:
       en: "Sum up model, framework and tool releases from the past day related to [technology areas to follow]. For each, explain the impact and whether it's worth following up on."
@@ -887,7 +887,7 @@ template:
       en: "Wrap up the week from its commits: what got done, what's stuck, and just three priorities for next week."
       zh-CN: "按本周的提交收束完成项、卡住的问题，和下周只保留的三条优先级。"
     name:
-      en: "Weekly Review"
+      en: "Weekly review"
       zh-CN: "每周回顾"
     prompt:
       en: "Review this week's commits and merges in the repository [repository path]: what got done, where things are stuck, and only three priorities for next week. Use bullet points and skip the filler."
@@ -928,7 +928,7 @@ time:
     zh-CN: "%{count} 年前"
 timezone:
   local:
-    en: "Local Time Zone · %{offset}"
+    en: "Local time zone · %{offset}"
     zh-CN: "本机时区 · %{offset}"
 title:
   en: "Automations"
@@ -960,10 +960,10 @@ tool:
     zh-CN: "搜索 %{target}"
 trigger:
   add:
-    en: "Add Trigger"
+    en: "Add trigger"
     zh-CN: "添加触发器"
   delete:
-    en: "Delete Trigger"
+    en: "Delete trigger"
     zh-CN: "删除触发器"
   event:
     en: "Event · %{topic}"
@@ -975,7 +975,7 @@ trigger:
     en: "; "
     zh-CN: "；"
   webhook:
-    en: "External Trigger"
+    en: "External trigger"
     zh-CN: "外部触发"
   webhook_unset:
     en: "External trigger not set up"
@@ -1032,13 +1032,13 @@ turn_failure:
     zh-CN: "Agent 拒绝继续处理"
 turn_hint:
   api_key_rejected:
-    en: "The server rejected the API key. Check this agent's Environment in Settings → Agents → Custom Agents, and make sure no spaces or quotes were pasted along with it."
+    en: "The server rejected the API key. Check this agent's Environment in Settings → Agents → Custom agents, and make sure no spaces or quotes were pasted along with it."
     zh-CN: "API key 被服务端拒绝了：到「设置 → Agent → 自定义 Agent」里这个 Agent 的「环境变量」核对一遍，注意别把前后空格或引号一起粘进去。"
   connection_refused:
-    en: "Couldn't reach the model service. If you set a custom base URL (such as OPENAI_BASE_URL), check the address and port in this agent's Environment under Settings → Agents → Custom Agents, and that this machine can reach it."
+    en: "Couldn't reach the model service. If you set a custom base URL (such as OPENAI_BASE_URL), check the address and port in this agent's Environment under Settings → Agents → Custom agents, and that this machine can reach it."
     zh-CN: "连不上模型服务：如果配了自定义 base URL（如 OPENAI_BASE_URL），到「设置 → Agent → 自定义 Agent」里这个 Agent 的「环境变量」确认地址和端口，以及本机能否访问。"
   no_api_key:
-    en: "No API key yet. In Settings → Agents → Custom Agents, create an agent based on this one, put your keys in Environment as KEY=value, one per line (e.g. OPENAI_API_KEY=sk-...), then start a new conversation with it."
+    en: "No API key yet. In Settings → Agents → Custom agents, create an agent based on this one, put your keys in Environment as KEY=value, one per line (e.g. OPENAI_API_KEY=sk-...), then start a new conversation with it."
     zh-CN: "还没配 API key：在「设置 → Agent → 自定义 Agent」新建一个基于这个 agent 的 Agent，在「环境变量」里按 KEY=值 每行一条填好（比如 OPENAI_API_KEY=sk-...），再用它新建对话。"
   rate_limited:
     en: "The server is rate limiting requests. Wait a moment before sending again; if it keeps happening, check your account's quota."
@@ -1048,7 +1048,7 @@ webhook:
     en: "Copy"
     zh-CN: "复制"
   copy_example:
-    en: "Copy Example"
+    en: "Copy example"
     zh-CN: "复制示例"
   example_text:
     en: "Hello"
@@ -1060,7 +1060,7 @@ webhook:
     en: "Send a POST request to this address to trigger a run."
     zh-CN: "向此地址发送 POST 请求即可触发运行。"
   regenerate:
-    en: "Regenerate Address"
+    en: "Regenerate address"
     zh-CN: "重新生成地址"
   save_hint:
     en: "Save this automation to see the webhook settings."
@@ -1089,7 +1089,7 @@ weekday:
     zh-CN: "三"
 workspace:
   choose:
-    en: "Choose Folder…"
+    en: "Choose folder…"
     zh-CN: "选择文件夹…"
   default:
     en: "Default folder"
@@ -1104,8 +1104,8 @@ workspace:
     en: "Choose"
     zh-CN: "选择"
   pick_title:
-    en: "Choose Where the Automation Runs"
+    en: "Choose where the automation runs"
     zh-CN: "选择自动化在哪个目录里运行"
   reset:
-    en: "Use Default"
+    en: "Use default"
     zh-CN: "用默认目录"

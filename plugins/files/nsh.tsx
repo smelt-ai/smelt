@@ -3,14 +3,8 @@
 //         主体用 1st-class Rust <SmeltEditor>、<SmeltMarkdown>、<Image>；正文和图片以 Blob 交给它们，不进插件的 JS 堆
 // - 右侧：<ResizablePanelGroup> 无 JS 往返拖动分栏，搜索框 + 钉目录按钮 + 键盘可控文件树 / 搜索结果树
 // - 全事件驱动：project.watch / project_changed / reconnected / window_activated / active_context，无轮询。
-import { cleanup, computed, effect, Image, Scroll, signal, Text, untracked, View } from "nsh";
-import {
-  Input,
-  MenuItem,
-  MenuSeparator,
-  ResizablePanel,
-  ResizablePanelGroup,
-} from "nsh/base";
+import { cleanup, computed, effect, Image, List, Scroll, signal, Text, untracked, View } from "nsh";
+import { ResizablePanel, ResizablePanelGroup } from "nsh/base";
 import { Menu } from "nsh/desktop";
 import {
   activeContext,
@@ -24,7 +18,6 @@ import {
   DIALOG_SURFACE_CLASS,
   initHost,
   localOs,
-  MENU_ITEM_CLASS,
   onCommand,
   onEvent,
   onSlices,
@@ -41,12 +34,17 @@ import {
   revealPath,
   run,
   SmeltButton,
+  SmeltConfirmDialog,
   SmeltContextMenu,
   SmeltDialog,
   SmeltDisclosureChevron,
   SmeltEditor,
   SmeltIcon,
+  SmeltInput,
   SmeltMarkdown,
+  SmeltMenuItem,
+  SmeltMenuSeparator,
+  SmeltRow,
   SmeltTooltip,
   stableMemo,
   store,
@@ -1399,43 +1397,6 @@ onEvent(
 
 // ---- 子组件 ----
 
-
-function MenuRow(props: {
-  label: string;
-  iconPath?: string;
-  danger?: boolean;
-  disabled?: boolean;
-  onSelect: () => void;
-}) {
-  const look = currentTheme;
-  return (
-    <MenuItem
-      closeOnSelect={true}
-      disabled={props.disabled}
-      class={MENU_ITEM_CLASS}
-      style={{ height: 28, gap: 8 }}
-      onSelect={props.onSelect}
-    >
-      <If when={Boolean(props.iconPath)}>
-        <SmeltIcon
-          path={props.iconPath}
-          size={14}
-          color={props.danger ? look().palette.bad : look().palette.muted}
-        />
-      </If>
-      <Text
-        style={{
-          fontSize: look().type.ui_compact.size,
-          lineHeight: look().type.ui_compact.line_height,
-          color: props.danger ? look().palette.bad : look().palette.text,
-        }}
-      >
-        {props.label}
-      </Text>
-    </MenuItem>
-  );
-}
-
 function gitMarkColor(mark: string, palette: any): string {
   if (mark === "D") return palette.bad;
   if (mark === "A") return palette.ok;
@@ -1595,7 +1556,7 @@ function UnreadableBody() {
         {status()?.message ?? ""}
       </Text>
       <If when={Boolean(status()?.canRetry)}>
-        <SmeltButton small={true} label={t("retry")} onPress={retryOpenFile} />
+        <SmeltButton size="sm" label={t("retry")} onPress={retryOpenFile} />
       </If>
     </View>
   );
@@ -1675,6 +1636,11 @@ export function Main() {
     const of = openFile();
     return of != null && of.preview && isMarkdownPath(of.path);
   });
+
+  // 关上时框还在淡出：留着上一次的文件名，标题和说明不在淡出途中变样。
+  const deleteShown = computed(
+    (prev: DeleteDialog | null | undefined) => deleteDialog() ?? prev ?? null,
+  );
 
   const openFileDirty = computed(() => isDirty(openFile()));
   // 编辑器按文件 id 挂：换文件就换一个，撤销历史不串到别的文件。
@@ -1785,8 +1751,7 @@ export function Main() {
                       minWidth: 0,
                     }}
                   >
-                    <View
-                      class="rounded hover:bg-accent"
+                    <SmeltRow
                       onPress={() => {
                         if (!onTreeMachine()) return;
                         revealFromBreadcrumb(seg().path, !isLast());
@@ -1811,9 +1776,6 @@ export function Main() {
                         paddingTop: 4,
                         paddingBottom: 4,
                         minHeight: 26,
-                        display: "flex",
-                        alignItems: "center",
-                        cursor: onTreeMachine() ? "pointer" : "default",
                       }}
                     >
                       <Text
@@ -1829,16 +1791,9 @@ export function Main() {
                       >
                         {seg().label}
                       </Text>
-                    </View>
+                    </SmeltRow>
                     <If when={!isLast()}>
-                      <Text
-                        style={{
-                          fontSize: look().type.ui.size,
-                          color: look().palette.muted,
-                        }}
-                      >
-                        {">"}
-                      </Text>
+                      <SmeltIcon path="icons/chevron-right.svg" size={12} color={look().palette.muted} />
                     </If>
                   </View>
                 );
@@ -1846,10 +1801,10 @@ export function Main() {
             </Each>
             <If when={openFileDirty()}>
               <View
+                class="rounded-full"
                 style={{
                   width: 6,
                   height: 6,
-                  borderRadius: 3,
                   backgroundColor: look().palette.need,
                   flexShrink: 0,
                   marginLeft: 4,
@@ -1875,16 +1830,16 @@ export function Main() {
           <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 0 }}>
             <If when={canOpenInBrowser()}>
               <SmeltButton
-                quiet={true}
-                small={true}
+                variant="quiet"
+                size="sm"
                 label={t("browser.open")}
                 onPress={openFileInBrowser}
               />
             </If>
             <If when={canUnlock()}>
               <SmeltButton
-                quiet={true}
-                small={true}
+                variant="quiet"
+                size="sm"
                 icon="icons/pencil.svg"
                 label={t("readonly.edit")}
                 tooltip={t("readonly.tooltip")}
@@ -1893,15 +1848,15 @@ export function Main() {
             </If>
             <If when={canPreviewMarkdown()}>
               <SmeltButton
-                quiet={true}
-                small={true}
+                variant="quiet"
+                size="sm"
                 label={showingMarkdownPreview() ? t("preview.show_source") : t("preview.show_preview")}
                 onPress={() => setFilePreview(!showingMarkdownPreview())}
               />
             </If>
             <SmeltButton
-              quiet={true}
-              small={true}
+              variant="quiet"
+              size="sm"
               icon={treeOpen() ? "icons/panel-right.svg" : "icons/panel-left.svg"}
               tooltip={treeOpen() ? t("tree.collapse") : t("tree.expand")}
               onPress={() => {
@@ -2020,7 +1975,8 @@ export function Main() {
                   flexShrink: 0,
                 }}
               >
-                <Input
+                <SmeltInput
+                  size="sm"
                   value={filterQuery()}
                   placeholder={t("search.placeholder")}
                   accessibilityLabel={t("search.placeholder")}
@@ -2034,19 +1990,12 @@ export function Main() {
                       scheduleSearch("");
                     }
                   }}
-                  class="rounded-(--radius) border border-input bg-card px-2 text-foreground"
-                  style={{
-                    flex: 1,
-                    minWidth: 0,
-                    height: 26,
-                    fontSize: look().type.small.size,
-                    lineHeight: look().type.small.line_height,
-                  }}
+                  class="flex-1 min-w-0"
                 />
                 <If when={isLocalTree()}>
                   <SmeltButton
-                    quiet={true}
-                    small={true}
+                    variant="quiet"
+                    size="sm"
                     icon="icons/plus.svg"
                     tooltip={t("pin.add")}
                     onPress={() => void pickPinnedRoots()}
@@ -2071,13 +2020,19 @@ export function Main() {
                         onKeyDown={handleTreeKeyDown}
                         style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}
                       >
-                        <Scroll style={{ flex: 1, width: "100%", height: "100%" }}>
-                          <View style={{ display: "flex", flexDirection: "column", paddingTop: 2, paddingBottom: 4 }}>
-                            <Each of={rows()} key={(row: any) => fileTreeRowId(row)}>
+                        <List
+                          each={rows()}
+                          keyExtractor={(row: any) => fileTreeRowId(row)}
+                          estimatedItemSize={24}
+                          style={{ flex: 1, width: "100%", height: "100%" }}
+                          contentStyle={{ paddingTop: 2, paddingBottom: 4 }}
+                        >
                               {(row: () => any) => {
                                 const isLoading = () => row().kind === "loading";
                                 const isRoot = () => row().kind === "root_header";
                                 const rowPath = () => fileTreeRowPath(row()) ?? "";
+                                // 两种状态会分开：点目录、方向键移动只动选中，编辑器里还开着原来的文件。
+                                // 选中（点击和键盘的落点）铺底色；打开的文件名字换正文色、加中等字重。
                                 const isSelected = () =>
                                   selectedPath() != null && selectedPath() === rowPath();
                                 const isOpen = () =>
@@ -2097,8 +2052,9 @@ export function Main() {
                                           <SmeltContextMenu
                                             popupStyle={{ minWidth: 168 }}
                                             trigger={
-                                              <View
-                                                class="hover:bg-accent"
+                                              <SmeltRow
+                                                rounded={false}
+                                                selected={isSelected()}
                                                 onPress={() => {
                                                   const r = row();
                                                   selectedPath.set(r.path);
@@ -2124,20 +2080,10 @@ export function Main() {
                                                 }
                                                 style={{
                                                   width: "100%",
-                                                  display: "flex",
-                                                  flexDirection: "row",
-                                                  alignItems: "center",
                                                   gap: 4,
                                                   height: 24,
-                                                  paddingLeft:
-                                                    8 + row().depth * 14 - (isSelected() ? 2 : 0),
+                                                  paddingLeft: 8 + row().depth * 14,
                                                   paddingRight: 8,
-                                                  borderLeftWidth: isSelected() ? 2 : 0,
-                                                  borderLeftColor: look().palette.ink,
-                                                  backgroundColor: isOpen()
-                                                    ? look().palette.row_selected
-                                                    : "transparent",
-                                                  cursor: "pointer",
                                                   overflow: "hidden",
                                                 }}
                                               >
@@ -2172,9 +2118,13 @@ export function Main() {
                                                     minWidth: 0,
                                                     fontSize: look().type.ui.size,
                                                     lineHeight: look().type.ui.line_height,
-                                                    color: row().isDir
-                                                      ? look().palette.text
-                                                      : look().palette.muted,
+                                                    fontWeight: isOpen()
+                                                      ? look().type.ui_medium.weight
+                                                      : look().type.ui.weight,
+                                                    color:
+                                                      row().isDir || isOpen()
+                                                        ? look().palette.text
+                                                        : look().palette.muted,
                                                     numberOfLines: 1,
                                                   }}
                                                 >
@@ -2195,31 +2145,31 @@ export function Main() {
                                                     {row().gitMark ?? ""}
                                                   </Text>
                                                 </If>
-                                              </View>
+                                              </SmeltRow>
                                             }
                                           >
-                                            <MenuRow
+                                            <SmeltMenuItem
                                               label={t("send.path_menu")}
                                               onSelect={() => sendPathToSession(row().path)}
                                             />
-                                            <MenuRow
+                                            <SmeltMenuItem
                                               label={t("copy_path")}
                                               onSelect={() => void clipboardWrite(row().path)}
                                             />
                                             <If when={isLocalTree()}>
-                                              <MenuRow
+                                              <SmeltMenuItem
                                                 label={isMac ? t("reveal.finder") : t("reveal.file_manager")}
                                                 onSelect={() => void revealPath(row().path)}
                                               />
                                             </If>
-                                            <MenuSeparator class="my-1 bg-border" style={{ height: 1 }} />
-                                            <MenuRow
+                                            <SmeltMenuSeparator />
+                                            <SmeltMenuItem
                                               label={
                                                 row().isDir
                                                   ? t("delete.folder_menu")
                                                   : t("delete.file_menu")
                                               }
-                                              iconPath="icons/trash.svg"
+                                              icon="icons/trash.svg"
                                               danger={true}
                                               onSelect={() => startDelete(row().path, Boolean(row().isDir))}
                                             />
@@ -2230,23 +2180,19 @@ export function Main() {
                                         <If
                                           when={Boolean(row().pinned)}
                                           else={
-                                            <View
-                                              class="hover:bg-accent"
+                                            <SmeltRow
+                                              rounded={false}
+                                              selected={isSelected()}
                                               onPress={() => {
                                                 selectedPath.set(row().path);
                                                 toggleRootCollapsed(row().path);
                                               }}
                                               style={{
-                                                display: "flex",
-                                                flexDirection: "row",
-                                                alignItems: "center",
+                                                width: "100%",
                                                 gap: 4,
                                                 height: 24,
-                                                paddingLeft: isSelected() ? 6 : 8,
+                                                paddingLeft: 8,
                                                 paddingRight: 8,
-                                                borderLeftWidth: isSelected() ? 2 : 0,
-                                                borderLeftColor: look().palette.ink,
-                                                cursor: "pointer",
                                                 overflow: "hidden",
                                               }}
                                             >
@@ -2273,30 +2219,25 @@ export function Main() {
                                                 {styleOpsFor(treeMachine()).fileName(row().path) ??
                                                   row().path}
                                               </Text>
-                                            </View>
+                                            </SmeltRow>
                                           }
                                         >
                                           <SmeltContextMenu
                                             popupStyle={{ minWidth: 168 }}
                                             trigger={
-                                              <View
-                                                class="hover:bg-accent"
+                                              <SmeltRow
+                                                rounded={false}
+                                                selected={isSelected()}
                                                 onPress={() => {
                                                   selectedPath.set(row().path);
                                                   toggleRootCollapsed(row().path);
                                                 }}
                                                 style={{
                                                   width: "100%",
-                                                  display: "flex",
-                                                  flexDirection: "row",
-                                                  alignItems: "center",
                                                   gap: 4,
                                                   height: 24,
-                                                  paddingLeft: isSelected() ? 6 : 8,
+                                                  paddingLeft: 8,
                                                   paddingRight: 8,
-                                                  borderLeftWidth: isSelected() ? 2 : 0,
-                                                  borderLeftColor: look().palette.ink,
-                                                  cursor: "pointer",
                                                   overflow: "hidden",
                                                 }}
                                               >
@@ -2323,10 +2264,10 @@ export function Main() {
                                                   {styleOpsFor(treeMachine()).fileName(row().path) ??
                                                     row().path}
                                                 </Text>
-                                              </View>
+                                              </SmeltRow>
                                             }
                                           >
-                                            <MenuRow
+                                            <SmeltMenuItem
                                               label={t("pin.remove")}
                                               onSelect={() => unpinRoot(row().path)}
                                             />
@@ -2337,6 +2278,7 @@ export function Main() {
                                   >
                                     <View
                                       style={{
+                                        width: "100%",
                                         height: 24,
                                         paddingLeft: 8 + row().depth * 14,
                                         paddingRight: 8,
@@ -2357,9 +2299,7 @@ export function Main() {
                                   </If>
                                 );
                               }}
-                            </Each>
-                          </View>
-                        </Scroll>
+                        </List>
                       </View>
                     </If>
                   </If>
@@ -2378,15 +2318,19 @@ export function Main() {
                       {searchStatusText()}
                     </Text>
                   </View>
-                  <Scroll style={{ flex: 1, width: "100%", height: "100%" }}>
-                    <View style={{ display: "flex", flexDirection: "column", paddingBottom: 4 }}>
-                      <Each of={searchRows()} key={(r: any) => r.key}>
+                  <List
+                    each={searchRows()}
+                    keyExtractor={(r: any) => r.key}
+                    estimatedItemSize={24}
+                    style={{ flex: 1, width: "100%", height: "100%" }}
+                    contentStyle={{ paddingBottom: 4 }}
+                  >
                         {(row: () => any) => (
                           <If
                             when={row().kind === "dir"}
                             else={
-                              <View
-                                class="hover:bg-accent"
+                              <SmeltRow
+                                rounded={false}
                                 onPress={() =>
                                   viewFileOn(
                                     searchState()?.machine ?? treeMachine(),
@@ -2395,13 +2339,13 @@ export function Main() {
                                   )
                                 }
                                 style={{
-                                  display: "flex",
+                                  width: "100%",
                                   flexDirection: "column",
+                                  alignItems: "stretch",
                                   paddingLeft: 8 + row().depth * 12,
                                   paddingRight: 8,
                                   paddingTop: 3,
                                   paddingBottom: 3,
-                                  cursor: "pointer",
                                 }}
                               >
                                 <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 4 }}>
@@ -2443,11 +2387,12 @@ export function Main() {
                                     {row().snippet ?? ""}
                                   </Text>
                                 </If>
-                              </View>
+                              </SmeltRow>
                             }
                           >
                             <View
                               style={{
+                                width: "100%",
                                 display: "flex",
                                 flexDirection: "row",
                                 alignItems: "center",
@@ -2472,9 +2417,7 @@ export function Main() {
                             </View>
                           </If>
                         )}
-                      </Each>
-                    </View>
-                  </Scroll>
+                  </List>
                 </View>
               </If>
             </View>
@@ -2514,13 +2457,13 @@ export function Main() {
           </Text>
           <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
             <SmeltButton
-              quiet={true}
-              small={true}
+              variant="quiet"
+              size="sm"
               label={t("cancel")}
               onPress={() => unsavedDialog.set(null)}
             />
             <SmeltButton
-              small={true}
+              size="sm"
               label={t("switch.discard")}
               onPress={() => {
                 const dlg = unsavedDialog();
@@ -2529,8 +2472,8 @@ export function Main() {
               }}
             />
             <SmeltButton
-              primary={true}
-              small={true}
+              variant="primary"
+              size="sm"
               label={t("switch.save")}
               onPress={() => {
                 const dlg = unsavedDialog();
@@ -2549,55 +2492,20 @@ export function Main() {
       </SmeltDialog>
 
       {/* 删除确认框 */}
-      <SmeltDialog
+      <SmeltConfirmDialog
         open={deleteDialog() != null}
-        role="alertdialog"
-        accessibilityLabel={
-          deleteDialog()?.isDir ? t("delete.folder_confirm") : t("delete.file_confirm")
+        title={deleteShown()?.isDir ? t("delete.folder_confirm") : t("delete.file_confirm")}
+        description={
+          deleteShown()?.isDir
+            ? t("delete.folder_description", { name: deleteShown()?.name ?? "" })
+            : t("delete.file_description", { name: deleteShown()?.name ?? "" })
         }
-        onOpenChange={({ open }: { open: boolean }) => {
-          if (!open) deleteDialog.set(null);
-        }}
-        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
-        style={{ width: 420, gap: 12 }}
-      >
-        <If when={deleteDialog() != null}>
-          <Text
-            style={{
-              color: look().palette.text,
-              fontSize: look().type.ui_medium.size,
-              fontWeight: look().type.ui_medium.weight,
-            }}
-          >
-            {deleteDialog()?.isDir ? t("delete.folder_confirm") : t("delete.file_confirm")}
-          </Text>
-          <Text
-            style={{
-              color: look().palette.muted,
-              fontSize: look().type.ui.size,
-              lineHeight: look().type.ui.line_height,
-            }}
-          >
-            {deleteDialog()?.isDir
-              ? t("delete.folder_description", { name: deleteDialog()?.name ?? "" })
-              : t("delete.file_description", { name: deleteDialog()?.name ?? "" })}
-          </Text>
-          <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
-            <SmeltButton
-              quiet={true}
-              small={true}
-              label={t("cancel")}
-              onPress={() => deleteDialog.set(null)}
-            />
-            <SmeltButton
-              danger={true}
-              small={true}
-              label={t("delete.action")}
-              onPress={() => void confirmDelete()}
-            />
-          </View>
-        </If>
-      </SmeltDialog>
+        confirmLabel={t("delete.action")}
+        cancelLabel={t("cancel")}
+        danger={true}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => deleteDialog.set(null)}
+      />
     </View>
   );
 }

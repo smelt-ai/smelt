@@ -69,7 +69,7 @@ bucket:
     en: "Idle"
     zh-CN: "空闲"
   needs_you:
-    en: "Needs You"
+    en: "Needs you"
     zh-CN: "需要你"
   running:
     en: "Running"
@@ -78,7 +78,7 @@ bucket:
     en: "Today"
     zh-CN: "今天"
   week:
-    en: "Last 7 Days"
+    en: "Last 7 days"
     zh-CN: "7 天内"
   yesterday:
     en: "Yesterday"
@@ -106,19 +106,19 @@ close_project:
     zh-CN: "关闭项目「%{name}」？"
 command:
   reveal_in_list:
-    en: "Reveal in Session List"
+    en: "Reveal in session list"
     zh-CN: "在会话列表中定位"
   focus_list:
-    en: "Focus Sidebar"
+    en: "Focus sidebar"
     zh-CN: "聚焦侧栏"
   next_session:
-    en: "Next Session"
+    en: "Next session"
     zh-CN: "下一个会话"
   open_project:
-    en: "Open Project…"
+    en: "Open project…"
     zh-CN: "打开项目…"
   prev_session:
-    en: "Previous Session"
+    en: "Previous session"
     zh-CN: "上一个会话"
 error:
   agent_settings_loading:
@@ -162,7 +162,7 @@ grouping:
     en: "All"
     zh-CN: "全部"
   by_machine:
-    en: "Separate by Machine"
+    en: "Separate by machine"
     zh-CN: "按机器分开"
   project:
     en: "Project"
@@ -177,10 +177,10 @@ grouping:
     en: "Time"
     zh-CN: "时间"
   title:
-    en: "Group By"
+    en: "Group by"
     zh-CN: "分组依据"
   with_sessions:
-    en: "With Sessions"
+    en: "With sessions"
     zh-CN: "有会话"
 kind:
   conversation:
@@ -194,13 +194,13 @@ kind:
     zh-CN: "终端"
 list:
   add_project:
-    en: "Add Project"
+    en: "Add project"
     zh-CN: "添加项目"
   finish_merged:
     en: "All branches merged, close the worktree"
     zh-CN: "分支都已合并，关闭工作树"
   grouping_menu:
-    en: "Filter & Group"
+    en: "Filter & group"
     zh-CN: "筛选与分组"
   hidden_projects:
     one:
@@ -213,7 +213,7 @@ list:
     en: "Machine"
     zh-CN: "机器"
   new_in_workset:
-    en: "New Session in Worktree"
+    en: "New session in worktree"
     zh-CN: "在工作树里新建会话"
   no_matching_projects:
     en: "No matching projects"
@@ -225,7 +225,7 @@ list:
     en: "No sessions"
     zh-CN: "没有会话"
   search_projects:
-    en: "Search Projects"
+    en: "Search projects"
     zh-CN: "搜索项目"
   separator:
     en: ", "
@@ -238,7 +238,7 @@ machine:
     en: "Direct · %{rtt}ms"
     zh-CN: "直连 · %{rtt}ms"
   incompatible:
-    en: "Incompatible Version"
+    en: "Incompatible version"
     zh-CN: "版本不兼容"
   incompatible_detail:
     en: "Incompatible version · %{version}"
@@ -269,46 +269,46 @@ machine:
     zh-CN: "升级中"
 menu:
   check_merge:
-    en: "Check Merge Status"
+    en: "Check merge status"
     zh-CN: "检查合并状态"
   checking_merge:
-    en: "Checking Merge Status…"
+    en: "Checking merge status…"
     zh-CN: "正在检查合并状态…"
   close_group:
-    en: "Close These Sessions"
+    en: "Close these sessions"
     zh-CN: "关闭这组会话"
   close_project:
-    en: "Close Project"
+    en: "Close project"
     zh-CN: "关闭项目"
   copy_branch:
-    en: "Copy Branch Name"
+    en: "Copy branch name"
     zh-CN: "复制分支名"
   copy_project_path:
-    en: "Copy Project Path"
+    en: "Copy project path"
     zh-CN: "复制项目路径"
   copy_session_id:
-    en: "Copy Session ID"
+    en: "Copy session ID"
     zh-CN: "复制会话 ID"
   create_pr:
-    en: "Create PR in Browser"
+    en: "Create PR in browser"
     zh-CN: "在浏览器中创建 PR"
   finish_workset:
-    en: "Close Worktree…"
+    en: "Close worktree…"
     zh-CN: "关闭工作树…"
   machine:
     en: "Machine “%{name}”"
     zh-CN: "机器「%{name}」"
   manage_repositories:
-    en: "Manage Project Repositories…"
+    en: "Manage project repositories…"
     zh-CN: "管理项目仓库…"
   new_session:
-    en: "New Session"
+    en: "New session"
     zh-CN: "新建会话"
   new_workset:
-    en: "New Worktree…"
+    en: "New worktree…"
     zh-CN: "新建工作树…"
   open_on_machine:
-    en: "Open on Which Machine"
+    en: "Open on which machine"
     zh-CN: "在哪台机器上打开"
   pin:
     en: "Pin"
@@ -317,20 +317,20 @@ menu:
     en: "Rename"
     zh-CN: "重命名"
   rename_workset:
-    en: "Rename Worktree…"
+    en: "Rename worktree…"
     zh-CN: "重命名工作树…"
   unpin:
     en: "Unpin"
     zh-CN: "取消置顶"
 new:
   choose_location:
-    en: "Choose Project"
+    en: "Choose project"
     zh-CN: "选择项目"
   choose_project:
     en: "Choose a project first"
     zh-CN: "先选一个项目"
   favorite:
-    en: "Add to Favorites"
+    en: "Add to favorites"
     zh-CN: "设为常用"
   loading_tools:
     en: "Reading which tools are installed on “%{machine}”…"
@@ -351,7 +351,7 @@ new:
     en: "The agent settings changed; choose a launch option again"
     zh-CN: "智能体配置已变更，请重新选择启动项"
   unfavorite:
-    en: "Remove from Favorites"
+    en: "Remove from favorites"
     zh-CN: "取消常用"
   unreachable:
     en: "Can't reach “%{machine}”: %{error}"
@@ -374,11 +374,11 @@ pick:
     en: "Open"
     zh-CN: "打开"
   title:
-    en: "Open Project"
+    en: "Open project"
     zh-CN: "打开项目"
 project:
   no_folder:
-    en: "No Folder"
+    en: "No folder"
     zh-CN: "未指定目录"
   repositories:
     one:
@@ -392,25 +392,25 @@ repo:
     en: "Back"
     zh-CN: "返回"
   base:
-    en: "Base Branch"
+    en: "Base branch"
     zh-CN: "基线分支"
   base_placeholder:
     en: "Leave empty for the remote default branch, or enter a branch to start from"
     zh-CN: "留空从远端默认分支拉出，或填写要从哪个分支拉出"
   bind:
-    en: "Add Repository"
+    en: "Add repository"
     zh-CN: "添加仓库"
   bind_hint:
     en: "Choose the root folder of an existing Git repository. Repositories outside the project only get a symlink under repos/; the original folder isn't moved."
     zh-CN: "选择已有 Git 仓库的根目录。项目外的仓库只在 repos/ 下建软链接，原目录不会移动。"
   bind_more:
-    en: "Choose Existing Repository…"
+    en: "Choose existing repository…"
     zh-CN: "选择已有仓库…"
   bind_to:
     en: "Bound in place inside the project; outside it, linked to: %{root}/repos/%{name}"
     zh-CN: "项目内直接绑定；项目外链接到：%{root}/repos/%{name}"
   branch:
-    en: "Branch Name"
+    en: "Branch name"
     zh-CN: "分支名"
   branch_hint:
     en: "Leave empty to use feat/%{task}; or enter a full branch name (such as fix/search). Branch names can't contain spaces."
@@ -426,15 +426,15 @@ repo:
     zh-CN: "选择"
   choose_first:
     en: "Choose the root folder of an existing Git repository first"
-    zh-CN: "请先选择已有 Git 仓库的根目录"
+    zh-CN: "先选择已有 Git 仓库的根目录"
   choose_folder:
-    en: "Choose Folder…"
+    en: "Choose folder…"
     zh-CN: "选择文件夹…"
   choose_title:
-    en: "Choose Existing Git Repository"
+    en: "Choose existing Git repository"
     zh-CN: "选择已有 Git 仓库"
   clone:
-    en: "Clone and Add"
+    en: "Clone and add"
     zh-CN: "克隆并添加"
   clone_hint:
     en: "Uses the Git/SSH credentials already on the runtime machine; cloning may take a few minutes."
@@ -449,7 +449,7 @@ repo:
     en: "Remove"
     zh-CN: "确认移除"
   create:
-    en: "Create Worktree"
+    en: "Create worktree"
     zh-CN: "创建工作树"
   done:
     en: "Done"
@@ -462,15 +462,15 @@ repo:
     zh-CN: "工作树仍在使用：%{worksets}"
   invalid_task:
     en: "Enter a task name without path separators and choose at least one repository"
-    zh-CN: "请填写不含路径分隔符的任务名，并至少选择一个仓库"
+    zh-CN: "填写不含路径分隔符的任务名，并至少选择一个仓库"
   keep:
-    en: "Keep Link"
+    en: "Keep link"
     zh-CN: "保留关联"
   loading:
     en: "Loading project repositories…"
     zh-CN: "正在读取项目仓库…"
   name:
-    en: "Repository Name (editable)"
+    en: "Repository name (editable)"
     zh-CN: "仓库名称（可修改）"
   name_line:
     en: "Name: %{name} · %{destination}"
@@ -497,16 +497,16 @@ repo:
     en: "The worktree was created, but the setup script (.smelt/worktree-setup) of repository %{repository} failed:\n%{output}"
     zh-CN: "工作树已建好，但仓库 %{repository} 的初始化脚本（.smelt/worktree-setup）失败：\n%{output}"
   source_existing:
-    en: "Existing Repository"
+    en: "Existing repository"
     zh-CN: "已有仓库"
   source_link:
-    en: "External Repository · Symlink"
+    en: "External repository · Symlink"
     zh-CN: "外部仓库 · 软链接"
   source_root:
-    en: "Project Root Repository"
+    en: "Project root repository"
     zh-CN: "项目根仓库"
   task:
-    en: "Task Name"
+    en: "Task name"
     zh-CN: "任务名"
   task_hint:
     en: "Any language works; a name close to the branch name is best. No path separators."
@@ -518,16 +518,16 @@ repo:
     en: "<task>"
     zh-CN: "<任务名>"
   title_bind:
-    en: "Add Existing Repository"
+    en: "Add existing repository"
     zh-CN: "添加已有仓库"
   title_clone:
     en: "Clone from Git URL"
     zh-CN: "从 Git URL 克隆"
   title_create:
-    en: "New Worktree"
+    en: "New worktree"
     zh-CN: "新建工作树"
   title_manage:
-    en: "Manage Project Repositories"
+    en: "Manage project repositories"
     zh-CN: "管理项目仓库"
   url_placeholder:
     en: "HTTPS or SSH Git URL"
@@ -549,7 +549,7 @@ settings:
     en: "List"
     zh-CN: "列表"
   title:
-    en: "Session List"
+    en: "Session list"
     zh-CN: "会话列表"
 span:
   ago:
@@ -578,14 +578,14 @@ span:
     zh-CN: "%{count} 年"
 view:
   list:
-    en: "Session List"
+    en: "Session list"
     zh-CN: "会话列表"
 workset:
   dirty:
     en: "has uncommitted changes"
     zh-CN: "有未提交的改动"
   finish_anyway:
-    en: "Close Anyway"
+    en: "Close anyway"
     zh-CN: "仍然关闭"
   finish_anyway_title:
     en: "Close worktree “%{task}” anyway?"
@@ -597,7 +597,7 @@ workset:
     en: "Close worktree “%{task}”?"
     zh-CN: "关闭工作树「%{task}」？"
   finished:
-    en: "Worktree Closed"
+    en: "Worktree closed"
     zh-CN: "工作树已关闭"
   leftover_entries:
     en: "These weren't deleted: %{entries}"

@@ -1,15 +1,15 @@
-// 会话列表的菜单与确认框：Smelt 的菜单、对话框、提示（`smelt/sdk`）加 NSH 的 MenuItem / MenuSeparator / Submenu，
+// 会话列表的菜单：Smelt 的菜单、菜单项、提示（`smelt/sdk`）加 NSH 的 Submenu，
 // 外观跟着宿主主题走，零硬编码颜色。
 
 import { Image, signal, Text, View } from "nsh";
-import { MenuItem, MenuSeparator, Submenu } from "nsh/base";
+import { Submenu } from "nsh/base";
 import {
-  DIALOG_SURFACE_CLASS,
   MENU_ITEM_CLASS,
-  SmeltButton,
-  SmeltDialog,
   SmeltIcon,
   SmeltMenu,
+  SmeltMenuItem,
+  SmeltMenuLabel,
+  SmeltMenuSeparator,
   SmeltTooltip,
 } from "smelt/sdk";
 export { MENU_ITEM_CLASS };
@@ -52,91 +52,6 @@ export function Tip(props: { text: string }) {
   );
 }
 
-export function MenuEntry(props: {
-  label: string;
-  image?: string | null;
-  iconPath?: string | null;
-  iconColor?: string;
-  checked?: boolean;
-  danger?: boolean;
-  disabled?: boolean;
-  closeOnSelect?: boolean;
-  onSelect: () => void;
-}) {
-  const look = () => theme();
-  const color = () => (props.danger ? look().palette.bad : look().palette.text);
-  const iconColor = () =>
-    props.iconColor ?? (props.danger ? look().palette.bad : look().palette.muted);
-  return (
-    <MenuItem
-      checked={props.checked}
-      disabled={props.disabled}
-      closeOnSelect={props.closeOnSelect ?? true}
-      onSelect={props.onSelect}
-      class={MENU_ITEM_CLASS}
-      style={{ height: 28, gap: space(2) }}
-    >
-      {props.image ? (
-        <View style={{ width: 14, height: 14, flexShrink: 0 }}>
-          <Image src={props.image} style={{ width: 14, height: 14, objectFit: "contain" }} />
-        </View>
-      ) : props.iconPath ? (
-        <View style={{ width: 14, height: 14, flexShrink: 0 }}>
-          <SmeltIcon path={props.iconPath} size={14} color={iconColor()} />
-        </View>
-      ) : null}
-      <Text
-        class="flex-1 min-w-0"
-        style={{
-          color: color(),
-          fontSize: look().type.ui.size,
-          lineHeight: look().type.ui.line_height,
-          numberOfLines: 1,
-        }}
-      >
-        {props.label}
-      </Text>
-      {props.checked != null ? (
-        <View
-          style={{
-            width: 14,
-            height: 14,
-            alignItems: "center",
-            justifyContent: "center",
-            flexShrink: 0,
-          }}
-        >
-          {props.checked ? (
-            <SmeltIcon path={icon("check")} size={13} color={look().palette.text} />
-          ) : null}
-        </View>
-      ) : null}
-    </MenuItem>
-  );
-}
-
-export function MenuDivider() {
-  return <MenuSeparator class="my-1 bg-border" style={{ height: 1 }} />;
-}
-
-export function MenuSectionTitle(props: { text: string }) {
-  const look = () => theme();
-  return (
-    <View style={{ paddingHorizontal: space(2), paddingVertical: space(1) }}>
-      <Text
-        style={{
-          color: look().palette.faint,
-          fontSize: look().type.small.size,
-          lineHeight: look().type.small.line_height,
-          fontWeight: look().type.small_medium.weight,
-        }}
-      >
-        {props.text}
-      </Text>
-    </View>
-  );
-}
-
 /** 其它插件往右键菜单登记的项（含子菜单）。 */
 export function ContributedMenuItems(props: {
   items: ContributedMenuItem[];
@@ -146,7 +61,7 @@ export function ContributedMenuItems(props: {
   const look = () => theme();
   return (
     <>
-      {(props.leadingDivider ?? true) && props.items.length > 0 ? <MenuDivider /> : null}
+      {(props.leadingDivider ?? true) && props.items.length > 0 ? <SmeltMenuSeparator /> : null}
       <Each of={props.items} key={(item: ContributedMenuItem, ix: number) => `${item.label}:${ix}`}>
         {(item: () => ContributedMenuItem) =>
           item().submenu && item().submenu!.length > 0 ? (
@@ -187,10 +102,10 @@ export function ContributedMenuItems(props: {
               />
             </Submenu>
           ) : (
-            <MenuEntry
+            <SmeltMenuItem
               label={item().label}
               image={item().image}
-              iconPath={item().icon}
+              icon={item().icon}
               onSelect={() => {
                 const current = item();
                 if (!current.command) return;
@@ -343,38 +258,38 @@ export function GroupingMenu(props: { onOpenChange?: (open: boolean) => void }) 
         </View>
       }
     >
-      <MenuSectionTitle text={t("grouping.title")} />
-      <MenuEntry
+      <SmeltMenuLabel label={t("grouping.title")} />
+      <SmeltMenuItem
         label={t("grouping.project")}
         checked={grouping() === "project"}
         onSelect={() => list.set_grouping("project")}
       />
-      <MenuEntry
+      <SmeltMenuItem
         label={t("grouping.status")}
         checked={grouping() === "status"}
         onSelect={() => list.set_grouping("status")}
       />
-      <MenuEntry
+      <SmeltMenuItem
         label={t("grouping.time")}
         checked={grouping() === "last_updated"}
         onSelect={() => list.set_grouping("last_updated")}
       />
-      <MenuDivider />
-      <MenuSectionTitle text={t("grouping.show")} />
-      <MenuEntry
+      <SmeltMenuSeparator />
+      <SmeltMenuLabel label={t("grouping.show")} />
+      <SmeltMenuItem
         label={t("grouping.all")}
         checked={!hideEmpty()}
         onSelect={() => list.set_hide_empty_projects(false)}
       />
-      <MenuEntry
+      <SmeltMenuItem
         label={t("grouping.with_sessions")}
         checked={hideEmpty()}
         onSelect={() => list.set_hide_empty_projects(true)}
       />
       {hasRemote() ? (
         <>
-          <MenuDivider />
-          <MenuEntry
+          <SmeltMenuSeparator />
+          <SmeltMenuItem
             label={t("grouping.by_machine")}
             checked={byMachine()}
             onSelect={() => list.set_by_machine(!byMachine())}
@@ -382,72 +297,5 @@ export function GroupingMenu(props: { onOpenChange?: (open: boolean) => void }) 
         </>
       ) : null}
     </SmeltMenu>
-  );
-}
-
-/** 关闭运行中会话、非空项目或工作树前的确认对话框。 */
-export function ConfirmDialog(props: {
-  request: () => ConfirmRequest | null;
-  onDismiss: () => void;
-}) {
-  const look = () => theme();
-  const req = props.request;
-  return (
-    <SmeltDialog
-      open={req() != null}
-      role="alertdialog"
-      accessibilityLabel={req()?.title ?? ""}
-      accessibilityDescription={req()?.description ?? ""}
-      onOpenChange={({ open }) => {
-        if (!open) props.onDismiss();
-      }}
-      class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
-      style={{ width: 340, gap: space(3) }}
-    >
-      {req() ? (
-        <>
-          <Text
-            style={{
-              color: look().palette.text,
-              fontSize: look().type.ui_medium.size,
-              lineHeight: look().type.ui_medium.line_height,
-              fontWeight: look().type.ui_medium.weight,
-            }}
-          >
-            {req()!.title}
-          </Text>
-          {req()!.description ? (
-            <Text
-              style={{
-                color: look().palette.muted,
-                fontSize: look().type.text_xsmall.size,
-                lineHeight: look().type.text_xsmall.line_height,
-              }}
-            >
-              {req()!.description}
-            </Text>
-          ) : null}
-          <View class="flex-row items-center justify-end" style={{ gap: space(2) }}>
-            <SmeltButton
-              label={t("action.cancel")}
-              quiet={true}
-              small={true}
-              onPress={props.onDismiss}
-            />
-            <SmeltButton
-              label={req()!.action}
-              primary={!req()!.danger}
-              danger={req()!.danger}
-              small={true}
-              onPress={() => {
-                const fn = req()!.confirm;
-                props.onDismiss();
-                fn();
-              }}
-            />
-          </View>
-        </>
-      ) : null}
-    </SmeltDialog>
   );
 }

@@ -1,7 +1,7 @@
 // 设置「记忆」页：重排模型选择 + OpenAI 兼容向量检索服务配置与连通性测试。
 
 import { computed, Text, View } from "nsh";
-import { SmeltButton, t } from "smelt/sdk";
+import { SmeltButton, SmeltMenuItem, SmeltMenuSeparator, t } from "smelt/sdk";
 import {
   memoryKeyPlaceholder,
   memoryStatusLine,
@@ -11,8 +11,6 @@ import {
 import { currentTheme, type PageController } from "./state.ts";
 import {
   DropdownMenuButton,
-  MenuDivider,
-  MenuEntry,
   MenuSub,
   PageIntro,
   SectionCell,
@@ -49,13 +47,13 @@ export function MemoryTab(props: { page: PageController }) {
                 align="start"
                 minWidth={220}
               >
-                <MenuEntry
+                <SmeltMenuItem
                   label={rerankModelLabel(null, t)}
                   checked={rerank() == null}
                   onSelect={() => props.page.setRerankModel(null)}
                 />
                 <If when={groups().length > 0}>
-                  <MenuDivider />
+                  <SmeltMenuSeparator />
                 </If>
                 <Each of={groups()} key={(g: any) => g.provider}>
                   {(group: () => any) => {
@@ -64,7 +62,7 @@ export function MemoryTab(props: { page: PageController }) {
                       <MenuSub label={group().provider_name} checked={inGroup()}>
                         <Each of={group().models} key={(c: any) => c.id}>
                           {(choice: () => any) => (
-                            <MenuEntry
+                            <SmeltMenuItem
                               label={modelChoiceShortLabel(choice())}
                               checked={inGroup() && rerank()?.id === choice().id}
                               onSelect={() =>
@@ -166,7 +164,7 @@ export function MemoryTab(props: { page: PageController }) {
               }}
             >
               <SmeltButton
-                small={true}
+                size="sm"
                 label={testing() ? t("memory.testing") : t("memory.test")}
                 tooltip={t("memory.test_tooltip")}
                 loading={testing()}
@@ -174,8 +172,8 @@ export function MemoryTab(props: { page: PageController }) {
                 onPress={() => props.page.testMemoryEmbedding()}
               />
               <SmeltButton
-                primary={true}
-                small={true}
+                variant="primary"
+                size="sm"
                 label={t("common.save")}
                 loading={saving()}
                 disabled={saving()}
@@ -183,16 +181,16 @@ export function MemoryTab(props: { page: PageController }) {
               />
               <If when={saved().apiKeySet}>
                 <SmeltButton
-                  quiet={true}
-                  small={true}
+                  variant="quiet"
+                  size="sm"
                   label={t("memory.clear_key")}
                   disabled={saving()}
                   onPress={() => props.page.clearMemoryApiKey()}
                 />
               </If>
               <SmeltButton
-                quiet={true}
-                small={true}
+                variant="quiet"
+                size="sm"
                 label={t("memory.clear_all")}
                 disabled={saving()}
                 onPress={() => props.page.clearMemoryAll()}

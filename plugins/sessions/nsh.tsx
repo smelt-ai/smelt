@@ -15,7 +15,6 @@ import {
   conversationFacts,
   currentTheme,
   daemonStateStatus,
-  DIALOG_SURFACE_CLASS,
   emitEvent,
   initHost,
   machineMeta,
@@ -41,7 +40,7 @@ import {
   sessionStates,
   setActiveContext,
   SmeltButton,
-  SmeltDialog,
+  SmeltConfirmDialog,
   SmeltIcon,
   SmeltNativeWindowDrag,
   SmeltWindowBar,
@@ -1396,8 +1395,8 @@ function SplitLeafPane(props: {
             </If>
           </View>
           <SmeltButton
-            dismiss={true}
-            small={true}
+            variant="dismiss"
+            size="xs"
             icon="icons/close.svg"
             tooltip={t("close.pane")}
             onPress={() => {
@@ -1684,20 +1683,11 @@ function LiveSessionView(props: { keyStr: string }) {
           }}
         >
           <SmeltButton
-            quiet={true}
-            small={true}
+            variant="floating"
+            shape="pill"
             label={title()}
             tooltip={title()}
-            style={{
-              height: CHROME_ISLAND_HEIGHT_PX,
-              maxWidth: TITLE_ISLAND_MAX_WIDTH,
-              paddingLeft: 12,
-              paddingRight: 12,
-              borderRadius: CHROME_ISLAND_HEIGHT_PX / 2,
-              backgroundColor: look().palette.surface,
-              borderWidth: 1,
-              borderColor: look().palette.hair,
-            }}
+            class="max-w-50"
             onPress={() => {
               const firstId = order()[0];
               if (!firstId) return;
@@ -1787,7 +1777,7 @@ function EmptyState() {
           <If when={offerAdd()}>
             <View style={{ marginTop: 8 }}>
               <SmeltButton
-                primary={true}
+                variant="primary"
                 label={t("empty.add_machine")}
                 onPress={() => {
                   addMachineError.set(null);
@@ -1898,8 +1888,8 @@ export function session() {
             {failureBanner() ?? ""}
           </Text>
           <SmeltButton
-            dismiss={true}
-            small={true}
+            variant="dismiss"
+            size="xs"
             icon="icons/close.svg"
             tooltip={t("split.dismiss_failure")}
             onPress={() => clearFailure()}
@@ -1912,58 +1902,22 @@ export function session() {
 
 /** 无头根：挂在主壳全局槽位，承载运行中关闭确认对话框并维持后台生命周期。 */
 export function root() {
-  const look = currentTheme;
   return (
     <View style={{ width: 0, height: 0, overflow: "hidden" }}>
-      <SmeltDialog
+      <SmeltConfirmDialog
         open={closeConfirm() != null}
-        role="alertdialog"
-        accessibilityLabel={closeConfirm()?.question ?? ""}
-        onOpenChange={({ open }: { open: boolean }) => {
-          if (!open) closeConfirm.set(null);
+        title={closeConfirm()?.question ?? ""}
+        description={closeConfirm()?.description ?? ""}
+        confirmLabel={closeConfirm()?.actionLabel ?? ""}
+        cancelLabel={t("split.cancel")}
+        danger
+        onConfirm={() => {
+          const action = closeConfirm()?.onConfirm;
+          closeConfirm.set(null);
+          action?.();
         }}
-        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
-        style={{ width: 420, gap: 12 }}
-      >
-        <If when={closeConfirm() != null}>
-          <Text
-            style={{
-              color: look().palette.text,
-              fontSize: look().type.ui_medium.size,
-              fontWeight: look().type.ui_medium.weight,
-            }}
-          >
-            {closeConfirm()?.question ?? ""}
-          </Text>
-          <Text
-            style={{
-              color: look().palette.muted,
-              fontSize: look().type.ui.size,
-              lineHeight: look().type.ui.line_height,
-            }}
-          >
-            {closeConfirm()?.description ?? ""}
-          </Text>
-          <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
-            <SmeltButton
-              quiet={true}
-              small={true}
-              label={t("split.cancel")}
-              onPress={() => closeConfirm.set(null)}
-            />
-            <SmeltButton
-              danger={true}
-              small={true}
-              label={closeConfirm()?.actionLabel ?? ""}
-              onPress={() => {
-                const action = closeConfirm()?.onConfirm;
-                closeConfirm.set(null);
-                action?.();
-              }}
-            />
-          </View>
-        </If>
-      </SmeltDialog>
+        onCancel={() => closeConfirm.set(null)}
+      />
     </View>
   );
 }

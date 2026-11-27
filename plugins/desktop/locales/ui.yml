@@ -1,6 +1,6 @@
 _version: 2
 title:
-  en: Remote Desktop
+  en: Remote desktop
   zh-CN: 远程桌面
 no_machine:
   en: No machine selected yet
@@ -10,7 +10,7 @@ machine_removed:
   zh-CN: 这台机器已经移除了
 command:
   open:
-    en: Open Remote Desktop
+    en: Open remote desktop
     zh-CN: 打开远程桌面
 error:
   no_place:
@@ -53,10 +53,10 @@ action:
     en: Reconnect
     zh-CN: 重新连接
   view_only:
-    en: View Only
+    en: View only
     zh-CN: 只看
   take_control:
-    en: Take Control
+    en: Take control
     zh-CN: 接管
   disconnect:
     en: Disconnect

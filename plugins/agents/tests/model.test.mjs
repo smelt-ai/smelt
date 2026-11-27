@@ -45,7 +45,7 @@ const dict = {
   "new_conversation.named": "新对话 · %{name}",
   "instructions.footer": "会作为系统提示词带进每次对话和自动化。",
   "instructions.footer_count": "%{count} 字 · 会作为系统提示词带进每次对话和自动化",
-  "error.no_engine": "请选择一个可用的执行引擎",
+  "error.no_engine": "选择一个可用的执行引擎",
   "usage.none": "还没有对话",
   "usage.conversations.one": "1 段对话",
   "usage.conversations.other": "%{count} 段对话",
@@ -358,7 +358,7 @@ describe("agents model", () => {
     expect(agentInstructionsFooter("", t)).toContain("系统提示词");
     expect(agentInstructionsFooter("abc", t)).toContain("3 字");
     expect(agentConversationStartError({ engine_kind: "pi" }, ENGINES, t)).toBe(null);
-    expect(agentConversationStartError({ engine_kind: "x" }, ENGINES, t)).toBe("请选择一个可用的执行引擎");
+    expect(agentConversationStartError({ engine_kind: "x" }, ENGINES, t)).toBe("选择一个可用的执行引擎");
     expect(agentUsageSummary(0, 0, t)).toBe("还没有对话");
     expect(agentUsageSummary(2, 1, t)).toBe("2 段对话 · 1 条自动化");
     expect(memorySummaryText(0, 0, t)).toBe("还没有记忆");

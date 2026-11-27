@@ -17,8 +17,11 @@ import {
   run,
   safeArea,
   SmeltButton,
+  SmeltConfirmDialog,
+  SmeltContextMenu,
   SmeltDialog,
   SmeltIcon,
+  SmeltMenuItem,
   SmeltPopover,
   SmeltRadio,
   SmeltTooltip,
@@ -130,13 +133,22 @@ bootTask(async () => {
   ]);
 });
 
-type DialogState =
-  | { kind: "delete"; machine: string | null; row: any }
-  | { kind: "restore"; machine: string | null; row: any; picked: string | null };
+type DeleteState = { kind: "delete"; machine: string | null; row: any };
+type RestoreState = { kind: "restore"; machine: string | null; row: any; picked: string | null };
+type DialogState = DeleteState | RestoreState;
 
 export function button() {
   const popoverOpen = signal(false);
   const dialog = signal<DialogState | null>(null);
+  // 关上时框还在淡出：留着上一次的内容，不在淡出途中变样或变空。
+  const shownDelete = computed((prev: DeleteState | null | undefined) => {
+    const cur = dialog();
+    return cur?.kind === "delete" ? cur : (prev ?? null);
+  });
+  const shownRestore = computed((prev: RestoreState | null | undefined) => {
+    const cur = dialog();
+    return cur?.kind === "restore" ? cur : (prev ?? null);
+  });
   const look = theme;
   const insets = computed(() => safeArea(BUTTON).bar_insets);
   const list = computed(() => archivedMachines());
@@ -199,7 +211,7 @@ export function button() {
           popupStyle={{ width: POPOVER_WIDTH }}
           trigger={
             <SmeltButton
-              quiet={true}
+              variant="quiet"
               selected={popoverOpen()}
               icon="icons/archive.svg"
               accessibilityLabel={t("title")}
@@ -303,91 +315,109 @@ export function button() {
                                 {(row: () => any) => {
                                   const isBusy = () => busySet().has(busy_key(machine().machine, row().id));
                                   return (
-                                    <View
-                                      class="group hover:bg-accent"
-                                      style={{
-                                        width: "100%",
-                                        paddingLeft: 8,
-                                        paddingRight: 8,
-                                        paddingTop: 4,
-                                        paddingBottom: 4,
-                                        borderRadius: look().radius.row,
-                                        display: "flex",
-                                        flexDirection: "row",
-                                        alignItems: "center",
-                                        gap: 8,
-                                        opacity: isBusy() ? 0.5 : 1,
-                                      }}
-                                    >
-                                      <SmeltIcon
-                                        path={
-                                          row().is_conversation
-                                            ? "icons/message-square.svg"
-                                            : "icons/terminal.svg"
-                                        }
-                                        size={15}
-                                        color={p().muted}
-                                      />
-                                      <View style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-                                        <Text
+                                    <SmeltContextMenu
+                                      trigger={
+                                        <View
+                                          class="group hover:bg-accent"
                                           style={{
-                                            fontSize: look().type.ui.size,
-                                            lineHeight: look().type.ui.line_height,
-                                            color: p().text,
-                                            numberOfLines: 1,
+                                            width: "100%",
+                                            paddingLeft: 8,
+                                            paddingRight: 8,
+                                            paddingTop: 4,
+                                            paddingBottom: 4,
+                                            borderRadius: look().radius.row,
+                                            display: "flex",
+                                            flexDirection: "row",
+                                            alignItems: "center",
+                                            gap: 8,
+                                            opacity: isBusy() ? 0.5 : 1,
                                           }}
                                         >
-                                          {row().title}
-                                        </Text>
-                                        {row().when ? (
-                                          <Text
+                                          <SmeltIcon
+                                            path={
+                                              row().is_conversation
+                                                ? "icons/message-square.svg"
+                                                : "icons/terminal.svg"
+                                            }
+                                            size={15}
+                                            color={p().muted}
+                                          />
+                                          <View style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+                                            <Text
+                                              style={{
+                                                fontSize: look().type.ui.size,
+                                                lineHeight: look().type.ui.line_height,
+                                                color: p().text,
+                                                numberOfLines: 1,
+                                              }}
+                                            >
+                                              {row().title}
+                                            </Text>
+                                            {row().when ? (
+                                              <Text
+                                                style={{
+                                                  fontSize: look().type.text_xsmall.size,
+                                                  color: p().muted,
+                                                  numberOfLines: 1,
+                                                }}
+                                              >
+                                                {row().when}
+                                              </Text>
+                                            ) : null}
+                                          </View>
+                                          {/* 悬停或键盘移到按钮上时出现；同样的操作在右键菜单里。 */}
+                                          <View
+                                            class="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
                                             style={{
-                                              fontSize: look().type.text_xsmall.size,
-                                              color: p().muted,
-                                              numberOfLines: 1,
+                                              display: "flex",
+                                              flexDirection: "row",
+                                              alignItems: "center",
+                                              flexShrink: 0,
+                                              gap: 4,
                                             }}
                                           >
-                                            {row().when}
-                                          </Text>
-                                        ) : null}
-                                      </View>
-                                      <View
-                                        class="opacity-0 group-hover:opacity-100"
-                                        style={{
-                                          display: "flex",
-                                          flexDirection: "row",
-                                          alignItems: "center",
-                                          flexShrink: 0,
-                                          gap: 4,
-                                        }}
-                                      >
-                                        <SmeltButton
-                                          quiet={true}
-                                          small={true}
-                                          disabled={isBusy()}
-                                          icon="icons/restore.svg"
-                                          tooltip={t("action.restore")}
-                                          accessibilityLabel={t("action.restore")}
-                                          onPress={(e: any) => {
-                                            e?.stopPropagation?.();
-                                            if (!isBusy()) requestRestore(machine().machine, row());
-                                          }}
-                                        />
-                                        <SmeltButton
-                                          quiet={true}
-                                          danger={true}
-                                          small={true}
-                                          disabled={isBusy()}
-                                          icon="icons/trash.svg"
-                                          tooltip={t("action.delete")}
-                                          accessibilityLabel={t("action.delete")}
-                                          onPress={(e: any) => {
-                                            e?.stopPropagation?.();
-                                            if (!isBusy()) requestDelete(machine().machine, row());
-                                          }}
-                                        />
-                                      </View>
-                                    </View>
+                                            <SmeltButton
+                                              variant="quiet"
+                                              size="sm"
+                                              disabled={isBusy()}
+                                              icon="icons/restore.svg"
+                                              tooltip={t("action.restore")}
+                                              accessibilityLabel={t("action.restore")}
+                                              onPress={(e: any) => {
+                                                e?.stopPropagation?.();
+                                                if (!isBusy()) requestRestore(machine().machine, row());
+                                              }}
+                                            />
+                                            <SmeltButton
+                                              variant="danger-quiet"
+                                              size="sm"
+                                              disabled={isBusy()}
+                                              icon="icons/trash.svg"
+                                              tooltip={t("action.delete")}
+                                              accessibilityLabel={t("action.delete")}
+                                              onPress={(e: any) => {
+                                                e?.stopPropagation?.();
+                                                if (!isBusy()) requestDelete(machine().machine, row());
+                                              }}
+                                            />
+                                          </View>
+                                        </View>
+                                      }
+                                    >
+                                      <SmeltMenuItem
+                                        label={t("action.restore")}
+                                        icon="icons/restore.svg"
+                                        disabled={isBusy()}
+                                        onSelect={() => requestRestore(machine().machine, row())}
+                                      />
+                                      <SmeltMenuItem
+                                        label={t("action.delete")}
+                                        icon="icons/trash.svg"
+                                        danger={true}
+                                        disabled={isBusy()}
+                                        onSelect={() => requestDelete(machine().machine, row())}
+                                      />
+                                    </SmeltContextMenu>
                                   );
                                 }}
                               </Each>
@@ -404,116 +434,99 @@ export function button() {
         </SmeltPopover>
       </If>
 
+      <SmeltConfirmDialog
+        open={dialog()?.kind === "delete"}
+        title={t("delete.confirm")}
+        description={t("delete.description", { title: shownDelete()?.row.title ?? "" })}
+        confirmLabel={t("action.delete")}
+        cancelLabel={t("action.cancel")}
+        danger={true}
+        onConfirm={confirmDialog}
+        onCancel={() => dialog.set(null)}
+      />
+
+      {/* 恢复到已关闭的工作集：要先选一个去处，没有可选的时候确认不可点，不是单纯的确认框。 */}
       <SmeltDialog
-        open={dialog() != null}
+        open={dialog()?.kind === "restore"}
         role="alertdialog"
+        accessibilityLabel={t("restore.closed_title")}
         onOpenChange={({ open }: any) => {
           if (!open) dialog.set(null);
         }}
-        class="m-auto"
+        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
+        style={{ width: CONFIRM_WIDTH, gap: 12 }}
       >
-        {dialog() ? (
-          <View
-            class={`${DIALOG_SURFACE_CLASS} p-5 flex-col gap-3`}
-            style={{ width: CONFIRM_WIDTH }}
+        <If when={shownRestore() != null}>
+          <Text
+            style={{
+              fontSize: look().type.ui_medium.size,
+              lineHeight: look().type.ui_medium.line_height,
+              fontWeight: look().type.ui_medium.weight,
+              color: look().palette.text,
+            }}
           >
-            <Text
-              style={{
-                fontSize: look().type.ui_medium.size + 1,
-                fontWeight: 600,
-                color: look().palette.text,
-              }}
-            >
-              {dialog()!.kind === "delete" ? t("delete.confirm") : t("restore.closed_title")}
-            </Text>
-            <Text
-              style={{
-                fontSize: look().type.ui.size,
-                lineHeight: look().type.ui.line_height,
-                color: look().palette.muted,
-              }}
-            >
-              {dialog()!.kind === "delete"
-                ? t("delete.description", { title: dialog()!.row.title })
-                : t("restore.closed_description", {
-                    root: dialog()!.row.closed_workset.old_root,
-                  })}
-            </Text>
+            {t("restore.closed_title")}
+          </Text>
+          <Text
+            style={{
+              fontSize: look().type.ui.size,
+              lineHeight: look().type.ui.line_height,
+              color: look().palette.muted,
+            }}
+          >
+            {t("restore.closed_description", {
+              root: shownRestore()!.row.closed_workset.old_root,
+            })}
+          </Text>
 
-            {dialog()!.kind === "restore" ? (
-              dialog()!.row.closed_workset.candidates.length === 0 ? (
-                <Text style={{ fontSize: look().type.ui.size, color: look().palette.muted }}>
-                  {t("restore.no_worksets")}
-                </Text>
-              ) : (
-                <Scroll style={{ maxHeight: CHOICES_MAX_HEIGHT, width: "100%" }}>
-                  <RadioGroup
-                    accessibilityLabel={t("restore.closed_title")}
-                    style={{ display: "flex", flexDirection: "column", gap: 8 }}
-                  >
-                    <Each
-                      of={dialog()!.row.closed_workset.candidates}
-                      key={(c: any) => c.id}
-                    >
-                      {(candidate: () => any) => {
-                        const checked = () => {
-                          const cur = dialog();
-                          return cur?.kind === "restore" && cur.picked === candidate().id;
-                        };
-                        return (
-                          <SmeltRadio
-                            checked={checked()}
-                            accessibilityLabel={candidate().label}
-                            onChange={() => {
-                              const prev = dialog();
-                              if (prev?.kind === "restore") {
-                                dialog.set({ ...prev, picked: candidate().id });
-                              }
-                            }}
-                          >
-                            <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
-                              {candidate().label}
-                            </Text>
-                          </SmeltRadio>
-                        );
+          {shownRestore()!.row.closed_workset.candidates.length === 0 ? (
+            <Text style={{ fontSize: look().type.ui.size, color: look().palette.muted }}>
+              {t("restore.no_worksets")}
+            </Text>
+          ) : (
+            <Scroll style={{ maxHeight: CHOICES_MAX_HEIGHT, width: "100%" }}>
+              <RadioGroup
+                accessibilityLabel={t("restore.closed_title")}
+                style={{ display: "flex", flexDirection: "column", gap: 8 }}
+              >
+                <Each of={shownRestore()!.row.closed_workset.candidates} key={(c: any) => c.id}>
+                  {(candidate: () => any) => (
+                    <SmeltRadio
+                      checked={shownRestore()?.picked === candidate().id}
+                      accessibilityLabel={candidate().label}
+                      onChange={() => {
+                        const prev = dialog();
+                        if (prev?.kind === "restore") {
+                          dialog.set({ ...prev, picked: candidate().id });
+                        }
                       }}
-                    </Each>
-                  </RadioGroup>
-                </Scroll>
-              )
-            ) : null}
+                    >
+                      <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
+                        {candidate().label}
+                      </Text>
+                    </SmeltRadio>
+                  )}
+                </Each>
+              </RadioGroup>
+            </Scroll>
+          )}
 
-            <View
-              style={{
-                display: "flex",
-                flexDirection: "row",
-                justifyContent: "flex-end",
-                gap: 8,
-                paddingTop: 4,
-              }}
-            >
-              <SmeltButton
-                quiet={true}
-                label={t("action.cancel")}
-                onPress={() => dialog.set(null)}
-              />
-              {dialog()!.kind === "delete" ? (
-                <SmeltButton
-                  danger={true}
-                  label={t("action.delete")}
-                  onPress={confirmDialog}
-                />
-              ) : (
-                <SmeltButton
-                  primary={true}
-                  disabled={dialog()!.picked == null}
-                  label={t("action.restore")}
-                  onPress={confirmDialog}
-                />
-              )}
-            </View>
+          <View class="flex-row items-center justify-end gap-2" style={{ marginTop: 4 }}>
+            <SmeltButton
+              variant="quiet"
+              size="sm"
+              label={t("action.cancel")}
+              onPress={() => dialog.set(null)}
+            />
+            <SmeltButton
+              variant="primary"
+              size="sm"
+              disabled={shownRestore()?.picked == null}
+              label={t("action.restore")}
+              onPress={confirmDialog}
+            />
           </View>
-        ) : null}
+        </If>
       </SmeltDialog>
     </View>
   );

@@ -22,7 +22,7 @@ import {
 const t = (key, params = {}) => {
   const dict = {
     "row.when_ran": "%{time} · ran %{minutes} min",
-    "menu.continue_agent": "Continue Conversation",
+    "menu.continue_agent": "Continue conversation",
     "menu.continue_acp": "Continue via ACP",
   };
   let out = dict[key] ?? key;
@@ -124,7 +124,7 @@ describe("smelt.history model", () => {
     expect(isAgentSession(false, "writer")).toBe(true);
     expect(isAgentSession(true, null)).toBe(true);
     expect(continueLabel(false, t)).toBe("Continue via ACP");
-    expect(continueLabel(true, t)).toBe("Continue Conversation");
+    expect(continueLabel(true, t)).toBe("Continue conversation");
   });
 
   test("submittedTitle distinguishes unchanged, renamed, and cleared", () => {

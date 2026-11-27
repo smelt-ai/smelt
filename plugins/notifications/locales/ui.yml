@@ -5,10 +5,10 @@ page:
     zh-CN: 通知
 section:
   system:
-    en: System Notifications
+    en: System notifications
     zh-CN: 系统通知
   agent:
-    en: When Agents Call You
+    en: When agents call you
     zh-CN: Agent 什么时候叫你
   terminal:
     en: Terminal
@@ -43,7 +43,7 @@ permission:
     en: Checking…
     zh-CN: 正在读取…
   request:
-    en: Request Permission
+    en: Request permission
     zh-CN: 请求授权
   open_settings:
     en: Open System Settings ↗
@@ -85,7 +85,7 @@ status:
     zh-CN: 未读
 menu:
   show_main_window:
-    en: Open smelt Main Window
+    en: Open smelt main window
     zh-CN: 打开 smelt 主窗口
 tooltip:
   both:

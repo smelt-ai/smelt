@@ -6,15 +6,21 @@
 // - `settings`：设置「通用 → 会话列表」行首头像选择。
 
 import { cleanup, computed, createAnimatedValue, Easing, effect, Overlay, Scroll, signal, Text, View } from "nsh";
-import { Input, Submenu } from "nsh/base";
+import { Submenu } from "nsh/base";
 import {
   fileUriToPath,
   SmeltButton,
+  SmeltConfirmDialog,
   SmeltContextMenu,
   SmeltDisclosure,
   SmeltDisclosureChevron,
   SmeltIcon,
+  SmeltInput,
   SmeltMenu,
+  SmeltMenuItem,
+  SmeltMenuLabel,
+  SmeltMenuSeparator,
+  SmeltRow,
   SmeltWindowBar,
   viewShown,
 } from "smelt/sdk";
@@ -59,7 +65,6 @@ import {
   tick,
 } from "./bridge.ts";
 import {
-  ConfirmDialog,
   ConfirmRequest,
   ContributedMenuItems,
   fetchMachinesMenuGroups,
@@ -67,9 +72,6 @@ import {
   MachineMenuGroup,
   MachinesMenuEntries,
   MENU_ITEM_CLASS,
-  MenuDivider,
-  MenuEntry,
-  MenuSectionTitle,
   Tip,
 } from "./menus.tsx";
 import { NewSessionPopover, PaletteDialog } from "./new_session_view.tsx";
@@ -318,6 +320,7 @@ function DropLine(props: { edge: "top" | "bottom" | null }) {
   return (
     <If when={props.edge != null}>
       <View
+        class="rounded-full"
         style={{
           position: "absolute",
           top: props.edge === "top" ? -1 : undefined,
@@ -325,7 +328,6 @@ function DropLine(props: { edge: "top" | "bottom" | null }) {
           left: 4,
           right: 4,
           height: 2,
-          borderRadius: 1,
           backgroundColor: look().palette.accent,
           pointerEvents: "none",
         }}
@@ -415,10 +417,10 @@ function CollapsedSummary(props: { status: string; count: number; selected?: boo
     <View class="flex-row items-center" style={{ gap: 6, flexShrink: 0 }}>
       <If when={props.status !== "idle"}>
         <View
+          class="rounded-full"
           style={{
             width: 6,
             height: 6,
-            borderRadius: 3,
             backgroundColor: dotColor(look().palette, props.status),
           }}
         />
@@ -444,7 +446,6 @@ function InlineRenameInput(props: {
   onCommit: () => void;
   onCancel: () => void;
 }) {
-  const look = () => theme();
   const anchorEl = signal<any>(null);
   let inputEl: any = null;
   let initialSelected = false;
@@ -456,7 +457,7 @@ function InlineRenameInput(props: {
       onPress={(e: any) => e?.stopPropagation?.()}
       onPressDown={(e: any) => e?.stopPropagation?.()}
     >
-      <Input
+      <SmeltInput
         ref={(el: any) => {
           inputEl = el ?? null;
           // 同步请求焦点，保证右键菜单关闭时的 focus_back 不会把焦点抢回行容器。
@@ -483,12 +484,6 @@ function InlineRenameInput(props: {
         onKeyPress={(e: any) => {
           if (e?.key === "Escape") props.onCancel();
         }}
-        class="rounded-(--radius) border border-input bg-card px-1.5 text-foreground"
-        style={{
-          height: 22,
-          fontSize: look().type.ui.size,
-          lineHeight: look().type.ui.line_height,
-        }}
       />
       <If when={anchorEl() != null}>
         <Overlay
@@ -509,7 +504,6 @@ function ProjectSearchInput(props: {
   onClose: () => void;
   onClearAndClose: () => void;
 }) {
-  const look = () => theme();
   const anchorEl = signal<any>(null);
   const focused = signal(true);
   let inputEl: any = null;
@@ -520,7 +514,8 @@ function ProjectSearchInput(props: {
       style={{ marginLeft: -6 }}
       onPressDown={(e: any) => e?.stopPropagation?.()}
     >
-      <Input
+      <SmeltInput
+        size="sm"
         ref={(el: any) => {
           inputEl = el ?? null;
           el?.focus?.();
@@ -538,12 +533,6 @@ function ProjectSearchInput(props: {
         }}
         onKeyPress={(e: any) => {
           if (e?.key === "Escape") props.onClearAndClose();
-        }}
-        class="rounded-(--radius) border border-input bg-card px-1.5 text-foreground"
-        style={{
-          height: 22,
-          fontSize: look().type.text_xsmall.size,
-          lineHeight: look().type.text_xsmall.line_height,
         }}
       />
       <If when={anchorEl() != null && (focused() || props.value().trim() === "")}>
@@ -1014,10 +1003,10 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
             >
               <If when={Boolean(info().unread)}>
                 <View
+                  class="rounded-full"
                   style={{
                     width: 6,
                     height: 6,
-                    borderRadius: 3,
                     backgroundColor: look().palette.accent,
                   }}
                 />
@@ -1037,7 +1026,8 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
             <If when={!renaming()}>
               <View class="absolute inset-0 items-end justify-center opacity-0 invisible pointer-events-none group-hover/row:opacity-100 group-hover/row:visible group-hover/row:pointer-events-auto">
                 <SmeltButton
-                  dismiss={true}
+                  variant="dismiss"
+                  size="xs"
                   icon={icon("close")}
                   tooltip={t("close.confirm")}
                   accessibilityLabel={t("close.confirm")}
@@ -1053,14 +1043,14 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
         </View>
       }
     >
-      <MenuEntry
+      <SmeltMenuItem
         label={row().pinned ? t("menu.unpin") : t("menu.pin")}
-        iconPath={icon(row().pinned ? "pin-off" : "pin")}
+        icon={icon(row().pinned ? "pin-off" : "pin")}
         onSelect={() => actions.pin_session(list, row().key, row().group, !row().pinned)}
       />
-      <MenuEntry
+      <SmeltMenuItem
         label={t("menu.rename")}
-        iconPath={icon("pencil")}
+        icon={icon("pencil")}
         onSelect={() => props.startRename({ kind: "conversation", key: row().key }, row().title)}
       />
       <ContributedMenuItems
@@ -1073,26 +1063,26 @@ function SessionRow(props: SharedRowProps & { row: () => any; level: number }) {
           )
         }
       />
-      <MenuDivider />
-      <MenuEntry
+      <SmeltMenuSeparator />
+      <SmeltMenuItem
         label={t("archive.confirm")}
-        iconPath={icon("archive")}
+        icon={icon("archive")}
         onSelect={() => actions.archive_session(list, props.ask, row().key, row().title, row().status)}
       />
       {row().session_id != null ? (
-        <MenuEntry
+        <SmeltMenuItem
           label={t("menu.copy_session_id")}
-          iconPath={icon("copy")}
+          icon={icon("copy")}
           onSelect={() => {
             const copyText = list.session_id_to_copy(row().key.machine, row().session_id);
             clipboardWrite(copyText).catch(() => {});
           }}
         />
       ) : null}
-      <MenuDivider />
-      <MenuEntry
+      <SmeltMenuSeparator />
+      <SmeltMenuItem
         label={t("close.confirm")}
-        iconPath={icon("close")}
+        icon={icon("close")}
         danger={true}
         onSelect={triggerClose}
       />
@@ -1435,14 +1425,14 @@ function ProjectSection(props: SharedRowProps & { project: () => any; byMachine:
       >
         {project().root ? (
           <>
-            <MenuEntry
+            <SmeltMenuItem
               label={t("menu.new_workset")}
-              iconPath={icon("git-branch")}
+              icon={icon("git-branch")}
               onSelect={() => list.open_repositories(project().machine, project().root, "create")}
             />
-            <MenuEntry
+            <SmeltMenuItem
               label={t("menu.manage_repositories")}
-              iconPath={icon("repositories")}
+              icon={icon("repositories")}
               onSelect={() => list.open_repositories(project().machine, project().root, "manage")}
             />
             <ContributedMenuItems
@@ -1455,16 +1445,16 @@ function ProjectSection(props: SharedRowProps & { project: () => any; byMachine:
                 )
               }
             />
-            <MenuDivider />
-            <MenuEntry
+            <SmeltMenuSeparator />
+            <SmeltMenuItem
               label={t("menu.copy_project_path")}
-              iconPath={icon("copy")}
+              icon={icon("copy")}
               onSelect={() => clipboardWrite(project().root).catch(() => {})}
             />
             {project().branch ? (
-              <MenuEntry
+              <SmeltMenuItem
                 label={t("menu.copy_branch")}
-                iconPath={icon("git-branch")}
+                icon={icon("git-branch")}
                 onSelect={() => clipboardWrite(project().branch).catch(() => {})}
               />
             ) : null}
@@ -1472,7 +1462,7 @@ function ProjectSection(props: SharedRowProps & { project: () => any; byMachine:
         ) : null}
         {project().machine_name != null && machineItems().length > 0 ? (
           <>
-            <MenuDivider />
+            <SmeltMenuSeparator />
             <Submenu
               trigger={
                 <View class={MENU_ITEM_CLASS} style={{ height: 28, gap: space(2) }}>
@@ -1505,18 +1495,18 @@ function ProjectSection(props: SharedRowProps & { project: () => any; byMachine:
             </Submenu>
           </>
         ) : null}
-        {project().root ? <MenuDivider /> : null}
-        <MenuEntry
+        {project().root ? <SmeltMenuSeparator /> : null}
+        <SmeltMenuItem
           label={project().pinned ? t("menu.unpin") : t("menu.pin")}
-          iconPath={icon(project().pinned ? "pin-off" : "pin")}
+          icon={icon(project().pinned ? "pin-off" : "pin")}
           onSelect={() => actions.pin_project(list, project().machine, project().root, !project().pinned)}
         />
         {project().root ? (
           <>
-            <MenuDivider />
-            <MenuEntry
+            <SmeltMenuSeparator />
+            <SmeltMenuItem
               label={project().opened ? t("menu.close_project") : t("menu.close_group")}
-              iconPath={icon("close")}
+              icon={icon("close")}
               danger={true}
               onSelect={() => {
                 const cur = project();
@@ -1585,9 +1575,8 @@ function WorksetSection(props: SharedRowProps & { workset: () => any; level: num
       <SmeltContextMenu
         popupStyle={{ minWidth: 184 }}
         trigger={
-          <View
+          <SmeltRow
             ref={(el: any) => props.registerRowRef(key(), el)}
-            role="button"
             tooltip={props.rename() == null && workset().tooltip ? <Tip text={workset().tooltip} /> : undefined}
             onPress={() => {
               if (renaming() || !collapsible()) return;
@@ -1596,14 +1585,12 @@ function WorksetSection(props: SharedRowProps & { workset: () => any; level: num
                 !workset().collapsed,
               );
             }}
-            class="group/row flex-row items-center hover:bg-accent"
+            class="group/row"
             style={{
               height: ROW_MD,
               paddingLeft: indent(props.level),
               paddingRight: space(1),
               gap: space(2),
-              borderRadius: look().radius.row,
-              cursor: "default",
             }}
           >
             <DisclosureSlot
@@ -1683,17 +1670,17 @@ function WorksetSection(props: SharedRowProps & { workset: () => any; level: num
             </If>
 
             <FailureMark target={{ kind: "workset", machine: workset().machine, id: workset().id }} />
-          </View>
+          </SmeltRow>
         }
       >
-        <MenuEntry
+        <SmeltMenuItem
           label={workset().pinned ? t("menu.unpin") : t("menu.pin")}
-          iconPath={icon(workset().pinned ? "pin-off" : "pin")}
+          icon={icon(workset().pinned ? "pin-off" : "pin")}
           onSelect={() => actions.pin_workset(list, workset().machine, workset().id, !workset().pinned)}
         />
-        <MenuEntry
+        <SmeltMenuItem
           label={t("menu.rename_workset")}
-          iconPath={icon("pencil")}
+          icon={icon("pencil")}
           onSelect={() =>
             props.startRename(
               { kind: "workset", machine: workset().machine, id: workset().id },
@@ -1701,11 +1688,11 @@ function WorksetSection(props: SharedRowProps & { workset: () => any; level: num
             )
           }
         />
-        <MenuDivider />
+        <SmeltMenuSeparator />
         {repos().length <= 1 ? (
-          <MenuEntry
+          <SmeltMenuItem
             label={t("menu.create_pr")}
-            iconPath={icon("external-link")}
+            icon={icon("external-link")}
             disabled={repos().length === 0}
             onSelect={() => {
               const first = repos()[0];
@@ -1738,7 +1725,7 @@ function WorksetSection(props: SharedRowProps & { workset: () => any; level: num
           >
             <Each of={repos()} key={(r: any) => r.worktree}>
               {(repo: () => any) => (
-                <MenuEntry
+                <SmeltMenuItem
                   label={repo().name}
                   onSelect={() =>
                     actions.open_pull_request(
@@ -1753,15 +1740,15 @@ function WorksetSection(props: SharedRowProps & { workset: () => any; level: num
             </Each>
           </Submenu>
         )}
-        <MenuEntry
+        <SmeltMenuItem
           label={workset().checking ? t("menu.checking_merge") : t("menu.check_merge")}
-          iconPath={icon("refresh")}
+          icon={icon("refresh")}
           disabled={workset().checking}
           onSelect={() => actions.check_workset(list, workset().machine, workset().id)}
         />
-        <MenuEntry
+        <SmeltMenuItem
           label={t("menu.finish_workset")}
-          iconPath={icon("close")}
+          icon={icon("close")}
           danger={true}
           onSelect={() =>
             actions.finish_workset(list, props.ask, workset().machine, workset().id, workset().task)
@@ -1807,17 +1794,14 @@ function MachineHeaderRow(props: {
         if (open) loadMenu();
       }}
       trigger={
-        <View
+        <SmeltRow
           ref={(el: any) => props.registerRowRef(key(), el)}
-          role="button"
-          class="group/row flex-row items-center hover:bg-accent"
+          class="group/row"
           style={{
             height: ROW_SM,
             paddingHorizontal: space(2),
             marginTop: space(1),
             gap: space(2),
-            borderRadius: look().radius.row,
-            cursor: "default",
           }}
           onPress={() => {
             if (!collapsible()) return;
@@ -1924,7 +1908,7 @@ function MachineHeaderRow(props: {
               </SmeltMenu>
             </If>
           </View>
-        </View>
+        </SmeltRow>
       }
     >
       <ContributedMenuItems
@@ -2537,12 +2521,12 @@ export function main() {
           </View>
         }
       >
-        <MenuSectionTitle text={t("menu.open_on_machine")} />
+        <SmeltMenuLabel label={t("menu.open_on_machine")} />
         <Each of={sidebar().machines} key={(m: any) => machine_flip(m.machine)}>
           {(m: () => any) => (
-            <MenuEntry
+            <SmeltMenuItem
               label={m().name}
-              iconPath={m().os_icon}
+              icon={m().os_icon}
               iconColor={lightColor(look().palette, m().link?.light ?? "good")}
               disabled={m().link?.unavailable != null}
               onSelect={() => actions.open_project(list, m().machine)}
@@ -2755,16 +2739,13 @@ export function main() {
                     </View>
                   }
                 >
-                  <View
+                  <SmeltRow
                     ref={(el: any) => registerRowRef(CONVERSATIONS_KEY, el)}
-                    role="button"
-                    class="group/row flex-row items-center hover:bg-accent"
+                    class="group/row"
                     style={{
                       height: ROW_SM,
                       paddingHorizontal: space(2),
                       gap: space(2),
-                      borderRadius: look().radius.row,
-                      cursor: "default",
                     }}
                     onPress={() =>
                       list.set_collapsed(
@@ -2796,7 +2777,7 @@ export function main() {
                         count={sidebar().conversations.rows.length}
                       />
                     </If>
-                  </View>
+                  </SmeltRow>
                 </SmeltDisclosure>
               </View>
             </If>
@@ -2870,17 +2851,14 @@ export function main() {
                                     </View>
                                   }
                                 >
-                                  <View
+                                  <SmeltRow
                                     ref={(el: any) => registerRowRef(bKey(), el)}
-                                    role="button"
-                                    class="group/row flex-row items-center hover:bg-accent"
+                                    class="group/row"
                                     style={{
                                       height: ROW_MD,
                                       paddingLeft: indent(bucketLevel()),
                                       paddingRight: space(1),
                                       gap: space(2),
-                                      borderRadius: look().radius.row,
-                                      cursor: "default",
                                     }}
                                     onPress={() =>
                                       list.set_bucket_collapsed(bKey(), !group().collapsed)
@@ -2909,7 +2887,7 @@ export function main() {
                                         count={group().rows.length}
                                       />
                                     </If>
-                                  </View>
+                                  </SmeltRow>
                                 </SmeltDisclosure>
                               );
                             }}
@@ -2946,10 +2924,8 @@ export function main() {
                         </Each>
 
                         <If when={hiddenCountOf(area()) > 0}>
-                          <View
-                            role="button"
-                            class="flex-row items-center rounded-(--radius) hover:bg-accent"
-                            style={{ height: ROW_SM, paddingHorizontal: space(2), cursor: "default" }}
+                          <SmeltRow
+                            style={{ height: ROW_SM, paddingHorizontal: space(2) }}
                             onPress={() => list.set_hide_empty_projects(false)}
                           >
                             <Text
@@ -2963,7 +2939,7 @@ export function main() {
                                 ? t("list.hidden_projects.one")
                                 : t("list.hidden_projects.other", { count: hiddenCountOf(area()) })}
                             </Text>
-                          </View>
+                          </SmeltRow>
                         </If>
 
                         <If
@@ -3022,7 +2998,20 @@ export function main() {
         </Overlay>
       </If>
 
-      <ConfirmDialog request={confirm} onDismiss={() => confirm.set(null)} />
+      <SmeltConfirmDialog
+        open={confirm() != null}
+        title={confirm()?.title ?? ""}
+        description={confirm()?.description ?? ""}
+        confirmLabel={confirm()?.action ?? ""}
+        cancelLabel={t("action.cancel")}
+        danger={Boolean(confirm()?.danger)}
+        onConfirm={() => {
+          const req = confirm();
+          confirm.set(null);
+          req?.confirm();
+        }}
+        onCancel={() => confirm.set(null)}
+      />
     </View>
   );
 }

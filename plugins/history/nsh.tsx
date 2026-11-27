@@ -1,6 +1,6 @@
 // 历史会话（NSH A2 独立 VM 版本）：复用纯逻辑 model.js 与 Rust 一等 <TextView>（SmeltMarkdown）。
 import { computed, List, Scroll, signal, Text, View } from "nsh";
-import { Input, MenuItem, MenuSeparator, Submenu } from "nsh/base";
+import { Submenu } from "nsh/base";
 import {
   activeContext,
   agentCatalog,
@@ -24,10 +24,16 @@ import {
   request,
   run,
   SmeltButton,
+  SmeltConfirmDialog,
   SmeltContextMenu,
   SmeltDialog,
   SmeltIcon,
+  SmeltInput,
   SmeltMarkdown,
+  SmeltMenuItem,
+  SmeltMenuSeparator,
+  SmeltRow,
+  SmeltSegmented,
   stableMemo,
   t,
   text,
@@ -728,41 +734,9 @@ bootTask(async () => {
 
 // ---- 视图组件 ----
 
-
-function MenuRow(props: {
-  label: string;
-  iconPath?: string | null;
-  danger?: boolean;
-  onSelect: () => void;
-}) {
-  const look = currentTheme;
-  const fg = () => (props.danger ? look().palette.bad : look().palette.text);
-  const iconColor = () => (props.danger ? look().palette.bad : look().palette.muted);
-  return (
-    <MenuItem
-      closeOnSelect={true}
-      onSelect={props.onSelect}
-      class={MENU_ITEM_CLASS}
-      style={{ height: 28, gap: 8 }}
-    >
-      <If when={Boolean(props.iconPath)}>
-        <View style={{ width: 14, height: 14, flexShrink: 0 }}>
-          <SmeltIcon path={props.iconPath!} size={14} color={iconColor()} />
-        </View>
-      </If>
-      <Text
-        class="flex-1 min-w-0"
-        style={{
-          color: fg(),
-          fontSize: look().type.ui.size,
-          lineHeight: look().type.ui.line_height,
-          numberOfLines: 1,
-        }}
-      >
-        {props.label}
-      </Text>
-    </MenuItem>
-  );
+/** 来源标签的值：引擎加自定义 Agent 的 id。 */
+function sourceTabKey(kind: string, profileId: string | null | undefined): string {
+  return `${kind}:${profileId ?? ""}`;
 }
 
 function Placeholder(props: { message: string }) {
@@ -878,7 +852,7 @@ function HistoryTurnItem(props: { turn: Turn; cwd: string; machine: string | nul
                     paddingRight: 16,
                     paddingTop: 10,
                     paddingBottom: 10,
-                    borderRadius: 12,
+                    borderRadius: look().radius.xl,
                     backgroundColor: look().palette.soft,
                   }}
                 >
@@ -926,12 +900,11 @@ function RenameDialogInput(props: {
   onSubmit: () => void;
   onCancel: () => void;
 }) {
-  const look = currentTheme;
   let inputEl: any = null;
   let initialSelected = false;
   let edited = false;
   return (
-    <Input
+    <SmeltInput
       ref={(el: any) => {
         inputEl = el ?? null;
         // 同步抢占焦点，避免右键菜单关闭时的 focus_back 把焦点拉回行。
@@ -953,8 +926,6 @@ function RenameDialogInput(props: {
       onKeyPress={(e: any) => {
         if (e?.key === "Escape") props.onCancel();
       }}
-      class="rounded-(--radius) border border-input bg-card px-2 text-foreground"
-      style={{ height: 28, fontSize: look().type.ui.size }}
     />
   );
 }
@@ -995,6 +966,13 @@ export function Main() {
       return Boolean(list && list.sessions.length > 0);
     });
   });
+  const tabOptions = computed(() =>
+    visibleTabs().map((tab) => ({ value: sourceTabKey(tab.kind, tab.profile_id), label: tab.label })),
+  );
+  // 关上时框还在淡出：留着上一次的名字，说明不在淡出途中变空。
+  const deleteShown = computed(
+    (prev: DeleteDialogState | null | undefined) => deleteDialog() ?? prev ?? null,
+  );
 
   const bindings = computed(() => {
     const project = currentProject();
@@ -1064,8 +1042,8 @@ export function Main() {
           }}
         >
           <SmeltButton
-            quiet={true}
-            small={true}
+            variant="quiet"
+            size="sm"
             icon="icons/refresh.svg"
             tooltip={t("refresh")}
             onPress={refreshNow}
@@ -1076,70 +1054,18 @@ export function Main() {
               horizontal={true}
               style={{ maxWidth: "85%", minWidth: 0, flexShrink: 1 }}
             >
-              <View
-                style={{
-                  display: "flex",
-                  flexDirection: "row",
-                  alignItems: "center",
-                  padding: 2,
-                  gap: 2,
-                  borderRadius: look().radius.md,
-                  backgroundColor: look().palette.soft,
+              <SmeltSegmented
+                options={tabOptions()}
+                value={sourceTabKey(activeSource().kind, activeSource().profile_id)}
+                onChange={(value: string) => {
+                  const tab = visibleTabs().find(
+                    (it) => sourceTabKey(it.kind, it.profile_id) === value,
+                  );
+                  if (!tab) return;
+                  sourcePickedByUser = true;
+                  selectSource(tab.kind, tab.profile_id);
                 }}
-              >
-                <Each
-                  of={visibleTabs()}
-                  key={(tab: { kind: string; profile_id: string | null }) =>
-                    `${tab.kind}:${tab.profile_id ?? ""}`
-                  }
-                >
-                  {(tab: () => { kind: string; profile_id: string | null; label: string }) => {
-                    const isSelected = computed(() => {
-                      const cur = activeSource();
-                      return (
-                        tab().kind === cur.kind &&
-                        (tab().profile_id ?? null) === (cur.profile_id ?? null)
-                      );
-                    });
-                    return (
-                      <View
-                        role="button"
-                        onPress={() => {
-                          sourcePickedByUser = true;
-                          selectSource(tab().kind, tab().profile_id);
-                        }}
-                        style={{
-                          paddingLeft: 8,
-                          paddingRight: 8,
-                          height: 22,
-                          display: "flex",
-                          flexDirection: "row",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          flexShrink: 0,
-                          borderRadius: look().radius.sm,
-                          backgroundColor: isSelected() ? look().palette.surface : "transparent",
-                          cursor: "default",
-                        }}
-                      >
-                        <Text
-                          style={{
-                            color: isSelected() ? look().palette.text : look().palette.muted,
-                            fontSize: look().type.small.size,
-                            lineHeight: look().type.small.line_height,
-                            fontWeight: isSelected()
-                              ? look().type.small_medium.weight
-                              : look().type.small.weight,
-                            numberOfLines: 1,
-                          }}
-                        >
-                          {tab().label}
-                        </Text>
-                      </View>
-                    );
-                  }}
-                </Each>
-              </View>
+              />
             </Scroll>
           </If>
         </View>
@@ -1287,16 +1213,17 @@ export function Main() {
                 gap: 4,
               }}
             >
-              <Input
+              <SmeltInput
+                size="sm"
                 value={filterText()}
                 placeholder={t("search")}
                 onChange={({ value }: { value: string }) => filterText.set(value)}
-                class="flex-1 min-w-0 rounded-(--radius) border border-input bg-card px-2 text-foreground"
-                style={{ height: 26, fontSize: look().type.small.size }}
+                class="flex-1 min-w-0"
               />
               <If when={filterText().length > 0}>
                 <SmeltButton
-                  dismiss={true}
+                  variant="dismiss"
+                  size="xs"
                   icon="icons/close.svg"
                   onPress={() => filterText.set("")}
                 />
@@ -1315,12 +1242,13 @@ export function Main() {
                   when={filteredSessions().length > 0}
                   else={<Placeholder message={t("empty.no_match")} />}
                 >
-                  <Scroll style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
-                    <View style={{ paddingTop: 8, paddingBottom: 8 }}>
-                      <Each
-                        of={filteredSessions()}
-                        key={(session: SessionSummary) => rowKey(session)}
-                      >
+                  <List
+                    each={filteredSessions()}
+                    keyExtractor={(session: SessionSummary) => rowKey(session)}
+                    estimatedItemSize={58}
+                    style={{ flex: 1, minWidth: 0, minHeight: 0 }}
+                    contentStyle={{ paddingTop: 8, paddingBottom: 8 }}
+                  >
                         {(session: () => SessionSummary) => {
                           const isSelected = computed(
                             () => activeOpened()?.path === session().path,
@@ -1331,33 +1259,23 @@ export function Main() {
                             isAgentSession(spaceEngineId() != null, boundDef()),
                           );
                           return (
-                            <View style={{ paddingLeft: 8, paddingRight: 8, paddingBottom: 4 }}>
+                            <View style={{ width: "100%", paddingLeft: 8, paddingRight: 8, paddingBottom: 4 }}>
                               <SmeltContextMenu
                                 popupStyle={{ minWidth: 184 }}
                                 trigger={
-                                  <View
-                                    role="button"
+                                  <SmeltRow
+                                    selected={isSelected()}
                                     onPress={() => openSessionDetail(session().path)}
                                     style={{
-                                      display: "flex",
                                       flexDirection: "column",
+                                      alignItems: "stretch",
                                       justifyContent: "center",
                                       width: "100%",
                                       height: 54,
                                       gap: 2,
                                       paddingLeft: 8,
                                       paddingRight: 8,
-                                      borderRadius: look().radius.row,
-                                      backgroundColor: isSelected()
-                                        ? look().palette.row_selected
-                                        : "transparent",
-                                      cursor: "default",
                                     }}
-                                    hoverStyle={
-                                      isSelected()
-                                        ? undefined
-                                        : { backgroundColor: look().palette.row_hover }
-                                    }
                                   >
                                     <Text
                                       style={{
@@ -1381,17 +1299,17 @@ export function Main() {
                                     >
                                       {labels().secondary}
                                     </Text>
-                                  </View>
+                                  </SmeltRow>
                                 }
                               >
                                 <If when={sourceMeta().acp_id != null}>
-                                  <MenuRow
+                                  <SmeltMenuItem
                                     label={continueLabel(isAgent(), t)}
                                     onSelect={() => resumeSession(session(), false, boundDef())}
                                   />
                                 </If>
                                 <If when={!isAgent()}>
-                                  <MenuRow
+                                  <SmeltMenuItem
                                     label={t("menu.continue_cli")}
                                     onSelect={() => resumeSession(session(), true, null)}
                                   />
@@ -1428,7 +1346,7 @@ export function Main() {
                                         }
                                       >
                                         {(target: () => any) => (
-                                          <MenuRow
+                                          <SmeltMenuItem
                                             label={target().label}
                                             onSelect={() =>
                                               handOffSession(session(), target())
@@ -1439,26 +1357,26 @@ export function Main() {
                                     </Submenu>
                                   </If>
                                 </If>
-                                <MenuSeparator class="my-1 bg-border" style={{ height: 1 }} />
-                                <MenuRow
+                                <SmeltMenuSeparator />
+                                <SmeltMenuItem
                                   label={t("rename")}
                                   onSelect={() => startRename(session())}
                                 />
                                 <If when={session().custom_title != null}>
-                                  <MenuRow
+                                  <SmeltMenuItem
                                     label={t("menu.reset_title")}
                                     onSelect={() => resetTitle(session())}
                                   />
                                 </If>
-                                <MenuRow
+                                <SmeltMenuItem
                                   label={t("menu.copy_path")}
                                   onSelect={() => void clipboardWrite(session().path)}
                                 />
                                 <If when={sourceMeta().deletable}>
-                                  <MenuSeparator class="my-1 bg-border" style={{ height: 1 }} />
-                                  <MenuRow
+                                  <SmeltMenuSeparator />
+                                  <SmeltMenuItem
                                     label={t("delete.action")}
-                                    iconPath="icons/trash.svg"
+                                    icon="icons/trash.svg"
                                     danger={true}
                                     onSelect={() =>
                                       startDelete(session(), sourceMeta().short_label)
@@ -1469,9 +1387,7 @@ export function Main() {
                             </View>
                           );
                         }}
-                      </Each>
-                    </View>
-                  </Scroll>
+                  </List>
                 </If>
               </If>
             </If>
@@ -1511,14 +1427,14 @@ export function Main() {
           />
           <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
             <SmeltButton
-              quiet={true}
-              small={true}
+              variant="quiet"
+              size="sm"
               label={t("cancel")}
               onPress={() => renameDialog.set(null)}
             />
             <SmeltButton
-              primary={true}
-              small={true}
+              variant="primary"
+              size="sm"
               label={t("rename")}
               onPress={submitRename}
             />
@@ -1527,54 +1443,19 @@ export function Main() {
       </SmeltDialog>
 
       {/* 删除确认框 */}
-      <SmeltDialog
+      <SmeltConfirmDialog
         open={deleteDialog() != null}
-        role="alertdialog"
-        accessibilityLabel={t("delete.confirm")}
-        onOpenChange={({ open }: { open: boolean }) => {
-          if (!open) deleteDialog.set(null);
-        }}
-        class={`m-auto ${DIALOG_SURFACE_CLASS} p-4`}
-        style={{ width: 420, gap: 12 }}
-      >
-        <If when={deleteDialog() != null}>
-          <Text
-            style={{
-              color: look().palette.text,
-              fontSize: look().type.ui_medium.size,
-              fontWeight: look().type.ui_medium.weight,
-            }}
-          >
-            {t("delete.confirm")}
-          </Text>
-          <Text
-            style={{
-              color: look().palette.muted,
-              fontSize: look().type.ui.size,
-              lineHeight: look().type.ui.line_height,
-            }}
-          >
-            {t("delete.description", {
-              agent: deleteDialog()?.agentShortLabel ?? "",
-              title: deleteDialog()?.title ?? "",
-            })}
-          </Text>
-          <View style={{ display: "flex", flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
-            <SmeltButton
-              quiet={true}
-              small={true}
-              label={t("cancel")}
-              onPress={() => deleteDialog.set(null)}
-            />
-            <SmeltButton
-              danger={true}
-              small={true}
-              label={t("delete.action")}
-              onPress={confirmDelete}
-            />
-          </View>
-        </If>
-      </SmeltDialog>
+        title={t("delete.confirm")}
+        description={t("delete.description", {
+          agent: deleteShown()?.agentShortLabel ?? "",
+          title: deleteShown()?.title ?? "",
+        })}
+        confirmLabel={t("delete.action")}
+        cancelLabel={t("cancel")}
+        danger={true}
+        onConfirm={confirmDelete}
+        onCancel={() => deleteDialog.set(null)}
+      />
     </View>
   );
 }

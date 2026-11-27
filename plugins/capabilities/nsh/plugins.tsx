@@ -1,7 +1,7 @@
 // 能力库「技能」「扩展」页签：扫描目录、导入、移至通用目录 / 同名择一、给智能体用、删除。
 
 import { computed } from "nsh";
-import { SmeltButton, t } from "smelt/sdk";
+import { SmeltButton, SmeltMenuItem, t } from "smelt/sdk";
 import {
   derivePluginRoots,
   formatUsedByLine,
@@ -12,7 +12,6 @@ import {
 import { agentSettingsOn, type PageController } from "./state.ts";
 import {
   DropdownMenuButton,
-  MenuEntry,
   PageIntro,
   SectionCell,
   SettingsPageShell,
@@ -47,8 +46,8 @@ export function PluginsTab(props: { page: PageController; kind: "skill" | "exten
         <SectionCell>
           <SettingsRow title={t("plugins.scan")} description={roots().join("\n")}>
             <SmeltButton
-              quiet={true}
-              small={true}
+              variant="quiet"
+              size="sm"
               label={t("plugins.rescan")}
               onPress={() => props.page.refreshPlugins()}
             />
@@ -57,7 +56,7 @@ export function PluginsTab(props: { page: PageController; kind: "skill" | "exten
         <SectionCell divider={true}>
           <SettingsRow title={t("plugins.import_confirm")} description={importDesc()}>
             <SmeltButton
-              small={true}
+              size="sm"
               label={importLabel()}
               onPress={() => props.page.importPlugin(props.kind)}
             />
@@ -152,7 +151,7 @@ export function PluginsTab(props: { page: PageController; kind: "skill" | "exten
                   >
                     <If when={showMove()}>
                       <SmeltButton
-                        small={true}
+                        size="sm"
                         label={t("plugins.move")}
                         onPress={() => props.page.adoptPlugin(plugin().id, plugin().path)}
                       />
@@ -165,7 +164,7 @@ export function PluginsTab(props: { page: PageController; kind: "skill" | "exten
                       >
                         <Each of={copies()} key={(path: string) => path}>
                           {(path: () => string) => (
-                            <MenuEntry
+                            <SmeltMenuItem
                               label={path()}
                               onSelect={() => props.page.adoptPlugin(plugin().id, path())}
                             />
@@ -178,8 +177,8 @@ export function PluginsTab(props: { page: PageController; kind: "skill" | "exten
                     </If>
                     <If when={!plugin().builtin}>
                       <SmeltButton
-                        quiet={true}
-                        small={true}
+                        variant="quiet"
+                        size="sm"
                         label={t("common.delete")}
                         onPress={() => props.page.requestDeletePlugin(plugin())}
                       />

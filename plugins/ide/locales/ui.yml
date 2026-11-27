@@ -1,9 +1,9 @@
 _version: 2
 open_with:
-  en: Open With
+  en: Open with
   zh-CN: 用其他应用打开
 file_manager:
-  en: File Manager
+  en: File manager
   zh-CN: 文件管理器
 error:
   app_missing:

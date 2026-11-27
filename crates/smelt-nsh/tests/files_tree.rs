@@ -457,7 +457,7 @@ fn files_tree_renders_and_interacts_after_async_load(cx: &mut TestAppContext) {
                 .unwrap()
                 .iter()
                 .any(|p| p == "/work/smelt/Cargo.toml")
-                && has_a11y_text(cx, "Hide File Tree")
+                && has_a11y_text(cx, "Hide file tree")
         },
     );
 
@@ -474,7 +474,7 @@ fn files_tree_renders_and_interacts_after_async_load(cx: &mut TestAppContext) {
         [json!("[workspace]\nmembers = []\n")],
     );
 
-    // 5. 打开文件后顶部多出面包屑栏（约 39px），右键文件行应弹出包含 Copy File Path 与 Delete File 的上下文菜单。
+    // 5. 打开文件后顶部多出面包屑栏（约 39px），右键文件行应弹出包含 Copy file path 与 Delete file 的上下文菜单。
     let row2_after_breadcrumb = point(px(1080.), px(174.));
     cx.simulate_mouse_move(row2_after_breadcrumb, None, Modifiers::default());
     cx.simulate_mouse_down(
@@ -488,7 +488,7 @@ fn files_tree_renders_and_interacts_after_async_load(cx: &mut TestAppContext) {
         Modifiers::default(),
     );
     wait_for(cx, "右键文件行弹出上下文菜单", |cx| {
-        has_a11y_text(cx, "Copy File Path") && has_a11y_text(cx, "Delete File")
+        has_a11y_text(cx, "Copy file path") && has_a11y_text(cx, "Delete file")
     });
 
     shell.update(cx, |shell, cx| shell.shutdown(cx));

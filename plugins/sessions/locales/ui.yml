@@ -14,75 +14,75 @@ action:
     zh-CN: "分屏"
 close:
   pane:
-    en: "Close Pane"
+    en: "Close pane"
     zh-CN: "关闭分屏"
   pane_running:
     en: "This pane is still running. Close it?"
-    zh-CN: "这个分屏还在运行，确定关闭吗？"
+    zh-CN: "这个分屏还在运行，要关闭吗？"
   running_description:
     en: "The turn running in “%{title}” will be stopped, and it can't be recovered after closing."
     zh-CN: "「%{title}」正在跑的这一轮会被终止，关掉之后找不回来。"
   session:
-    en: "Close Session"
+    en: "Close session"
     zh-CN: "关闭会话"
   session_running:
     en: "This session is still running. Close it?"
-    zh-CN: "这个会话还在运行，确定关闭吗？"
+    zh-CN: "这个会话还在运行，要关闭吗？"
 command:
   activate:
-    en: "Jump to Session"
+    en: "Jump to session"
     zh-CN: "跳到会话"
   create_conversation:
-    en: "Create Session"
+    en: "Create session"
     zh-CN: "新建会话"
   close_pane:
-    en: "Close Current Pane or Session"
+    en: "Close current pane or session"
     zh-CN: "关闭当前分屏或会话"
   fork:
-    en: "Fork Conversation"
+    en: "Fork conversation"
     zh-CN: "分叉对话"
   handoff:
-    en: "Hand Off to Another Agent"
+    en: "Hand off to another agent"
     zh-CN: "交接给另一个 agent"
   next_pane:
-    en: "Next Pane"
+    en: "Next pane"
     zh-CN: "下一个分屏"
   prev_pane:
-    en: "Previous Pane"
+    en: "Previous pane"
     zh-CN: "上一个分屏"
   resume:
-    en: "Resume Past Session"
+    en: "Resume past session"
     zh-CN: "续接历史会话"
   resume_in_terminal:
-    en: "Resume Past Session in Terminal"
+    en: "Resume past session in terminal"
     zh-CN: "在终端里续接历史会话"
   select_project:
-    en: "Select Project"
+    en: "Select project"
     zh-CN: "选中项目"
   selection:
-    en: "Current Selection"
+    en: "Current selection"
     zh-CN: "当前选中"
   send_text:
-    en: "Fill Text into Session"
+    en: "Fill text into session"
     zh-CN: "往会话里填文字"
   split_down:
-    en: "Split Down"
+    en: "Split down"
     zh-CN: "上下分屏"
   split_right:
-    en: "Split Right"
+    en: "Split right"
     zh-CN: "左右分屏"
   start_conversation:
-    en: "Start Conversation"
+    en: "Start conversation"
     zh-CN: "开始对话"
 empty:
   add_machine:
-    en: "Add Remote Machine"
+    en: "Add remote machine"
     zh-CN: "添加远程机器"
   no_session:
     en: "No open sessions"
     zh-CN: "没有打开的会话"
   title:
-    en: "Take a Break"
+    en: "Take a break"
     zh-CN: "休息一下"
 error:
   agent_gone:
@@ -99,13 +99,13 @@ error:
     zh-CN: "打开会话：参数不对：%{error}"
   choose_engine:
     en: "Choose an available engine"
-    zh-CN: "请选择一个可用的执行引擎"
+    zh-CN: "选择一个可用的执行引擎"
   custom_needs_profile:
     en: "Generic ACP needs a custom agent"
     zh-CN: "通用 ACP 要选一个自定义 Agent"
   engine_not_available:
     en: "%{engine} isn't available as an agent engine yet; use Pi instead"
-    zh-CN: "%{engine} 暂未开放为产品级智能体引擎，请改用 Pi"
+    zh-CN: "%{engine} 暂未开放为产品级智能体引擎，改用 Pi"
   failed:
     en: "Couldn't %{what}: %{error}"
     zh-CN: "%{what}失败：%{error}"
@@ -181,7 +181,7 @@ kind:
     zh-CN: "终端"
 menu:
   copy_session_id:
-    en: "Copy Session ID"
+    en: "Copy session ID"
     zh-CN: "复制会话 ID"
 split:
   cancel:

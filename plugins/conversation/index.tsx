@@ -29,7 +29,7 @@ import {
   workspaceDirectory,
 } from "smelt/sdk";
 import { MemoryChangesCard } from "./cards.tsx";
-import { type AttachedImage, Composer } from "./composer.tsx";
+import { type AttachedImage, Composer, type ComposerApi } from "./composer.tsx";
 import { EditDiffDialog, type EditDiffDialogState } from "./edit_diff_dialog.tsx";
 import { ct } from "./i18n.ts";
 import {
@@ -77,6 +77,12 @@ export interface SmeltConversationSpec {
   binding?: any;
 }
 
+/** `<SmeltConversation>` 的命令式接口（`conversationRef` 给出）。 */
+export interface SmeltConversationApi {
+  /** 往输入框里追加文本（如 `smelt.sessions/send-text`）：接在草稿后面，光标放到末尾并聚焦输入框。 */
+  insertText(text: string): void;
+}
+
 export interface SmeltConversationProps {
   machine: string | null;
   sessionId: string;
@@ -106,8 +112,8 @@ export interface SmeltConversationProps {
   reuseKey?: string;
   /** 递增触发输入框聚焦。 */
   focusSeq?: number;
-  /** 外部向输入框插入文本（如 `smelt.sessions/send-text`）。 */
-  insertText?: { seq: number; text: string } | null;
+  /** 挂上时给出命令式接口，卸下时给 `null`。 */
+  conversationRef?: (api: SmeltConversationApi | null) => void;
   /** 递增触发模型列表刷新（如 Pi 配置变更时）。 */
   refreshModelsSeq?: number;
   readOnly?: boolean;
@@ -202,8 +208,6 @@ export function SmeltConversation(props: SmeltConversationProps) {
   const imagePreview = signal<{ uri: string; loading: boolean; img: any } | null>(null);
   const imagePreviewCopied = signal(false);
   let imagePreviewCopyTimer: ReturnType<typeof setTimeout> | null = null;
-  const restoreDraft = signal<{ seq: number; text: string; images: AttachedImage[] } | null>(null);
-  const quickInsert = signal<{ seq: number; text: string } | null>(null);
   const reconnectSeq = signal(0);
   /** 对话流断了，正在等机器上线后自动重新订阅。 */
   const reconnecting = signal(false);
@@ -211,19 +215,10 @@ export function SmeltConversation(props: SmeltConversationProps) {
   const streamClosed = signal(false);
 
   let listApi: any = null;
+  /** 输入框跟对话同生同灭，挂上就有。 */
+  let composerApi: ComposerApi | null = null;
   let lastRestoreRev = 0;
-  let restoreSeq = 0;
-  let quickInsertSeq = 0;
-  let lastExternalInsertSeq = 0;
-
-  effect(() => {
-    const ext = props.insertText;
-    if (ext && ext.seq !== lastExternalInsertSeq) {
-      lastExternalInsertSeq = ext.seq;
-      quickInsertSeq += 1;
-      quickInsert.set({ seq: quickInsertSeq, text: ext.text });
-    }
-  });
+  cleanup(() => props.conversationRef?.(null));
 
   let lastRefreshModelsSeq = props.refreshModelsSeq ?? 0;
   let lastNotifiedAtLatest = true;
@@ -471,8 +466,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
         )
         .filter(Boolean) as AttachedImage[];
       if (texts.length > 0 || imgs.length > 0) {
-        restoreSeq += 1;
-        restoreDraft.set({ seq: restoreSeq, text: texts.join("\n"), images: imgs });
+        composerApi?.restore(texts.join("\n"), imgs);
       }
       const sid = subId();
       if (sid) {
@@ -590,8 +584,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
       } else if (ev.kind === "initial_prompt_unsupported" && lastInitialPromptText) {
         const text = lastInitialPromptText;
         lastInitialPromptText = null;
-        restoreSeq += 1;
-        restoreDraft.set({ seq: restoreSeq, text, images: [] });
+        composerApi?.restore(text, []);
       }
     });
 
@@ -633,8 +626,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
         if (cancelled) return;
 
         if (start?.prefill) {
-          restoreSeq += 1;
-          restoreDraft.set({ seq: restoreSeq, text: start.prefill, images: [] });
+          composerApi?.restore(start.prefill, []);
         }
 
         const launchPayload = buildAcpLaunchPayload({
@@ -976,20 +968,15 @@ export function SmeltConversation(props: SmeltConversationProps) {
             }}
           >
             <SmeltButton
-              floating
-              small
+              variant="floating"
+              shape="pill"
               label={pinnedPrompt() ?? props.title ?? ct("title")}
               tooltip={
                 effectiveModel()?.current_name
                   ? `${props.title ?? ct("title")} · ${effectiveModel().current_name}`
                   : (props.title ?? ct("title"))
               }
-              style={{
-                height: 28,
-                maxWidth: pinnedPrompt() ? 480 : 240,
-                paddingHorizontal: 14,
-                borderRadius: 14,
-              }}
+              class={pinnedPrompt() ? "max-w-120" : "max-w-60"}
               onPress={() => props.onRevealInList?.()}
             />
           </View>
@@ -1060,8 +1047,8 @@ export function SmeltConversation(props: SmeltConversationProps) {
                             {connectError() ?? ""}
                           </Text>
                           <SmeltButton
-                            primary
-                            small
+                            variant="primary"
+                            size="sm"
                             label={ct("action.retry")}
                             onPress={() => reconnectSeq.set(reconnectSeq() + 1)}
                           />
@@ -1101,7 +1088,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
                       {snapshot()?.end_reason || ct("status.disconnected")}
                     </Text>
                     <SmeltButton
-                      primary
+                      variant="primary"
                       label={
                         reconnectOnly()
                           ? ct("action.reconnect")
@@ -1221,7 +1208,7 @@ export function SmeltConversation(props: SmeltConversationProps) {
         <If when={retryInfo() != null}>
           <View style={{ width: "100%", alignItems: "center", paddingHorizontal: 16, paddingBottom: 6 }}>
             <View
-              class="w-full px-3 py-2 rounded-[10px] bg-soft border border-border flex-row items-center gap-2"
+              class="w-full px-3 py-2 rounded-xl bg-soft border border-border flex-row items-center gap-2"
               style={{ maxWidth: 768 }}
             >
               <SmeltIcon spin={visible()} size={12} color={look().palette.muted} />
@@ -1239,15 +1226,15 @@ export function SmeltConversation(props: SmeltConversationProps) {
         <If when={visibleNotice() != null}>
           <View style={{ width: "100%", alignItems: "center", paddingHorizontal: 16, paddingBottom: 6 }}>
             <View
-              class="w-full px-3 py-1.5 rounded-[10px] bg-need/12 border border-border flex-row items-center gap-2"
+              class="w-full px-3 py-1.5 rounded-xl bg-need/12 border border-border flex-row items-center gap-2"
               style={{ maxWidth: 768 }}
             >
               <Text style={{ flex: 1, fontSize: look().type.text_xsmall.size, color: look().palette.need }}>
                 {visibleNotice()?.text ?? ""}
               </Text>
               <SmeltButton
-                dismiss
-                small
+                variant="dismiss"
+                size="xs"
                 icon="icons/close.svg"
                 onPress={() => {
                   const id = visibleNotice()?.id;
@@ -1280,8 +1267,8 @@ export function SmeltConversation(props: SmeltConversationProps) {
                   {snapshot()?.end_reason || ct("status.disconnected")}
                 </Text>
                 <SmeltButton
-                  primary
-                  small
+                  variant="primary"
+                  size="sm"
                   label={reconnectOnly() ? ct("action.reconnect") : ct("action.restart")}
                   onPress={restartOrReconnect}
                 />
@@ -1329,8 +1316,10 @@ export function SmeltConversation(props: SmeltConversationProps) {
           usageBreakdown={() => snapshot()?.usage_breakdown ?? null}
           focusSeq={() => props.focusSeq ?? 0}
           roomy={showEmptyWelcome}
-          insertText={quickInsert}
-          restoreDraft={restoreDraft}
+          composerRef={(api) => {
+            composerApi = api;
+            props.conversationRef?.({ insertText: (text) => api.insert(text) });
+          }}
           onSend={(text, imageRefs, followUp) => {
             const payload = followUp
               ? { FollowUp: { text, images: [], delivery_id: null } }
@@ -1420,13 +1409,13 @@ export function SmeltConversation(props: SmeltConversationProps) {
               </Text>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
                 <SmeltButton
-                  quiet
-                  small
+                  variant="quiet"
+                  size="sm"
                   icon={imagePreviewCopied() ? "icons/check.svg" : "icons/copy.svg"}
                   label={imagePreviewCopied() ? ct("action.copied") : ct("action.copy_image")}
                   onPress={handleCopyPreviewImage}
                 />
-                <SmeltButton quiet small icon="icons/close.svg" onPress={closeImagePreview} />
+                <SmeltButton variant="quiet" size="sm" icon="icons/close.svg" onPress={closeImagePreview} />
               </View>
             </View>
             <View style={{ flex: 1, minHeight: 0, alignItems: "center", justifyContent: "center" }}>

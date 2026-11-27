@@ -91,7 +91,7 @@ const EN_DICT = {
   "pi_login.wrong_callback": "Wrong callback, expected %{expected}",
   "pi_model.base_url_invalid": "The API URL must be a full HTTP(S) URL",
   "pi_model.provider_id_invalid": "Provider ID \"%{id}\" is invalid",
-  "pi_model.provider_id_required": "Enter a Provider ID",
+  "pi_model.provider_id_required": "Enter a provider ID",
   "plugins.origin_builtin": "Built into %{origin}",
   "plugins.summary.extension": "%{usable} usable extensions installed.",
   "plugins.summary.skill": "%{usable} usable skills installed.",
