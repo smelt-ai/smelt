@@ -1,9 +1,9 @@
 // 文件面板（NSH A2 独立 VM 版本）：
 // - 左侧：面包屑 + 脏点 + 错误 + 本地 HTML「浏览器打开」+ Markdown 预览/源码切换 + 树收起按钮，
-//         主体用 1st-class Rust <SmeltEditor>、<SmeltMarkdown>、<Image data:... />
+//         主体用 1st-class Rust <SmeltEditor>、<SmeltMarkdown>、<Image>；正文和图片以 Blob 交给它们，不进插件的 JS 堆
 // - 右侧：<ResizablePanelGroup> 无 JS 往返拖动分栏，搜索框 + 钉目录按钮 + 键盘可控文件树 / 搜索结果树
 // - 全事件驱动：project.watch / project_changed / reconnected / window_activated / active_context，无轮询。
-import { computed, effect, Image, Scroll, signal, Text, View } from "nsh";
+import { cleanup, computed, effect, Image, Scroll, signal, Text, untracked, View } from "nsh";
 import {
   Input,
   MenuItem,
@@ -17,6 +17,7 @@ import {
   bootTask,
   call,
   callDetail,
+  callWithBlobs,
   clipboardWrite,
   currentTheme,
   DIALOG_SURFACE_CLASS,
@@ -53,6 +54,7 @@ import {
   viewShown,
   windowActive,
 } from "smelt/sdk";
+import type { BlobAt } from "smelt/sdk";
 
 import {
   ancestorsUnderRoot,
@@ -87,7 +89,11 @@ const SEND_TEXT_CMD = "smelt.sessions/send-text";
 const SEARCH_DEBOUNCE_MS = 180;
 /** 远程拉大文件、大图（经中继最大 20 MB）比一般调用慢，和手机端一样给两分钟。 */
 const FILE_OPEN_TIMEOUT_MS = 120_000;
-const PREVIEW_DEBOUNCE_MS = 80;
+/** `file.open` 回复里的正文和图片字节以 Blob 交来，不进插件的 JS 堆：插件只是转交给原生组件。 */
+const FILE_OPEN_BLOBS: BlobAt[] = [
+  "/content/text",
+  { at: "/content/data", base64: true, mime_at: "/content/mime" },
+];
 
 interface ProjectRef {
   machine: string | null;
@@ -122,17 +128,25 @@ interface OpenFileState {
   status: OpenFileStatus;
   /** 点过「解锁编辑」或已经改过：项目外也能改。在不在项目里随根目录实时算，不存。 */
   unlocked: boolean;
-  content: string;
-  savedContent: string;
+  /** 交给编辑器的正文：打开、外部改动重读时换；编辑器挂着时换它就是替换正文。 */
+  text: Blob | null;
+  /**
+   * 编辑器里现在的正文：每次改动原地换成编辑器交来的 Blob，不触发重画（没有东西从它画）。
+   * 切标签、切项目、切预览后编辑器重新挂上，从这里接着改；存盘也存它。
+   */
+  edits: { text: Blob | null };
+  /** 最近一次读到或存下的正文：编辑器拿它判断改没改。 */
+  saved: Blob | null;
+  /** 编辑器报来的：正文和 `saved` 不同。 */
+  modified: boolean;
   savedVersion: string | null;
-  imageDataUri: string | null;
+  image: Blob | null;
   saveError: string | null;
   readable: boolean;
   conflictPending: boolean;
   reloadInflight: boolean;
   reloadAgain: boolean;
   preview: boolean;
-  previewSource: string;
   pendingGotoLine: number | null;
 }
 
@@ -211,7 +225,6 @@ let pendingReveal: string | null = null;
 let pendingSwitchAfterSave: { fromId: number; target: FileRef; line: number | null } | null = null;
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 let searchSeq = 0;
-let previewTimer: ReturnType<typeof setTimeout> | null = null;
 let activeEditorApi: any = null;
 let activeEditorFileId = 0;
 let settingsLoaded = false;
@@ -243,7 +256,23 @@ function currentRoots(): string[] {
 
 function isDirty(of: OpenFileState | null): boolean {
   if (!of || !of.readable || of.status.kind !== "ready") return false;
-  return of.content !== of.savedContent;
+  return of.modified;
+}
+
+/** 换成读到的正文：交给编辑器、作已保存的基准，编辑器里没存的改动作废。 */
+function withText(of: OpenFileState, text: Blob, version: string | null): OpenFileState {
+  return {
+    ...of,
+    status: { kind: "ready" },
+    text,
+    edits: { text },
+    saved: text,
+    modified: false,
+    savedVersion: version,
+    image: null,
+    readable: true,
+    saveError: null,
+  };
 }
 
 /** 文件在不在当前项目（含钉住的目录）里：只有树那台机器上的、落在某个根下的才算。 */
@@ -627,27 +656,10 @@ async function pickPinnedRoots() {
 
 // ---- 文件打开 / 保存 / 外部变更重读 / 预览 ----
 
-function schedulePreviewRefresh() {
-  const cur = openFile();
-  if (!cur || !cur.preview || !isMarkdownPath(cur.path)) return;
-  if (previewTimer) clearTimeout(previewTimer);
-  const fileId = cur.id;
-  previewTimer = setTimeout(() => {
-    previewTimer = null;
-    patchOpenFileById(fileId, (of) =>
-      of.preview && of.previewSource !== of.content ? { ...of, previewSource: of.content } : of,
-    );
-  }, PREVIEW_DEBOUNCE_MS);
-}
-
 function setFilePreview(nextPreview: boolean) {
   const cur = openFile();
   if (!cur || !isMarkdownPath(cur.path)) return;
-  openFile.set({
-    ...cur,
-    preview: nextPreview,
-    previewSource: nextPreview ? cur.content : cur.previewSource,
-  });
+  openFile.set({ ...cur, preview: nextPreview });
 }
 
 function jumpEditorToLine(line1Based: number) {
@@ -696,32 +708,30 @@ function openFileNow(machine: string | null, path: string, gotoLine: number | nu
   }
   const id = nextFileId++;
   const defaultPreview = isMarkdownPath(path) && gotoLine == null;
-  if (previewTimer) {
-    clearTimeout(previewTimer);
-    previewTimer = null;
-  }
   pendingSwitchAfterSave = null;
   unsavedDialog.set(null);
 
   const cached = fileCache.get(machine, path);
   const hadCached = cached != null;
+  const cachedText = cached?.kind === "text" ? cached.blob : null;
   openFile.set({
     id,
     machine,
     path,
     status: hadCached ? { kind: "ready" } : { kind: "loading" },
     unlocked: false,
-    content: cached?.kind === "text" ? cached.text : "",
-    savedContent: cached?.kind === "text" ? cached.text : "",
+    text: cachedText,
+    edits: { text: cachedText },
+    saved: cachedText,
+    modified: false,
     savedVersion: cached?.version ?? null,
-    imageDataUri: cached?.kind === "image" ? cached.dataUri : null,
+    image: cached?.kind === "image" ? cached.blob : null,
     saveError: null,
-    readable: cached?.kind === "text",
+    readable: cachedText != null,
     conflictPending: false,
     reloadInflight: false,
     reloadAgain: false,
     preview: defaultPreview,
-    previewSource: cached?.kind === "text" ? cached.text : "",
     pendingGotoLine: gotoLine,
   });
   persistCurrentProject();
@@ -737,7 +747,7 @@ function openFileNow(machine: string | null, path: string, gotoLine: number | nu
     patchOpenFileById(id, (of) => ({
       ...of,
       status: { kind: "unreadable", message, canRetry },
-      imageDataUri: null,
+      image: null,
       readable: false,
     }));
   };
@@ -747,6 +757,7 @@ function openFileNow(machine: string | null, path: string, gotoLine: number | nu
     "file.open",
     { path, if_none_match: cached?.version ?? undefined },
     FILE_OPEN_TIMEOUT_MS,
+    FILE_OPEN_BLOBS,
   ).then((outcome) => {
     if (!findOpenFileById(id)) return;
     if (!outcome.ok) {
@@ -770,9 +781,13 @@ function openFileNow(machine: string | null, path: string, gotoLine: number | nu
     }
     if (content.kind === "not_modified") return;
     if (content.kind === "text") {
-      const body = String(content.text ?? "");
+      const body = content.text;
+      if (!(body instanceof Blob)) {
+        unreadable(t("unreadable.error", { error: "invalid response" }), true);
+        return;
+      }
       const version = typeof content.version === "string" ? content.version : null;
-      if (version != null) fileCache.put(machine, path, { kind: "text", text: body, version });
+      if (version != null) fileCache.put(machine, path, { kind: "text", blob: body, version });
       const found = findOpenFileById(id);
       if (!found) return;
       if (hadCached && isDirty(found.file)) {
@@ -780,17 +795,7 @@ function openFileNow(machine: string | null, path: string, gotoLine: number | nu
         return;
       }
       if (hadCached && found.file.savedVersion === version && found.file.readable) return;
-      patchOpenFileById(id, (of) => ({
-        ...of,
-        status: { kind: "ready" },
-        content: body,
-        savedContent: body,
-        savedVersion: version,
-        previewSource: body,
-        imageDataUri: null,
-        readable: true,
-        saveError: null,
-      }));
+      patchOpenFileById(id, (of) => withText(of, body, version));
       const cur = openFile();
       if (!hadCached && cur && cur.id === id && gotoLine != null) {
         queueMicrotask(() => {
@@ -805,18 +810,17 @@ function openFileNow(machine: string | null, path: string, gotoLine: number | nu
     if (content.kind === "image") {
       // 格式由运行时按内容认（`mime`），不按扩展名猜；旧运行时不带就当预览不了。
       const mime = typeof content.mime === "string" ? content.mime : "";
-      const b64 = typeof content.data === "string" ? content.data : "";
-      if (!mime || !b64) {
+      const image = content.data;
+      if (!mime || !(image instanceof Blob) || image.size === 0) {
         unreadable(t("unreadable.image"));
         return;
       }
-      const dataUri = `data:${mime};base64,${b64}`;
       const version = typeof content.version === "string" ? content.version : null;
-      fileCache.put(machine, path, { kind: "image", dataUri, version });
+      fileCache.put(machine, path, { kind: "image", blob: image, version });
       patchOpenFileById(id, (of) => ({
         ...of,
         status: { kind: "ready" },
-        imageDataUri: dataUri,
+        image,
         savedVersion: version,
         readable: false,
       }));
@@ -858,7 +862,7 @@ async function saveOpenFile() {
   const cur = openFile();
   if (!cur) return;
   // 图片和还在读的文件没有可存的文本。
-  if (cur.imageDataUri != null || cur.status.kind === "loading") return;
+  if (cur.image != null || cur.status.kind === "loading") return;
   if (isReadOnly(cur)) {
     openFile.set({ ...cur, saveError: t("save.read_only") });
     pendingSwitchAfterSave = null;
@@ -870,12 +874,14 @@ async function saveOpenFile() {
     return;
   }
   const id = cur.id;
-  const content = cur.content;
+  const text = cur.edits.text;
+  if (!text) return;
   const baseVersion = cur.conflictPending ? null : cur.savedVersion;
 
+  // 参数里的 Blob 宿主收到的是它的文本：正文不经过插件的 JS 堆。
   const outcome = await callDetail<{ version: string }>(cur.machine, "file.save", {
     path: cur.path,
-    text: content,
+    text,
     base_version: baseVersion,
   });
 
@@ -891,11 +897,13 @@ async function saveOpenFile() {
     const version =
       typeof outcome.value?.version === "string" ? outcome.value.version : cur.savedVersion;
     if (version != null) {
-      fileCache.put(cur.machine, cur.path, { kind: "text", text: content, version });
+      fileCache.put(cur.machine, cur.path, { kind: "text", blob: text, version });
     }
+    // 存的时候又改了就还是改过；编辑器换了基准还会再报一次。
     patchOpenFileById(id, (of) => ({
       ...of,
-      savedContent: content,
+      saved: text,
+      modified: of.edits.text !== text,
       savedVersion: version,
       saveError: null,
       conflictPending: false,
@@ -937,10 +945,11 @@ function reloadOpenFile() {
   const path = cur.path;
   openFile.set({ ...cur, reloadInflight: true, reloadAgain: false });
 
-  void call(
+  void callWithBlobs(
     machine,
     "file.open",
     { path, if_none_match: cur.savedVersion ?? undefined },
+    FILE_OPEN_BLOBS,
     FILE_OPEN_TIMEOUT_MS,
   )
     .then((result: any) => {
@@ -948,31 +957,18 @@ function reloadOpenFile() {
       if (!found) return;
       const again = found.file.reloadAgain;
       const content = result?.content;
-      if (content?.kind === "text" && typeof content.version === "string") {
-        fileCache.put(machine, path, {
-          kind: "text",
-          text: String(content.text ?? ""),
-          version: content.version,
-        });
+      const body: Blob | null =
+        content?.kind === "text" && content.text instanceof Blob && typeof content.version === "string"
+          ? content.text
+          : null;
+      if (body) {
+        fileCache.put(machine, path, { kind: "text", blob: body, version: content.version });
       }
       patchOpenFileById(id, (of) => {
         const next: OpenFileState = { ...of, reloadInflight: false, reloadAgain: false };
-        if (
-          content?.kind === "text" &&
-          typeof content.version === "string" &&
-          of.savedVersion !== content.version
-        ) {
-          if (isDirty(of)) {
-            next.saveError = t("save.changed_elsewhere");
-          } else {
-            const textBody = String(content.text ?? "");
-            next.content = textBody;
-            next.savedContent = textBody;
-            next.savedVersion = content.version;
-            next.previewSource = textBody;
-          }
-        }
-        return next;
+        if (!body || of.savedVersion === content.version) return next;
+        if (isDirty(of)) return { ...next, saveError: t("save.changed_elsewhere") };
+        return withText(next, body, content.version);
       });
       if (again && openFile()?.id === id) {
         reloadOpenFile();
@@ -1016,10 +1012,10 @@ function sendPathToSession(path: string) {
   sendToSession(`@${display} `);
 }
 
-function sendEditorSelectionToSession() {
+async function sendEditorSelectionToSession() {
   const cur = openFile();
   if (!cur || !activeEditorApi) return;
-  const selected = String(activeEditorApi.selectedText?.() ?? "");
+  const selected = String((await activeEditorApi.selectedText?.()) ?? "");
   if (!selected.trim()) return;
   const proj = currentProject();
   const ops = styleOpsFor(cur.machine);
@@ -1476,6 +1472,114 @@ function Placeholder(props: { text: string }) {
   );
 }
 
+/**
+ * `blob()` 的 `blob:` 地址，交给原生组件（编辑器、Markdown、图片）读：换了 blob 才换地址，旧地址和
+ * 组件卸载时 revoke。只在组件里用，随组件清理。
+ */
+function blobUrl(blob: () => Blob | null): () => string | undefined {
+  const source = computed(blob);
+  let made: string | undefined;
+  const url = computed(() => {
+    const next = source();
+    const prev = made;
+    made = next ? URL.createObjectURL(next) : undefined;
+    if (prev) URL.revokeObjectURL(prev);
+    return made;
+  });
+  cleanup(() => {
+    if (made) URL.revokeObjectURL(made);
+    made = undefined;
+  });
+  return url;
+}
+
+/**
+ * 一个打开文件的编辑器，按文件 id 挂。正文只以 Blob 进出（`valueUrl`、`onBlobChange`），改没改由
+ * 编辑器对着 `saved` 判断：插件的 JS 堆不随文件变大。挂上时从 `edits.text` 接着改，之后 `text`
+ * 换了（外部改动重读）才替换正文。
+ */
+function FileEditor(props: { id: number; onContextMenu: (e: { x: number; y: number }) => void }) {
+  const id = props.id;
+  // 只认自己那个文件：换走以后到卸载之间不读别的文件的正文。
+  const own = () => {
+    const of = openFile();
+    return of?.id === id ? of : null;
+  };
+  const path = untracked(() => own()?.path ?? "");
+  const given = computed((prev: Blob | null | undefined) => own()?.text ?? prev ?? null);
+  const saved = computed((prev: Blob | null | undefined) => own()?.saved ?? prev ?? null);
+  let mounted = false;
+  const valueUrl = blobUrl(() => {
+    const text = given();
+    if (mounted) return text;
+    mounted = true;
+    return untracked(() => own()?.edits.text) ?? text;
+  });
+  const savedUrl = blobUrl(saved);
+  const readOnly = computed(() => {
+    const of = own();
+    return !of?.readable || isReadOnly(of);
+  });
+  cleanup(() => {
+    if (activeEditorFileId === id) {
+      activeEditorApi = null;
+      activeEditorFileId = 0;
+    }
+  });
+  return (
+    <SmeltEditor
+      editorRef={(api: any) => {
+        if (!api) return;
+        activeEditorApi = api;
+        activeEditorFileId = id;
+        if (focusEditorOnMount) {
+          focusEditorOnMount = false;
+          api.focus?.();
+        }
+        const line = untracked(() => own()?.pendingGotoLine);
+        if (line != null) {
+          jumpEditorToLine(line);
+          patchOpenFileById(id, (of) => ({ ...of, pendingGotoLine: null }));
+        }
+      }}
+      valueUrl={valueUrl()}
+      savedValueUrl={savedUrl()}
+      language={editorLanguageForPath(path)}
+      readOnly={readOnly()}
+      lineNumbers={true}
+      softWrap={false}
+      accessibilityLabel={path}
+      onBlobChange={({ blob }: { blob: Blob }) => {
+        const found = findOpenFileById(id);
+        if (found) found.file.edits.text = blob;
+      }}
+      onModifiedChange={({ modified }: { modified: boolean }) => {
+        // 改过就算解锁：钉住或移走目录后也还能接着改。
+        patchOpenFileById(id, (of) =>
+          of.modified === modified && (of.unlocked || !modified)
+            ? of
+            : { ...of, modified, unlocked: of.unlocked || modified },
+        );
+      }}
+      onContextMenu={props.onContextMenu}
+    />
+  );
+}
+
+/** Markdown 预览：编辑器这时已卸下，`edits.text` 就是现在的正文。 */
+function FilePreview(props: { cwd: string | null; machine: string | null }) {
+  const url = blobUrl(() => {
+    const of = openFile();
+    return of ? (of.edits.text ?? of.text) : null;
+  });
+  return <SmeltMarkdown markdownUrl={url()} cwd={props.cwd} machine={props.machine} />;
+}
+
+function FileImage() {
+  const url = blobUrl(() => openFile()?.image ?? null);
+  return <Image src={url() ?? ""} style={{ width: "100%", height: "100%", objectFit: "contain" }} />;
+}
+
 /** 读不出来：居中说明，传输或运行时出错时给重试。 */
 function UnreadableBody() {
   const look = currentTheme;
@@ -1592,16 +1696,11 @@ export function Main() {
     return of != null && of.preview && isMarkdownPath(of.path);
   });
 
-  // 编辑正文与脏标记独立成细粒度信号：按键期间原地更新 `cur.content`，不替换 `openFile`
-  // 引用，避免每次击键重算面包屑、工具栏显隐与文件树。
-  const editorContent = signal<string>("");
-  const editorDirtyTick = signal<number>(0);
-  effect(() => {
-    editorContent.set(openFile()?.content ?? "");
-  });
-  const openFileDirty = computed(() => {
-    editorDirtyTick();
-    return isDirty(openFile());
+  const openFileDirty = computed(() => isDirty(openFile()));
+  // 编辑器按文件 id 挂：换文件就换一个，撤销历史不串到别的文件。
+  const editorFileIds = computed(() => {
+    const id = openFile()?.id;
+    return id == null ? [] : [id];
   });
 
   const isShown = computed(() => viewShown(VIEW_ID));
@@ -1611,9 +1710,10 @@ export function Main() {
     }
   });
 
-  function handleEditorContextMenu(e: { x: number; y: number }) {
+  async function handleEditorContextMenu(e: { x: number; y: number }) {
     const api = activeEditorApi;
-    const hasSelection = Boolean(api && String(api.selectedText?.() ?? "").trim().length > 0);
+    const selected = api ? String((await api.selectedText?.()) ?? "") : "";
+    const hasSelection = selected.trim().length > 0;
     const cur = openFile();
     const readOnly = !cur || !cur.readable || isReadOnly(cur);
     void Menu.popup(
@@ -1858,57 +1958,21 @@ export function Main() {
                 <If when={openFile()?.status.kind !== "loading"} else={<Placeholder text={t("loading")} />}>
                   <If when={openFile()?.status.kind !== "unreadable"} else={<UnreadableBody />}>
                     <If
-                      when={Boolean(openFile()?.imageDataUri)}
+                      when={openFile()?.image != null}
                       else={
                         <If
                           when={showingMarkdownPreview()}
                           else={
-                            <SmeltEditor
-                              editorRef={(api: any) => {
-                                activeEditorApi = api;
-                                const cur = openFile();
-                                activeEditorFileId = cur?.id ?? 0;
-                                if (api && focusEditorOnMount) {
-                                  focusEditorOnMount = false;
-                                  api.focus?.();
-                                }
-                                if (api && cur?.pendingGotoLine != null) {
-                                  jumpEditorToLine(cur.pendingGotoLine);
-                                  patchOpenFileById(cur.id, (of) => ({ ...of, pendingGotoLine: null }));
-                                }
-                              }}
-                              value={editorContent()}
-                              language={openFile() ? editorLanguageForPath(openFile()!.path) : "text"}
-                              readOnly={!openFile()?.readable || isReadOnly(openFile()!)}
-                              lineNumbers={true}
-                              softWrap={false}
-                              accessibilityLabel={openFile()?.path ?? ""}
-                              onChange={({ value }: { value: string }) => {
-                                const cur = openFile();
-                                if (!cur || !cur.readable || isReadOnly(cur)) return;
-                                if (cur.content === value) return;
-                                const wasDirty = isDirty(cur);
-                                cur.content = value;
-                                editorContent.set(value);
-                                // 改过就算解锁：仅首次编辑时翻 `unlocked`；后续击键不换 `openFile` 引用。
-                                if (!cur.unlocked) {
-                                  openFile.set({ ...cur, unlocked: true });
-                                } else if (isDirty(cur) !== wasDirty) {
-                                  editorDirtyTick.set(editorDirtyTick() + 1);
-                                }
-                                schedulePreviewRefresh();
-                              }}
-                              onContextMenu={handleEditorContextMenu}
-                            />
+                            <Each of={editorFileIds()} key={(id: number) => id}>
+                              {(id: () => number) => (
+                                <FileEditor id={id()} onContextMenu={handleEditorContextMenu} />
+                              )}
+                            </Each>
                           }
                         >
                           <Scroll style={{ flex: 1, width: "100%", height: "100%" }}>
                             <View style={{ padding: 14, width: "100%", minWidth: 0 }}>
-                              <SmeltMarkdown
-                                markdown={openFile()?.previewSource ?? ""}
-                                cwd={previewCwd()}
-                                machine={openFile()?.machine ?? null}
-                              />
+                              <FilePreview cwd={previewCwd()} machine={openFile()?.machine ?? null} />
                             </View>
                           </Scroll>
                         </If>
@@ -1926,10 +1990,7 @@ export function Main() {
                           overflow: "hidden",
                         }}
                       >
-                        <Image
-                          src={openFile()?.imageDataUri ?? ""}
-                          style={{ width: "100%", height: "100%", objectFit: "contain" }}
-                        />
+                        <FileImage />
                       </View>
                     </If>
                   </If>

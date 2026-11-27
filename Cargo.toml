@@ -93,16 +93,16 @@ gpui-fast-windows = { git = "https://github.com/smelt-ai/gpui-fast", rev = "e447
 # 整理提交并按精确 rev 钉死。这里十个包一起换到同一个 rev。上游版本号变了要同时改
 # crates/smelt-nsh/Cargo.toml 里的 `=` 版本要求：对不上时 cargo 只警告「patch was not used」，
 # 悄悄退回 crates.io 的上游原版（没有我们的改动）。
-nsh-base = { git = "https://github.com/smelt-ai/nsh", rev = "0b517d175d18d9fa76fd29eb01136ae2f051e02e" }
-nsh-bundler = { git = "https://github.com/smelt-ai/nsh", rev = "0b517d175d18d9fa76fd29eb01136ae2f051e02e" }
-nsh-core = { git = "https://github.com/smelt-ai/nsh", rev = "0b517d175d18d9fa76fd29eb01136ae2f051e02e" }
-nsh-engine = { git = "https://github.com/smelt-ai/nsh", rev = "0b517d175d18d9fa76fd29eb01136ae2f051e02e" }
-nsh-i18n = { git = "https://github.com/smelt-ai/nsh", rev = "0b517d175d18d9fa76fd29eb01136ae2f051e02e" }
-nsh-js = { git = "https://github.com/smelt-ai/nsh", rev = "0b517d175d18d9fa76fd29eb01136ae2f051e02e" }
-nsh-macros = { git = "https://github.com/smelt-ai/nsh", rev = "0b517d175d18d9fa76fd29eb01136ae2f051e02e" }
-nsh-package = { git = "https://github.com/smelt-ai/nsh", rev = "0b517d175d18d9fa76fd29eb01136ae2f051e02e" }
-nsh-platform-gpui = { git = "https://github.com/smelt-ai/nsh", rev = "0b517d175d18d9fa76fd29eb01136ae2f051e02e" }
-nsh-updater = { git = "https://github.com/smelt-ai/nsh", rev = "0b517d175d18d9fa76fd29eb01136ae2f051e02e" }
+nsh-base = { git = "https://github.com/smelt-ai/nsh", rev = "95695c82cebc913b12858313a8f4a0f93964cb3f" }
+nsh-bundler = { git = "https://github.com/smelt-ai/nsh", rev = "95695c82cebc913b12858313a8f4a0f93964cb3f" }
+nsh-core = { git = "https://github.com/smelt-ai/nsh", rev = "95695c82cebc913b12858313a8f4a0f93964cb3f" }
+nsh-engine = { git = "https://github.com/smelt-ai/nsh", rev = "95695c82cebc913b12858313a8f4a0f93964cb3f" }
+nsh-i18n = { git = "https://github.com/smelt-ai/nsh", rev = "95695c82cebc913b12858313a8f4a0f93964cb3f" }
+nsh-js = { git = "https://github.com/smelt-ai/nsh", rev = "95695c82cebc913b12858313a8f4a0f93964cb3f" }
+nsh-macros = { git = "https://github.com/smelt-ai/nsh", rev = "95695c82cebc913b12858313a8f4a0f93964cb3f" }
+nsh-package = { git = "https://github.com/smelt-ai/nsh", rev = "95695c82cebc913b12858313a8f4a0f93964cb3f" }
+nsh-platform-gpui = { git = "https://github.com/smelt-ai/nsh", rev = "95695c82cebc913b12858313a8f4a0f93964cb3f" }
+nsh-updater = { git = "https://github.com/smelt-ai/nsh", rev = "95695c82cebc913b12858313a8f4a0f93964cb3f" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow" }

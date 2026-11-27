@@ -530,27 +530,34 @@ export declare function call<T = any>(
 ): Promise<T>;
 
 /**
- * 同 `call`，回复里 `blobs` 这些位置（JSON 指针，如 `/patch`、`/diff/text`）上的长文本以
+ * 同 `call`，回复里 `blobs` 这些位置（JSON 指针，如 `/patch`、`/diff/text`）上的正文以
  * `Blob` 交来，不进插件的 JS 堆：用 `URL.createObjectURL` 交给原生组件（`SmeltDiffView` 的
- * `patchUrl`），换内容时 `URL.revokeObjectURL`。那里没有文本时照原样。
+ * `patchUrl`、`SmeltEditor` 的 `valueUrl`、`<Image>` 的 `src`），换内容时 `URL.revokeObjectURL`。
+ * base64 编码的字节（图片）写成 `{ at, base64: true, mime_at }`，`mime_at` 指回复里类型所在的
+ * 位置。那里没有正文时照原样。反方向不用这个：参数里放 `Blob`，宿主收到的就是它的文本。
  */
 export declare function callWithBlobs<T = any>(
   machine: string | null,
   method: ControlMethodName | (string & {}),
   params: unknown,
-  blobs: string[],
+  blobs: BlobAt[],
   timeoutMs?: number,
 ): Promise<T>;
+
+/** `callWithBlobs` 的一处正文：文本的 JSON 指针，或 base64 字节及其类型所在的位置。 */
+export type BlobAt = string | { at: string; base64: true; mime_at?: string };
 
 export type CallDetailResult<T = any> =
   | { ok: true; value: T }
   | { ok: false; code: string | null; message: string };
 
+/** 同 `call`，失败也作值交来（带运行时的错误码）；`blobs` 同 `callWithBlobs`，位置相对 `value`。 */
 export declare function callDetail<T = any>(
   machine: string | null,
   method: ControlMethodName | (string & {}),
   params?: unknown,
   timeoutMs?: number,
+  blobs?: BlobAt[],
 ): Promise<CallDetailResult<T>>;
 
 export declare function request(
@@ -782,7 +789,9 @@ export declare function SmeltButton(props: SmeltButtonProps): JSX.Element;
 export declare function SmeltWindowBar(props: { view: string }): JSX.Element;
 
 export declare function SmeltMarkdown(props: {
-  markdown: string;
+  /** 二选一：正文，或 blob 里正文的 `blob:` 地址（大文件不进插件的 JS 堆）。 */
+  markdown?: string;
+  markdownUrl?: string;
   cwd?: string | null;
   machine?: string | null;
   selectable?: boolean;
@@ -796,6 +805,10 @@ export declare function SmeltEditor(props: {
   editorRef?: (api: any) => void;
   value?: string;
   defaultValue?: string;
+  /** blob 里正文的 `blob:` 地址，代替 `value`：大文件不进插件的 JS 堆，改后的正文从 `onBlobChange` 拿。 */
+  valueUrl?: string;
+  /** 已保存正文的 `blob:` 地址：`onModifiedChange` 报告当前正文和它是否不同。 */
+  savedValueUrl?: string;
   language?: string;
   placeholder?: string;
   readOnly?: boolean;
@@ -813,6 +826,9 @@ export declare function SmeltEditor(props: {
   styles?: Record<string, any>;
   classes?: Record<string, string>;
   onChange?: (event: { value: string }) => void;
+  /** 每次改动后的正文，以 Blob 交来（代替 `onChange` 的字符串，不进 JS 堆）。 */
+  onBlobChange?: (event: { blob: Blob }) => void;
+  onModifiedChange?: (event: { modified: boolean }) => void;
   onSelectionChange?: (event: any) => void;
   onFocus?: () => void;
   onBlur?: () => void;
