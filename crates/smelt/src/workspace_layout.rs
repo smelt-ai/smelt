@@ -31,9 +31,9 @@ use rust_i18n::t;
 use std::collections::HashSet;
 
 use gpui::{
-    App, AppContext as _, Context, Div, InteractiveElement as _, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, WindowControlArea, div, px,
-    rgb, svg,
+    App, AppContext as _, Context, Div, Focusable as _, InteractiveElement as _,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Window, WindowControlArea, div, px, rgb, svg,
 };
 use smelt_client_store::WorkspaceLayoutStateRecord;
 use smelt_plugin_api::{self as api, DockAreaState};
@@ -497,6 +497,7 @@ impl Workspace {
             return;
         }
         if self.nsh_shell.read(cx).is_js_view(id) {
+            window.focus(&self.nsh_shell.focus_handle(cx), cx);
             return;
         }
         if let Some(instance) = self.outlet_instance() {
@@ -920,6 +921,7 @@ impl Workspace {
             self.save_state(cx);
             cx.notify();
             self.show_view(id, window, cx);
+            window.focus(&self.nsh_shell.focus_handle(cx), cx);
             return Ok(());
         }
         let instance = api::create_view(id, args, window, cx)?;
