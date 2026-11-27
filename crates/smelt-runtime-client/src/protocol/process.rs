@@ -20,8 +20,8 @@ impl ControlCall for ProcessRunCall {
     const METHOD: ControlMethod = ControlMethod::ProcessRun;
 }
 
-/// 不给 `timeout_ms` 时等这么久。
-pub const PROCESS_RUN_DEFAULT_TIMEOUT_MS: u64 = 60_000;
+/// 不给 `timeout_ms` 时等这么久。比插件 `call` 默认的 60 秒短，超时的结果才回得到调用方。
+pub const PROCESS_RUN_DEFAULT_TIMEOUT_MS: u64 = 30_000;
 /// `timeout_ms` 最多这么长，超过报 `invalid_params`。
 pub const PROCESS_RUN_MAX_TIMEOUT_MS: u64 = 30 * 60_000;
 /// stdout、stderr 各自最多交回这么多字节，多出来的读掉丢弃，`truncated` 为真。

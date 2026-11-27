@@ -5,6 +5,7 @@
 //! 环境按登录 shell 铺（从 Finder 启动的运行时 `PATH` 只有系统目录，`node`、`git` 的
 //! 钩子都找不到），调用方给的变量叠在上面。
 
+use std::borrow::Cow;
 use std::io::{self, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -56,7 +57,15 @@ pub fn run(params: &ProcessRunParams) -> Result<ProcessRunResult, ProcessRunErro
     let timeout = Duration::from_millis(timeout_ms);
     let deadline = Instant::now() + timeout;
 
-    let mut command = Command::new(&params.program);
+    // 按子进程那份 PATH 找程序：Windows 上 `Command` 只补 `.exe`，npm 装的 `npx`、各家
+    // CLI 是 `.cmd`。找不到保留原名，让下面的 spawn 报 `not_found`。
+    let search_path = match params.env.get("PATH") {
+        Some(path) => Cow::Borrowed(path.as_str()),
+        None => crate::login_env::login_path(),
+    };
+    let program = crate::acp_conn::resolve_in_path(&params.program, &search_path)
+        .unwrap_or_else(|| params.program.clone());
+    let mut command = Command::new(program);
     command
         .args(&params.args)
         .stdin(Stdio::null())
@@ -92,8 +101,7 @@ pub fn run(params: &ProcessRunParams) -> Result<ProcessRunResult, ProcessRunErro
     spawn_reader(stdout, 0, tx.clone());
     spawn_reader(stderr, 1, tx);
 
-    let pid = i32::try_from(tree.pid()).unwrap_or(i32::MAX);
-    let timed_out = !smelt_sys::process_wait::wait_until_exit(pid, timeout);
+    let timed_out = !smelt_sys::process_wait::wait_child_exit(tree.pid(), timeout);
     if timed_out {
         let _ = tree.kill();
     }
