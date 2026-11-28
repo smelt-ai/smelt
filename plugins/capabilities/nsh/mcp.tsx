@@ -1,7 +1,16 @@
 // 能力库「MCP」页签：内置预设一键添加、已配置服务器启停/登录/移除/智能体勾选、mcp.json 入口。
 
 import { computed, Text, View } from "nsh";
-import { openUrl, piMcpPresets, SmeltButton, t } from "smelt/sdk";
+import {
+  openUrl,
+  piMcpPresets,
+  SmeltButton,
+  SmeltPageScroll,
+  SmeltSection,
+  SmeltSectionCell,
+  SmeltSettingRow,
+  t,
+} from "smelt/sdk";
 import {
   formatMcpTransportDetail,
   formatUsedByLine,
@@ -9,15 +18,7 @@ import {
 } from "../model.js";
 import { LoginPanel } from "./auth.tsx";
 import { agentSettingsOn, currentTheme, type PageController } from "./state.ts";
-import {
-  BadgePill,
-  SectionCell,
-  SettingsPageShell,
-  SettingsRow,
-  SettingsSection,
-  StatusLine,
-  UsesPopover,
-} from "./ui.tsx";
+import { BadgePill, StatusLine, UsesPopover } from "./ui.tsx";
 
 export function McpTab(props: { page: PageController }) {
   const look = currentTheme;
@@ -43,13 +44,13 @@ export function McpTab(props: { page: PageController }) {
   });
 
   return (
-    <SettingsPageShell maxWidth={760}>
+    <SmeltPageScroll maxWidth={760}>
       {/* 内置预设 */}
-      <SettingsSection title={t("mcp.builtin")}>
+      <SmeltSection title={t("mcp.builtin")}>
         <Each of={presets()} key={(p: any) => p.id}>
           {(preset: () => any, ix: () => number) => (
-            <SectionCell divider={ix() > 0}>
-              <SettingsRow title={preset().name} description={preset().summary}>
+            <SmeltSectionCell divider={ix() > 0}>
+              <SmeltSettingRow title={preset().name} description={preset().summary}>
                 <If when={Boolean(preset().extension_url)}>
                   <SmeltButton
                     variant="quiet"
@@ -79,36 +80,36 @@ export function McpTab(props: { page: PageController }) {
                 >
                   <BadgePill label={t("mcp.added")} tone="neutral" />
                 </If>
-              </SettingsRow>
-            </SectionCell>
+              </SmeltSettingRow>
+            </SmeltSectionCell>
           )}
         </Each>
-      </SettingsSection>
+      </SmeltSection>
 
       {/* 已配置服务器 */}
-      <SettingsSection title={t("mcp.configured")}>
+      <SmeltSection title={t("mcp.configured")}>
         <If when={props.page.mcpError() != null}>
-          <SectionCell>
+          <SmeltSectionCell>
             <StatusLine
               text={t("common.action_failed", { error: props.page.mcpError() ?? "" })}
               error={true}
             />
-          </SectionCell>
+          </SmeltSectionCell>
         </If>
 
         <If when={props.page.agentEditError() != null}>
-          <SectionCell divider={props.page.mcpError() != null}>
+          <SmeltSectionCell divider={props.page.mcpError() != null}>
             <StatusLine
               text={t("uses.failed", { error: props.page.agentEditError() ?? "" })}
               error={true}
             />
-          </SectionCell>
+          </SmeltSectionCell>
         </If>
 
         <If
           when={mcpResult().ok}
           else={
-            <SectionCell divider={props.page.mcpError() != null || props.page.agentEditError() != null}>
+            <SmeltSectionCell divider={props.page.mcpError() != null || props.page.agentEditError() != null}>
               <StatusLine
                 text={
                   cfg() == null
@@ -117,15 +118,15 @@ export function McpTab(props: { page: PageController }) {
                 }
                 error={cfg() != null || props.page.piConfigError() != null}
               />
-            </SectionCell>
+            </SmeltSectionCell>
           }
         >
           <If
             when={servers().length > 0}
             else={
-              <SectionCell divider={props.page.mcpError() != null || props.page.agentEditError() != null}>
+              <SmeltSectionCell divider={props.page.mcpError() != null || props.page.agentEditError() != null}>
                 <StatusLine text={t("mcp.empty")} />
-              </SectionCell>
+              </SmeltSectionCell>
             }
           >
             <Each of={servers()} key={(s: any) => s.name}>
@@ -145,7 +146,7 @@ export function McpTab(props: { page: PageController }) {
 
                 return (
                   <>
-                    <SectionCell divider={needsDivider()}>
+                    <SmeltSectionCell divider={needsDivider()}>
                       <View
                         style={{
                           display: "flex",
@@ -259,11 +260,11 @@ export function McpTab(props: { page: PageController }) {
                           />
                         </View>
                       </View>
-                    </SectionCell>
+                    </SmeltSectionCell>
                     <If when={loginTargetMatches()}>
-                      <SectionCell divider={true}>
+                      <SmeltSectionCell divider={true}>
                         <LoginPanel page={props.page} view={() => props.page.loginView()!} />
-                      </SectionCell>
+                      </SmeltSectionCell>
                     </If>
                   </>
                 );
@@ -271,7 +272,7 @@ export function McpTab(props: { page: PageController }) {
             </Each>
           </If>
         </If>
-      </SettingsSection>
+      </SmeltSection>
 
       {/* 原生文件入口与生效说明 */}
       <View
@@ -308,6 +309,6 @@ export function McpTab(props: { page: PageController }) {
         </If>
         <StatusLine text={t("mcp.footer")} />
       </View>
-    </SettingsPageShell>
+    </SmeltPageScroll>
   );
 }

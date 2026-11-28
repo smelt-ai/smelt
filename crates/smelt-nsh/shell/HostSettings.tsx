@@ -15,9 +15,13 @@ import {
   SmeltIcon,
   SmeltInput,
   SmeltNativeWindowDrag,
+  SmeltPageScroll,
   SmeltRow,
+  SmeltSection,
+  SmeltSectionCell,
   SmeltSegmented,
   SmeltSelect,
+  SmeltSettingRow,
   SmeltSwitch,
   stableMemo,
   theme as currentTheme,
@@ -95,207 +99,7 @@ function hostSettingsState(): HostSettingsSnapshot | null {
   return (snap?.host_settings as HostSettingsSnapshot | null | undefined) ?? null;
 }
 
-// ===================== 通用设置骨架 =====================
-
-function SettingsPageLayout(props: { pageKey?: string; children: any }) {
-  let scrollRef: any = null;
-  effect(() => {
-    const k = props.pageKey;
-    if (k) scrollRef?.scrollTo?.({ y: 0, animated: false });
-  });
-  return (
-    <Scroll
-      ref={(api: any) => {
-        scrollRef = api;
-      }}
-      style={{ flex: 1, width: "100%", height: "100%" }}
-    >
-      <View
-        style={{
-          width: "100%",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-        }}
-      >
-        <View
-          style={{
-            width: "100%",
-            maxWidth: 720,
-            paddingLeft: 24,
-            paddingRight: 24,
-            paddingTop: 16,
-            paddingBottom: 32,
-            display: "flex",
-            flexDirection: "column",
-            gap: 24,
-          }}
-        >
-          {props.children}
-        </View>
-      </View>
-    </Scroll>
-  );
-}
-
-function SettingsSectionCard(props: {
-  title?: string | null;
-  description?: string | null;
-  children?: any;
-}) {
-  const theme = currentTheme;
-  const hasHeader = () => Boolean(props.title || props.description);
-  return (
-    <View style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%" }}>
-      <If when={hasHeader()}>
-        <View
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 2,
-            paddingLeft: 16,
-            paddingRight: 16,
-          }}
-        >
-          <If when={Boolean(props.title)}>
-            <Text
-              style={{
-                fontSize: theme().type.ui_medium.size,
-                lineHeight: theme().type.ui_medium.line_height,
-                fontWeight: theme().type.ui_medium.weight,
-                color: theme().palette.muted,
-              }}
-            >
-              {props.title ?? ""}
-            </Text>
-          </If>
-          <If when={Boolean(props.description)}>
-            <Text
-              style={{
-                fontSize: theme().type.text_xsmall.size,
-                lineHeight: theme().type.text_xsmall.line_height,
-                color: theme().palette.muted,
-              }}
-            >
-              {props.description ?? ""}
-            </Text>
-          </If>
-        </View>
-      </If>
-      <View
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          paddingTop: 4,
-          paddingBottom: 4,
-          backgroundColor: theme().palette.surface,
-          borderWidth: 1,
-          borderColor: theme().palette.hair,
-          borderRadius: theme().radius.xl,
-          width: "100%",
-        }}
-      >
-        {props.children}
-      </View>
-    </View>
-  );
-}
-
-function SectionDivider() {
-  const theme = currentTheme;
-  return (
-    <View
-      style={{
-        marginLeft: 16,
-        marginRight: 16,
-        height: 1,
-        backgroundColor: theme().palette.hair,
-      }}
-    />
-  );
-}
-
-function SectionCell(props: { dividerAbove?: boolean; children: any }) {
-  return (
-    <>
-      <If when={Boolean(props.dividerAbove)}>
-        <SectionDivider />
-      </If>
-      <View style={{ paddingLeft: 16, paddingRight: 16, paddingTop: 8, paddingBottom: 8 }}>
-        {props.children}
-      </View>
-    </>
-  );
-}
-
-function SettingsRowItem(props: {
-  title: string;
-  description?: string | null;
-  error?: string | null;
-  children?: any;
-}) {
-  const theme = currentTheme;
-  return (
-    <View
-      style={{
-        display: "flex",
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 16,
-        minHeight: 28,
-        width: "100%",
-      }}
-    >
-      <View style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-        <Text
-          style={{
-            fontSize: theme().type.ui.size,
-            lineHeight: theme().type.ui.line_height,
-            color: theme().palette.text,
-          }}
-        >
-          {props.title}
-        </Text>
-        <If when={Boolean(props.description)}>
-          <Text
-            style={{
-              fontSize: theme().type.text_small.size,
-              lineHeight: theme().type.text_small.line_height,
-              color: theme().palette.muted,
-            }}
-          >
-            {props.description ?? ""}
-          </Text>
-        </If>
-        <If when={Boolean(props.error)}>
-          <Text
-            style={{
-              fontSize: theme().type.text_small.size,
-              lineHeight: theme().type.text_small.line_height,
-              color: theme().palette.bad,
-            }}
-          >
-            {props.error ?? ""}
-          </Text>
-        </If>
-      </View>
-      <If when={Boolean(props.children)}>
-        <View
-          style={{
-            display: "flex",
-            flexDirection: "row",
-            flexShrink: 0,
-            alignItems: "center",
-            gap: 8,
-          }}
-        >
-          {props.children}
-        </View>
-      </If>
-    </View>
-  );
-}
+// ===================== 通用设置控件 =====================
 
 function SettingsSelectControl(props: {
   items: SelectOption[];
@@ -689,10 +493,10 @@ export function SettingsNavPanel() {
 
 function LanguageSettingsView(props: { data: () => any }) {
   return (
-    <SettingsPageLayout pageKey="language">
-      <SettingsSectionCard title={props.data().section_title}>
-        <SectionCell>
-          <SettingsRowItem
+    <SmeltPageScroll scrollKey="language">
+      <SmeltSection title={props.data().section_title}>
+        <SmeltSectionCell>
+          <SmeltSettingRow
             title={props.data().row_title}
             description={props.data().row_description}
           >
@@ -702,20 +506,20 @@ function LanguageSettingsView(props: { data: () => any }) {
               label={props.data().row_title}
               onChange={(value) => sendSettingsAction({ page: "language", kind: "set", value })}
             />
-          </SettingsRowItem>
-        </SectionCell>
-      </SettingsSectionCard>
-    </SettingsPageLayout>
+          </SmeltSettingRow>
+        </SmeltSectionCell>
+      </SmeltSection>
+    </SmeltPageScroll>
   );
 }
 
 function TerminalSettingsView(props: { data: () => any }) {
   const theme = currentTheme;
   return (
-    <SettingsPageLayout pageKey="terminal">
-      <SettingsSectionCard title={props.data().section_title}>
-        <SectionCell>
-          <SettingsRowItem
+    <SmeltPageScroll scrollKey="terminal">
+      <SmeltSection title={props.data().section_title}>
+        <SmeltSectionCell>
+          <SmeltSettingRow
             title={props.data().row_title}
             description={props.data().row_description}
           >
@@ -755,19 +559,19 @@ function TerminalSettingsView(props: { data: () => any }) {
                 })
               }
             />
-          </SettingsRowItem>
-        </SectionCell>
-      </SettingsSectionCard>
-    </SettingsPageLayout>
+          </SmeltSettingRow>
+        </SmeltSectionCell>
+      </SmeltSection>
+    </SmeltPageScroll>
   );
 }
 
 function CliSettingsView(props: { data: () => any }) {
   return (
-    <SettingsPageLayout pageKey="cli">
-      <SettingsSectionCard>
-        <SectionCell>
-          <SettingsRowItem title={props.data().row_title} description={props.data().description}>
+    <SmeltPageScroll scrollKey="cli">
+      <SmeltSection>
+        <SmeltSectionCell>
+          <SmeltSettingRow title={props.data().row_title} description={props.data().description}>
             <SmeltButton
               size="sm"
               label={props.data().button_label}
@@ -775,10 +579,10 @@ function CliSettingsView(props: { data: () => any }) {
               disabled={Boolean(props.data().disabled)}
               onPress={() => sendSettingsAction({ page: "cli", kind: "install" })}
             />
-          </SettingsRowItem>
-        </SectionCell>
-      </SettingsSectionCard>
-    </SettingsPageLayout>
+          </SmeltSettingRow>
+        </SmeltSectionCell>
+      </SmeltSection>
+    </SmeltPageScroll>
   );
 }
 
@@ -787,10 +591,10 @@ function CleanupSettingsView(props: { data: () => any }) {
   const confirmOpen = signal(false);
   return (
     <>
-      <SettingsPageLayout pageKey="cleanup">
-        <SettingsSectionCard>
-          <SectionCell>
-            <SettingsRowItem title={props.data().row_title} description={props.data().summary}>
+      <SmeltPageScroll scrollKey="cleanup">
+        <SmeltSection>
+          <SmeltSectionCell>
+            <SmeltSettingRow title={props.data().row_title} description={props.data().summary}>
               <SmeltButton
                 size="sm"
                 label={props.data().action_label}
@@ -798,21 +602,21 @@ function CleanupSettingsView(props: { data: () => any }) {
                 disabled={!props.data().can_clean}
                 onPress={() => confirmOpen.set(true)}
               />
-            </SettingsRowItem>
-          </SectionCell>
+            </SmeltSettingRow>
+          </SmeltSectionCell>
           <Each of={props.data().items ?? []} key={(item: any) => item.path}>
             {(item: () => any) => (
-              <SectionCell dividerAbove={true}>
-                <SettingsRowItem title={item().label} description={item().error}>
+              <SmeltSectionCell divider={true}>
+                <SmeltSettingRow title={item().label} description={item().error}>
                   <Text style={{ fontSize: theme().type.ui.size, color: theme().palette.muted }}>
                     {item().size}
                   </Text>
-                </SettingsRowItem>
-              </SectionCell>
+                </SmeltSettingRow>
+              </SmeltSectionCell>
             )}
           </Each>
-        </SettingsSectionCard>
-      </SettingsPageLayout>
+        </SmeltSection>
+      </SmeltPageScroll>
 
       <SmeltDialog
         open={confirmOpen()}
@@ -877,9 +681,9 @@ function AboutSettingsView(props: { data: () => any }) {
   });
 
   return (
-    <SettingsPageLayout pageKey="about">
-      <SettingsSectionCard>
-        <SectionCell>
+    <SmeltPageScroll scrollKey="about">
+      <SmeltSection>
+        <SmeltSectionCell>
           <View style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <Text
               style={{
@@ -894,12 +698,12 @@ function AboutSettingsView(props: { data: () => any }) {
               {props.data().version ?? ""}
             </Text>
           </View>
-        </SectionCell>
-      </SettingsSectionCard>
+        </SmeltSectionCell>
+      </SmeltSection>
 
       <If when={upd() != null}>
-        <SettingsSectionCard title={upd()?.section_title}>
-          <SectionCell>
+        <SmeltSection title={upd()?.section_title}>
+          <SmeltSectionCell>
             <View style={{ display: "flex", flexDirection: "column", gap: 4, width: "100%" }}>
               <View
                 style={{
@@ -1025,10 +829,10 @@ function AboutSettingsView(props: { data: () => any }) {
                 </View>
               </If>
             </View>
-          </SectionCell>
+          </SmeltSectionCell>
 
-          <SectionCell dividerAbove={true}>
-            <SettingsRowItem
+          <SmeltSectionCell divider={true}>
+            <SmeltSettingRow
               title={upd()?.channel_label ?? ""}
               description={upd()?.channel_description ?? ""}
             >
@@ -1041,11 +845,11 @@ function AboutSettingsView(props: { data: () => any }) {
                   sendSettingsAction({ page: "about", kind: "set_channel", value })
                 }
               />
-            </SettingsRowItem>
-          </SectionCell>
+            </SmeltSettingRow>
+          </SmeltSectionCell>
 
-          <SectionCell dividerAbove={true}>
-            <SettingsRowItem
+          <SmeltSectionCell divider={true}>
+            <SmeltSettingRow
               title={upd()?.auto_install_label ?? ""}
               description={upd()?.auto_install_description ?? ""}
             >
@@ -1056,22 +860,22 @@ function AboutSettingsView(props: { data: () => any }) {
                   sendSettingsAction({ page: "about", kind: "set_auto_install", checked })
                 }
               />
-            </SettingsRowItem>
-          </SectionCell>
-        </SettingsSectionCard>
+            </SmeltSettingRow>
+          </SmeltSectionCell>
+        </SmeltSection>
       </If>
 
-      <SettingsSectionCard title={props.data().help?.section_title}>
-        <SectionCell>
-          <SettingsRowItem title={props.data().help?.docs_row ?? ""}>
+      <SmeltSection title={props.data().help?.section_title}>
+        <SmeltSectionCell>
+          <SmeltSettingRow title={props.data().help?.docs_row ?? ""}>
             <SettingsLinkButton
               label={props.data().help?.docs_label ?? ""}
               url={props.data().help?.docs_url ?? ""}
             />
-          </SettingsRowItem>
-        </SectionCell>
-        <SectionCell dividerAbove={true}>
-          <SettingsRowItem
+          </SmeltSettingRow>
+        </SmeltSectionCell>
+        <SmeltSectionCell divider={true}>
+          <SmeltSettingRow
             title={props.data().help?.report_row ?? ""}
             description={props.data().help?.report_description ?? ""}
           >
@@ -1085,18 +889,18 @@ function AboutSettingsView(props: { data: () => any }) {
               label={props.data().help?.report_label ?? ""}
               url={props.data().help?.report_url ?? ""}
             />
-          </SettingsRowItem>
-        </SectionCell>
-        <SectionCell dividerAbove={true}>
-          <SettingsRowItem title={props.data().help?.source_row ?? ""}>
+          </SmeltSettingRow>
+        </SmeltSectionCell>
+        <SmeltSectionCell divider={true}>
+          <SmeltSettingRow title={props.data().help?.source_row ?? ""}>
             <SettingsLinkButton
               label={props.data().help?.source_label ?? ""}
               url={props.data().help?.source_url ?? ""}
             />
-          </SettingsRowItem>
-        </SectionCell>
-      </SettingsSectionCard>
-    </SettingsPageLayout>
+          </SmeltSettingRow>
+        </SmeltSectionCell>
+      </SmeltSection>
+    </SmeltPageScroll>
   );
 }
 
@@ -1106,10 +910,10 @@ function PanelPluginsSettingsView(props: { data: () => any }) {
   const plugins = computed(() => (props.data().plugins ?? []) as any[]);
 
   return (
-    <SettingsPageLayout pageKey="panel_plugins">
+    <SmeltPageScroll scrollKey="panel_plugins">
       <If when={Boolean(props.data().error)}>
-        <SettingsSectionCard title={props.data().last_failed_title}>
-          <SectionCell>
+        <SmeltSection title={props.data().last_failed_title}>
+          <SmeltSectionCell>
             <Text
               style={{
                 fontSize: theme().type.text_xsmall.size,
@@ -1119,14 +923,14 @@ function PanelPluginsSettingsView(props: { data: () => any }) {
             >
               {props.data().error ?? ""}
             </Text>
-          </SectionCell>
-        </SettingsSectionCard>
+          </SmeltSectionCell>
+        </SmeltSection>
       </If>
 
-      <SettingsSectionCard title={props.data().list_title} description={props.data().list_hint}>
-        <SectionCell>
+      <SmeltSection title={props.data().list_title} description={props.data().list_hint}>
+        <SmeltSectionCell>
           <View style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <SettingsRowItem
+            <SmeltSettingRow
               title={props.data().import_title ?? ""}
               description={props.data().import_hint ?? ""}
             >
@@ -1143,7 +947,7 @@ function PanelPluginsSettingsView(props: { data: () => any }) {
                 disabled={Boolean(props.data().busy)}
                 onPress={() => sendSettingsAction({ page: "panel_plugins", kind: "import" })}
               />
-            </SettingsRowItem>
+            </SmeltSettingRow>
             <Text
               style={{
                 fontSize: theme().type.text_xsmall.size,
@@ -1154,22 +958,22 @@ function PanelPluginsSettingsView(props: { data: () => any }) {
               {props.data().trust_warning ?? ""}
             </Text>
           </View>
-        </SectionCell>
+        </SmeltSectionCell>
 
         <If when={plugins().length === 0}>
-          <SectionCell dividerAbove={true}>
+          <SmeltSectionCell divider={true}>
             <Text style={{ fontSize: theme().type.ui.size, color: theme().palette.muted }}>
               {props.data().empty_label ?? ""}
             </Text>
-          </SectionCell>
+          </SmeltSectionCell>
         </If>
 
         <Each of={plugins()} key={(p: any) => p.id}>
           {(plugin: () => any) => {
             const isPending = computed(() => pendingDelete() === plugin().id);
             return (
-              <SectionCell dividerAbove={true}>
-                <SettingsRowItem
+              <SmeltSectionCell divider={true}>
+                <SmeltSettingRow
                   title={plugin().name}
                   description={plugin().detail}
                   error={plugin().error}
@@ -1204,16 +1008,16 @@ function PanelPluginsSettingsView(props: { data: () => any }) {
                       onPress={() => pendingDelete.set(null)}
                     />
                   </If>
-                </SettingsRowItem>
-              </SectionCell>
+                </SmeltSettingRow>
+              </SmeltSectionCell>
             );
           }}
         </Each>
-      </SettingsSectionCard>
+      </SmeltSection>
 
-      <SettingsSectionCard title={props.data().authoring?.section_title}>
-        <SectionCell>
-          <SettingsRowItem
+      <SmeltSection title={props.data().authoring?.section_title}>
+        <SmeltSectionCell>
+          <SmeltSettingRow
             title={props.data().authoring?.row_title ?? ""}
             description={props.data().authoring?.description ?? ""}
           >
@@ -1227,10 +1031,10 @@ function PanelPluginsSettingsView(props: { data: () => any }) {
               label={props.data().authoring?.examples_label ?? ""}
               url={props.data().authoring?.examples_url ?? ""}
             />
-          </SettingsRowItem>
-        </SectionCell>
-      </SettingsSectionCard>
-    </SettingsPageLayout>
+          </SmeltSettingRow>
+        </SmeltSectionCell>
+      </SmeltSection>
+    </SmeltPageScroll>
   );
 }
 
@@ -1297,10 +1101,10 @@ function AppearanceSettingsView(props: { data: () => any }) {
   const layouts = computed(() => (props.data().layouts ?? []) as SelectOption[]);
 
   return (
-    <SettingsPageLayout pageKey="appearance">
-      <SettingsSectionCard title={props.data().interface_title}>
-        <SectionCell>
-          <SettingsRowItem
+    <SmeltPageScroll scrollKey="appearance">
+      <SmeltSection title={props.data().interface_title}>
+        <SmeltSectionCell>
+          <SmeltSettingRow
             title={props.data().theme_label ?? ""}
             description={props.data().theme_hint ?? ""}
           >
@@ -1368,11 +1172,11 @@ function AppearanceSettingsView(props: { data: () => any }) {
                 </View>
               )}
             />
-          </SettingsRowItem>
-        </SectionCell>
+          </SmeltSettingRow>
+        </SmeltSectionCell>
 
-        <SectionCell dividerAbove={true}>
-          <SettingsRowItem
+        <SmeltSectionCell divider={true}>
+          <SmeltSettingRow
             title={props.data().ui_font_size_label ?? ""}
             description={props.data().ui_font_size_hint ?? ""}
           >
@@ -1391,11 +1195,11 @@ function AppearanceSettingsView(props: { data: () => any }) {
                 })
               }
             />
-          </SettingsRowItem>
-        </SectionCell>
+          </SmeltSettingRow>
+        </SmeltSectionCell>
 
-        <SectionCell dividerAbove={true}>
-          <SettingsRowItem title={props.data().ui_font_label ?? ""}>
+        <SmeltSectionCell divider={true}>
+          <SmeltSettingRow title={props.data().ui_font_label ?? ""}>
             <SettingsSelectControl
               items={uiFontOptions()}
               value={props.data().ui_font_family ?? ""}
@@ -1405,13 +1209,13 @@ function AppearanceSettingsView(props: { data: () => any }) {
                 sendSettingsAction({ page: "appearance", kind: "set_ui_font_family", value })
               }
             />
-          </SettingsRowItem>
-        </SectionCell>
-      </SettingsSectionCard>
+          </SmeltSettingRow>
+        </SmeltSectionCell>
+      </SmeltSection>
 
-      <SettingsSectionCard title={props.data().code_title}>
-        <SectionCell>
-          <SettingsRowItem
+      <SmeltSection title={props.data().code_title}>
+        <SmeltSectionCell>
+          <SmeltSettingRow
             title={props.data().code_font_label ?? ""}
             description={props.data().code_font_hint ?? ""}
           >
@@ -1424,16 +1228,16 @@ function AppearanceSettingsView(props: { data: () => any }) {
                 sendSettingsAction({ page: "appearance", kind: "set_code_font_family", value })
               }
             />
-          </SettingsRowItem>
-        </SectionCell>
-      </SettingsSectionCard>
+          </SmeltSettingRow>
+        </SmeltSectionCell>
+      </SmeltSection>
 
-      <SettingsSectionCard title={props.data().layout_title}>
+      <SmeltSection title={props.data().layout_title}>
         <If
           when={layouts().length > 0}
           else={
-            <SectionCell>
-              <SettingsRowItem
+            <SmeltSectionCell>
+              <SmeltSettingRow
                 title={props.data().layout_label ?? ""}
                 description={props.data().layout_none_hint ?? ""}
               >
@@ -1445,12 +1249,12 @@ function AppearanceSettingsView(props: { data: () => any }) {
                 >
                   {props.data().no_layouts_label ?? ""}
                 </Text>
-              </SettingsRowItem>
-            </SectionCell>
+              </SmeltSettingRow>
+            </SmeltSectionCell>
           }
         >
-          <SectionCell>
-            <SettingsRowItem
+          <SmeltSectionCell>
+            <SmeltSettingRow
               title={props.data().layout_label ?? ""}
               description={props.data().layout_hint ?? ""}
             >
@@ -1462,10 +1266,10 @@ function AppearanceSettingsView(props: { data: () => any }) {
                   sendSettingsAction({ page: "appearance", kind: "set_layout", value })
                 }
               />
-            </SettingsRowItem>
-          </SectionCell>
-          <SectionCell dividerAbove={true}>
-            <SettingsRowItem
+            </SmeltSettingRow>
+          </SmeltSectionCell>
+          <SmeltSectionCell divider={true}>
+            <SmeltSettingRow
               title={props.data().reset_layout_label ?? ""}
               description={props.data().reset_layout_hint ?? ""}
             >
@@ -1474,15 +1278,15 @@ function AppearanceSettingsView(props: { data: () => any }) {
                 label={props.data().reset_action_label ?? ""}
                 onPress={() => sendSettingsAction({ page: "appearance", kind: "reset_layout" })}
               />
-            </SettingsRowItem>
-          </SectionCell>
+            </SmeltSettingRow>
+          </SmeltSectionCell>
         </If>
-      </SettingsSectionCard>
+      </SmeltSection>
 
-      <SettingsSectionCard title={props.data().background_title}>
+      <SmeltSection title={props.data().background_title}>
         <If when={Boolean(props.data().backdrop_available)}>
-          <SectionCell>
-            <SettingsRowItem
+          <SmeltSectionCell>
+            <SmeltSettingRow
               title={props.data().glass_label ?? ""}
               description={props.data().glass_hint ?? ""}
             >
@@ -1501,12 +1305,12 @@ function AppearanceSettingsView(props: { data: () => any }) {
                   })
                 }
               />
-            </SettingsRowItem>
-          </SectionCell>
+            </SmeltSettingRow>
+          </SmeltSectionCell>
         </If>
 
-        <SectionCell dividerAbove={Boolean(props.data().backdrop_available)}>
-          <SettingsRowItem
+        <SmeltSectionCell divider={Boolean(props.data().backdrop_available)}>
+          <SmeltSettingRow
             title={props.data().image_label ?? ""}
             description={props.data().image_hint ?? ""}
           >
@@ -1535,12 +1339,12 @@ function AppearanceSettingsView(props: { data: () => any }) {
                 onPress={() => sendSettingsAction({ page: "appearance", kind: "clear_bg_image" })}
               />
             </If>
-          </SettingsRowItem>
-        </SectionCell>
+          </SmeltSettingRow>
+        </SmeltSectionCell>
 
         <If when={Boolean(props.data().image_name)}>
-          <SectionCell dividerAbove={true}>
-            <SettingsRowItem
+          <SmeltSectionCell divider={true}>
+            <SmeltSettingRow
               title={props.data().image_opacity_label ?? ""}
               description={props.data().image_opacity_hint ?? ""}
             >
@@ -1559,11 +1363,11 @@ function AppearanceSettingsView(props: { data: () => any }) {
                   })
                 }
               />
-            </SettingsRowItem>
-          </SectionCell>
+            </SmeltSettingRow>
+          </SmeltSectionCell>
         </If>
-      </SettingsSectionCard>
-    </SettingsPageLayout>
+      </SmeltSection>
+    </SmeltPageScroll>
   );
 }
 
@@ -1634,7 +1438,7 @@ function ShortcutsSettingsView(props: { data: () => any }) {
   const labels = computed(() => props.data().labels ?? {});
 
   return (
-    <SettingsPageLayout pageKey="shortcuts">
+    <SmeltPageScroll scrollKey="shortcuts">
       <Text
         style={{
           paddingLeft: 16,
@@ -1649,10 +1453,10 @@ function ShortcutsSettingsView(props: { data: () => any }) {
 
       <Each of={props.data().groups ?? []} key={(g: any) => g.title}>
         {(group: () => any) => (
-          <SettingsSectionCard title={group().title}>
+          <SmeltSection title={group().title}>
             <Each of={group().rows ?? []} key={(r: any) => r.id}>
               {(row: () => any, ix: () => number) => (
-                <SectionCell dividerAbove={ix() > 0}>
+                <SmeltSectionCell divider={ix() > 0}>
                   <View
                     style={{
                       display: "flex",
@@ -1754,17 +1558,17 @@ function ShortcutsSettingsView(props: { data: () => any }) {
                       </BaseButton>
                     </View>
                   </View>
-                </SectionCell>
+                </SmeltSectionCell>
               )}
             </Each>
-          </SettingsSectionCard>
+          </SmeltSection>
         )}
       </Each>
 
-      <SettingsSectionCard title={props.data().view_keys_title}>
+      <SmeltSection title={props.data().view_keys_title}>
         <Each of={props.data().view_keys ?? []}>
           {(item: () => any, ix: () => number) => (
-            <SectionCell dividerAbove={ix() > 0}>
+            <SmeltSectionCell divider={ix() > 0}>
               <View
                 style={{
                   display: "flex",
@@ -1785,11 +1589,11 @@ function ShortcutsSettingsView(props: { data: () => any }) {
                   </Each>
                 </View>
               </View>
-            </SectionCell>
+            </SmeltSectionCell>
           )}
         </Each>
-      </SettingsSectionCard>
-    </SettingsPageLayout>
+      </SmeltSection>
+    </SmeltPageScroll>
   );
 }
 

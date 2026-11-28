@@ -1807,7 +1807,6 @@ export function Main() {
                   height: 6,
                   backgroundColor: look().palette.need,
                   flexShrink: 0,
-                  marginLeft: 4,
                 }}
               />
             </If>
@@ -1817,7 +1816,6 @@ export function Main() {
                   fontSize: look().type.text_xsmall.size,
                   lineHeight: look().type.text_xsmall.line_height,
                   color: look().palette.bad,
-                  marginLeft: 6,
                   flexShrink: 1,
                   numberOfLines: 1,
                 }}

@@ -1,7 +1,15 @@
 // 能力库「技能」「扩展」页签：扫描目录、导入、移至通用目录 / 同名择一、给智能体用、删除。
 
 import { computed } from "nsh";
-import { SmeltButton, SmeltMenuItem, t } from "smelt/sdk";
+import {
+  SmeltButton,
+  SmeltMenuItem,
+  SmeltPageScroll,
+  SmeltSection,
+  SmeltSectionCell,
+  SmeltSettingRow,
+  t,
+} from "smelt/sdk";
 import {
   derivePluginRoots,
   formatUsedByLine,
@@ -13,10 +21,6 @@ import { agentSettingsOn, type PageController } from "./state.ts";
 import {
   DropdownMenuButton,
   PageIntro,
-  SectionCell,
-  SettingsPageShell,
-  SettingsRow,
-  SettingsSection,
   StatusLine,
   UsesPopover,
 } from "./ui.tsx";
@@ -38,59 +42,59 @@ export function PluginsTab(props: { page: PageController; kind: "skill" | "exten
       : t("plugins.sources_description.extension");
 
   return (
-    <SettingsPageShell>
+    <SmeltPageScroll>
       <PageIntro text={summary().summary} />
 
       {/* 来源与导入 */}
-      <SettingsSection title={t("plugins.sources")} description={sourcesDesc()}>
-        <SectionCell>
-          <SettingsRow title={t("plugins.scan")} description={roots().join("\n")}>
+      <SmeltSection title={t("plugins.sources")} description={sourcesDesc()}>
+        <SmeltSectionCell>
+          <SmeltSettingRow title={t("plugins.scan")} description={roots().join("\n")}>
             <SmeltButton
               variant="quiet"
               size="sm"
               label={t("plugins.rescan")}
               onPress={() => props.page.refreshPlugins()}
             />
-          </SettingsRow>
-        </SectionCell>
-        <SectionCell divider={true}>
-          <SettingsRow title={t("plugins.import_confirm")} description={importDesc()}>
+          </SmeltSettingRow>
+        </SmeltSectionCell>
+        <SmeltSectionCell divider={true}>
+          <SmeltSettingRow title={t("plugins.import_confirm")} description={importDesc()}>
             <SmeltButton
               size="sm"
               label={importLabel()}
               onPress={() => props.page.importPlugin(props.kind)}
             />
-          </SettingsRow>
-        </SectionCell>
-      </SettingsSection>
+          </SmeltSettingRow>
+        </SmeltSectionCell>
+      </SmeltSection>
 
       {/* 最近一次操作错误 */}
       <If when={props.page.pluginError() != null}>
-        <SettingsSection title={t("plugins.last_failed")}>
-          <SectionCell>
+        <SmeltSection title={t("plugins.last_failed")}>
+          <SmeltSectionCell>
             <StatusLine text={props.page.pluginError() ?? ""} error={true} />
-          </SectionCell>
-        </SettingsSection>
+          </SmeltSectionCell>
+        </SmeltSection>
       </If>
 
       {/* 已安装列表 */}
-      <SettingsSection
+      <SmeltSection
         title={t("plugins.installed")}
         description={summary().items.length > 0 ? t("plugins.installed_description") : undefined}
       >
         <If when={props.page.agentEditError() != null}>
-          <SectionCell>
+          <SmeltSectionCell>
             <StatusLine
               text={t("uses.failed", { error: props.page.agentEditError() ?? "" })}
               error={true}
             />
-          </SectionCell>
+          </SmeltSectionCell>
         </If>
 
         <If
           when={summary().items.length > 0}
           else={
-            <SectionCell divider={props.page.agentEditError() != null}>
+            <SmeltSectionCell divider={props.page.agentEditError() != null}>
               <StatusLine
                 text={
                   cfg() == null
@@ -101,7 +105,7 @@ export function PluginsTab(props: { page: PageController; kind: "skill" | "exten
                 }
                 error={cfg() == null && props.page.piConfigError() != null}
               />
-            </SectionCell>
+            </SmeltSectionCell>
           }
         >
           <Each of={summary().items} key={(plugin: any) => plugin.id}>
@@ -142,8 +146,8 @@ export function PluginsTab(props: { page: PageController; kind: "skill" | "exten
               const copies = () => [plugin().path, ...(plugin().duplicates ?? [])];
 
               return (
-                <SectionCell divider={needsDivider()}>
-                  <SettingsRow
+                <SmeltSectionCell divider={needsDivider()}>
+                  <SmeltSettingRow
                     title={plugin().name}
                     description={plugin().description ? plugin().description : null}
                     clampDescription={plugin().description ? 2 : undefined}
@@ -183,13 +187,13 @@ export function PluginsTab(props: { page: PageController; kind: "skill" | "exten
                         onPress={() => props.page.requestDeletePlugin(plugin())}
                       />
                     </If>
-                  </SettingsRow>
-                </SectionCell>
+                  </SmeltSettingRow>
+                </SmeltSectionCell>
               );
             }}
           </Each>
         </If>
-      </SettingsSection>
-    </SettingsPageShell>
+      </SmeltSection>
+    </SmeltPageScroll>
   );
 }

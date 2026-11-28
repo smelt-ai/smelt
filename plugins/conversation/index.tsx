@@ -1103,77 +1103,75 @@ export function SmeltConversation(props: SmeltConversationProps) {
               </View>
             }
           >
-            <View style={{ position: "relative", flex: 1, width: "100%", minHeight: 0 }}>
-              <MessageList
-                rows={displayRows}
-                visible={visible}
-                machine={() => props.machine ?? null}
-                sessionId={() => props.sessionId}
-                cwd={cwd}
-                hasOlderHistory={() => entriesState().window.offset > 0}
-                loadingOlder={loadingOlder}
-                atLatest={atLatest}
-                turnActive={turnActive}
-                settled={settled}
-                streamingGlobalIndex={streamingGlobalIndex}
-                streamingText={streamingText}
-                latestUserGlobalIndex={latestUserGlobalIndex}
-                canFork={canFork}
-                supportsRewind={() => Boolean(snapshot()?.supports_rewind)}
-                liveSubagents={() => snapshot()?.subagents ?? []}
-                topPadding={titleBarTopPad}
-                listRef={(api) => {
-                  listApi = api;
-                }}
-                onLoadOlder={() => void handleLoadOlder()}
-                onViewableRange={handleViewableRange}
-                onScrollAtLatestChange={(nearEnd) => bottomStick.onViewableAtLatest(nearEnd)}
-                onUserScroll={() => bottomStick.cancel()}
-                onJumpToLatest={() => bottomStick.trigger({ animated: !turnActive() })}
-                onToggleTurnFold={(key) => {
-                  const next = new Set(expandedTurnFolds());
-                  if (!next.delete(key)) next.add(key);
-                  expandedTurnFolds.set(next);
-                }}
-                onToggleProcessGroup={(key) => {
-                  const next = new Set(expandedProcessGroups());
-                  if (!next.delete(key)) next.add(key);
-                  expandedProcessGroups.set(next);
-                }}
-                onOpenDiff={(d) => diffDialog.set(d)}
-                onPreviewImage={handlePreviewImage}
-                onForkAt={(globalIndex, role) => {
-                  const acpId = snapshot()?.acp_session_id;
-                  const onFork = props.onFork;
-                  if (!acpId || !onFork) return;
-                  const editing = role === "user";
-                  if (editing && (!snapshot()?.supports_rewind || latestUserGlobalIndex() === globalIndex)) {
-                    return;
-                  }
-                  // 同文本提问的序号要数整段对话，手里只有最近几页，切点让运行时算。
-                  void call(props.machine ?? null, "conversation.fork_cut", {
-                    session_id: props.sessionId,
-                    entry_index: globalIndex,
-                    side: editing ? "before" : "after",
+            <MessageList
+              rows={displayRows}
+              visible={visible}
+              machine={() => props.machine ?? null}
+              sessionId={() => props.sessionId}
+              cwd={cwd}
+              hasOlderHistory={() => entriesState().window.offset > 0}
+              loadingOlder={loadingOlder}
+              atLatest={atLatest}
+              turnActive={turnActive}
+              settled={settled}
+              streamingGlobalIndex={streamingGlobalIndex}
+              streamingText={streamingText}
+              latestUserGlobalIndex={latestUserGlobalIndex}
+              canFork={canFork}
+              supportsRewind={() => Boolean(snapshot()?.supports_rewind)}
+              liveSubagents={() => snapshot()?.subagents ?? []}
+              topPadding={titleBarTopPad}
+              listRef={(api) => {
+                listApi = api;
+              }}
+              onLoadOlder={() => void handleLoadOlder()}
+              onViewableRange={handleViewableRange}
+              onScrollAtLatestChange={(nearEnd) => bottomStick.onViewableAtLatest(nearEnd)}
+              onUserScroll={() => bottomStick.cancel()}
+              onJumpToLatest={() => bottomStick.trigger({ animated: !turnActive() })}
+              onToggleTurnFold={(key) => {
+                const next = new Set(expandedTurnFolds());
+                if (!next.delete(key)) next.add(key);
+                expandedTurnFolds.set(next);
+              }}
+              onToggleProcessGroup={(key) => {
+                const next = new Set(expandedProcessGroups());
+                if (!next.delete(key)) next.add(key);
+                expandedProcessGroups.set(next);
+              }}
+              onOpenDiff={(d) => diffDialog.set(d)}
+              onPreviewImage={handlePreviewImage}
+              onForkAt={(globalIndex, role) => {
+                const acpId = snapshot()?.acp_session_id;
+                const onFork = props.onFork;
+                if (!acpId || !onFork) return;
+                const editing = role === "user";
+                if (editing && (!snapshot()?.supports_rewind || latestUserGlobalIndex() === globalIndex)) {
+                  return;
+                }
+                // 同文本提问的序号要数整段对话，手里只有最近几页，切点让运行时算。
+                void call(props.machine ?? null, "conversation.fork_cut", {
+                  session_id: props.sessionId,
+                  entry_index: globalIndex,
+                  side: editing ? "before" : "after",
+                })
+                  .then((res: any) => {
+                    const cut = res?.cut ?? null;
+                    if (editing && !cut) return;
+                    onFork({ provider_session_id: acpId, cut, prompt: editing ? cut.text : "" });
                   })
-                    .then((res: any) => {
-                      const cut = res?.cut ?? null;
-                      if (editing && !cut) return;
-                      onFork({ provider_session_id: acpId, cut, prompt: editing ? cut.text : "" });
-                    })
-                    .catch((err) => console.error("[conversation] 算分叉切点失败：", err));
-                }}
-                onEditResendAt={(globalIndex, _text) => {
-                  sendAction({ RewindToMessage: { entry_index: globalIndex } });
-                }}
-                onRetryTurn={() => {
-                  sendAction("RetryLastTurn");
-                  scrollToBottomAfterSend();
-                }}
-                onInspectSubagent={(sub) => inspectedSubagent.set(sub)}
-                onOpenConversation={props.onOpenConversation}
-              />
-            </View>
+                  .catch((err) => console.error("[conversation] 算分叉切点失败：", err));
+              }}
+              onEditResendAt={(globalIndex, _text) => {
+                sendAction({ RewindToMessage: { entry_index: globalIndex } });
+              }}
+              onRetryTurn={() => {
+                sendAction("RetryLastTurn");
+                scrollToBottomAfterSend();
+              }}
+              onInspectSubagent={(sub) => inspectedSubagent.set(sub)}
+              onOpenConversation={props.onOpenConversation}
+            />
           </If>
         </If>
 
@@ -1195,13 +1193,22 @@ export function SmeltConversation(props: SmeltConversationProps) {
 
         {/* 状态横幅（启动进度 / Provider 重试 / 一次性 Notice / 断连重启） */}
         <If when={Boolean(snapshot()?.status_line) && (connecting() || turnActive())}>
-          <View style={{ width: "100%", alignItems: "center", paddingHorizontal: 16, paddingBottom: 6 }}>
-            <View style={{ width: "100%", maxWidth: 768, paddingHorizontal: 6, flexDirection: "row", alignItems: "center", gap: 6 }}>
-              <SmeltIcon spin={visible()} size={12} color={look().palette.muted} />
-              <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.muted }}>
-                {snapshot()?.status_line ?? ""}
-              </Text>
-            </View>
+          <View
+            style={{
+              width: "100%",
+              maxWidth: 800,
+              alignSelf: "center",
+              paddingHorizontal: 22,
+              paddingBottom: 6,
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            <SmeltIcon spin={visible()} size={12} color={look().palette.muted} />
+            <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.muted }}>
+              {snapshot()?.status_line ?? ""}
+            </Text>
           </View>
         </If>
 

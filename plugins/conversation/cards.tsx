@@ -384,7 +384,7 @@ export function MemoryChangesCard(props: {
     <If when={visible() != null}>
       <View style={{ width: "100%", alignItems: "center", paddingHorizontal: 16, paddingTop: 8 }}>
         <View
-          class="w-full rounded-2xl border border-border bg-card shadow-md overflow-hidden"
+          class="w-full rounded-2xl border border-border bg-card shadow-md"
           style={{ maxWidth: 768 }}
         >
           <View
@@ -436,17 +436,19 @@ export function MemoryChangesCard(props: {
                     <SmeltDisclosure
                       open={expanded() && Boolean(entry().body || entry().content)}
                       content={
-                        <Scroll style={{ maxHeight: 140, paddingLeft: 26, paddingRight: 8, marginBottom: 6 }}>
-                          <Text
-                            style={{
-                              fontSize: look().type.text_xsmall.size,
-                              color: look().palette.muted,
-                              fontFamily: look().fonts?.mono,
-                            }}
-                          >
-                            {entry().body ?? entry().content ?? ""}
-                          </Text>
-                        </Scroll>
+                        <View style={{ paddingBottom: 6 }}>
+                          <Scroll style={{ maxHeight: 140, paddingLeft: 26, paddingRight: 8 }}>
+                            <Text
+                              style={{
+                                fontSize: look().type.text_xsmall.size,
+                                color: look().palette.muted,
+                                fontFamily: look().fonts?.mono,
+                              }}
+                            >
+                              {entry().body ?? entry().content ?? ""}
+                            </Text>
+                          </Scroll>
+                        </View>
                       }
                     >
                       <View style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingRight: 8 }}>

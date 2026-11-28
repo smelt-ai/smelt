@@ -243,19 +243,7 @@ export function ConversationPane(props: {
   });
 
   return (
-    <View
-      style={{
-        position: "relative",
-        flex: 1,
-        width: "100%",
-        height: "100%",
-        minWidth: 0,
-        minHeight: 0,
-        display: "flex",
-        flexDirection: "column",
-        overflow: "hidden",
-      }}
-    >
+    <View style={{ position: "relative", flex: 1, overflow: "hidden" }}>
       <If
         when={directoryAcp() != null}
         else={

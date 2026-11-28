@@ -393,6 +393,33 @@ fn paint_quads(window_bounds: Bounds<Pixels>, panes: &Panes, scale: f32, window:
     }
 }
 
+/// 本帧布局与不透明度实际需要外壳回报坐标的停靠方位：
+/// - 平台不支持毛玻璃或 `bg_opacity >= 1.0`（纯实色）时不需要任何区域；
+/// - 其余情况只回报声明了材质的方位；若 `center` 声明了材质，还需回报 `bottom` 供 `glass_panes` 扣除。
+pub(crate) fn needed_placements(
+    materials: LayoutMaterials,
+    bg_opacity: f32,
+    backdrop_available: bool,
+) -> Vec<smelt_nsh::BackdropPlacement> {
+    if !backdrop_available || bg_opacity >= 1.0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(4);
+    if materials.left.is_some() {
+        out.push(smelt_nsh::BackdropPlacement::Left);
+    }
+    if materials.right.is_some() {
+        out.push(smelt_nsh::BackdropPlacement::Right);
+    }
+    if materials.center.is_some() {
+        out.push(smelt_nsh::BackdropPlacement::Center);
+    }
+    if materials.bottom.is_some() || materials.center.is_some() {
+        out.push(smelt_nsh::BackdropPlacement::Bottom);
+    }
+    out
+}
+
 /// 布局声明了材质、这一帧又画出来了的地方。中间那一列要扣掉压在它下面的下停靠区。
 fn glass_panes(materials: LayoutMaterials, regions: &Regions, scale: f32) -> Panes {
     let mut panes = Vec::new();
@@ -1267,5 +1294,29 @@ mod tests {
         assert_eq!(add_2.paint_panes, both);
         assert_eq!(add_2.sync, None);
         assert!(!add_2.needs_next_frame);
+    }
+
+    #[test]
+    fn needed_placements_only_includes_active_materials() {
+        use smelt_nsh::BackdropPlacement as P;
+
+        let sidebar_only = LayoutMaterials {
+            left: Some(Material::Sidebar),
+            ..LayoutMaterials::default()
+        };
+        assert_eq!(needed_placements(sidebar_only, 0.85, true), vec![P::Left]);
+        assert!(needed_placements(sidebar_only, 1.0, true).is_empty());
+        assert!(needed_placements(sidebar_only, 0.85, false).is_empty());
+        assert!(needed_placements(LayoutMaterials::default(), 0.5, true).is_empty());
+
+        let center_glass = LayoutMaterials {
+            center: Some(Material::Window),
+            ..LayoutMaterials::default()
+        };
+        // center 含材质时需同时回报 bottom 以供 glass_panes 扣除。
+        assert_eq!(
+            needed_placements(center_glass, 0.7, true),
+            vec![P::Center, P::Bottom]
+        );
     }
 }

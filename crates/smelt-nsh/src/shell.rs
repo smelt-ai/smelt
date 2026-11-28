@@ -26,7 +26,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     apply_theme,
-    components::BackdropHooks,
+    components::{BackdropHooks, BackdropPlacement},
     host,
     manifest::{LoadedPluginInfo, ShellLive, ShellSource, ShellUpdate, SourceDir},
     plugins::{PluginHost, PluginLifecycle},
@@ -242,6 +242,9 @@ pub struct MainShell {
     initial_ready: bool,
     /// 当前绑定窗口的材质分块回调（关窗重开时通过 `attach_window` / `detach_window` 切换，不重建引擎）。
     backdrop_hooks: Rc<RefCell<BackdropHooks>>,
+    /// 当前活跃页实际需要上报材质坐标的停靠方位；为空时壳层不挂任何 `SmeltBackdropRegion`，
+    /// 避免原生组件节点把整棵 DockArea 标记为不可做 GPU 图块缓存。
+    backdrop_placements: BTreeSet<BackdropPlacement>,
     /// 只有 `self.app` 本帧确实被通知重画时才清空上一帧的材质分块；避免 `MainShell` 单独重画而
     /// `self.app` 走 GPUI Fast 缓存时把 `Regions` 清空闪一帧实色。
     app_dirty: Rc<Cell<bool>>,
@@ -277,6 +280,12 @@ impl MainShell {
         let app = cx.new(|cx| AppView::new(options, window, cx));
         let shared_shell_view = Rc::new(RefCell::new(ComputedShellView::default()));
         let safe_area_reader = shared_shell_view.clone();
+        let initial_backdrop_placements = config
+            .backdrop
+            .record
+            .is_some()
+            .then(|| BackdropPlacement::ALL.into_iter().collect())
+            .unwrap_or_default();
         let backdrop_hooks = Rc::new(RefCell::new(config.backdrop));
         register_components(
             app.read(cx),
@@ -503,6 +512,7 @@ impl MainShell {
             pending_fallback: BTreeSet::new(),
             initial_ready: false,
             backdrop_hooks,
+            backdrop_placements: initial_backdrop_placements,
             app_dirty,
             dirty_slices: host::SliceMask::EMPTY,
             flush_scheduled: false,
@@ -542,7 +552,13 @@ impl MainShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let has_record = backdrop.record.is_some();
         *self.backdrop_hooks.borrow_mut() = backdrop;
+        self.backdrop_placements = if has_record {
+            BackdropPlacement::ALL.into_iter().collect()
+        } else {
+            BTreeSet::new()
+        };
         self.corners = corners;
         self.padding = padding;
         self.labels = labels;
@@ -557,6 +573,7 @@ impl MainShell {
     /// 主窗口关闭时卸载全部页面与重组件，仅保留常驻引擎线程与插件无头根（`plugin_roots`）在后台运行。
     pub fn detach_window(&mut self, cx: &mut Context<Self>) {
         *self.backdrop_hooks.borrow_mut() = BackdropHooks::default();
+        self.backdrop_placements.clear();
         self.window_subs.clear();
         self.pages.clear();
         self.active_page.clear();
@@ -976,6 +993,20 @@ impl MainShell {
         self.schedule_publish_slices(host::SliceMask::SHELL, cx);
     }
 
+    /// 告知主壳当前活跃页哪些停靠方位需要材质坐标上报；其余方位不挂 `SmeltBackdropRegion`。
+    pub fn set_backdrop_placements(
+        &mut self,
+        placements: &[BackdropPlacement],
+        cx: &mut Context<Self>,
+    ) {
+        let next: BTreeSet<BackdropPlacement> = placements.iter().copied().collect();
+        if self.backdrop_placements == next {
+            return;
+        }
+        self.backdrop_placements = next;
+        self.schedule_publish_slices(host::SliceMask::SHELL, cx);
+    }
+
     /// 某页的布局里是否摆着指定视图（含 `smelt/stack` 内的叶子）。
     pub fn has_view(&self, page_key: &str, view_id: &str) -> bool {
         self.pages
@@ -1202,9 +1233,19 @@ impl MainShell {
                     })
                 })
                 .collect();
+            let backdrop_placements: Vec<&'static str> =
+                if self.backdrop_hooks.borrow().record.is_some() {
+                    self.backdrop_placements
+                        .iter()
+                        .copied()
+                        .map(BackdropPlacement::as_str)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
             json!({
                 "padding": self.padding,
-                "has_backdrop": self.backdrop_hooks.borrow().record.is_some(),
+                "backdrop_placements": backdrop_placements,
                 "pages": pages_json,
                 "settings_page": self.settings_page.as_ref().map(|(id, title)| json!({
                     "id": id,

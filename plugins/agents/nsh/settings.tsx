@@ -1,12 +1,14 @@
 // 设置里的「Agent」页：本机 Agent CLI、Hooks、自定义 Agent、项目「+」新建菜单启动项。
 
-import { cleanup, computed, Scroll, Text, View } from "nsh";
+import { cleanup, computed, Text, View } from "nsh";
 import {
   locale,
   SmeltButton,
   SmeltInput,
   SmeltMenuItem,
   SmeltMenuSeparator,
+  SmeltPageScroll,
+  SmeltSection,
   t,
 } from "smelt/sdk";
 
@@ -51,49 +53,6 @@ import {
   updateProfileDraft,
 } from "./state.ts";
 import { DropdownButton } from "./ui.tsx";
-
-function SettingsSection(props: { title: string; description?: string; children?: any }) {
-  const look = currentTheme;
-  return (
-    <View style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <View style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-        <Text
-          style={{
-            fontSize: look().type.text_xsmall_medium.size,
-            lineHeight: look().type.text_xsmall_medium.line_height,
-            fontWeight: look().type.text_xsmall_medium.weight,
-            color: look().palette.muted,
-          }}
-        >
-          {props.title}
-        </Text>
-        <If when={Boolean(props.description)}>
-          <Text
-            style={{
-              fontSize: look().type.text_xsmall.size,
-              lineHeight: look().type.text_xsmall.line_height,
-              color: look().palette.faint,
-            }}
-          >
-            {props.description ?? ""}
-          </Text>
-        </If>
-      </View>
-      <View
-        style={{
-          borderRadius: look().radius.md,
-          borderWidth: 1,
-          borderColor: look().palette.hair,
-          backgroundColor: look().palette.surface,
-          display: "flex",
-          flexDirection: "column",
-        }}
-      >
-        {props.children}
-      </View>
-    </View>
-  );
-}
 
 function StatusDot(props: { size: number; color: string }) {
   return (
@@ -642,7 +601,7 @@ function CustomAgentsSection() {
   });
 
   return (
-    <SettingsSection
+    <SmeltSection cardStyle={{ paddingVertical: 0 }}
       title={t("settings.custom_agents")}
       description={t("profile.section_description")}
     >
@@ -674,7 +633,7 @@ function CustomAgentsSection() {
           />
         </View>
       </If>
-    </SettingsSection>
+    </SmeltSection>
   );
 }
 
@@ -686,7 +645,7 @@ function LaunchMenuSection() {
   const terminalIds = () => catalog().terminal_agent_ids;
 
   return (
-    <SettingsSection
+    <SmeltSection cardStyle={{ paddingVertical: 0 }}
       title={t("settings.new_menu")}
       description={t("launch.section_description")}
     >
@@ -757,29 +716,27 @@ function LaunchMenuSection() {
                     gap: 8,
                   }}
                 >
-                  <View style={{ width: 140, flexShrink: 0 }}>
-                    <SmeltInput
-                      value={row().label}
-                      placeholder={t("launch.label_placeholder")}
-                      accessibilityLabel={t("launch.name_column")}
-                      onChange={({ value }: { value: string }) =>
-                        updateLaunchRow(row().uid, { label: value })
-                      }
-                      onBlur={flushLaunchEdits}
-                    />
-                  </View>
-                  <View style={{ flex: 1, minWidth: 0 }}>
-                    <SmeltInput
-                      value={row().command}
-                      placeholder={t("launch.command_placeholder")}
-                      accessibilityLabel={t("launch.command_column")}
-                      onChange={({ value }: { value: string }) =>
-                        updateLaunchRow(row().uid, { command: value })
-                      }
-                      onBlur={flushLaunchEdits}
-                      mono
-                    />
-                  </View>
+                  <SmeltInput
+                    class="w-35 shrink-0"
+                    value={row().label}
+                    placeholder={t("launch.label_placeholder")}
+                    accessibilityLabel={t("launch.name_column")}
+                    onChange={({ value }: { value: string }) =>
+                      updateLaunchRow(row().uid, { label: value })
+                    }
+                    onBlur={flushLaunchEdits}
+                  />
+                  <SmeltInput
+                    class="flex-1 min-w-0"
+                    value={row().command}
+                    placeholder={t("launch.command_placeholder")}
+                    accessibilityLabel={t("launch.command_column")}
+                    onChange={({ value }: { value: string }) =>
+                      updateLaunchRow(row().uid, { command: value })
+                    }
+                    onBlur={flushLaunchEdits}
+                    mono
+                  />
                   <If
                     when={removable()}
                     else={<View style={{ width: 24, height: 24, flexShrink: 0 }} />}
@@ -807,7 +764,7 @@ function LaunchMenuSection() {
           />
         </View>
       </If>
-    </SettingsSection>
+    </SmeltSection>
   );
 }
 
@@ -820,25 +777,14 @@ export function AgentSettingsView() {
   });
 
   return (
-    <Scroll style={{ flex: 1, width: "100%", height: "100%" }}>
-      <View
-        style={{
-          maxWidth: 680,
-          width: "100%",
-          padding: 24,
-          display: "flex",
-          flexDirection: "column",
-          gap: 24,
-        }}
-      >
-        <SettingsSection title={t("settings.local_agents")}>
-          <CliSectionContent />
-          <HooksSectionContent />
-        </SettingsSection>
+    <SmeltPageScroll>
+      <SmeltSection cardStyle={{ paddingVertical: 0 }} title={t("settings.local_agents")}>
+        <CliSectionContent />
+        <HooksSectionContent />
+      </SmeltSection>
 
-        <CustomAgentsSection />
-        <LaunchMenuSection />
-      </View>
-    </Scroll>
+      <CustomAgentsSection />
+      <LaunchMenuSection />
+    </SmeltPageScroll>
   );
 }

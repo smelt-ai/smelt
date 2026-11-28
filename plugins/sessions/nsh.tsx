@@ -1710,23 +1710,11 @@ function EmptyState() {
   );
 
   return (
-    <View
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        flex: 1,
-        width: "100%",
-        height: "100%",
-        minWidth: 0,
-        minHeight: 0,
-      }}
-    >
+    <View style={{ flex: 1 }}>
       <SmeltWindowBar view={SESSION_VIEW} />
       <View
         style={{
           flex: 1,
-          minHeight: 0,
-          display: "flex",
           alignItems: "center",
           justifyContent: "center",
           padding: 24,
@@ -1734,78 +1722,58 @@ function EmptyState() {
       >
         <View
           style={{
-            display: "flex",
-            flexDirection: "column",
             alignItems: "center",
-            gap: 8,
+            gap: 10,
             maxWidth: 360,
           }}
         >
           <View
-            style={{
-              width: 32,
-              height: 32,
-              marginBottom: 8,
-              borderRadius: look().radius.md,
-              backgroundColor: look().palette.soft,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
+            class="rounded-(--radius-md) bg-soft items-center justify-center"
+            style={{ width: 32, height: 32 }}
           >
             <SmeltIcon path="icons/coffee.svg" size={16} color={look().palette.text} />
           </View>
-          <Text
-            style={{
-              fontSize: look().type.ui_medium.size,
-              lineHeight: look().type.ui_medium.line_height,
-              fontWeight: look().type.ui_medium.weight,
-              color: look().palette.text,
-            }}
-          >
-            {t("empty.title")}
-          </Text>
-          <Text
-            style={{
-              fontSize: look().type.ui.size,
-              lineHeight: look().type.ui.line_height,
-              color: look().palette.muted,
-            }}
-          >
-            {t("empty.no_session")}
-          </Text>
+          <View class="items-center gap-1">
+            <Text
+              style={{
+                fontSize: look().type.ui_medium.size,
+                lineHeight: look().type.ui_medium.line_height,
+                fontWeight: look().type.ui_medium.weight,
+                color: look().palette.text,
+              }}
+            >
+              {t("empty.title")}
+            </Text>
+            <Text
+              style={{
+                fontSize: look().type.ui.size,
+                lineHeight: look().type.ui.line_height,
+                color: look().palette.muted,
+              }}
+            >
+              {t("empty.no_session")}
+            </Text>
+          </View>
           <If when={offerAdd()}>
-            <View style={{ marginTop: 8 }}>
-              <SmeltButton
-                variant="primary"
-                label={t("empty.add_machine")}
-                onPress={() => {
-                  addMachineError.set(null);
-                  run(ADD_MACHINE_CMD, null).catch((err) => {
-                    addMachineError.set(
-                      t("error.failed", {
-                        what: t("action.add_machine"),
-                        error: errorMessage(err),
-                      }),
-                    );
-                  });
-                }}
-              />
-            </View>
+            <SmeltButton
+              variant="primary"
+              label={t("empty.add_machine")}
+              onPress={() => {
+                addMachineError.set(null);
+                run(ADD_MACHINE_CMD, null).catch((err) => {
+                  addMachineError.set(
+                    t("error.failed", {
+                      what: t("action.add_machine"),
+                      error: errorMessage(err),
+                    }),
+                  );
+                });
+              }}
+            />
           </If>
           <If when={addMachineError() != null}>
             <View
-              style={{
-                marginTop: 8,
-                paddingLeft: 10,
-                paddingRight: 10,
-                paddingTop: 6,
-                paddingBottom: 6,
-                borderRadius: look().radius.md,
-                borderWidth: 1,
-                borderColor: look().palette.bad,
-                backgroundColor: look().palette.surface,
-              }}
+              class="rounded-(--radius-md) border border-bad bg-card px-2.5 py-1.5"
             >
               <Text
                 style={{

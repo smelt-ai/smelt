@@ -1,7 +1,15 @@
 // 设置「记忆」页：重排模型选择 + OpenAI 兼容向量检索服务配置与连通性测试。
 
 import { computed, Text, View } from "nsh";
-import { SmeltButton, SmeltMenuItem, SmeltMenuSeparator, t } from "smelt/sdk";
+import {
+  SmeltButton,
+  SmeltMenuItem,
+  SmeltMenuSeparator,
+  SmeltPageScroll,
+  SmeltSection,
+  SmeltSectionCell,
+  t,
+} from "smelt/sdk";
 import {
   memoryKeyPlaceholder,
   memoryStatusLine,
@@ -13,9 +21,6 @@ import {
   DropdownMenuButton,
   MenuSub,
   PageIntro,
-  SectionCell,
-  SettingsPageShell,
-  SettingsSection,
   StatusLine,
   TextField,
 } from "./ui.tsx";
@@ -34,12 +39,12 @@ export function MemoryTab(props: { page: PageController }) {
   const testResult = computed(() => props.page.memoryTestResult());
 
   return (
-    <SettingsPageShell>
+    <SmeltPageScroll>
       <PageIntro text={t("memory.description")} />
 
       {/* 重排模型 */}
-      <SettingsSection title={t("memory.rerank_title")}>
-        <SectionCell>
+      <SmeltSection title={t("memory.rerank_title")}>
+        <SmeltSectionCell>
           <View style={{ display: "flex", flexDirection: "column", width: "100%", gap: 8 }}>
             <View style={{ display: "flex", flexDirection: "row", alignItems: "center" }}>
               <DropdownMenuButton
@@ -82,12 +87,12 @@ export function MemoryTab(props: { page: PageController }) {
             </View>
             <StatusLine text={t("memory.rerank_description")} />
           </View>
-        </SectionCell>
-      </SettingsSection>
+        </SmeltSectionCell>
+      </SmeltSection>
 
       {/* 向量检索服务 */}
-      <SettingsSection title={t("memory.vector_title")}>
-        <SectionCell>
+      <SmeltSection title={t("memory.vector_title")}>
+        <SmeltSectionCell>
           <View style={{ display: "flex", flexDirection: "column", width: "100%", gap: 12 }}>
             <StatusLine text={t("memory.form_description")} />
             <Text
@@ -200,8 +205,8 @@ export function MemoryTab(props: { page: PageController }) {
               </If>
             </View>
           </View>
-        </SectionCell>
-      </SettingsSection>
-    </SettingsPageShell>
+        </SmeltSectionCell>
+      </SmeltSection>
+    </SmeltPageScroll>
   );
 }

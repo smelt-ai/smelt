@@ -186,6 +186,11 @@ const open = signal(false);
 | `SmeltDiffView` | 显示差异：给 `patch`，或给 `oldValue` 和 `newValue`。`layout` 是 `"split"` 或 `"unified"`，`inline` 定行内高亮的粒度，可以在行上加注释（`annotations` + `renderAnnotation`） |
 | `SmeltVector` | 画一段 SVG 源码：`markup`、`width`、`height`。自带图标里没有的图形用它 |
 | `SmeltWindowBar` | 自己画顶栏的视图用它让出红绿灯，见[视图](views.md#自己画顶栏) |
+| `SmeltPageScroll` | 居中限宽（默认 720pt）的滚动页骨架，设置页与说明页共用；传 `scrollKey` 可在切页时自动回顶 |
+| `SmeltSection` | 分组卡片：可选标题/说明 + 主题描边卡片（不做圆角裁剪以免阻断 GPU 图块缓存） |
+| `SmeltSectionDivider` | 卡片内左右缩进 16pt 的 1pt 分隔线 |
+| `SmeltSectionCell` | `SmeltSection` 内标准单元格（左右 16pt、上下 8pt），`divider` 为真时在上方加分隔线 |
+| `SmeltSettingRow` | 设置行：左侧标题/说明/附注/错误，右侧放控件 |
 | `ViewInstance` | 嵌一个登记过的视图，见[视图](views.md#嵌入别的视图) |
 
 `SmeltNative*` 开头的几个（终端、桌面、头像等）是给内置插件用的原生组件，props 跟着内置插件变，用户插件不要依赖。
@@ -241,6 +246,8 @@ const open = signal(false);
 
 阴影用 `shadow-<档>`，跟主题走：主题 `elevation` 的每一档都有类名（键里的下划线换连字符，`shadow-raised`、`shadow-floating`、`shadow-overlay`、`shadow-md`、`shadow-switch-on`……）；按钮另用 `shadow-button` / `shadow-button-primary` / `shadow-button-floating`，宿主已按底色透不透换好。
 
+圆角也可在 `class` 里直接引用主题令牌：`rounded-(--radius-xs)`、`rounded-(--radius-sm)`、`rounded-(--radius-md)`、`rounded-(--radius-lg)`、`rounded-(--radius-xl)`、`rounded-(--radius-row)`。
+
 > [!IMPORTANT]
 > 不要写死颜色（`#3a6ee1`、`text-blue-500`）。写死的颜色在别的主题、深色模式下会对不上，内置插件也一律不写。
 
@@ -294,6 +301,9 @@ t.radius.md;                 // 圆角
 | `class="text-gray-500"`、`color: "#888"` | `class="text-muted-foreground"`、`theme().palette.muted` |
 | `<SmeltButton command="x/y" />` 指望它执行 | `onPress={() => run("x/y")}` |
 | 组件函数里 `await call(...)` | 放进 `bootTask`、事件回调或 `resource` |
+| `width: "100%"` 同时写左右 `margin` | 省掉 `width: "100%"`（列容器默认拉伸），或把左右留白放到父容器 `paddingHorizontal` |
+| 在 `<Scroll>` 上设 `borderRadius`，或用圆角 + `overflow: "hidden"` 包 `<Scroll>`/`<List>`/`<SmeltDiffView>` | 圆角底色放在外层容器、不加 `overflow: "hidden"`，避免圆角裁剪整棵子树阻断 GPU 图块缓存 |
+| `SmeltDisclosure` 的 `content` 根节点写 `margin` | 改写 `padding`，确保展开高度动画量到的尺寸与视觉一致 |
 
 ## 相关
 

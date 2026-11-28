@@ -785,6 +785,7 @@ impl Workspace {
         });
         self.nsh_shell
             .update(cx, |shell, cx| shell.set_active_page(key, target, cx));
+        self.sync_backdrop_placements(cx);
         let next = ShellView::from_nsh(self.nsh_shell.read(cx).shell_view());
         let before = std::mem::replace(&mut self.shell_view, next);
         let ids: Vec<String> = [&before, &self.shell_view]

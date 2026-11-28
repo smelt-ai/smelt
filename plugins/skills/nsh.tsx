@@ -1411,15 +1411,14 @@ export function main() {
           flexShrink: 0,
         }}
       >
-        <View style={{ flex: 1, minWidth: 0 }}>
-          <SmeltInput
-            size="sm"
-            value={query()}
-            placeholder={t("search.placeholder")}
-            accessibilityLabel={t("search.label")}
-            onChange={({ value }: { value: string }) => query.set(value)}
-          />
-        </View>
+        <SmeltInput
+          size="sm"
+          class="flex-1 min-w-0"
+          value={query()}
+          placeholder={t("search.placeholder")}
+          accessibilityLabel={t("search.label")}
+          onChange={({ value }: { value: string }) => query.set(value)}
+        />
         <SmeltButton
           variant="primary"
           size="sm"
@@ -1579,54 +1578,49 @@ export function main() {
 
           {/* 失效软链 */}
           <If when={showBroken()}>
-            <View style={{ display: "flex", flexDirection: "column" }}>
-              <View
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 6,
+                paddingHorizontal: 16,
+                paddingTop: 12,
+                paddingBottom: 4,
+              }}
+            >
+              <Text
                 style={{
-                  display: "flex",
-                  flexDirection: "row",
-                  alignItems: "center",
-                  gap: 6,
-                  paddingLeft: 16,
-                  paddingRight: 16,
-                  paddingTop: 12,
-                  paddingBottom: 4,
+                  flex: 1,
+                  fontSize: look().type.small.size,
+                  color: look().palette.muted,
                 }}
               >
+                {`${t("broken.title")} ${scanData().broken.length}`}
+              </Text>
+              <SmeltButton
+                variant="quiet"
+                size="sm"
+                label={t("broken.button")}
+                onPress={() => pruneDialogOpen.set(true)}
+              />
+            </View>
+            <Each of={scanData().broken} key={(b: any) => b.path}>
+              {(b: () => { path: string }) => (
                 <Text
                   style={{
-                    flex: 1,
-                    fontSize: look().type.small.size,
+                    paddingHorizontal: 16,
+                    paddingVertical: 2,
+                    fontFamily: look().fonts?.mono,
+                    fontSize: look().type.text_xsmall.size,
+                    lineHeight: look().type.text_xsmall.line_height,
                     color: look().palette.muted,
+                    numberOfLines: 1,
                   }}
                 >
-                  {`${t("broken.title")} ${scanData().broken.length}`}
+                  {prettyPath(scanData().home, b().path)}
                 </Text>
-                <SmeltButton
-                  variant="quiet"
-                  size="sm"
-                  label={t("broken.button")}
-                  onPress={() => pruneDialogOpen.set(true)}
-                />
-              </View>
-              <Each of={scanData().broken} key={(b: any) => b.path}>
-                {(b: () => { path: string }) => (
-                  <Text
-                    style={{
-                      paddingLeft: 16,
-                      paddingRight: 16,
-                      paddingTop: 2,
-                      paddingBottom: 2,
-                      fontFamily: look().fonts?.mono,
-                      fontSize: 11,
-                      color: look().palette.muted,
-                      numberOfLines: 1,
-                    }}
-                  >
-                    {prettyPath(scanData().home, b().path)}
-                  </Text>
-                )}
-              </Each>
-            </View>
+              )}
+            </Each>
           </If>
         </View>
       </Scroll>

@@ -175,7 +175,17 @@ pub(crate) fn nsh_theme() -> Theme {
         let set = theme.set_shadow(&name, &css, &css);
         debug_assert!(set, "{name}: {css}");
     }
-    theme.set_number("radius", RADIUS.md);
+    for (name, value) in [
+        ("radius", RADIUS.md),
+        ("radius-xs", RADIUS.xs),
+        ("radius-sm", RADIUS.sm),
+        ("radius-md", RADIUS.md),
+        ("radius-lg", RADIUS.lg),
+        ("radius-xl", RADIUS.xl),
+        ("radius-row", f32::from(ui_theme::row_radius())),
+    ] {
+        theme.set_number(name, value);
+    }
     theme.set_font(
         "font-mono",
         smelt_plugin_api::model::font_config::font_family(),
@@ -539,6 +549,7 @@ pub(crate) fn build_theme_config() -> serde_json::Value {
         .colors()
         .map(|(name, _)| (name, "#00000000"))
         .chain(tokens.shadows().map(|(name, _)| (name, NO_SHADOW)))
+        .chain(tokens.numbers().map(|(name, _)| (name, "0px")))
         .collect();
     names.sort_unstable();
     let colors: serde_json::Map<String, serde_json::Value> = names
@@ -589,10 +600,31 @@ mod tests {
             assert_eq!(light[name], "#00000000", "{name}");
         }
         assert_eq!(light["shadow-floating"], NO_SHADOW);
+        for name in [
+            "radius",
+            "radius-xs",
+            "radius-sm",
+            "radius-md",
+            "radius-lg",
+            "radius-xl",
+            "radius-row",
+        ] {
+            assert_eq!(light[name], "0px", "{name}");
+        }
         let parsed = nsh_platform_gpui::Theme::from_json(&config.to_string()).unwrap();
         assert!(parsed.color("scrim").is_some());
         assert!(parsed.color("run").is_none(), "在跑不配色");
         assert!(parsed.tokens().shadow("shadow-overlay").is_some());
+        for name in [
+            "radius-xs",
+            "radius-sm",
+            "radius-md",
+            "radius-lg",
+            "radius-xl",
+            "radius-row",
+        ] {
+            assert!(parsed.number(name).is_some(), "missing parsed {name}");
+        }
     }
 
     #[test]
@@ -625,10 +657,7 @@ mod tests {
         }
     }
 
-    /// 投影只从主题来（设计语言第 2 节）：内置插件、SDK、主壳里不写 Tailwind 自带的几档
-    /// （`shadow-md` 已由主题令牌接管，不算）。
-    #[test]
-    fn builtin_sources_take_shadows_from_the_theme() {
+    fn builtin_script_files() -> Vec<std::path::PathBuf> {
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             for entry in std::fs::read_dir(dir).unwrap().flatten() {
                 let path = entry.path();
@@ -648,6 +677,15 @@ mod tests {
         for dir in ["src/plugins", "shell", "../../plugins"] {
             walk(&root.join(dir), &mut files);
         }
+        files.sort();
+        files
+    }
+
+    /// 投影只从主题来（设计语言第 2 节）：内置插件、SDK、主壳里不写 Tailwind 自带的几档
+    /// （`shadow-md` 已由主题令牌接管，不算）。
+    #[test]
+    fn builtin_sources_take_shadows_from_the_theme() {
+        let files = builtin_script_files();
         let mut found = Vec::new();
         for file in &files {
             let text = std::fs::read_to_string(file).unwrap();
@@ -670,6 +708,229 @@ mod tests {
         assert!(found.is_empty(), "用主题的投影令牌：\n{}", found.join("\n"));
     }
 
+    /// 从 `start`（指向 `{` 或 `<`）扫描到配对的闭合字符，跳过字符串字面量。
+    fn scan_balanced(text: &str, start: usize, open: char, close: char) -> Option<&str> {
+        let mut depth = 0usize;
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
+        for (rel, ch) in text[start..].char_indices() {
+            if let Some(q) = quote {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == q {
+                    quote = None;
+                }
+                continue;
+            }
+            match ch {
+                '\'' | '"' | '`' => quote = Some(ch),
+                c if c == open => depth += 1,
+                c if c == close => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(&text[start..start + rel + ch.len_utf8()]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// 扫描 JSX 开标签（从 `<Tag` 起至对应的顶层 `>`，忽略 `{...}` 表达式里的 `>` / `=>`）。
+    fn scan_jsx_open_tag(text: &str, start: usize) -> Option<(&str, usize)> {
+        let mut brace_depth = 0usize;
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
+        for (rel, ch) in text[start..].char_indices() {
+            if let Some(q) = quote {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == q {
+                    quote = None;
+                }
+                continue;
+            }
+            match ch {
+                '\'' | '"' | '`' => quote = Some(ch),
+                '{' => brace_depth += 1,
+                '}' => brace_depth = brace_depth.saturating_sub(1),
+                '>' if brace_depth == 0 => {
+                    let end = start + rel + 1;
+                    return Some((&text[start..end], end));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn line_of(text: &str, offset: usize) -> usize {
+        text[..offset].bytes().filter(|&b| b == b'\n').count() + 1
+    }
+
+    /// 静态布局与图层缓存护栏（内置插件、SDK、主壳全量扫描）：
+    /// 1. 禁止同一 `style` 对象里同时写 `width: "100%"` 与水平 `margin`（必然溢出父容器）；
+    /// 2. 禁止在 `<Scroll>` 自身写 `borderRadius` / `rounded-*`（触发圆角裁剪，整棵滚动子树失活 GPU 图块缓存）；
+    /// 3. 禁止在 `SmeltDisclosure` 的 `content` 根节点写 `margin*`（`Collapsible` 高度弹簧不计外边距，改用 `padding`）；
+    /// 4. 禁止圆角 + `overflow: "hidden"` / `overflow-hidden` 容器直接包裹 `<Scroll>` / `<List>` / `<SmeltDiffView>` / `<SmeltEditor>`。
+    #[test]
+    fn builtin_sources_follow_layout_and_cache_rules() {
+        let files: Vec<_> = builtin_script_files()
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "tsx" || e == "jsx"))
+            .collect();
+        assert!(files.len() > 30, "只扫到 {} 个 TSX/JSX 文件", files.len());
+
+        let mut violations = Vec::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file).unwrap();
+
+            // 规则 1：width: "100%" 与水平 margin 并存。
+            let mut pos = 0;
+            while let Some(rel) = text[pos..].find("width: \"100%\"") {
+                let at = pos + rel;
+                // 往前找最近的未闭合 `{`。
+                let mut depth = 0i32;
+                let mut open_at = None;
+                for (i, ch) in text[..at].char_indices().rev() {
+                    match ch {
+                        '}' => depth += 1,
+                        '{' => {
+                            if depth == 0 {
+                                open_at = Some(i);
+                                break;
+                            }
+                            depth -= 1;
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(open) = open_at
+                    && let Some(block) = scan_balanced(&text, open, '{', '}')
+                {
+                    let has_horiz_margin = ["marginLeft:", "marginRight:", "marginHorizontal:"]
+                        .iter()
+                        .any(|k| block.contains(k) && !block.contains(&format!("{k} \"auto\"")));
+                    if has_horiz_margin {
+                        violations.push(format!(
+                            "{}:{}: width:\"100%\" 不可与水平 margin 同用（会溢出父容器）",
+                            file.display(),
+                            line_of(&text, at)
+                        ));
+                    }
+                }
+                pos = at + 1;
+            }
+
+            // 规则 2：<Scroll> 上不写 borderRadius / rounded-。
+            let mut pos = 0;
+            while let Some(rel) = text[pos..].find("<Scroll") {
+                let at = pos + rel;
+                let next = text[at + 7..].chars().next();
+                if next.is_some_and(|c| c.is_whitespace() || c == '>')
+                    && let Some((tag, _)) = scan_jsx_open_tag(&text, at)
+                    && (tag.contains("borderRadius") || tag.contains("rounded-"))
+                {
+                    violations.push(format!(
+                        "{}:{}: <Scroll> 不可设圆角（会触发圆角裁剪，阻断 GPU 图块缓存）",
+                        file.display(),
+                        line_of(&text, at)
+                    ));
+                }
+                pos = at + 7;
+            }
+
+            // 规则 3：<SmeltDisclosure content={...}> 根节点不写 margin。
+            let mut pos = 0;
+            while let Some(rel) = text[pos..].find("<SmeltDisclosure") {
+                let at = pos + rel;
+                let next = text[at + 16..].chars().next();
+                if next.is_some_and(|c| c.is_whitespace() || c == '>')
+                    && let Some((tag, _)) = scan_jsx_open_tag(&text, at)
+                    && let Some(c_rel) = tag.find("content={")
+                    && let Some(content_expr) = scan_balanced(tag, c_rel + 8, '{', '}')
+                    && let Some(lt) = content_expr.find('<')
+                    && let Some((root_tag, _)) = scan_jsx_open_tag(content_expr, lt)
+                {
+                    let has_margin = [
+                        "margin:",
+                        "marginTop:",
+                        "marginBottom:",
+                        "marginLeft:",
+                        "marginRight:",
+                        "marginHorizontal:",
+                        "marginVertical:",
+                        "m-",
+                        "mt-",
+                        "mb-",
+                        "ml-",
+                        "mr-",
+                        "mx-",
+                        "my-",
+                    ]
+                    .iter()
+                    .any(|k| root_tag.contains(k));
+                    if has_margin {
+                        violations.push(format!(
+                            "{}:{}: SmeltDisclosure content 根节点不可设 margin（改用 padding）",
+                            file.display(),
+                            line_of(&text, at + c_rel)
+                        ));
+                    }
+                }
+                pos = at + 16;
+            }
+
+            // 规则 4：圆角 + overflow hidden 不得包裹 <Scroll>/<List>/<SmeltDiffView>/<SmeltEditor>。
+            for tag_prefix in ["<View", "<SmeltDisclosure", "<SmeltPopover"] {
+                let mut pos = 0;
+                while let Some(rel) = text[pos..].find(tag_prefix) {
+                    let at = pos + rel;
+                    let after = text[at + tag_prefix.len()..].chars().next();
+                    if after.is_some_and(|c| c.is_whitespace() || c == '>')
+                        && let Some((open_tag, body_start)) = scan_jsx_open_tag(&text, at)
+                    {
+                        let rounded =
+                            open_tag.contains("borderRadius") || open_tag.contains("rounded-");
+                        let clips = open_tag.contains("overflow: \"hidden\"")
+                            || open_tag.contains("overflow-hidden");
+                        if rounded && clips && !open_tag.ends_with("/>") {
+                            let close_tag = format!("</{}", &tag_prefix[1..]);
+                            // 在对应闭合标签前（限定最多 2500 字节局部窗口）检查重型子视图。
+                            let window_end = (body_start + 2500).min(text.len());
+                            let end = text[body_start..window_end]
+                                .find(&close_tag)
+                                .map_or(window_end, |i| body_start + i);
+                            let body = &text[body_start..end];
+                            for heavy in ["<Scroll", "<List", "<SmeltDiffView", "<SmeltEditor"] {
+                                if body.contains(heavy) {
+                                    violations.push(format!(
+                                        "{}:{}: 圆角 + overflow:hidden 容器不可包裹 {heavy}（阻断 GPU 图块缓存）",
+                                        file.display(),
+                                        line_of(&text, at)
+                                    ));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    pos = at + tag_prefix.len();
+                }
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "发现布局/缓存违规：\n{}",
+            violations.join("\n")
+        );
+    }
+
     #[test]
     fn nsh_theme_exposes_smelt_semantic_tokens() {
         let theme = nsh_theme();
@@ -690,6 +951,20 @@ mod tests {
             assert!(
                 theme.color(name).is_some(),
                 "missing NSH theme token {name}"
+            );
+        }
+        for name in [
+            "radius",
+            "radius-xs",
+            "radius-sm",
+            "radius-md",
+            "radius-lg",
+            "radius-xl",
+            "radius-row",
+        ] {
+            assert!(
+                theme.number(name).is_some(),
+                "missing NSH theme radius token {name}"
             );
         }
     }

@@ -650,11 +650,23 @@ impl Workspace {
         }
     }
 
+    pub(crate) fn sync_backdrop_placements(&self, cx: &mut Context<Self>) {
+        let placements = window_backdrop::needed_placements(
+            self.open_page_materials(cx),
+            cx.global::<Appearance>().bg_opacity,
+            window_backdrop::available(),
+        );
+        self.nsh_shell.update(cx, |shell, cx| {
+            shell.set_backdrop_placements(&placements, cx)
+        });
+    }
+
     pub(crate) fn sync_nsh_chrome(&mut self, cx: &mut Context<Self>) {
         let padding = f32::from(ui_theme::shell_padding());
         let labels = nsh_shell_labels();
         self.nsh_shell
             .update(cx, |shell, cx| shell.set_chrome(padding, labels, cx));
+        self.sync_backdrop_placements(cx);
     }
 
     pub(crate) fn sync_nsh_settings_page(&mut self, cx: &mut Context<Self>) {

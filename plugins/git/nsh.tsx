@@ -1764,10 +1764,7 @@ function RepoHeaderRow(props: { row: any }) {
       style={{
         gap: 4,
         height: 24,
-        marginLeft: 4,
-        marginRight: 4,
-        paddingLeft: 4,
-        paddingRight: 4,
+        paddingHorizontal: 4,
       }}
     >
       <SmeltButton
@@ -1844,11 +1841,9 @@ function CommitBoxRow(props: { row: any }) {
   return (
     <View
       style={{
-        display: "flex",
-        flexDirection: "column",
         gap: 6,
-        paddingLeft: 12 + props.row.depth * 10,
-        paddingRight: 8,
+        paddingLeft: 8 + props.row.depth * 10,
+        paddingRight: 4,
         paddingTop: 4,
         paddingBottom: 6,
       }}
@@ -1939,12 +1934,11 @@ function GroupHeaderRow(props: { row: any }) {
   return (
     <View
       style={{
-        display: "flex",
         flexDirection: "row",
         alignItems: "center",
         height: 24,
-        paddingLeft: 12 + props.row.depth * 10,
-        paddingRight: 10,
+        paddingLeft: 8 + props.row.depth * 10,
+        paddingRight: 6,
       }}
     >
       <Text
@@ -1983,9 +1977,7 @@ function TreeDirRow(props: { row: any }) {
       style={{
         gap: 4,
         height: 24,
-        marginLeft: 4,
-        marginRight: 4,
-        paddingLeft: 10 + props.row.depth * 12,
+        paddingLeft: 8 + props.row.depth * 12,
         paddingRight: 8,
       }}
     >
@@ -2030,14 +2022,10 @@ function TreeFileRow(props: { row: any }) {
         <SmeltRow
           onPress={() => openAggregateFile(props.row.repo, props.row.path)}
           style={{
-            width: "100%",
             gap: 4,
             height: 24,
-            marginLeft: 4,
-            marginRight: 4,
-            paddingLeft: 10 + props.row.depth * 12,
+            paddingLeft: 8 + props.row.depth * 12,
             paddingRight: 8,
-            overflow: "hidden",
           }}
         >
           <If when={Boolean(props.row.gitlink)}>
@@ -3479,8 +3467,8 @@ export function Main() {
                       each={changeListModel().rows}
                       keyExtractor={(row: any) => row.key}
                       estimatedItemSize={24}
-                      style={{ flex: 1, width: "100%", height: "100%" }}
-                      contentStyle={{ paddingBottom: 8 }}
+                      style={{ flex: 1 }}
+                      contentStyle={{ paddingHorizontal: 4, paddingBottom: 8 }}
                     >
                       {(row: () => any) => (
                         <If

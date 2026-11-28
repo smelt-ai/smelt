@@ -687,6 +687,50 @@ bootTask(async () => {
         }
     }
 
+    // 回归测试：按活跃页实际材质按需挂载 SmeltBackdropRegion，避免未声明材质的停靠区被原生组件阻断图层缓存。
+    shell.update(cx, |shell, cx| {
+        shell.set_backdrop_placements(&[BackdropPlacement::Left], cx);
+    });
+    let start = Instant::now();
+    loop {
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let left_only = {
+            let r = recorded_regions.borrow();
+            r.get("left").is_some_and(|b| b.size.width > px(100.)) && !r.contains_key("center")
+        };
+        if left_only {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "set_backdrop_placements([Left]) 未收敛为仅回报 left（regions={:?}）",
+            *recorded_regions.borrow(),
+        );
+        // 轮询例外：测试平台等待引擎线程提交按需材质区域后的帧；周期 20ms，上限 10s。
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    shell.update(cx, |shell, cx| {
+        shell.set_backdrop_placements(&[], cx);
+    });
+    let start = Instant::now();
+    loop {
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        if recorded_regions.borrow().is_empty() {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "set_backdrop_placements([]) 应卸载全部 SmeltBackdropRegion（regions={:?}）",
+            *recorded_regions.borrow(),
+        );
+        // 轮询例外：测试平台等待引擎线程提交卸载材质区域后的帧；周期 20ms，上限 10s。
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
     // 验证双向命令派发：宿主执行 JS 插件命令 `smelt.session-list/new-session`。
     let cmd_result: Rc<RefCell<Option<Result<Value, String>>>> = Rc::new(RefCell::new(None));
     let cmd_slot = cmd_result.clone();

@@ -412,8 +412,8 @@ export function Composer(props: {
   // 输入框几乎一直有焦点，不另画焦点环；边框只表示等你。
   const cardClass = computed(() =>
     awaitingUser()
-      ? "relative w-full rounded-3xl border border-need/45 bg-card shadow-md overflow-hidden transition-colors duration-150"
-      : "relative w-full rounded-3xl border border-border bg-card shadow-md overflow-hidden transition-colors duration-150",
+      ? "relative w-full rounded-3xl border border-need/45 bg-card shadow-md transition-colors duration-150"
+      : "relative w-full rounded-3xl border border-border bg-card shadow-md transition-colors duration-150",
   );
 
   // 输入框建好以后再交出接口，挂上时就来的文本也能拿到焦点。
@@ -439,7 +439,7 @@ export function Composer(props: {
         {/* @ / 补全弹层（锚定在输入框正上方） */}
         <If when={completionItems().length > 0}>
           <View
-            class="w-full rounded-xl bg-soft p-1.5 shadow-floating overflow-hidden"
+            class="w-full rounded-xl bg-soft p-1.5 shadow-floating"
             style={{ maxHeight: 244 }}
           >
             <Scroll style={{ maxHeight: 232 }}>
