@@ -13,7 +13,7 @@
 // 系统通知、菜单栏、角标都是宿主的能力（smelt.app/notify、setStatusMenu、smelt.app/set-dock-badge）。
 // 主窗口关着时插件照常在后台跑，点通知、菜单项会重开主窗口跳到那段会话。什么时候做全靠事件。
 
-import { computed, Scroll, signal, Text, View } from "nsh";
+import { computed, signal, Text, View } from "nsh";
 import {
   activeContext,
   bootTask,
@@ -29,6 +29,10 @@ import {
   run,
   setStatusMenu,
   SmeltButton,
+  SmeltPageScroll,
+  SmeltSection,
+  SmeltSectionCell,
+  SmeltSettingRow,
   SmeltSwitch,
   store,
   t,
@@ -340,94 +344,6 @@ bootTask(async () => {
   sync();
 });
 
-function SectionCard(props: { title: string; children?: any }) {
-  const look = currentTheme;
-  return (
-    <View style={{ width: "100%", display: "flex", flexDirection: "column", gap: 8 }}>
-      <Text
-        style={{
-          fontSize: look().type.small_medium.size,
-          lineHeight: look().type.small_medium.line_height,
-          fontWeight: look().type.small_medium.weight,
-          color: look().palette.muted,
-        }}
-      >
-        {props.title}
-      </Text>
-      <View
-        style={{
-          width: "100%",
-          borderRadius: look().radius.lg,
-          backgroundColor: look().palette.surface,
-          borderWidth: 1,
-          borderColor: look().palette.hair,
-          overflow: "hidden",
-          display: "flex",
-          flexDirection: "column",
-        }}
-      >
-        {props.children}
-      </View>
-    </View>
-  );
-}
-
-function PrefSwitchRow(props: {
-  label: string;
-  description?: string;
-  checked: boolean;
-  last?: boolean;
-  onChange: (checked: boolean) => void;
-}) {
-  const look = currentTheme;
-  return (
-    <View
-      style={{
-        width: "100%",
-        paddingLeft: 16,
-        paddingRight: 16,
-        paddingTop: 12,
-        paddingBottom: 12,
-        borderBottomWidth: props.last ? 0 : 1,
-        borderBottomColor: look().palette.hair,
-        display: "flex",
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 16,
-      }}
-    >
-      <View style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-        <Text
-          style={{
-            fontSize: look().type.ui.size,
-            lineHeight: look().type.ui.line_height,
-            color: look().palette.text,
-          }}
-        >
-          {props.label}
-        </Text>
-        <If when={Boolean(props.description)}>
-          <Text
-            style={{
-              fontSize: look().type.small.size,
-              lineHeight: look().type.small.line_height,
-              color: look().palette.muted,
-            }}
-          >
-            {props.description ?? ""}
-          </Text>
-        </If>
-      </View>
-      <SmeltSwitch
-        checked={props.checked}
-        accessibilityLabel={props.label}
-        onChange={(checked: boolean) => props.onChange(Boolean(checked))}
-      />
-    </View>
-  );
-}
-
 function PermissionCardContent() {
   const look = currentTheme;
   const perm = computed(() => notificationPermission());
@@ -461,15 +377,7 @@ function PermissionCardContent() {
   };
 
   return (
-    <View
-      style={{
-        width: "100%",
-        paddingLeft: 16,
-        paddingRight: 16,
-        paddingTop: 12,
-        paddingBottom: 12,
-      }}
-    >
+    <SmeltSectionCell>
       <If
         when={line() !== null}
         else={
@@ -488,7 +396,6 @@ function PermissionCardContent() {
           style={{
             width: "100%",
             minHeight: 28,
-            display: "flex",
             flexDirection: "row",
             alignItems: "center",
             gap: 8,
@@ -525,7 +432,7 @@ function PermissionCardContent() {
           </If>
         </View>
       </If>
-    </View>
+    </SmeltSectionCell>
   );
 }
 
@@ -536,69 +443,62 @@ export function main() {
   };
 
   return (
-    <Scroll style={{ flex: 1, width: "100%", height: "100%" }}>
-      <View
-        style={{
-          width: "100%",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-        }}
-      >
-        <View
-          style={{
-            maxWidth: 720,
-            width: "100%",
-            paddingLeft: 24,
-            paddingRight: 24,
-            paddingTop: 16,
-            paddingBottom: 32,
-            display: "flex",
-            flexDirection: "column",
-            gap: 24,
-          }}
-        >
-          <SectionCard title={t("section.system")}>
-            <PermissionCardContent />
-          </SectionCard>
+    <SmeltPageScroll>
+      <SmeltSection title={t("section.system")}>
+        <PermissionCardContent />
+      </SmeltSection>
 
-          <SectionCard title={t("section.agent")}>
-            <PrefSwitchRow
-              label={t("prefs.approval")}
+      <SmeltSection title={t("section.agent")}>
+        <SmeltSectionCell>
+          <SmeltSettingRow title={t("prefs.approval")}>
+            <SmeltSwitch
               checked={prefs().approval}
-              onChange={(approval) => update({ approval })}
+              accessibilityLabel={t("prefs.approval")}
+              onChange={(approval: boolean) => update({ approval: Boolean(approval) })}
             />
-            <PrefSwitchRow
-              label={t("prefs.input")}
-              description={t("prefs.input_description")}
+          </SmeltSettingRow>
+        </SmeltSectionCell>
+        <SmeltSectionCell divider>
+          <SmeltSettingRow title={t("prefs.input")} description={t("prefs.input_description")}>
+            <SmeltSwitch
               checked={prefs().input}
-              onChange={(input) => update({ input })}
+              accessibilityLabel={t("prefs.input")}
+              onChange={(input: boolean) => update({ input: Boolean(input) })}
             />
-            <PrefSwitchRow
-              label={t("prefs.success")}
+          </SmeltSettingRow>
+        </SmeltSectionCell>
+        <SmeltSectionCell divider>
+          <SmeltSettingRow title={t("prefs.success")}>
+            <SmeltSwitch
               checked={prefs().success}
-              onChange={(success) => update({ success })}
+              accessibilityLabel={t("prefs.success")}
+              onChange={(success: boolean) => update({ success: Boolean(success) })}
             />
-            <PrefSwitchRow
-              label={t("prefs.failure")}
+          </SmeltSettingRow>
+        </SmeltSectionCell>
+        <SmeltSectionCell divider>
+          <SmeltSettingRow title={t("prefs.failure")}>
+            <SmeltSwitch
               checked={prefs().failure}
-              last={true}
-              onChange={(failure) => update({ failure })}
+              accessibilityLabel={t("prefs.failure")}
+              onChange={(failure: boolean) => update({ failure: Boolean(failure) })}
             />
-          </SectionCard>
+          </SmeltSettingRow>
+        </SmeltSectionCell>
+      </SmeltSection>
 
-          <SectionCard title={t("section.terminal")}>
-            <PrefSwitchRow
-              label={t("prefs.bell")}
-              description={t("prefs.bell_description")}
+      <SmeltSection title={t("section.terminal")}>
+        <SmeltSectionCell>
+          <SmeltSettingRow title={t("prefs.bell")} description={t("prefs.bell_description")}>
+            <SmeltSwitch
               checked={prefs().bell}
-              last={true}
-              onChange={(bell) => update({ bell })}
+              accessibilityLabel={t("prefs.bell")}
+              onChange={(bell: boolean) => update({ bell: Boolean(bell) })}
             />
-          </SectionCard>
-        </View>
-      </View>
-    </Scroll>
+          </SmeltSettingRow>
+        </SmeltSectionCell>
+      </SmeltSection>
+    </SmeltPageScroll>
   );
 }
 

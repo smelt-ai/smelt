@@ -8,6 +8,7 @@ import {
   SmeltRow,
   SmeltSegmented,
   SmeltSwitch,
+  SmeltVector,
   theme,
 } from "smelt/sdk";
 import { ct } from "./i18n.ts";
@@ -67,7 +68,7 @@ export function ModelConfigPopover(props: {
       placement="top"
       align="start"
       offset={8}
-      popupClass="rounded-xl border border-border bg-popover p-0 shadow-md overflow-hidden"
+      popupClass="rounded-xl border border-border bg-popover p-0 shadow-md"
       popupStyle={{ width: 348 }}
       trigger={
         <SmeltButton
@@ -382,7 +383,7 @@ export function CapabilitiesPopover(props: {
         placement="top"
         align="start"
         offset={8}
-        popupClass="rounded-xl border border-border bg-popover p-0 shadow-md overflow-hidden"
+        popupClass="rounded-xl border border-border bg-popover p-0 shadow-md"
         popupStyle={{ width: 320 }}
         trigger={
           <SmeltButton
@@ -576,6 +577,22 @@ export function UsagePopover(props: {
     return look().palette.muted;
   });
   const meterTrack = computed(() => colorWithAlpha(look().palette.muted, 0.28));
+  const meterSvg = computed(() => {
+    const p = Math.max(0, Math.min(100, pct()));
+    const color = meterColor();
+    const track = meterTrack();
+    if (p <= 0) {
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 13 13"><circle cx="6.5" cy="6.5" r="6" fill="${track}"/></svg>`;
+    }
+    if (p >= 100) {
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 13 13"><circle cx="6.5" cy="6.5" r="6" fill="${color}"/></svg>`;
+    }
+    const rad = (p / 100) * Math.PI * 2 - Math.PI / 2;
+    const x = (6.5 + 6 * Math.cos(rad)).toFixed(2);
+    const y = (6.5 + 6 * Math.sin(rad)).toFixed(2);
+    const largeArc = p > 50 ? 1 : 0;
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 13 13"><circle cx="6.5" cy="6.5" r="6" fill="${track}"/><path d="M6.5 6.5 L6.5 0.5 A6 6 0 ${largeArc} 1 ${x} ${y} Z" fill="${color}"/></svg>`;
+  });
 
   return (
     <If when={props.compacting() || props.usage() != null}>
@@ -601,14 +618,7 @@ export function UsagePopover(props: {
                 when={props.compacting()}
                 else={
                   // 用量饼：灰底圆上按比例填一块扇形，平时只画它，具体数字在悬停提示里
-                  <View
-                    class="rounded-full"
-                    style={{
-                      width: 13,
-                      height: 13,
-                      backgroundImage: `conic-gradient(${meterColor()} 0%, ${meterColor()} ${pct()}%, ${meterTrack()} ${pct()}%, ${meterTrack()} 100%)`,
-                    }}
-                  />
+                  <SmeltVector markup={meterSvg()} width={13} height={13} />
                 }
               >
                 <SmeltIcon

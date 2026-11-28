@@ -12,6 +12,7 @@ import {
   nativeComponent,
   nativeModule,
   reduceMotion,
+  Scroll,
   signal,
   Text,
   View,
@@ -2510,7 +2511,7 @@ export function SmeltConfirmDialog(props: {
         </Text>
       </If>
       {props.children}
-      <View class="flex-row items-center justify-end gap-2" style={{ marginTop: 4 }}>
+      <View class="flex-row items-center justify-end gap-2 pt-1">
         <SmeltButton
           variant="quiet"
           size="sm"
@@ -2527,6 +2528,201 @@ export function SmeltConfirmDialog(props: {
         />
       </View>
     </SmeltDialog>
+  );
+}
+
+/**
+ * 居中限宽的滚动页骨架（设置页、说明页、能力库等共用）：单层 `alignSelf: "center"` 居中，
+ * 默认 `maxWidth: 720`、左右 24pt、顶 16pt、底 32pt、组间 24pt；给 `scrollKey` 时换键自动回顶。
+ */
+export function SmeltPageScroll(props: {
+  maxWidth?: number;
+  gap?: number;
+  scrollKey?: string;
+  style?: any;
+  contentStyle?: any;
+  children?: any;
+}) {
+  let scrollRef: any = null;
+  effect(() => {
+    const k = props.scrollKey;
+    if (k) scrollRef?.scrollTo?.({ y: 0, animated: false });
+  });
+  return (
+    <Scroll
+      ref={(api: any) => {
+        scrollRef = api;
+      }}
+      style={{ flex: 1, ...(props.style ?? {}) }}
+    >
+      <View
+        style={{
+          width: "100%",
+          maxWidth: props.maxWidth ?? 720,
+          alignSelf: "center",
+          paddingHorizontal: 24,
+          paddingTop: 16,
+          paddingBottom: 32,
+          gap: props.gap ?? 24,
+          ...(props.contentStyle ?? {}),
+        }}
+      >
+        {props.children}
+      </View>
+    </Scroll>
+  );
+}
+
+/** 一组设置或信息卡片：可选分组标题与说明（左缩进 16pt 对齐卡片内容）+ 描边卡片（不做圆角裁剪以免阻断图层缓存）。 */
+export function SmeltSection(props: {
+  title?: string | null;
+  description?: string | null;
+  cardStyle?: any;
+  children?: any;
+}) {
+  const look = theme;
+  const hasHeader = () => Boolean(props.title || props.description);
+  return (
+    <View class="w-full gap-2">
+      <If when={hasHeader()}>
+        <View class="px-4 gap-0.5">
+          <If when={Boolean(props.title)}>
+            <Text
+              class="text-muted-foreground"
+              style={{
+                fontSize: look().type.ui_medium.size,
+                lineHeight: look().type.ui_medium.line_height,
+                fontWeight: look().type.ui_medium.weight,
+              }}
+            >
+              {props.title ?? ""}
+            </Text>
+          </If>
+          <If when={Boolean(props.description)}>
+            <Text
+              class="text-muted-foreground"
+              style={{
+                fontSize: look().type.text_xsmall.size,
+                lineHeight: look().type.text_xsmall.line_height,
+              }}
+            >
+              {props.description ?? ""}
+            </Text>
+          </If>
+        </View>
+      </If>
+      <View
+        class="w-full py-1 rounded-(--radius-xl) border border-border bg-card"
+        style={props.cardStyle}
+      >
+        {props.children}
+      </View>
+    </View>
+  );
+}
+
+/** 卡片内左右各缩进 16pt 的 1pt 分隔线。 */
+export function SmeltSectionDivider() {
+  return <View class="mx-4 h-px bg-border" />;
+}
+
+/** `SmeltSection` 内的标准单元格（左右 16pt、上下 8pt），`divider` 为真时在上方加一条缩进分隔线。 */
+export function SmeltSectionCell(props: {
+  divider?: boolean;
+  style?: any;
+  children?: any;
+}) {
+  return (
+    <>
+      <If when={Boolean(props.divider)}>
+        <SmeltSectionDivider />
+      </If>
+      <View class="px-4 py-2" style={props.style}>
+        {props.children}
+      </View>
+    </>
+  );
+}
+
+/** 设置行：左侧标题/说明/附注/错误占满余宽，右侧放控件（开关、下拉、按钮等）。 */
+export function SmeltSettingRow(props: {
+  title: string;
+  description?: string | null;
+  clampDescription?: number;
+  note?: string | null;
+  error?: string | null;
+  children?: any;
+}) {
+  const look = theme;
+  return (
+    <View class="w-full flex-row items-center justify-between gap-4" style={{ minHeight: 28 }}>
+      <View class="flex-1 min-w-0 gap-0.5">
+        <Text
+          class="text-foreground"
+          style={{
+            fontSize: look().type.ui.size,
+            lineHeight: look().type.ui.line_height,
+          }}
+        >
+          {props.title}
+        </Text>
+        <If when={Boolean(props.description)}>
+          <Text
+            class="text-muted-foreground"
+            tooltip={
+              props.clampDescription != null && props.description ? (
+                <SmeltTooltip>
+                  <Text
+                    style={{
+                      color: look().palette.text,
+                      fontSize: look().type.text_xsmall.size,
+                      lineHeight: look().type.text_xsmall.line_height,
+                      maxWidth: 440,
+                    }}
+                  >
+                    {props.description}
+                  </Text>
+                </SmeltTooltip>
+              ) : undefined
+            }
+            style={{
+              fontSize: look().type.text_small.size,
+              lineHeight: look().type.text_small.line_height,
+              ...(props.clampDescription != null
+                ? { numberOfLines: props.clampDescription }
+                : {}),
+            }}
+          >
+            {props.description ?? ""}
+          </Text>
+        </If>
+        <If when={Boolean(props.note)}>
+          <Text
+            class="text-faint"
+            style={{
+              fontSize: look().type.text_xsmall.size,
+              lineHeight: look().type.text_xsmall.line_height,
+            }}
+          >
+            {props.note ?? ""}
+          </Text>
+        </If>
+        <If when={Boolean(props.error)}>
+          <Text
+            class="text-bad"
+            style={{
+              fontSize: look().type.text_small.size,
+              lineHeight: look().type.text_small.line_height,
+            }}
+          >
+            {props.error ?? ""}
+          </Text>
+        </If>
+      </View>
+      <If when={Boolean(props.children)}>
+        <View class="flex-row items-center shrink-0 gap-2">{props.children}</View>
+      </If>
+    </View>
   );
 }
 

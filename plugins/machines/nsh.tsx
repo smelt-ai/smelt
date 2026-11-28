@@ -3,7 +3,7 @@
 // - 连进来：远程访问开关、自建 relay、生成一次性配对串与二维码、管理已配对设备；
 // - 角标：有机器离线、不兼容、高延迟或机器表读取失败时在「远程」页挂 "!" 角标。
 
-import { Canvas, cleanup, computed, Scroll, signal, Text, View } from "nsh";
+import { Canvas, cleanup, computed, signal, Text, View } from "nsh";
 import {
   bootTask,
   call,
@@ -23,6 +23,8 @@ import {
   SmeltConfirmDialog,
   SmeltDialog,
   SmeltInput,
+  SmeltPageScroll,
+  SmeltSection,
   SmeltSwitch,
   smeltVersion,
   t,
@@ -694,40 +696,6 @@ function QrCanvas(props: { matrix: { size: number; bits: string }; displaySize?:
   );
 }
 
-function SectionCard(props: { title: string; description: string; children?: any }) {
-  const look = theme;
-  return (
-    <View style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <View style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-        <Text
-          style={{
-            fontSize: look().type.text_xsmall_medium.size,
-            fontWeight: look().type.text_xsmall_medium.weight,
-            color: look().palette.muted,
-          }}
-        >
-          {props.title}
-        </Text>
-        <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.faint }}>
-          {props.description}
-        </Text>
-      </View>
-      <View
-        style={{
-          borderRadius: look().radius.md,
-          borderWidth: 1,
-          borderColor: look().palette.hair,
-          backgroundColor: look().palette.surface,
-          display: "flex",
-          flexDirection: "column",
-        }}
-      >
-        {props.children}
-      </View>
-    </View>
-  );
-}
-
 export function remote() {
   if (!initializedPage) {
     initializedPage = true;
@@ -749,19 +717,9 @@ export function remote() {
   });
 
   return (
-    <Scroll style={{ flex: 1, width: "100%", height: "100%" }}>
-      <View
-        style={{
-          maxWidth: 680,
-          width: "100%",
-          padding: 24,
-          display: "flex",
-          flexDirection: "column",
-          gap: 24,
-        }}
-      >
-        {/* 连到其他机器 */}
-        <SectionCard title={t("outgoing.title")} description={t("outgoing.description")}>
+    <SmeltPageScroll>
+      {/* 连到其他机器 */}
+      <SmeltSection cardStyle={{ paddingVertical: 0 }} title={t("outgoing.title")} description={t("outgoing.description")}>
           <View
             style={{
               padding: 14,
@@ -859,16 +817,15 @@ export function remote() {
                 {t("add.description")}
               </Text>
             </View>
-            <View style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
-              <View style={{ flex: 1, minWidth: 0 }}>
-                <SmeltInput
-                  value={pairingInput()}
-                  placeholder="smelt+iroh://…"
-                  disabled={adding()}
-                  onChange={({ value }: { value: string }) => pairingInput.set(value)}
-                  onSubmit={submitAddMachine}
-                />
-              </View>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <SmeltInput
+                class="flex-1 min-w-0"
+                value={pairingInput()}
+                placeholder="smelt+iroh://…"
+                disabled={adding()}
+                onChange={({ value }: { value: string }) => pairingInput.set(value)}
+                onSubmit={submitAddMachine}
+              />
               <SmeltButton
                 size="sm"
                 label={adding() ? t("add.adding") : t("add.action")}
@@ -883,10 +840,10 @@ export function remote() {
               </Text>
             </If>
           </View>
-        </SectionCard>
+        </SmeltSection>
 
         {/* 让其他设备连进来 */}
-        <SectionCard title={t("incoming.title")} description={t("incoming.description")}>
+        <SmeltSection cardStyle={{ paddingVertical: 0 }} title={t("incoming.title")} description={t("incoming.description")}>
           {/* 远程访问开关 */}
           <View
             style={{
@@ -1041,20 +998,18 @@ export function remote() {
                 {t("relay.custom_description")}
               </Text>
             </View>
-            <View style={{ width: 220, flexShrink: 0 }}>
-              <SmeltInput
-                value={relayInput()}
-                disabled={!loaded()}
-                accessibilityLabel={t("relay.custom")}
-                onChange={({ value }: { value: string }) => scheduleRelayCommit(value)}
-                onBlur={() => flushRelayCommit()}
-                onSubmit={() => flushRelayCommit()}
-              />
-            </View>
+            <SmeltInput
+              class="w-55 shrink-0"
+              value={relayInput()}
+              disabled={!loaded()}
+              accessibilityLabel={t("relay.custom")}
+              onChange={({ value }: { value: string }) => scheduleRelayCommit(value)}
+              onBlur={() => flushRelayCommit()}
+              onSubmit={() => flushRelayCommit()}
+            />
           </View>
-        </SectionCard>
-      </View>
-    </Scroll>
+        </SmeltSection>
+    </SmeltPageScroll>
   );
 }
 

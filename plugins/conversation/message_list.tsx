@@ -461,60 +461,53 @@ function ToolCallRow(props: {
           }
         >
           {/* session_send / session_spawn 同伴消息行 */}
-          <View
+          <SmeltRow
+            onPress={() => {
+              const target = peer()?.toId ?? peer()?.to_id;
+              if (target && props.onOpenConversation) props.onOpenConversation(target);
+            }}
             style={{
+              flexDirection: "column",
+              alignItems: "stretch",
               borderRadius: look().radius.md,
               borderWidth: 1,
               borderColor: peer()?.error ? look().palette.bad : look().palette.hair,
               backgroundColor: look().palette.surface,
-              overflow: "hidden",
+              paddingHorizontal: 10,
+              paddingVertical: 6,
+              gap: 3,
             }}
           >
-            <SmeltRow
-              rounded={false}
-              onPress={() => {
-                const target = peer()?.toId ?? peer()?.to_id;
-                if (target && props.onOpenConversation) props.onOpenConversation(target);
-              }}
-              style={{
-                flexDirection: "column",
-                alignItems: "stretch",
-                paddingHorizontal: 10,
-                paddingVertical: 6,
-                gap: 3,
-              }}
-            >
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                <SmeltIcon
-                  path={peer()?.spawned ? "icons/git-branch.svg" : "icons/arrow-right.svg"}
-                  size={12}
-                  color={peer()?.error ? look().palette.bad : look().palette.muted}
-                />
-                <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.text }}>
-                  {ct(peer()?.spawned ? "peer.spawned" : "peer.sent", {
-                    to: peer()?.toTitle || peer()?.to_title || peer()?.toId || peer()?.to_id || "",
-                  })}
-                </Text>
-              </View>
-              <If when={Boolean(peer()?.text)}>
-                <Text
-                  style={{
-                    paddingLeft: 18,
-                    fontSize: look().type.text_xsmall.size,
-                    color: look().palette.muted,
-                    numberOfLines: 2,
-                  }}
-                >
-                  {peer()?.text ?? ""}
-                </Text>
-              </If>
-              <If when={Boolean(peer()?.error)}>
-                <Text style={{ paddingLeft: 18, fontSize: look().type.text_xsmall.size, color: look().palette.bad }}>
-                  {peer()?.error ?? ""}
-                </Text>
-              </If>
-            </SmeltRow>
-          </View>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+              <SmeltIcon
+                path={peer()?.spawned ? "icons/git-branch.svg" : "icons/arrow-right.svg"}
+                size={12}
+                color={peer()?.error ? look().palette.bad : look().palette.muted}
+              />
+              <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.text }}>
+                {ct(peer()?.spawned ? "peer.spawned" : "peer.sent", {
+                  to: peer()?.toTitle || peer()?.to_title || peer()?.toId || peer()?.to_id || "",
+                })}
+              </Text>
+            </View>
+            <If when={Boolean(peer()?.text)}>
+              <Text
+                style={{
+                  paddingLeft: 18,
+                  fontSize: look().type.text_xsmall.size,
+                  color: look().palette.muted,
+                  numberOfLines: 2,
+                }}
+              >
+                {peer()?.text ?? ""}
+              </Text>
+            </If>
+            <If when={Boolean(peer()?.error)}>
+              <Text style={{ paddingLeft: 18, fontSize: look().type.text_xsmall.size, color: look().palette.bad }}>
+                {peer()?.error ?? ""}
+              </Text>
+            </If>
+          </SmeltRow>
         </If>
       }
     >
@@ -645,14 +638,16 @@ function ToolCallRow(props: {
           </If>
 
           {/* 改动文件差异胶囊 */}
-          <View style={{ paddingLeft: 22 }}>
-            <DiffFileChips
-              files={editFiles}
-              cwd={props.cwd}
-              machine={props.machine}
-              onOpenDiff={props.onOpenDiff}
-            />
-          </View>
+          <If when={editFiles().length > 0}>
+            <View style={{ paddingLeft: 22 }}>
+              <DiffFileChips
+                files={editFiles}
+                cwd={props.cwd}
+                machine={props.machine}
+                onOpenDiff={props.onOpenDiff}
+              />
+            </View>
+          </If>
 
           {/* Pi 子智能体派发卡片 */}
           <If when={(tc()?.subagents?.length ?? 0) > 0}>
@@ -665,56 +660,53 @@ function ToolCallRow(props: {
                   const status = computed(() => liveMatch()?.status ?? runItem().status ?? "completed");
                   const isRunning = computed(() => status() === "running" || status() === "pending");
                   return (
-                    <View
+                    <SmeltRow
+                      onPress={() =>
+                        props.onInspectSubagent({
+                          id: runItem().id,
+                          title: runItem().title || runItem().id,
+                        })
+                      }
                       style={{
                         borderRadius: look().radius.md,
                         borderWidth: 1,
                         borderColor: look().palette.hair,
                         backgroundColor: look().palette.surface,
-                        overflow: "hidden",
+                        paddingHorizontal: 10,
+                        paddingVertical: 6,
+                        gap: 8,
                       }}
                     >
-                      <SmeltRow
-                        rounded={false}
-                        onPress={() =>
-                          props.onInspectSubagent({
-                            id: runItem().id,
-                            title: runItem().title || runItem().id,
-                          })
-                        }
-                        style={{ paddingHorizontal: 10, paddingVertical: 6, gap: 8 }}
+                      <If
+                        when={isRunning()}
+                        else={<SmeltIcon path="icons/bot.svg" size={13} color={look().palette.muted} />}
                       >
-                        <If
-                          when={isRunning()}
-                          else={<SmeltIcon path="icons/bot.svg" size={13} color={look().palette.muted} />}
-                        >
-                          <SmeltIcon spin={props.visible()} size={12} color={look().palette.muted} />
-                        </If>
-                        <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
-                          <Text style={{ fontSize: look().type.small.size, color: look().palette.text, numberOfLines: 1 }}>
-                            {runItem().title || runItem().id}
-                          </Text>
-                          <If when={Boolean(liveMatch()?.lastActivity)}>
-                            <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.faint, numberOfLines: 1 }}>
-                              {liveMatch()?.lastActivity ?? ""}
-                            </Text>
-                          </If>
-                        </View>
-                        <Text
-                          style={{
-                            fontSize: look().type.text_xsmall.size,
-                            color:
-                              status() === "failed"
-                                ? look().palette.bad
-                                : isRunning()
-                                  ? look().palette.muted
-                                  : look().palette.faint,
-                          }}
-                        >
-                          {statusLabel(status())}
+                        <SmeltIcon spin={props.visible()} size={12} color={look().palette.muted} />
+                      </If>
+                      <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
+                        <Text style={{ fontSize: look().type.small.size, color: look().palette.text, numberOfLines: 1 }}>
+                          {runItem().title || runItem().id}
                         </Text>
-                      </SmeltRow>
-                    </View>
+                        <If when={Boolean(liveMatch()?.lastActivity)}>
+                          <Text style={{ fontSize: look().type.text_xsmall.size, color: look().palette.faint, numberOfLines: 1 }}>
+                            {liveMatch()?.lastActivity ?? ""}
+                          </Text>
+                        </If>
+                      </View>
+                      <Text
+                        style={{
+                          fontSize: look().type.text_xsmall.size,
+                          color:
+                            status() === "failed"
+                              ? look().palette.bad
+                              : isRunning()
+                                ? look().palette.muted
+                                : look().palette.faint,
+                        }}
+                      >
+                        {statusLabel(status())}
+                      </Text>
+                    </SmeltRow>
                   );
                 }}
               </Each>
@@ -996,8 +988,7 @@ export function MessageList(props: {
                                     : "opacity-0 group-hover/user:opacity-100 group-focus-within/user:opacity-100"
                                 }
                                 style={{
-                                  height: 24,
-                                  marginBottom: 8,
+                                  paddingBottom: 8,
                                   flexShrink: 0,
                                   flexDirection: "row",
                                   alignItems: "center",
@@ -1116,21 +1107,22 @@ export function MessageList(props: {
                               open={thoughtExpanded()}
                               style={{ width: "100%" }}
                               content={
-                                <View
-                                  style={{
-                                    marginTop: 4,
-                                    paddingLeft: 18,
-                                    borderLeftWidth: 2,
-                                    borderLeftColor: look().palette.hair,
-                                  }}
-                                >
-                                  <SmeltMarkdown
-                                    markdown={bodyText()}
-                                    streaming={isStreamingCell()}
-                                    cwd={props.cwd()}
-                                    machine={props.machine()}
-                                    styles={thoughtMarkdownStyles()}
-                                  />
+                                <View style={{ paddingTop: 4 }}>
+                                  <View
+                                    style={{
+                                      paddingLeft: 18,
+                                      borderLeftWidth: 2,
+                                      borderLeftColor: look().palette.hair,
+                                    }}
+                                  >
+                                    <SmeltMarkdown
+                                      markdown={bodyText()}
+                                      streaming={isStreamingCell()}
+                                      cwd={props.cwd()}
+                                      machine={props.machine()}
+                                      styles={thoughtMarkdownStyles()}
+                                    />
+                                  </View>
                                 </View>
                               }
                             >
@@ -1341,20 +1333,21 @@ export function MessageList(props: {
                             borderWidth: 1,
                             borderColor: look().palette.hair,
                             backgroundColor: look().palette.surface,
-                            overflow: "hidden",
                           }}
                           content={
-                            <Scroll style={{ maxHeight: 140, paddingLeft: 28, paddingRight: 10, marginBottom: 6 }}>
-                              <Text
-                                style={{
-                                  fontFamily: look().fonts?.mono,
-                                  fontSize: look().type.text_xsmall.size,
-                                  color: look().palette.muted,
-                                }}
-                              >
-                                {tail()}
-                              </Text>
-                            </Scroll>
+                            <View style={{ paddingBottom: 6 }}>
+                              <Scroll style={{ maxHeight: 140, paddingLeft: 28, paddingRight: 10 }}>
+                                <Text
+                                  style={{
+                                    fontFamily: look().fonts?.mono,
+                                    fontSize: look().type.text_xsmall.size,
+                                    color: look().palette.muted,
+                                  }}
+                                >
+                                  {tail()}
+                                </Text>
+                              </Scroll>
+                            </View>
                           }
                         >
                           {/* 有输出尾巴才能点开 */}
@@ -1367,7 +1360,6 @@ export function MessageList(props: {
                             }
                           >
                             <SmeltRow
-                              rounded={false}
                               onPress={() => toggleSet(expandedTaskNotes, noteKey())}
                               style={noteHeaderStyle}
                             >

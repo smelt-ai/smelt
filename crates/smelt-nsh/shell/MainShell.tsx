@@ -2,8 +2,8 @@
 // - 单引擎线程 + 单界面树（Core）承载全部页面、DockArea、浮动的左右停靠区开关与插件无头根；
 // - 每个面板通过外壳专用的 `<HostView>` 挂载（JS 插件走内部 `<Slot>`，Rust 视图走 `smelt.view`）；
 // - 不含任何具体功能或插件名称，完全按宿主推送的 `smelt.state.shell` 驱动。
-import { cleanup, computed, effect, host, Scroll, signal, Text, View } from "nsh";
-import { Button as BaseButton, DockArea } from "nsh/base";
+import { cleanup, computed, effect, host, List, signal, Text, View } from "nsh";
+import { DockArea } from "nsh/base";
 import { Slot } from "smelt/slots";
 import { HostSettingsPage, isHostSettingsPage, SettingsNavPanel } from "./HostSettings.tsx";
 import {
@@ -20,6 +20,7 @@ import {
   SmeltNativeView,
   SmeltNativeWindowBar,
   SmeltNativeWindowDrag,
+  SmeltRow,
   stableMemo,
   theme as currentTheme,
   views,
@@ -31,7 +32,6 @@ void initHost(["locale", "theme", "shell", "js_views", "views", "pages", "safe_a
 function HostView(props: {
   view: string;
   args?: unknown;
-  class?: string;
   style?: any;
 }) {
   const jsTargetKey = computed(() => {
@@ -52,35 +52,15 @@ function HostView(props: {
     view: props.view,
     args: props.args ?? null,
   }));
+  const viewStyle = () => props.style ?? { flex: 1 };
 
   return (
-    <View
-      class={props.class}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        minWidth: 0,
-        minHeight: 0,
-        ...(props.style ?? {}),
-      }}
+    <If
+      when={jsTargetKey() !== ""}
+      else={<SmeltNativeView spec={nativeSpec()} style={viewStyle()} />}
     >
-      <If
-        when={jsTargetKey() !== ""}
-        else={
-          <SmeltNativeView
-            spec={nativeSpec()}
-            style={{ flex: 1, minWidth: 0, minHeight: 0 }}
-          />
-        }
-      >
-        <Slot
-          id={jsPlugin()}
-          view={jsView()}
-          args={props.args}
-          style={{ flex: 1, width: "100%", height: "100%", minWidth: 0, minHeight: 0 }}
-        />
-      </If>
-    </View>
+      <Slot id={jsPlugin()} view={jsView()} args={props.args} style={viewStyle()} />
+    </If>
   );
 }
 
@@ -181,38 +161,28 @@ interface ShellSnapshot {
   };
 }
 
-function StackView(props: { node: StackNodeSpec }) {
+function StackView(props: { node: StackNodeSpec; style?: any }) {
   const vertical = props.node.axis === "vertical";
   return (
     <View
       style={{
-        display: "flex",
         flexDirection: vertical ? "column" : "row",
         flex: 1,
-        width: "100%",
-        height: "100%",
-        minWidth: 0,
-        minHeight: 0,
+        ...(props.style ?? {}),
       }}
     >
       {props.node.items.map((item) => {
         const fit = Boolean(item.fit);
         const itemStyle = vertical
           ? fit
-            ? { flexShrink: 0, flexGrow: 0, width: "100%", display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }
-            : { flex: 1, width: "100%", display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }
+            ? { flexShrink: 0, flexGrow: 0, width: "100%" }
+            : { flex: 1, width: "100%" }
           : fit
-            ? { flexShrink: 0, flexGrow: 0, height: "100%", display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }
-            : { flex: 1, height: "100%", display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 };
-        return (
-          <View style={itemStyle}>
-            {item.view ? (
-              <HostView view={item.view} style={{ flex: 1, width: "100%", height: "100%" }} />
-            ) : item.stack ? (
-              <StackView node={item.stack} />
-            ) : null}
-          </View>
-        );
+            ? { flexShrink: 0, flexGrow: 0, height: "100%" }
+            : { flex: 1, height: "100%" };
+        if (item.view) return <HostView view={item.view} style={itemStyle} />;
+        if (item.stack) return <StackView node={item.stack} style={itemStyle} />;
+        return null;
       })}
     </View>
   );
@@ -241,45 +211,23 @@ function OutletPanel(props: { pageKey: string }) {
   const rustSpec = stableMemo(() => ({ view: outlet()?.id ?? "" }));
 
   return (
-    <View style={{ display: "flex", flexDirection: "column", flex: 1, width: "100%", height: "100%", minWidth: 0, minHeight: 0 }}>
+    <View style={{ flex: 1 }}>
       {(() => {
         const mode = outletMode();
         if (mode === "managed") {
-          return (
-            <SmeltNativeView
-              spec={managedSpec}
-              style={{ flex: 1, width: "100%", height: "100%" }}
-            />
-          );
+          return <SmeltNativeView spec={managedSpec} style={{ flex: 1 }} />;
         }
         if (mode.startsWith("js-inst:")) {
           const rest = mode.slice(8);
           const id = rest.slice(0, rest.lastIndexOf(":"));
-          return (
-            <HostView
-              view={id}
-              args={outlet()?.args}
-              style={{ flex: 1, width: "100%", height: "100%" }}
-            />
-          );
+          return <HostView view={id} args={outlet()?.args} style={{ flex: 1 }} />;
         }
         if (mode.startsWith("js:")) {
           const id = mode.slice(3);
-          return (
-            <HostView
-              view={id}
-              args={outlet()?.args}
-              style={{ flex: 1, width: "100%", height: "100%" }}
-            />
-          );
+          return <HostView view={id} args={outlet()?.args} style={{ flex: 1 }} />;
         }
         if (mode.startsWith("rust:")) {
-          return (
-            <SmeltNativeView
-              spec={rustSpec()}
-              style={{ flex: 1, width: "100%", height: "100%" }}
-            />
-          );
+          return <SmeltNativeView spec={rustSpec()} style={{ flex: 1 }} />;
         }
         if (mode === "empty-bar") {
           return (
@@ -310,7 +258,7 @@ function SettingsContentPanel() {
   );
 
   return (
-    <View style={{ display: "flex", flexDirection: "column", flex: 1, width: "100%", height: "100%", minWidth: 0, minHeight: 0 }}>
+    <View style={{ flex: 1 }}>
       <View
         style={{
           position: "relative",
@@ -319,19 +267,17 @@ function SettingsContentPanel() {
           height: area().title_bar ? TOP_BAR_HEIGHT : undefined,
           paddingLeft: (area().top_bar_insets?.left ?? 0) + 20,
           paddingRight: (area().top_bar_insets?.right ?? 0) + 20,
-          paddingTop: area().title_bar ? 0 : 8,
-          paddingBottom: area().title_bar ? 0 : 8,
+          paddingVertical: area().title_bar ? 0 : 8,
           borderBottomWidth: 1,
           borderBottomColor: theme().palette.hair,
-          display: "flex",
           flexDirection: "row",
           alignItems: "center",
         }}
       >
         <If when={area().title_bar}>
-          <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0 }}>
-            <SmeltNativeWindowDrag style={{ width: "100%", height: "100%" }} />
-          </View>
+          <SmeltNativeWindowDrag
+            style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0 }}
+          />
         </If>
         <If when={settingsId() !== ""}>
           <Text
@@ -348,7 +294,7 @@ function SettingsContentPanel() {
           </Text>
         </If>
       </View>
-      <View style={{ flex: 1, minHeight: 0, minWidth: 0, display: "flex", flexDirection: "column" }}>
+      <View style={{ flex: 1 }}>
         <If
           when={settingsId() !== ""}
           else={
@@ -361,7 +307,7 @@ function SettingsContentPanel() {
         >
           <If
             when={isHostSettingsPage(settingsId())}
-            else={<HostView view={settingsId()} style={{ flex: 1, width: "100%", height: "100%" }} />}
+            else={<HostView view={settingsId()} style={{ flex: 1 }} />}
           >
             <HostSettingsPage pageId={settingsId()} />
           </If>
@@ -381,7 +327,7 @@ function PanelBody(props: { pageKey: string; panelId: string }) {
     return { kind: "view" as const, view: String(m.view ?? "") };
   });
   return (
-    <View style={{ display: "flex", flexDirection: "column", flex: 1, width: "100%", height: "100%", minWidth: 0, minHeight: 0 }}>
+    <View style={{ flex: 1 }}>
       {(() => {
         const spec = bodySpec();
         if (spec.kind === "placeholder") return null;
@@ -389,7 +335,7 @@ function PanelBody(props: { pageKey: string; panelId: string }) {
         if (spec.view === "smelt/outlet") return <OutletPanel pageKey={props.pageKey} />;
         if (spec.view === "smelt/settings") return <SettingsContentPanel />;
         if (spec.view === "smelt/settings-nav") return <SettingsNavPanel />;
-        return <HostView view={spec.view} style={{ flex: 1, width: "100%", height: "100%" }} />;
+        return <HostView view={spec.view} style={{ flex: 1 }} />;
       })()}
     </View>
   );
@@ -445,13 +391,9 @@ function TabItem(props: { pageKey: string; panelId: string; active: boolean }) {
     <View
       style={{
         height: TOP_BAR_HEIGHT - 8,
-        paddingLeft: 8,
-        paddingRight: 8,
-        marginLeft: 2,
-        marginRight: 2,
+        paddingHorizontal: 8,
         borderRadius: theme().radius.row,
         backgroundColor: props.active ? theme().palette.row_selected : "transparent",
-        display: "flex",
         flexDirection: "row",
         alignItems: "center",
         gap: 4,
@@ -472,11 +414,9 @@ function TabItem(props: { pageKey: string; panelId: string; active: boolean }) {
         <View
           class="rounded-full"
           style={{
-            paddingLeft: 5,
-            paddingRight: 5,
+            paddingHorizontal: 5,
             height: 16,
             backgroundColor: theme().palette.soft,
-            display: "flex",
             alignItems: "center",
             justifyContent: "center",
           }}
@@ -525,7 +465,6 @@ function TabBarTrailing(props: {
   return (
     <View
       style={{
-        display: "flex",
         flexDirection: "row",
         alignItems: "center",
         width: "100%",
@@ -538,16 +477,15 @@ function TabBarTrailing(props: {
         </If>
       </View>
       <If when={trailing().canZoom}>
-        <View style={{ flexShrink: 0, paddingRight: 4 }}>
-          <SmeltButton
-            variant="quiet"
-            size="sm"
-            selected={props.zoomed}
-            icon={props.zoomed ? "icons/minimize.svg" : "icons/maximize.svg"}
-            tooltip={props.zoomed ? trailing().restoreLabel : trailing().zoomLabel}
-            onPress={props.onToggleZoom}
-          />
-        </View>
+        <SmeltButton
+          variant="quiet"
+          size="sm"
+          class="shrink-0 mr-1"
+          selected={props.zoomed}
+          icon={props.zoomed ? "icons/minimize.svg" : "icons/maximize.svg"}
+          tooltip={props.zoomed ? trailing().restoreLabel : trailing().zoomLabel}
+          onPress={props.onToggleZoom}
+        />
       </If>
       <If when={trailing().right > 0}>
         <View style={{ width: trailing().right, height: TOP_BAR_HEIGHT, flexShrink: 0 }}>
@@ -605,7 +543,18 @@ function PageWorkspace(props: { pageKey: string }) {
   const theme = currentTheme;
   const labels = stableMemo(() => (shellState() as ShellSnapshot | undefined)?.labels);
   const padding = computed(() => (shellState() as ShellSnapshot | undefined)?.padding ?? 0);
-  const hasBackdrop = computed(() => Boolean((shellState() as any)?.has_backdrop));
+  const backdropPlacements = stableMemo<string[]>(
+    () => (shellState() as any)?.backdrop_placements ?? [],
+  );
+  const hasAnyBackdrop = computed(() => backdropPlacements().length > 0);
+  const renderRegionBackdrop = (placement: string) => (
+    <If when={backdropPlacements().includes(placement)}>
+      <SmeltBackdropRegion
+        placement={placement}
+        style={{ width: "100%", height: "100%", pointerEvents: "none" }}
+      />
+    </If>
+  );
 
   const reportLayout = (event: { layout?: any } | any) => {
     const nextLayout = event?.layout ?? event;
@@ -627,35 +576,34 @@ function PageWorkspace(props: { pageKey: string }) {
     <View
       style={{
         position: "absolute",
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
+        top: padding(),
+        left: padding(),
+        right: padding(),
+        bottom: padding(),
         display: pageActive() ? "flex" : "none",
-        flexDirection: "column",
-        padding: padding(),
       }}
     >
       <If when={hasPage()}>
-        <View style={{ position: "relative", flex: 1, minHeight: 0, minWidth: 0, display: "flex" }}>
-          <DockArea
-            ref={(api: any) => {
-              dockRef = api;
-            }}
-            style={{ flex: 1, width: "100%", height: "100%" }}
-            compact={false}
-            layout={dockLayout()}
-            panels={dockPanels()}
-            onLayoutChange={reportLayout}
-            onZoomChange={reportZoom}
-            tabBarStyle={{
-              flexDirection: "row",
-              alignItems: "center",
-              height: TOP_BAR_HEIGHT,
-              flexShrink: 0,
-              borderBottomWidth: 1,
-              borderBottomColor: theme().palette.hair,
-            }}
+        <DockArea
+          ref={(api: any) => {
+            dockRef = api;
+          }}
+          style={{ flex: 1 }}
+          compact={false}
+          layout={dockLayout()}
+          panels={dockPanels()}
+          onLayoutChange={reportLayout}
+          onZoomChange={reportZoom}
+          tabBarStyle={{
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 4,
+            paddingHorizontal: 2,
+            height: TOP_BAR_HEIGHT,
+            flexShrink: 0,
+            borderBottomWidth: 1,
+            borderBottomColor: theme().palette.hair,
+          }}
             handleStyle={{
               backgroundColor: theme().palette.hair,
             }}
@@ -665,16 +613,7 @@ function PageWorkspace(props: { pageKey: string }) {
               borderColor: theme().palette.focus,
               borderRadius: theme().radius.md,
             }}
-            renderRegionBackdrop={
-              hasBackdrop()
-                ? (placement: string) => (
-                    <SmeltBackdropRegion
-                      placement={placement}
-                      style={{ width: "100%", height: "100%", pointerEvents: "none" }}
-                    />
-                  )
-                : undefined
-            }
+            renderRegionBackdrop={hasAnyBackdrop() ? renderRegionBackdrop : undefined}
             renderTabBarLeading={(group: any) => (
               <TabBarLeading pageKey={props.pageKey} groupId={String(group.id)} />
             )}
@@ -705,7 +644,6 @@ function PageWorkspace(props: { pageKey: string }) {
                 top: 0,
                 left: leftToggleX(),
                 height: TOP_BAR_HEIGHT,
-                display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
               }}
@@ -732,7 +670,6 @@ function PageWorkspace(props: { pageKey: string }) {
                 top: 0,
                 right: WINDOW_EDGE_MARGIN,
                 height: TOP_BAR_HEIGHT,
-                display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
               }}
@@ -751,7 +688,6 @@ function PageWorkspace(props: { pageKey: string }) {
               />
             </View>
           </If>
-        </View>
       </If>
     </View>
   );
@@ -770,11 +706,11 @@ function HostDialogs() {
   const picker = computed(() => dialogs()?.dir_picker ?? null);
   const confirm = computed(() => dialogs()?.confirm ?? null);
 
-  let dirScrollRef: any = null;
+  let dirListRef: any = null;
   effect(() => {
     const rev = picker()?.list_rev ?? 0;
     if (rev > 0) {
-      dirScrollRef?.scrollTo?.({ y: 0, animated: false });
+      dirListRef?.scrollToIndex?.({ index: 0, animated: false });
     }
   });
 
@@ -939,105 +875,67 @@ function HostDialogs() {
 
           <If when={dirBodyKind() === "list"}>
             <View
-              style={{
-                height: 320,
-                display: "flex",
-                flexDirection: "column",
-                overflow: "hidden",
-                borderWidth: 1,
-                borderColor: theme().palette.hair,
-                borderRadius: theme().radius.row,
-              }}
+              class="rounded-(--radius-row) border border-border"
+              style={{ height: 320 }}
             >
-              <Scroll
+              <List
                 ref={(api: any) => {
-                  dirScrollRef = api;
+                  dirListRef = api;
                 }}
-                style={{ flex: 1, width: "100%", height: "100%" }}
+                each={picker()?.entries ?? []}
+                keyExtractor={(e: DirPickerEntrySnapshot) => e.path}
+                estimatedItemSize={32}
+                style={{ flex: 1 }}
+                contentStyle={{ padding: 4, gap: 2 }}
               >
-                <View style={{ display: "flex", flexDirection: "column", width: "100%" }}>
-                  <Each of={picker()?.entries ?? []} key={(e: DirPickerEntrySnapshot) => e.path}>
-                    {(entry: () => DirPickerEntrySnapshot) => (
-                      <View
-                        style={{
-                          display: "flex",
-                          flexDirection: "row",
-                          alignItems: "center",
-                          width: "100%",
-                          backgroundColor: entry().selected
-                            ? theme().palette.row_selected
-                            : "transparent",
+                {(entry: () => DirPickerEntrySnapshot) => (
+                  <SmeltRow
+                    selected={entry().selected}
+                    onPress={() => {
+                      const item = entry();
+                      sendHostDialogAction(
+                        item.is_dir ? "dir_picker_navigate" : "dir_picker_toggle",
+                        item.path,
+                      );
+                    }}
+                    style={{ height: 30, paddingHorizontal: 8, gap: 8 }}
+                  >
+                    <SmeltIcon
+                      path={entry().is_dir ? "icons/folder.svg" : "icons/file.svg"}
+                      size={14}
+                      color={theme().palette.muted}
+                    />
+                    <Text
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        fontSize: theme().type.ui.size,
+                        lineHeight: theme().type.ui.line_height,
+                        color: theme().palette.text,
+                        numberOfLines: 1,
+                      }}
+                    >
+                      {entry().name}
+                    </Text>
+                    <If when={Boolean(picker()?.multiple && entry().is_dir)}>
+                      <SmeltButton
+                        variant="quiet"
+                        size="sm"
+                        icon={entry().selected ? "icons/check.svg" : "icons/plus.svg"}
+                        tooltip={
+                          entry().selected
+                            ? picker()?.deselect_tooltip ?? ""
+                            : picker()?.select_tooltip ?? ""
+                        }
+                        onPress={(e: any) => {
+                          e?.stopPropagation?.();
+                          sendHostDialogAction("dir_picker_toggle", entry().path);
                         }}
-                      >
-                        <BaseButton
-                          onPress={() => {
-                            const item = entry();
-                            sendHostDialogAction(
-                              item.is_dir ? "dir_picker_navigate" : "dir_picker_toggle",
-                              item.path,
-                            );
-                          }}
-                          style={{
-                            flex: 1,
-                            minWidth: 0,
-                            display: "flex",
-                            flexDirection: "row",
-                            alignItems: "center",
-                            gap: 8,
-                            paddingLeft: 12,
-                            paddingRight: 12,
-                            paddingTop: 6,
-                            paddingBottom: 6,
-                            backgroundColor: "transparent",
-                            cursor: "default",
-                          }}
-                          hoverStyle={{
-                            backgroundColor: entry().selected
-                              ? theme().palette.row_selected
-                              : theme().palette.row_hover,
-                          }}
-                          activeStyle={{
-                            backgroundColor: theme().palette.row_selected,
-                          }}
-                        >
-                          <SmeltIcon
-                            path={entry().is_dir ? "icons/folder.svg" : "icons/file.svg"}
-                            size={14}
-                            color={theme().palette.muted}
-                          />
-                          <Text
-                            style={{
-                              flex: 1,
-                              minWidth: 0,
-                              fontSize: theme().type.ui.size,
-                              lineHeight: theme().type.ui.line_height,
-                              color: theme().palette.text,
-                              numberOfLines: 1,
-                            }}
-                          >
-                            {entry().name}
-                          </Text>
-                        </BaseButton>
-                        <If when={Boolean(picker()?.multiple && entry().is_dir)}>
-                          <View style={{ flexShrink: 0, paddingRight: 8 }}>
-                            <SmeltButton
-                              variant="quiet"
-                              size="sm"
-                              icon={entry().selected ? "icons/check.svg" : "icons/plus.svg"}
-                              tooltip={
-                                entry().selected
-                                  ? picker()?.deselect_tooltip ?? ""
-                                  : picker()?.select_tooltip ?? ""
-                              }
-                              onPress={() => sendHostDialogAction("dir_picker_toggle", entry().path)}
-                            />
-                          </View>
-                        </If>
-                      </View>
-                    )}
-                  </Each>
-                </View>
-              </Scroll>
+                      />
+                    </If>
+                  </SmeltRow>
+                )}
+              </List>
             </View>
           </If>
 

@@ -74,12 +74,9 @@ function DetailDisclosure(props: {
         accessibilityLabel={props.title}
         onPress={() => toggleRunDetailBlock(props.blockKey)}
         style={{
-          width: "100%",
           height: 24,
-          marginLeft: -6,
-          marginRight: -6,
-          paddingLeft: 6,
-          paddingRight: 6,
+          marginHorizontal: -6,
+          paddingHorizontal: 6,
           gap: 6,
         }}
       >
@@ -193,14 +190,10 @@ function ToolOutputPartsView(props: {
                   <View
                     style={{
                       width: "100%",
-                      minWidth: 0,
                       borderRadius: look().radius.md,
                       borderWidth: 1,
                       borderColor: look().palette.hair,
                       backgroundColor: look().palette.surface,
-                      overflow: "hidden",
-                      display: "flex",
-                      flexDirection: "column",
                     }}
                   >
                     <If when={Boolean(p().path)}>
@@ -296,13 +289,9 @@ function TranscriptStep(props: {
 
   // 可展开的步骤整行可点；不可展开的只是一行字，不做成按钮（不进 Tab 序、无悬停）。
   const stepRowStyle = {
-    width: "100%",
     minHeight: 24,
-    marginLeft: -6,
-    marginRight: -6,
-    paddingLeft: 6,
-    paddingRight: 6,
-    display: "flex",
+    marginHorizontal: -6,
+    paddingHorizontal: 6,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,

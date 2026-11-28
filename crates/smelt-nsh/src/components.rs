@@ -18,12 +18,25 @@ pub(crate) const WINDOW_DRAG: &str = "smelt.window-drag";
 pub(crate) const BACKDROP_REGION: &str = "smelt.backdrop-region";
 
 /// 主窗口材质分块的方位。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BackdropPlacement {
     Center,
     Left,
     Right,
     Bottom,
+}
+
+impl BackdropPlacement {
+    pub const ALL: [Self; 4] = [Self::Center, Self::Left, Self::Right, Self::Bottom];
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Center => "center",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Bottom => "bottom",
+        }
+    }
 }
 
 /// 记录单块 Dock 区域坐标的回调类型（`None` 表示该区域已收起或无面积）。

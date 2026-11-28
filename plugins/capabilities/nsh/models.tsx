@@ -1,7 +1,17 @@
 // 设置「模型」页：默认模型、推理强度、服务商凭据与自定义服务商、原生配置文件。
 
 import { computed, Text, View } from "nsh";
-import { SmeltButton, SmeltInput, SmeltMenuItem, SmeltMenuSeparator, t } from "smelt/sdk";
+import {
+  SmeltButton,
+  SmeltInput,
+  SmeltMenuItem,
+  SmeltMenuSeparator,
+  SmeltPageScroll,
+  SmeltSection,
+  SmeltSectionCell,
+  SmeltSettingRow,
+  t,
+} from "smelt/sdk";
 import {
   authStatusConfigured,
   authStatusNote,
@@ -28,10 +38,6 @@ import {
   BadgePill,
   DropdownMenuButton,
   MenuSub,
-  SectionCell,
-  SettingsPageShell,
-  SettingsRow,
-  SettingsSection,
   StatusLine,
   TextField,
 } from "./ui.tsx";
@@ -41,22 +47,22 @@ export function ModelsTab(props: { page: PageController }) {
   const failed = computed(() => cfg() == null && props.page.piConfigError() != null);
 
   return (
-    <SettingsPageShell>
+    <SmeltPageScroll>
       <If
         when={cfg() != null}
         else={
-          <SettingsSection>
-            <SectionCell>
+          <SmeltSection>
+            <SmeltSectionCell>
               <StatusLine text={props.page.pendingText()} error={failed()} />
-            </SectionCell>
-          </SettingsSection>
+            </SmeltSectionCell>
+          </SmeltSection>
         }
       >
         <DefaultModelSection page={props.page} />
         <ProvidersSection page={props.page} />
         <NativeFilesSection page={props.page} />
       </If>
-    </SettingsPageShell>
+    </SmeltPageScroll>
   );
 }
 
@@ -99,20 +105,20 @@ function DefaultModelSection(props: { page: PageController }) {
   const editing = computed(() => props.page.modelEditor() != null);
 
   return (
-    <SettingsSection>
+    <SmeltSection>
       <If
         when={modelResult().ok}
         else={
-          <SectionCell>
+          <SmeltSectionCell>
             <StatusLine
               text={t("default_model.read_failed", { error: (modelResult() as any).error ?? "" })}
               error={true}
             />
-          </SectionCell>
+          </SmeltSectionCell>
         }
       >
-        <SectionCell>
-          <SettingsRow
+        <SmeltSectionCell>
+          <SmeltSettingRow
             title={t("default_model.title")}
             description={current() == null ? t("default_model.auto_description") : null}
           >
@@ -158,29 +164,29 @@ function DefaultModelSection(props: { page: PageController }) {
                 onSelect={() => props.page.openManualModelEditor()}
               />
             </DropdownMenuButton>
-          </SettingsRow>
-        </SectionCell>
+          </SmeltSettingRow>
+        </SmeltSectionCell>
 
         <If when={props.page.modelEditor() != null}>
-          <SectionCell divider={true}>
+          <SmeltSectionCell divider={true}>
             <ManualModelForm
               page={props.page}
               draft={() => props.page.modelEditor()!}
             />
-          </SectionCell>
+          </SmeltSectionCell>
         </If>
 
         <If when={props.page.defaultError() != null}>
-          <SectionCell divider={true}>
+          <SmeltSectionCell divider={true}>
             <StatusLine
               text={t("common.action_failed", { error: props.page.defaultError() ?? "" })}
               error={true}
             />
-          </SectionCell>
+          </SmeltSectionCell>
         </If>
 
-        <SectionCell divider={true}>
-          <SettingsRow title={t("default_model.thinking")}>
+        <SmeltSectionCell divider={true}>
+          <SmeltSettingRow title={t("default_model.thinking")}>
             <DropdownMenuButton label={thinkingLabel()} align="end" minWidth={140}>
               <Each of={PI_THINKING_LEVELS} key={(lv: string) => lv}>
                 {(lv: () => string) => (
@@ -192,10 +198,10 @@ function DefaultModelSection(props: { page: PageController }) {
                 )}
               </Each>
             </DropdownMenuButton>
-          </SettingsRow>
-        </SectionCell>
+          </SmeltSettingRow>
+        </SmeltSectionCell>
       </If>
-    </SettingsSection>
+    </SmeltSection>
   );
 }
 
@@ -314,14 +320,14 @@ function ProvidersSection(props: { page: PageController }) {
   });
 
   return (
-    <SettingsSection title={t("providers.title")}>
+    <SmeltSection title={t("providers.title")}>
       <If when={props.page.authError() != null}>
-        <SectionCell>
+        <SmeltSectionCell>
           <StatusLine
             text={t("common.action_failed", { error: props.page.authError() ?? "" })}
             error={true}
           />
-        </SectionCell>
+        </SmeltSectionCell>
       </If>
 
       <Each of={merged().entries} key={(entry: any) => `${entry.kind}:${entry.id}`}>
@@ -334,7 +340,7 @@ function ProvidersSection(props: { page: PageController }) {
           };
           return (
             <>
-              <SectionCell divider={needsDivider()}>
+              <SmeltSectionCell divider={needsDivider()}>
                 <If
                   when={entry().kind === "builtin"}
                   else={
@@ -352,19 +358,19 @@ function ProvidersSection(props: { page: PageController }) {
                     busy={busy}
                   />
                 </If>
-              </SectionCell>
+              </SmeltSectionCell>
               <If when={isLoginTarget()}>
-                <SectionCell divider={true}>
+                <SmeltSectionCell divider={true}>
                   <LoginPanel page={props.page} view={() => providerLogin()!} />
-                </SectionCell>
+                </SmeltSectionCell>
               </If>
               <If when={isEditingCustom()}>
-                <SectionCell divider={true}>
+                <SmeltSectionCell divider={true}>
                   <CustomProviderForm
                     page={props.page}
                     draft={() => props.page.customProviderEditor()!}
                   />
-                </SectionCell>
+                </SmeltSectionCell>
               </If>
             </>
           );
@@ -373,14 +379,14 @@ function ProvidersSection(props: { page: PageController }) {
 
       {/* 登录中的服务商若被折叠，面板依然显示 */}
       <If when={orphanLogin() != null}>
-        <SectionCell divider={merged().entries.length > 0 || props.page.authError() != null}>
+        <SmeltSectionCell divider={merged().entries.length > 0 || props.page.authError() != null}>
           <LoginPanel page={props.page} view={() => orphanLogin()!} />
-        </SectionCell>
+        </SmeltSectionCell>
       </If>
 
       {/* 新建自定义服务商表单 */}
       <If when={addingCustom()}>
-        <SectionCell
+        <SmeltSectionCell
           divider={
             merged().entries.length > 0 ||
             props.page.authError() != null ||
@@ -391,11 +397,11 @@ function ProvidersSection(props: { page: PageController }) {
             page={props.page}
             draft={() => props.page.customProviderEditor()!}
           />
-        </SectionCell>
+        </SmeltSectionCell>
       </If>
 
       {/* 底部：凭据助手状态 / 展开全部 + 添加自定义服务商 */}
-      <SectionCell
+      <SmeltSectionCell
         divider={
           merged().entries.length > 0 ||
           props.page.authError() != null ||
@@ -461,8 +467,8 @@ function ProvidersSection(props: { page: PageController }) {
             onPress={() => props.page.openCustomProviderEditor(null)}
           />
         </View>
-      </SectionCell>
-    </SettingsSection>
+      </SmeltSectionCell>
+    </SmeltSection>
   );
 }
 
@@ -481,7 +487,7 @@ function BuiltinProviderRow(props: {
   const hasMore = () => showReauth() || showStepByStep() || showApiKeyMenu() || configured();
 
   return (
-    <SettingsRow title={props.provider().name} note={authStatusNote(props.provider(), t)}>
+    <SmeltSettingRow title={props.provider().name} note={authStatusNote(props.provider(), t)}>
       <If when={!configured() && props.provider().supportsOauth}>
         <SmeltButton
           size="sm"
@@ -573,7 +579,7 @@ function BuiltinProviderRow(props: {
           </If>
         </DropdownMenuButton>
       </If>
-    </SettingsRow>
+    </SmeltSettingRow>
   );
 }
 
@@ -585,7 +591,7 @@ function CustomProviderRow(props: {
 }) {
   const title = () => nonEmptyOr(props.provider().displayName, props.provider().id);
   return (
-    <SettingsRow
+    <SmeltSettingRow
       title={title()}
       note={customProviderNote(props.provider(), props.isAuto(), t)}
     >
@@ -608,7 +614,7 @@ function CustomProviderRow(props: {
           onSelect={() => props.page.requestRemoveCustomProvider(props.provider().id, title())}
         />
       </DropdownMenuButton>
-    </SettingsRow>
+    </SmeltSettingRow>
   );
 }
 
@@ -958,9 +964,9 @@ function NativeFilesSection(props: { page: PageController }) {
   const isRemote = computed(() => props.page.machine() !== null);
 
   return (
-    <SettingsSection>
-      <SectionCell>
-        <SettingsRow
+    <SmeltSection>
+      <SmeltSectionCell>
+        <SmeltSettingRow
           title={t("config.native_files")}
           description={
             isRemote() ? t("config.remote_file", { name: props.page.currentMachineName() }) : null
@@ -998,8 +1004,8 @@ function NativeFilesSection(props: { page: PageController }) {
             tooltip={t("config.reload_tooltip")}
             onPress={() => props.page.refreshSettingsAndAuth()}
           />
-        </SettingsRow>
-      </SectionCell>
-    </SettingsSection>
+        </SmeltSettingRow>
+      </SmeltSectionCell>
+    </SmeltSection>
   );
 }

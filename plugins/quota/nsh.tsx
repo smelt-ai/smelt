@@ -1,5 +1,5 @@
 // 账户额度（NSH A2 独立 VM 版本）：复用纯逻辑 model.js 与 contract.js，使用 NSH <Canvas> 画抗锯齿额度环。
-import { Canvas, computed, Scroll, signal, Text, View } from "nsh";
+import { Canvas, computed, signal, Text, View } from "nsh";
 import {
   bootTask,
   call,
@@ -12,8 +12,12 @@ import {
   safeArea,
   SmeltButton,
   SmeltIcon,
+  SmeltPageScroll,
   SmeltPopover,
   SmeltRow,
+  SmeltSection,
+  SmeltSectionCell,
+  SmeltSettingRow,
   SmeltSwitch,
   SmeltTooltip,
   t,
@@ -535,98 +539,30 @@ export function settings() {
   });
 
   return (
-    <Scroll style={{ flex: 1, width: "100%", height: "100%" }}>
-      <View
-        style={{
-          maxWidth: 680,
-          width: "100%",
-          padding: 24,
-          display: "flex",
-          flexDirection: "column",
-          gap: 16,
-        }}
-      >
-        <View
-          style={{
-            borderRadius: look().radius.md,
-            borderWidth: 1,
-            borderColor: look().palette.hair,
-            backgroundColor: look().palette.surface,
-            display: "flex",
-            flexDirection: "column",
-          }}
-        >
-          {current().error != null ? (
-            <View
-              style={{
-                padding: 14,
-                borderBottomWidth: 1,
-                borderBottomColor: look().palette.hair,
-                display: "flex",
-                flexDirection: "row",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 12,
-              }}
-            >
-              <Text style={{ fontSize: look().type.ui.size, color: look().palette.text }}>
-                {t("read_failed")}
-              </Text>
-              <Text
-                style={{
-                  maxWidth: 320,
-                  fontSize: look().type.text_xsmall.size,
-                  color: look().palette.muted,
-                  numberOfLines: 1,
-                }}
-              >
-                {current().error}
-              </Text>
-            </View>
-          ) : null}
+    <SmeltPageScroll>
+      <SmeltSection>
+        <If when={current().error != null}>
+          <SmeltSectionCell>
+            <SmeltSettingRow title={t("read_failed")} description={current().error ?? undefined} />
+          </SmeltSectionCell>
+        </If>
 
-          <Each of={current().providers} key={(p: any) => p.target}>
-            {(provider: () => any) => {
-              const target = () => quotaTarget(provider().target);
-              const facts = () => {
-                version();
-                return setting_row(quotaState, provider());
-              };
-              const p = () => look().palette;
-              const desc = () =>
-                facts().denied ? t("keychain_denied") : facts().enabled ? facts().error : null;
-              return target() ? (
-                <View
-                  style={{
-                    paddingLeft: 14,
-                    paddingRight: 14,
-                    paddingTop: 12,
-                    paddingBottom: 12,
-                    borderBottomWidth: 1,
-                    borderBottomColor: p().hair,
-                    display: "flex",
-                    flexDirection: "row",
-                    alignItems: "center",
-                    gap: 12,
-                  }}
+        <Each of={current().providers} key={(p: any) => p.target}>
+          {(provider: () => any, index: () => number) => {
+            const target = () => quotaTarget(provider().target);
+            const facts = () => {
+              version();
+              return setting_row(quotaState, provider());
+            };
+            const desc = () =>
+              facts().denied ? t("keychain_denied") : facts().enabled ? facts().error : null;
+            return target() ? (
+              <SmeltSectionCell divider={index() > 0 || current().error != null}>
+                <SmeltSettingRow
+                  title={target()!.name}
+                  description={desc()}
+                  clampDescription={2}
                 >
-                  <View style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-                    <Text style={{ fontSize: look().type.ui.size, color: p().text }}>
-                      {target()!.name}
-                    </Text>
-                    {desc() ? (
-                      <Text
-                        style={{
-                          fontSize: look().type.text_xsmall.size,
-                          color: p().muted,
-                          numberOfLines: 2,
-                        }}
-                      >
-                        {desc()}
-                      </Text>
-                    ) : null}
-                  </View>
-
                   {facts().denied ? (
                     <SmeltButton
                       variant="quiet"
@@ -651,13 +587,13 @@ export function settings() {
                     accessibilityLabel={t("enable_label", { name: target()!.name })}
                     onChange={(checked: boolean) => setEnabled(facts().id, Boolean(checked))}
                   />
-                </View>
-              ) : null;
-            }}
-          </Each>
-        </View>
-      </View>
-    </Scroll>
+                </SmeltSettingRow>
+              </SmeltSectionCell>
+            ) : null;
+          }}
+        </Each>
+      </SmeltSection>
+    </SmeltPageScroll>
   );
 }
 

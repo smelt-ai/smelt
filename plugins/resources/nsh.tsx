@@ -10,7 +10,7 @@
 //   每 2s 采一轮；
 // - 可见期间收到 `sessions_changed` / `machines_changed` / `locale_changed` 立即重建快照。
 
-import { cleanup, computed, effect, Scroll, signal, Text, View } from "nsh";
+import { cleanup, computed, effect, signal, Text, View } from "nsh";
 import {
   bootTask,
   call,
@@ -26,7 +26,9 @@ import {
   SmeltDisclosure,
   SmeltDisclosureChevron,
   SmeltIcon,
+  SmeltPageScroll,
   SmeltRow,
+  SmeltSection,
   SmeltVector,
   t,
   text,
@@ -268,61 +270,6 @@ bootTask(async () => {
 
 // ---- 界面组件 ----
 
-function SectionCard(props: { title: string; description?: string; children?: any }) {
-  const look = theme;
-  return (
-    <View style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <View
-        style={{
-          paddingLeft: 16,
-          paddingRight: 16,
-          display: "flex",
-          flexDirection: "column",
-          gap: 2,
-        }}
-      >
-        <Text
-          style={{
-            fontSize: look().type.ui_medium.size,
-            lineHeight: look().type.ui_medium.line_height,
-            fontWeight: look().type.ui_medium.weight,
-            color: look().palette.muted,
-          }}
-        >
-          {props.title}
-        </Text>
-        <If when={Boolean(props.description)}>
-          <Text
-            style={{
-              fontSize: look().type.text_xsmall.size,
-              lineHeight: look().type.text_xsmall.line_height,
-              color: look().palette.muted,
-            }}
-          >
-            {props.description ?? ""}
-          </Text>
-        </If>
-      </View>
-      <View
-        style={{
-          borderRadius: look().radius.lg,
-          borderWidth: 1,
-          borderColor: look().palette.hair,
-          backgroundColor: look().palette.surface,
-          paddingLeft: 16,
-          paddingRight: 16,
-          paddingTop: 12,
-          paddingBottom: 12,
-          display: "flex",
-          flexDirection: "column",
-        }}
-      >
-        {props.children}
-      </View>
-    </View>
-  );
-}
-
 function Disclosure(props: { open: boolean }) {
   const look = theme;
   return (
@@ -494,7 +441,7 @@ function SummarySection() {
   });
 
   return (
-    <SectionCard title={t("summary.title")} description={t("summary.refresh")}>
+    <SmeltSection cardStyle={{ paddingHorizontal: 16, paddingVertical: 12 }} title={t("summary.title")} description={t("summary.refresh")}>
       <If
         when={local() != null}
         else={
@@ -571,7 +518,7 @@ function SummarySection() {
           </Text>
         </View>
       </If>
-    </SectionCard>
+    </SmeltSection>
   );
 }
 
@@ -594,7 +541,7 @@ function MachineSection(props: { section: () => any }) {
   });
 
   return (
-    <SectionCard title={props.section().name}>
+    <SmeltSection cardStyle={{ paddingHorizontal: 16, paddingVertical: 12 }} title={props.section().name}>
       <View style={{ display: "flex", flexDirection: "column", width: "100%" }}>
         {/* 列头 */}
         <View
@@ -972,7 +919,7 @@ function MachineSection(props: { section: () => any }) {
           </View>
         </If>
       </View>
-    </SectionCard>
+    </SmeltSection>
   );
 }
 
@@ -987,34 +934,11 @@ export function main() {
   const snap = computed(() => snapshot());
 
   return (
-    <Scroll style={{ flex: 1, width: "100%", height: "100%" }}>
-      <View
-        style={{
-          width: "100%",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-        }}
-      >
-        <View
-          style={{
-            maxWidth: 720,
-            width: "100%",
-            paddingLeft: 24,
-            paddingRight: 24,
-            paddingTop: 16,
-            paddingBottom: 32,
-            display: "flex",
-            flexDirection: "column",
-            gap: 24,
-          }}
-        >
-          <SummarySection />
-          <Each of={snap().sections} key={(section: any) => section.idPrefix}>
-            {(section: () => any) => <MachineSection section={section} />}
-          </Each>
-        </View>
-      </View>
-    </Scroll>
+    <SmeltPageScroll>
+      <SummarySection />
+      <Each of={snap().sections} key={(section: any) => section.idPrefix}>
+        {(section: () => any) => <MachineSection section={section} />}
+      </Each>
+    </SmeltPageScroll>
   );
 }

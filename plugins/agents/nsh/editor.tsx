@@ -1029,68 +1029,34 @@ function MemorySection(props: {
                 return entry().description ? entry().description : entry().file_name;
               };
               const usage = () => memoryUsageInfo(entry());
-              const bodyLines = () => {
-                const body = String(entry().body ?? "");
-                if (!body) return [];
-                return body.split(/\r?\n/);
-              };
+              const bodyText = () => String(entry().body ?? "");
 
               return (
                 <SmeltDisclosure
                   open={isExpanded()}
                   content={
-                    <Scroll
-                      style={{
-                        marginLeft: 12,
-                        marginRight: 12,
-                        marginBottom: 8,
-                        maxHeight: 240,
-                        borderRadius: look().radius.md,
-                        backgroundColor: look().palette.side,
-                      }}
-                    >
+                    <View style={{ paddingHorizontal: 12, paddingBottom: 8 }}>
                       <View
                         style={{
-                          paddingLeft: 12,
-                          paddingRight: 12,
-                          paddingTop: 8,
-                          paddingBottom: 8,
-                          display: "flex",
-                          flexDirection: "column",
+                          borderRadius: look().radius.md,
+                          backgroundColor: look().palette.side,
+                          paddingHorizontal: 12,
+                          paddingVertical: 8,
                         }}
                       >
-                        <If
-                          when={bodyLines().length > 0}
-                          else={
-                            <Text
-                              style={{
-                                color: look().palette.faint,
-                                fontSize: look().type.text_xsmall.size,
-                                lineHeight: look().type.text_xsmall.line_height,
-                              }}
-                            >
-                              {t("memory.empty_body")}
-                            </Text>
-                          }
-                        >
-                          <Each of={bodyLines()} key={(_: string, ix: number) => String(ix)}>
-                            {(line: () => string) => (
-                              <View style={{ minHeight: 16 }}>
-                                <Text
-                                  style={{
-                                    color: look().palette.muted,
-                                    fontSize: look().type.text_xsmall.size,
-                                    lineHeight: look().type.text_xsmall.line_height,
-                                  }}
-                                >
-                                  {line()}
-                                </Text>
-                              </View>
-                            )}
-                          </Each>
-                        </If>
+                        <Scroll style={{ maxHeight: 224 }}>
+                          <Text
+                            style={{
+                              color: bodyText() ? look().palette.muted : look().palette.faint,
+                              fontSize: look().type.text_xsmall.size,
+                              lineHeight: look().type.text_xsmall.line_height,
+                            }}
+                          >
+                            {bodyText() || t("memory.empty_body")}
+                          </Text>
+                        </Scroll>
                       </View>
-                    </Scroll>
+                    </View>
                   }
                 >
                   <View

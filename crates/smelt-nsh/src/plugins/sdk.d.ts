@@ -914,6 +914,45 @@ export declare function SmeltConfirmDialog(props: {
   onCancel: () => void;
   children?: JSX.Element;
 }): JSX.Element;
+
+/** 居中限宽的滚动页骨架（默认 `maxWidth: 720`，左右 24pt、顶 16pt、底 32pt、组间 24pt）。 */
+export declare function SmeltPageScroll(props: {
+  maxWidth?: number;
+  gap?: number;
+  scrollKey?: string;
+  style?: StyleProp<ViewStyle>;
+  contentStyle?: StyleProp<ViewStyle>;
+  children?: JSX.Element;
+}): JSX.Element;
+
+/** 一组设置或信息卡片：可选分组标题与说明 + 描边卡片。 */
+export declare function SmeltSection(props: {
+  title?: string | null;
+  description?: string | null;
+  cardStyle?: StyleProp<ViewStyle>;
+  children?: JSX.Element;
+}): JSX.Element;
+
+/** 卡片内左右各缩进 16pt 的 1pt 分隔线。 */
+export declare function SmeltSectionDivider(): JSX.Element;
+
+/** `SmeltSection` 内的标准单元格（左右 16pt、上下 8pt），`divider` 为真时在上方加缩进分隔线。 */
+export declare function SmeltSectionCell(props: {
+  divider?: boolean;
+  style?: StyleProp<ViewStyle>;
+  children?: JSX.Element;
+}): JSX.Element;
+
+/** 设置行：左侧标题/说明/附注/错误，右侧控件。 */
+export declare function SmeltSettingRow(props: {
+  title: string;
+  description?: string | null;
+  clampDescription?: number;
+  note?: string | null;
+  error?: string | null;
+  children?: JSX.Element;
+}): JSX.Element;
+
 export declare function SmeltWindowBar(props: { view: string }): JSX.Element;
 
 export declare function SmeltMarkdown(props: {
